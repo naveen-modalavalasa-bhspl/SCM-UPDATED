@@ -1,5 +1,8 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Navigate, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import {
+  INDENT_ACK_HOME, TRANSFER_ACK_HOME, ackDetailPath, isTransferRow,
+} from "../ackPaths";
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle, ArrowRight, Barcode, Boxes, Building2, CalendarClock,
@@ -30,7 +33,7 @@ import {
   receivable, shortDate,
 } from "../components/acknowledgementParts";
 import { CombinationTag, combinationKey, combinationLabel } from "@/shared/combination";
-import { PackageCheckModal, type PackageCheck } from "@/shared/components";
+import { PackageCheckModal, packGroups, shortPackCode, type PackageCheck } from "@/shared/components";
 
 /**
  * One indent's delivery, walked the way the delivery itself happens.
@@ -92,8 +95,15 @@ export default function AcknowledgementDetailPage({ kind = "indent" }: { kind?: 
     [kind, directIssue.data, acknowledgements.data, indentId],
   );
 
-  const back = { to: kind === "issue" ? "/indents/acknowledgements?view=direct" : "/indents/acknowledgements",
-                 label: "Back to Acknowledgements" };
+  // Mounted twice: under Indents for departmental receipts, and under Inventory >
+  // Stock Transfer for every transfer (STR and direct STO). Back goes to the desk the
+  // page was opened from — a transfer never lands on the indents list (2026-10-29).
+  const transferRoute = useLocation().pathname.startsWith("/inventory/transfers");
+  const back = {
+    to: transferRoute ? TRANSFER_ACK_HOME
+      : kind === "issue" ? `${INDENT_ACK_HOME}?view=direct` : INDENT_ACK_HOME,
+    label: transferRoute ? "Back to Stock Transfer acknowledgements" : "Back to Acknowledgements",
+  };
 
   if (source.isLoading) {
     return (
@@ -131,11 +141,19 @@ export default function AcknowledgementDetailPage({ kind = "indent" }: { kind?: 
     );
   }
 
+  // An STR opened at the old indents address (a notification, a bookmark) moves to
+  // the Stock Transfer desk, query intact.
+  if (!transferRoute && kind === "indent" && isTransferRow(row)) {
+    return <Navigate to={`${ackDetailPath(row.indent_id, true)}${window.location.search}`} replace />;
+  }
+
   return (
     <ReceiptKindContext.Provider value={kind}>
       <AcknowledgementDetail
         row={row}
         kind={kind}
+        backTo={back.to}
+        backLabel={back.label}
         qc={qc}
         accountScope={accountScope}
         onDone={() => nav(back.to)}
@@ -226,10 +244,12 @@ interface StepTask {
  */
 type StopState = "done" | "optional" | "todo";
 
-function AcknowledgementDetail({ row, kind, onDone, accountScope, qc }: {
+function AcknowledgementDetail({ row, kind, onDone, accountScope, qc, backTo, backLabel }: {
   row: Acknowledgement;
   kind: ReceiptKind;
   onDone: () => void;
+  backTo: string;
+  backLabel: string;
   accountScope: ReturnType<typeof useIndentAccountScope>;
   qc: QueryClient;
 }) {
@@ -515,8 +535,7 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc }: {
         title={row.indent_no}
         back={parentStop
           ? { to: `?stop=${encodeURIComponent(parentStop.key)}`, label: `Back to ${parentStop.plain.toLowerCase()}` }
-          : { to: kind === "issue" ? "/indents/acknowledgements?view=direct" : "/indents/acknowledgements",
-              label: "Back to Acknowledgements" }}
+          : { to: backTo, label: backLabel }}
       />
 
       <ErrorBanner error={confirm.error ?? upload.error ?? remove.error} />
@@ -715,7 +734,9 @@ type ReceiptPackageLine = AcknowledgementLine & {
   /** What the packer put in this package of the line (2026-10-22). */
   package_pack_breakdown?: PackEntry[] | null;
   /** The PACKAGES (codes) this carton holds of a line issued in packages (2026-10-26). */
-  package_box_codes?: { code: string; quantity: number; received?: number | null }[] | null;
+  package_box_codes?: { code: string; quantity: number; received?: number | null;
+    name?: string | null; path?: { code: string; name?: string | null }[] | null;
+    inner?: { code: string; name?: string | null; carries: number; part?: boolean }[] | null }[] | null;
 };
 
 interface ReceiptPackage {
@@ -2363,24 +2384,36 @@ function PackageLineRow({
                   </button>
                 )}
               </div>
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                {packs.map((pkg) => {
-                  const kept = check.kept.includes(pkg.code);
-                  const shortIn = check.partial[pkg.code] ?? 0;
-                  return (
-                    <span key={pkg.code}
-                          className={`inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] ${
-                            !kept ? "border-bad/30 bg-bad/5" : shortIn ? "border-warn/40 bg-warn/5"
-                              : "border-line bg-content1"}`}>
-                      <span className="mono font-semibold text-ink">{pkg.code}</span>
-                      <span className={!kept ? "font-semibold text-bad" : shortIn ? "font-semibold text-warn" : "text-muted"}>
-                        {!kept ? "missing" : shortIn
-                          ? `${qty(Number(pkg.quantity) - shortIn)} of ${qty(pkg.quantity)}`
-                          : `${qty(pkg.quantity)} ${line.uom_code ?? ""}`}
-                      </span>
-                    </span>
-                  );
-                })}
+              {/* Grouped by the carton (and opened box) each package came out of
+                  (2026-10-28): "4 boxes + 5 strips" reads as one carton. */}
+              <div className="mt-2 space-y-1.5">
+                {packGroups(packs).map(([label, list]) => (
+                  <div key={label || "-"} className="flex flex-wrap items-center gap-1.5">
+                    {label && (
+                      <span className="mr-1 text-[11px] font-semibold capitalize text-muted">{label}</span>
+                    )}
+                    {list.map((pkg) => {
+                      const kept = check.kept.includes(pkg.code);
+                      const shortIn = check.partial[pkg.code] ?? 0;
+                      return (
+                        <span key={pkg.code} title={pkg.code}
+                              className={`inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] ${
+                                !kept ? "border-bad/30 bg-bad/5" : shortIn ? "border-warn/40 bg-warn/5"
+                                  : "border-line bg-content1"}`}>
+                          <span className="font-semibold text-ink">
+                            {pkg.name && <span className="capitalize">{pkg.name.toLowerCase()} </span>}
+                            <span className="mono">{pkg.name ? shortPackCode(pkg.code) : pkg.code}</span>
+                          </span>
+                          <span className={!kept ? "font-semibold text-bad" : shortIn ? "font-semibold text-warn" : "text-muted"}>
+                            {!kept ? "missing" : shortIn
+                              ? `${qty(Number(pkg.quantity) - shortIn)} of ${qty(pkg.quantity)}`
+                              : `${qty(pkg.quantity)} ${line.uom_code ?? ""}`}
+                          </span>
+                        </span>
+                      );
+                    })}
+                  </div>
+                ))}
               </div>
             </div>
           )}
@@ -2388,7 +2421,10 @@ function PackageLineRow({
             open={checking}
             onClose={() => setChecking(false)}
             mode="receipt"
-            packages={packs.map((p) => ({ code: p.code, carries: Number(p.quantity) }))}
+            // Drawn as carton › box › strip; a kept box can be checked strip by strip
+            // (2026-10-28) — only the box's own figure is sent on.
+            packages={packs.map((p) => ({ code: p.code, carries: Number(p.quantity),
+                                          name: p.name, path: p.path, inner: p.inner }))}
             value={check}
             packName={packName}
             uom={line.uom_code}

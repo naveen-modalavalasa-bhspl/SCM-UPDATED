@@ -8,7 +8,7 @@ import {
 } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { fmtDate } from "@/shared/datetime";
-import AcknowledgementsPage from "@/modules/indents/pages/AcknowledgementsPage";
+import { TransferAcknowledgements } from "./TransferAcknowledgements";
 import { ReportLedgerPage } from "@/modules/reports";
 import { FilterBar, FilterMenu } from "./FilterBar";
 import { INDENT_STATUS_OPTIONS } from "@/modules/indents/constants";
@@ -17,7 +17,7 @@ import { ErrorNote } from "./PageStates";
 import { FulfillmentQueuePage } from "../pages/FulfillmentQueuePage";
 import QualityInspection from "@/modules/warehouse/pages/QualityInspection";
 import {
-  approveSTO, createSTO, getSTO, getStockBalances, getWarehouses, listSTOs, listSTRs,
+  approveSTO, createSTO, getSTO, getStockBalances, getStoDestinations, getWarehouses, listSTOs, listSTRs,
   rejectSTO,
 } from "../api";
 
@@ -118,7 +118,9 @@ export function StockTransferView() {
                                         badge: stoCount.data?.total as number | undefined }] : []),
     // The outward QC of a transfer's issue is done here, not on the warehouse rail.
     ...(can("qc_outward.view") ? [{ key: "qc", label: "Outward QC" }] : []),
-    ...(can("indent.acknowledge") ? [{ key: "acknowledge", label: "Acknowledgements" }] : []),
+    // Every transfer — STR and direct STO — is received here, under either grant.
+    ...(can("indent.acknowledge") || can("stock.transfer.receive")
+      ? [{ key: "acknowledge", label: "Acknowledgements" }] : []),
     ...(can("stock.transfer.view") ? [{ key: "history", label: "History" }] : []),
   ], [can, strCount.data, stoCount.data]);
 
@@ -169,7 +171,7 @@ export function StockTransferView() {
         <QualityInspection type="OUTGOING" title="Outward QC" stockTransfer
                            basePath="/inventory/transfers/qc" />
       )}
-      {active === "acknowledge" && <AcknowledgementsPage embedded indentTypes={["STR"]} />}
+      {active === "acknowledge" && <TransferAcknowledgements />}
       {active === "history" && <ReportLedgerPage embedded ledgerKey="stock_transfers" />}
     </div>
   );
@@ -550,34 +552,38 @@ function NewStoSheet({ onClose, onCreated }: { onClose: () => void; onCreated: (
     queryFn: () => getStockBalances({ warehouse_id: Number(fromId), size: 500 } as any),
     enabled: !!fromId,
   });
+  // Where this point may send to is SERVED — same level, same parent, in scope — so
+  // the dropdown offers exactly what `create_sto` accepts (2026-10-29).
+  const destinations = useQuery({
+    queryKey: ["stock-transfer", "sto-destinations", fromId],
+    queryFn: () => getStoDestinations(Number(fromId)),
+    enabled: !!fromId,
+  });
 
-  // One option per item, with what is free to send across every bin and batch.
-  const itemOptions = useMemo(() => {
-    const free = new Map<number, { label: string; qty: number; uom: string }>();
+  // One entry per item, with what is free to send across every bin and batch.
+  const freeByItem = useMemo(() => {
+    const free = new Map<string, { code: string; name: string; qty: number; uom: string }>();
     (stock.data?.items ?? []).forEach((s: any) => {
-      const cur = free.get(s.item_id);
+      const key = String(s.item_id);
+      const cur = free.get(key);
       const qty = Number(s.available_qty ?? 0);
       if (cur) cur.qty += qty;
-      else free.set(s.item_id, { label: `${s.item_code} — ${s.item_name}`, qty, uom: s.uom_code });
+      else free.set(key, { code: s.item_code, name: s.item_name, qty, uom: s.uom_code ?? "" });
     });
-    return [...free].filter(([, v]) => v.qty > 0).map(([id, v]) => ({
-      value: String(id), label: `${v.label} (${v.qty} ${v.uom} free here)`, qty: v.qty,
-    }));
+    return free;
   }, [stock.data]);
+  const itemOptions = useMemo(() => [...freeByItem]
+    .filter(([, v]) => v.qty > 0)
+    .map(([id, v]) => ({ value: id, label: `${v.code} — ${v.name} (${v.qty} ${v.uom} free)` })),
+  [freeByItem]);
 
   const whOptions = (warehouses as any[]).map((w) => ({ value: String(w.id), label: w.name }));
-  // A transfer is sideways on ONE level — LIP to LIP, MDP to MDP, warehouse to
-  // warehouse — and both ends come from the same data-scoped list (own points and the
-  // reporting line's). `create_sto` refuses anything else; this only offers what it
-  // would accept.
-  const tierOf = (type?: string | null) =>
-    type === "LIP" || type === "MDP" ? type : "WAREHOUSE";
-  const fromTier = tierOf((warehouses as any[]).find((w) => String(w.id) === fromId)?.warehouse_type);
-  const toOptions = fromId
-    ? (warehouses as any[])
-        .filter((w) => String(w.id) !== fromId && tierOf(w.warehouse_type) === fromTier)
-        .map((w) => ({ value: String(w.id), label: w.name }))
-    : [];
+  const toOptions = (destinations.data?.items ?? []).map((d) => ({
+    value: String(d.id),
+    label: d.parent_known ? d.name : `${d.name} · parent not on record`,
+  }));
+  const fromName: string | undefined = (warehouses as any[]).find((w) => String(w.id) === fromId)?.name;
+  const toRow = destinations.data?.items.find((d) => String(d.id) === toId);
 
   const create = useMutation({
     mutationFn: () => createSTO({
@@ -591,22 +597,28 @@ function NewStoSheet({ onClose, onCreated }: { onClose: () => void; onCreated: (
     onError: (e: any) => setError(e?.response?.data?.error ?? "Could not raise the transfer"),
   });
 
-  const over = lines.some((l) => {
-    const opt = itemOptions.find((o) => o.value === l.item_id);
-    return opt && Number(l.qty) > opt.qty;
-  });
+  const freeOf = (itemId: string) => freeByItem.get(itemId)?.qty ?? 0;
+  const over = lines.some((l) => l.item_id && Number(l.qty) > freeOf(l.item_id));
   const valid = fromId && toId && fromId !== toId && !over
     && lines.some((l) => l.item_id && Number(l.qty) > 0);
+  const unused = itemOptions.filter((o) => !lines.some((l) => l.item_id === o.value));
+  // A new line only once every line names an item, and only while something free is
+  // left to put on it — a blank row that can pick nothing is a dead end.
+  const canAdd = unused.length > 0 && lines.every((l) => l.item_id);
 
   const setLine = (i: number, patch: Partial<Line>) =>
     setLines((cur) => cur.map((l, j) => (j === i ? { ...l, ...patch } : l)));
+
+  const toPlaceholder = !fromId ? "Pick the source first"
+    : destinations.isLoading ? "Finding sibling points…"
+    : toOptions.length ? "Choose a destination" : "No sibling point in your scope";
 
   return (
     <DetailSheet
       open
       onClose={onClose}
       title="New stock transfer order"
-      subtitle="Send stock from a point you hold. Approval follows the STO ladder."
+      subtitle="Send stock sideways to a sibling point. Approval follows the STO ladder."
       footer={
         <div className="flex gap-2">
           <Button variant="primary" disabled={!valid || create.isPending} onClick={() => create.mutate()}>
@@ -623,10 +635,32 @@ function NewStoSheet({ onClose, onCreated }: { onClose: () => void; onCreated: (
             <Select ariaLabel="From" value={fromId} options={whOptions}
                     onChange={(v) => { setFromId(v || ""); setToId(""); setLines([{ item_id: "", qty: "" }]); }} />
           </Field>
-          <Field label="To (same level, within your scope)">
-            <Select ariaLabel="To" value={toId} options={toOptions.filter((o) => o.value !== fromId)}
+          <Field label="To (a sibling under the same parent)">
+            <Select ariaLabel="To" value={toId} options={toOptions} placeholder={toPlaceholder}
                     onChange={(v) => setToId(v || "")} />
           </Field>
+          {fromId && destinations.data && (
+            <div className="overflow-hidden rounded-xl border border-line bg-gradient-to-br from-brand/5 via-content1 to-content1">
+              <div className="flex items-center gap-2 border-b border-line/70 px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-muted">
+                <MapPin className="h-3.5 w-3.5 shrink-0 text-brand" aria-hidden />
+                <span className="min-w-0 truncate">
+                  {destinations.data.parent_name
+                    ? <>Under <span className="text-ink">{destinations.data.parent_name}</span></>
+                    : "Parent not on record — every same-level point in scope is offered"}
+                </span>
+                <span className="ml-auto shrink-0 rounded-full bg-brand/10 px-2 py-0.5 text-brand">
+                  {destinations.data.tier_label}
+                </span>
+              </div>
+              <div className="flex items-center gap-3 px-3 py-3 text-sm">
+                <span className="min-w-0 flex-1 truncate font-semibold text-ink">{fromName}</span>
+                <ArrowRight className="h-4 w-4 shrink-0 text-brand" aria-hidden />
+                <span className={`min-w-0 flex-1 truncate text-right font-semibold ${toRow ? "text-ink" : "text-muted"}`}>
+                  {toRow?.name ?? `${toOptions.length} sibling${toOptions.length === 1 ? "" : "s"} to choose from`}
+                </span>
+              </div>
+            </div>
+          )}
           <Field label="Remarks">
             <Input value={remarks} onChange={(e: any) => setRemarks(e.target?.value ?? e)} />
           </Field>
@@ -635,39 +669,69 @@ function NewStoSheet({ onClose, onCreated }: { onClose: () => void; onCreated: (
       <SheetSection title="Items">
         {!fromId ? (
           <p className="text-sm text-muted">Pick the source point first — the list is what it holds.</p>
-        ) : !stock.isLoading && itemOptions.length === 0 ? (
-          <p className="text-sm text-muted">Nothing free to send at this point.</p>
+        ) : stock.isLoading ? (
+          <p className="text-sm text-muted">Reading what {fromName ?? "this point"} holds…</p>
+        ) : itemOptions.length === 0 ? (
+          <p className="rounded-lg bg-bad-bg px-3 py-2 text-sm font-medium text-bad">
+            Nothing free to send at {fromName ?? "this point"}.
+          </p>
         ) : (
           <div className="space-y-3">
             {lines.map((l, i) => {
-              const opt = itemOptions.find((o) => o.value === l.item_id);
+              const info = l.item_id ? freeByItem.get(l.item_id) : undefined;
+              const free = info?.qty ?? 0;
+              const left = free - Number(l.qty || 0);
               return (
-                <div key={i} className="flex items-end gap-2">
-                  <div className="min-w-0 flex-1">
-                    <Field label="Item">
-                      <Select ariaLabel="Item" value={l.item_id}
-                              options={itemOptions.filter((o) => o.value === l.item_id
-                                || !lines.some((x) => x.item_id === o.value))}
-                              onChange={(v) => setLine(i, { item_id: v || "" })} />
-                    </Field>
+                <div key={i} className="rounded-xl border border-line bg-content1 p-3">
+                  <div className="flex items-end gap-2">
+                    <div className="min-w-0 flex-1">
+                      <Field label="Item">
+                        <Select ariaLabel="Item" value={l.item_id}
+                                options={itemOptions.filter((o) => o.value === l.item_id
+                                  || !lines.some((x) => x.item_id === o.value))}
+                                onChange={(v) => setLine(i, { item_id: v || "", qty: "" })} />
+                      </Field>
+                    </div>
+                    <div className="w-28">
+                      <Field label={info?.uom ? `Qty (${info.uom})` : "Qty"}>
+                        <Input type="number" min={0} value={l.qty}
+                               isInvalid={!!l.item_id && Number(l.qty) > free}
+                               onChange={(e: any) => setLine(i, { qty: e.target?.value ?? e })} />
+                      </Field>
+                    </div>
+                    <Button variant="subtle" aria-label="Remove line"
+                            onClick={() => setLines((cur) => cur.length > 1
+                              ? cur.filter((_, j) => j !== i) : [{ item_id: "", qty: "" }])}>
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
                   </div>
-                  <div className="w-28">
-                    <Field label="Qty">
-                      <Input type="number" value={l.qty}
-                             onChange={(e: any) => setLine(i, { qty: e.target?.value ?? e })} />
-                    </Field>
-                    {opt && Number(l.qty) > opt.qty && (
-                      <p className="text-[11px] text-bad">Only {opt.qty} free</p>
-                    )}
-                  </div>
-                  <Button variant="subtle" aria-label="Remove line"
-                          onClick={() => setLines((cur) => cur.length > 1 ? cur.filter((_, j) => j !== i) : cur)}>
-                    <Trash2 className="h-4 w-4" />
-                  </Button>
+                  {info && (
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                      <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 font-semibold ${
+                        free > 0 ? "bg-ok-bg text-ok" : "bg-bad-bg text-bad"}`}>
+                        <span className={`h-1.5 w-1.5 rounded-full ${free > 0 ? "bg-ok" : "bg-bad"}`} aria-hidden />
+                        {free > 0 ? `${free} ${info.uom} in stock at source` : "Out of stock at source"}
+                      </span>
+                      {Number(l.qty) > 0 && (left >= 0 ? (
+                        <span className="text-muted">{left} {info.uom} stays at {fromName}</span>
+                      ) : (
+                        <span className="font-semibold text-bad">
+                          {Math.abs(left)} {info.uom} more than is free — only {free} can go
+                        </span>
+                      ))}
+                      {free > 0 && Number(l.qty) !== free && (
+                        <button type="button" className="ml-auto min-h-8 font-semibold text-brand hover:underline"
+                                onClick={() => setLine(i, { qty: String(free) })}>
+                          Send all {free}
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
               );
             })}
-            <Button variant="secondary" onClick={() => setLines((cur) => [...cur, { item_id: "", qty: "" }])}>
+            <Button variant="secondary" disabled={!canAdd}
+                    onClick={() => setLines((cur) => [...cur, { item_id: "", qty: "" }])}>
               <Plus className="h-4 w-4" /> Add item
             </Button>
           </div>

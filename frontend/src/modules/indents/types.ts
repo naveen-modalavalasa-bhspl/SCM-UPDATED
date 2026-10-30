@@ -208,7 +208,10 @@ export interface AcknowledgementLine extends CombinationValue {
   issued_combinations?: (CombinationValue & { no_brand?: boolean; quantity: number })[];
   /** Issued in BOXES (2026-10-26): the boxes the line went out in. Counted by
    *  quantity; no code per piece is asked for. */
-  box_codes?: { code: string; pack_name?: string | null; quantity: number }[];
+  box_codes?: { code: string; pack_name?: string | null; quantity: number;
+    /** Carton › box, and the strips inside (2026-10-28). */
+    name?: string | null; path?: { code: string; name?: string | null }[] | null;
+    inner?: { code: string; name?: string | null; carries: number; part?: boolean }[] | null }[];
   /** The packs it was sent in, merged over its issue lines (2026-10-22). */
   pack_breakdown?: PackEntry[] | null;
   pack_text?: string | null;
@@ -253,7 +256,10 @@ export interface AcknowledgementLine extends CombinationValue {
  */
 export interface AcknowledgementPackageQuantity {
   /** The PACKAGES this carton holds of a line issued in packages (2026-10-26). */
-  box_codes?: { code: string; quantity: number; received?: number | null }[];
+  box_codes?: { code: string; quantity: number; received?: number | null;
+    /** Carton › box, and the strips inside (2026-10-28). */
+    name?: string | null; path?: { code: string; name?: string | null }[] | null;
+    inner?: { code: string; name?: string | null; carries: number; part?: boolean }[] | null }[];
   /** The packs THIS package holds of the line, as packed (2026-10-22). */
   pack_breakdown?: PackEntry[] | null;
   pack_text?: string | null;
@@ -369,6 +375,12 @@ export interface RaiserTracking {
 export interface Acknowledgement {
   indent_id: number;
   indent_no: string;
+  /** STR rows are received on Inventory > Stock Transfer, never under Indents. */
+  indent_type?: string | null;
+  /** An STR's route, off the orders serving it (2026-10-29). */
+  sto_nos?: string[];
+  from_warehouse_names?: string[];
+  to_warehouse_name?: string | null;
   indent_date?: string | null;
   required_date?: string | null;
   status: string;
@@ -529,4 +541,14 @@ export interface DirectIssueAck {
     dispatch_id: number; dispatch_no: string; status: string | null;
     package_count: number
   }[];
+}
+
+/** A direct STO arriving at the caller's point — Stock Transfer > Acknowledgements
+ *  (`/api/warehouse/acknowledgements/stock-transfers`). Received through the
+ *  direct-issue receipt journey, which credits it onto the destination shelf. */
+export interface StockTransferAck extends DirectIssueAck {
+  sto_id?: number | null;
+  sto_no?: string | null;
+  from_warehouse_name?: string | null;
+  to_warehouse_name?: string | null;
 }

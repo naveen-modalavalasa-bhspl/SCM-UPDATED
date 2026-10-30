@@ -1370,22 +1370,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         />
       ),
     },
-    {
-      key: "bin",
-      header: "Bin",
-      width: "w-40",
-      hideOnNarrow: true,
-      render: (l, i) => (
-        <Lookup
-          name={`bins-${form.warehouse_id}`}
-          load={(s) => binOptions(form.warehouse_id, s)}
-          value={l.bin_id ?? ""}
-          isDisabled={locked || !isGrn || !form.warehouse_id}
-          onChange={(v) => patchLine(i, { bin_id: v === "" ? null : v })}
-          placeholder="Bin"
-        />
-      ),
-    },
+
     {
       key: "rate",
       header: "Rate",
@@ -1442,7 +1427,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
   ];
 
   const columns = allColumns.filter((c) =>
-    (isGrn || !GRN_ONLY_LINE_COLUMNS.has(c.key)) && (c.key !== "bin" || binManaged));
+    (isGrn || !GRN_ONLY_LINE_COLUMNS.has(c.key)));
 
   if (editing && isLoading) return <div className="py-16 text-center text-muted">Loading…</div>;
 

@@ -54,4 +54,7 @@ export { SourceRef, SourceRefLine, type SourceRefCandidate } from "./SourceRef";
 // session is being resolved. Not for in-page waits — those stay quiet.
 export { AppSplash } from "./AppSplash";
 export * from "./tones";
-export { PackageCheckModal, type PackageCheck, type PackageToCheck } from "./PackageCheckModal";
+export {
+  PackageCheckModal, packGroups, packMix, packPathLabel, shortPackCode,
+  type InnerCheck, type PackageCheck, type PackageToCheck,
+} from "./PackageCheckModal";

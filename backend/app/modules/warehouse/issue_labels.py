@@ -42,11 +42,14 @@ def _d(value) -> Decimal:
 
 
 async def _descendants(db: AsyncSession, roots: list) -> dict[int, list]:
-    """Every pack inside the given ones, at any depth and in ANY status — a box that
-    left whole was consumed with its strips, and the strips still carry codes."""
+    """Every pack still inside the given ones, at any depth. A box that left whole was
+    consumed WITH its strips — closed at the same moment — and those strips still carry
+    codes; a strip taken out of it earlier, by another issue, is not inside it."""
+    from app.modules.warehouse.enums import LIVE_HANDLING_UNIT_STATUSES as LIVE
     out: dict[int, list] = {}
     frontier = [hu.id for hu in roots]
     seen = set(frontier)
+    by_id = {hu.id: hu for hu in roots}
     for _ in range(_MAX_DEPTH):
         if not frontier:
             break
@@ -54,8 +57,13 @@ async def _descendants(db: AsyncSession, roots: list) -> dict[int, list]:
             m.HandlingUnit.parent_id.in_(frontier)).order_by(m.HandlingUnit.id))).scalars().all()
         frontier = []
         for kid in kids:
-            if kid.id in seen:
+            parent = by_id.get(kid.parent_id)
+            with_it = kid.status in LIVE or (
+                parent is not None and parent.status not in LIVE
+                and kid.closed_at is not None and kid.closed_at == parent.closed_at)
+            if kid.id in seen or not with_it:
                 continue
+            by_id[kid.id] = kid
             seen.add(kid.id)
             out.setdefault(kid.parent_id, []).append(kid)
             frontier.append(kid.id)
@@ -85,23 +93,35 @@ async def _queued(db: AsyncSession, hu_ids) -> dict[int, int]:
 
 
 async def _pack_rows(db: AsyncSession, roots: list, *, line, qty_of: dict[int, Decimal],
-                     new_ids: set[int]) -> list[dict]:
-    """A line's packages as label rows, parent first and each child under it."""
+                     new_ids: set[int], seen_context: set[str] | None = None) -> list[dict]:
+    """A line's packages as label rows, in the order of the tree they came out of
+    (2026-10-28): each carton (and an opened box) as a CONTEXT row — the parent label
+    a re-labelled load needs on top — then the packs that left, each followed by
+    everything inside it. Every row carries its `path`, outermost first, so a strip's
+    sticker says "Carton …0572 › Box …0597" and a strip found loose at the far end
+    can still be put back where it came from. Context rows are printed once per
+    document (`seen_context`) even when two lines came out of one carton."""
     from app.modules.warehouse.service import public_label_token
+    seen_context = seen_context if seen_context is not None else set()
     tree = await _descendants(db, roots)
     every = list(roots) + [k for kids in tree.values() for k in kids]
-    batches = await _batches(db, {hu.batch_id for hu in every} | {line.batch_id})
+    ctx = await box_codes.pack_context(db, [hu.hu_code for hu in roots])
+    ancestor_codes = {p["code"] for c in ctx.values() for p in c["path"]}
+    ancestors = {hu.hu_code: hu for hu in (await db.execute(select(m.HandlingUnit).where(
+        m.HandlingUnit.hu_code.in_(ancestor_codes or {""})))).scalars().all()}
+    batches = await _batches(db, {hu.batch_id for hu in every}
+                             | {hu.batch_id for hu in ancestors.values()} | {line.batch_id})
     queued = await _queued(db, {hu.id for hu in every})
     out: list[dict] = []
 
-    def emit(hu, depth: int, parent_code: str | None):
-        kids = tree.get(hu.id, [])
+    def row(hu, *, depth: int, parent_code: str | None, path: list[dict], kids: list,
+            context: bool) -> dict:
         inside: dict[str, int] = {}
         for k in kids:
             inside[k.pack_name or "pack"] = inside.get(k.pack_name or "pack", 0) + 1
         batch = batches.get(hu.batch_id) or batches.get(line.batch_id)
-        qty = qty_of.get(hu.id, held(hu))
-        out.append({
+        qty = held(hu) if context else qty_of.get(hu.id, held(hu))
+        return {
             "key": f"h-{hu.id}", "kind": "PACK", "code": hu.hu_code,
             "line_id": line.id, "item_id": line.item_id,
             "item_code": line.item_code, "item_name": line.item_name,
@@ -113,17 +133,38 @@ async def _pack_rows(db: AsyncSession, roots: list, *, line, qty_of: dict[int, D
             "brand_name": line.brand_name, "variant_name": line.variant_name,
             "model_name": line.model_name,
             "depth": depth, "parent_code": parent_code,
+            "path": [{"code": p["code"], "name": p["name"]} for p in path],
             "packs_inside": ", ".join(f"{n} {_plural(k, n)}" for k, n in inside.items()) or None,
             "qr_token": public_label_token("h", hu.id),
-            "label_id": queued.get(hu.id),
-            "new_here": hu.id in new_ids,
-        })
-        if depth < _MAX_DEPTH:
-            for k in kids:
-                emit(k, depth + 1, hu.hu_code)
+            "label_id": None if context else queued.get(hu.id),
+            "new_here": (not context) and hu.id in new_ids,
+            "context": context, "issued": False,
+        }
 
-    for hu in sorted(roots, key=lambda h: h.id):
-        emit(hu, 0, None)
+    def emit(hu, depth: int, parent_code: str | None, path: list[dict], issued: bool = False):
+        kids = tree.get(hu.id, [])
+        out.append({**row(hu, depth=depth, parent_code=parent_code, path=path, kids=kids,
+                          context=False), "issued": issued})
+        if depth < _MAX_DEPTH:
+            here = path + [{"code": hu.hu_code, "name": hu.pack_name}]
+            for k in kids:
+                emit(k, depth + 1, hu.hu_code, here)
+
+    # Grouped by the outermost pack they came out of, then in pick order.
+    def group_key(hu):
+        path = ctx.get(hu.hu_code, {}).get("path", [])
+        return ([p["code"] for p in path], hu.id)
+
+    for hu in sorted(roots, key=group_key):
+        path = ctx.get(hu.hu_code, {}).get("path", [])
+        for i, p in enumerate(path):
+            anc = ancestors.get(p["code"])
+            if anc is None or p["code"] in seen_context:
+                continue
+            seen_context.add(p["code"])
+            out.append(row(anc, depth=i, parent_code=path[i - 1]["code"] if i else None,
+                           path=path[:i], kids=[], context=True))
+        emit(hu, len(path), path[-1]["code"] if path else None, path, issued=True)
     return out
 
 
@@ -132,6 +173,11 @@ async def _unit_rows(db: AsyncSession, units: list, *, line) -> list[dict]:
     identity is a serial or an IMEI, and those are the maker's label, not ours."""
     from app.modules.warehouse.service import public_label_token
     batches = await _batches(db, {u.batch_id for u in units} | {line.batch_id})
+    # The pack each unit sits in, and every pack around that (2026-10-28).
+    homes = {hu.id: hu for hu in (await db.execute(select(m.HandlingUnit).where(
+        m.HandlingUnit.id.in_({u.handling_unit_id for u in units if u.handling_unit_id} or {0}))))
+        .scalars().all()}
+    ctx = await box_codes.pack_context(db, [hu.hu_code for hu in homes.values()])
     out = []
     for u in units:
         code = u.asset_code or u.consumable_code
@@ -150,10 +196,19 @@ async def _unit_rows(db: AsyncSession, units: list, *, line) -> list[dict]:
             "brand_name": line.brand_name, "variant_name": line.variant_name,
             "model_name": line.model_name,
             "depth": 0, "parent_code": None, "packs_inside": None,
+            "path": _unit_path(homes.get(u.handling_unit_id), ctx),
             "qr_token": public_label_token("u", u.id),
-            "label_id": None, "new_here": False,
+            "label_id": None, "new_here": False, "context": False, "issued": True,
         })
     return out
+
+
+def _unit_path(home, ctx: dict) -> list[dict]:
+    if home is None:
+        return []
+    around = ctx.get(home.hu_code, {}).get("path", [])
+    return [{"code": p["code"], "name": p["name"]} for p in around] + [
+        {"code": home.hu_code, "name": home.pack_name}]
 
 
 def _line_summary(line, rows: list[dict], qty) -> dict:
@@ -162,8 +217,9 @@ def _line_summary(line, rows: list[dict], qty) -> dict:
         "item_name": line.item_name, "uom_code": line.uom_code, "qty": float(_d(qty)),
         "brand_name": line.brand_name, "variant_name": line.variant_name,
         "model_name": line.model_name, "batch_no": line.batch_no,
-        "packs": sum(1 for r in rows if r["kind"] == "PACK" and r["depth"] == 0),
-        "inner_packs": sum(1 for r in rows if r["kind"] == "PACK" and r["depth"] > 0),
+        "packs": sum(1 for r in rows if r["kind"] == "PACK" and r.get("issued")),
+        "inner_packs": sum(1 for r in rows if r["kind"] == "PACK" and not r.get("issued")
+                           and not r.get("context")),
         "units": sum(1 for r in rows if r["kind"] == "UNIT"),
     }
 
@@ -204,6 +260,7 @@ async def issue_labels(db: AsyncSession, issue_id: int) -> dict:
     units_by_line = await _issue_units_by_line(db, issue)
 
     lines, labels = [], []
+    seen_context: set[str] = set()
     for line in sorted(issue.items, key=lambda l: (l.line_no, l.id)):
         roots = {hu.id: hu for hu in await box_codes.line_boxes(db, issue.id, line.id)}
         codes = shipped.get(line.id, set()) - {hu.hu_code for hu in roots.values()}
@@ -215,7 +272,8 @@ async def issue_labels(db: AsyncSession, issue_id: int) -> dict:
         # A pack the line issued, never one nested in another it issued.
         tops = [hu for hu in roots.values() if hu.parent_id not in roots]
         new_ids = {hu.id for hu in tops if hu.source_type == "ISSUE" and hu.source_id == issue.id}
-        rows = await _pack_rows(db, tops, line=line, qty_of={}, new_ids=new_ids)
+        rows = await _pack_rows(db, tops, line=line, qty_of={}, new_ids=new_ids,
+                                seen_context=seen_context)
         units = {u.id: u for u in units_by_line.get(line.id, [])}
         for u in await _units_by_code(db, line.item_id, shipped_units.get(line.id, set())):
             units.setdefault(u.id, u)
@@ -248,6 +306,7 @@ async def received_labels(db: AsyncSession, dispatch_id: int) -> dict:
         by_line.setdefault((row.issue_item_id or 0, row.item_id, row.batch_id or 0), []).append(row)
 
     lines, labels = [], []
+    seen_context: set[str] = set()
     for (_issue_item_id, item_id, _batch), rows in by_line.items():
         head = rows[0]
         pack_rows = [r for r in rows if r.box_code]
@@ -259,7 +318,8 @@ async def received_labels(db: AsyncSession, dispatch_id: int) -> dict:
                 m.HandlingUnit.hu_code.in_(list(got)),
                 m.HandlingUnit.item_id == item_id))).scalars().all()
             qty_of = {hu.id: got[hu.hu_code] for hu in hus if hu.hu_code in got}
-        out = await _pack_rows(db, hus, line=head, qty_of=qty_of, new_ids=set())
+        out = await _pack_rows(db, hus, line=head, qty_of=qty_of, new_ids=set(),
+                               seen_context=seen_context)
         unit_codes = {r.serial_no for r in rows if not r.box_code and r.serial_no}
         out += await _unit_rows(db, await _units_by_code(db, item_id, unit_codes), line=head)
         lines.append(_line_summary(head, out, sum((_d(r.delivered_qty) for r in rows), ZERO)))

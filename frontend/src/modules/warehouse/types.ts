@@ -1195,6 +1195,16 @@ export interface Issue {
   destination_warehouse_id?: number | null;
   destination_warehouse_name?: string | null;
   destination_warehouse_type?: string | null;
+  /** The Stock Transfer Order this issue executes (2026-10-29). DIRECT = raised on
+   *  its own; STR = produced by an STR's allocation. Its destination is frozen. */
+  sto_id?: number | null;
+  sto_no?: string | null;
+  sto_status?: string | null;
+  sto_kind?: "DIRECT" | "STR" | null;
+  sto_str_no?: string | null;
+  sto_from_warehouse_name?: string | null;
+  sto_to_warehouse_id?: number | null;
+  sto_to_warehouse_name?: string | null;
   direction: "OUT" | "IN";
   original_issue_id?: number | null;
   original_issue_no?: string | null;
@@ -1563,6 +1573,48 @@ export interface IssueWrite {
 }
 
 /** A point a direct issue can go to (`/options/issue-destinations`). */
+/** What a consignment, dispatch and handover inherit from the issue behind them
+ *  (`/issues/{id}/transfer-context`, `/consignments/{id}/transfer-context`). */
+export interface TransferContext {
+  issue_id: number;
+  issue_no: string;
+  kind: "STR" | "STO" | "INDENT" | "DIRECT";
+  reference_no?: string | null;
+  str_no?: string | null;
+  sto_no?: string | null;
+  indent_no?: string | null;
+  from_warehouse_name?: string | null;
+  destination_warehouse_id?: number | null;
+  destination_warehouse_name?: string | null;
+  destination_office_name?: string | null;
+  sac?: string | null;
+  department_name?: string | null;
+  project_name?: string | null;
+  issued_to_id?: number | null;
+  issued_to_name?: string | null;
+  issued_to_code?: string | null;
+  issued_to_phone?: string | null;
+  vehicle_number?: string | null;
+}
+
+/** An approved STO leaving a point, with the issue that executes it
+ *  (`/options/stos`). Picking one opens that issue — it is never drafted twice. */
+export interface StoIssueOption {
+  id: number;
+  sto_no: string;
+  kind: "DIRECT" | "STR";
+  str_no?: string | null;
+  from_warehouse_id: number;
+  from_warehouse_name?: string | null;
+  to_warehouse_id: number;
+  to_warehouse_name?: string | null;
+  issue_id?: number | null;
+  issue_no?: string | null;
+  issue_status?: string | null;
+  item_count: number;
+  requested_qty: number;
+}
+
 export interface IssueDestinationOption {
   warehouse_id: number;
   code?: string | null;
@@ -1662,6 +1714,8 @@ export interface Dispatch {
   can_approve?: boolean;
   /** Each issue line's packs, once per line — rows are one per unit (2026-10-22). */
   line_packs?: DispatchLinePacks[];
+  /** Carton › box for each package code it carries (2026-10-28). */
+  box_paths?: Record<string, PackPathRef[]>;
 }
 
 export interface DispatchLinePacks {
@@ -1891,7 +1945,7 @@ export interface ConsignmentWrite {
 export interface IssueDispatchSourceItem extends DispatchItemWrite {
   /** Issued in PACKAGES (2026-10-26): each package the line sends on and what it
    *  carries after outward QC. A carton names which of them it holds. */
-  box_codes?: { code: string; quantity: number }[];
+  box_codes?: { code: string; quantity: number; name?: string | null; path?: PackPathRef[] | null }[];
   /** The packs this quantity travels in, read off the issue line (2026-10-22). */
   pack_breakdown?: PackEntry[] | null;
   pack_text?: string | null;
@@ -3291,6 +3345,12 @@ export interface ProjectHoldRelease {
 }
 
 
+/** A pack around another one, outermost first (2026-10-28). */
+export interface PackPathRef { code: string; name?: string | null; level?: number | null }
+
+/** A pack directly inside another (2026-10-28) — a strip in a box. */
+export interface PackInner { code: string; name?: string | null; level?: number | null; carries: number; part?: boolean }
+
 /** One box an issue line holds (2026-10-26). */
 export interface IssueBox {
   code: string;
@@ -3299,6 +3359,10 @@ export interface IssueBox {
   holds: number;
   size: number;
   part: boolean;
+  /** Its own name, the packs around it, and the packs inside it (2026-10-28). */
+  name?: string | null;
+  path?: PackPathRef[] | null;
+  inner?: PackInner[] | null;
 }
 
 /** One box an issue line could name — `GET /issues/box-sources` (2026-10-26). */
@@ -3322,6 +3386,8 @@ export interface BoxSource {
   parent_size?: number | null;
   /** With `with_units`: the serials / IMEIs / codes inside, in order. */
   units?: string[] | null;
+  /** Every pack around it, outermost first (2026-10-28). */
+  path?: PackPathRef[] | null;
 }
 
 /** One sticker for a posted issue or an acknowledged receipt (2026-10-28). */
@@ -3351,6 +3417,12 @@ export interface DocLabelRow {
   label_id?: number | null;
   /** A part pack cut by this issue at posting. */
   new_here: boolean;
+  /** The packs around it, outermost first (2026-10-28). */
+  path?: PackPathRef[] | null;
+  /** A parent label printed on top for context, not a pack that left. */
+  context?: boolean;
+  /** A pack the line itself issued (not one inside it, not a parent). */
+  issued?: boolean;
 }
 
 export interface DocLabelLine {

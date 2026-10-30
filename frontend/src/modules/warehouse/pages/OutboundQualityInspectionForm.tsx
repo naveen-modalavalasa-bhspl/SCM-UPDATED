@@ -17,11 +17,13 @@ import {
 } from "../api";
 import { fmtQty, num, percent, today } from "../format";
 import { PackageCheckModal } from "@/shared/components";
+import type { InnerCheck } from "@/shared/components/PackageCheckModal";
 import { PackQty, baseOf, shrinkWithin } from "@/shared/packing";
 import { resolveAcceptedUnits, unitsForAccepted, unitsStillToReject } from "../qcUnits";
 import { alerts } from "@/modules/alerts";
 import type {
   OutboundInspection as Inspection, OutboundInspectionItemWrite as InspectionItemWrite, InspectionParameter, OutboundInspectionWrite as InspectionWrite, Issue as Receipt,
+  IssueBox,
 } from "../types";
 import { usePointLabel } from "../usePointLabel";
 import { TONE_APPROVE, TONE_REJECT } from "@/shared/components/tones";
@@ -199,10 +201,14 @@ export default function OutboundQualityInspectionForm({
     return Math.abs(baseOf(packs) - qty) < 1e-6 ? packs : shrinkWithin(packs, qty);
   };
 
+  // The strip-by-strip detail behind each line's package check (2026-10-28). Only the
+  // rolled-up figure per package goes to the server; this keeps the detail on screen.
+  const [innerByLine, setInnerByLine] = useState<Record<number, Record<string, InnerCheck>>>({});
+
   const deliveryMeta = useMemo(() => {
     const byLine = new Map<number, {
       is_serial_tracked?: boolean, serials: string[], boxes: Map<string, number> | null,
-      packName: string,
+      packName: string, info: Map<string, IssueBox>,
     }>();
     for (const line of delivery?.items ?? []) {
       byLine.set(line.id, {
@@ -212,6 +218,8 @@ export default function OutboundQualityInspectionForm({
         boxes: line.issue_in_boxes && line.box_codes?.length
           ? new Map(line.box_codes.map((b) => [b.code, Number(b.take) || 0])) : null,
         packName: (line.box_codes?.[0]?.pack_name ?? "box").toLowerCase(),
+        // Where each box sits and the strips inside it (2026-10-28).
+        info: new Map((line.box_codes ?? []).map((b) => [b.code, b])),
       });
     }
     return byLine;
@@ -233,7 +241,13 @@ export default function OutboundQualityInspectionForm({
   /** The packages of a package line, in the issue's order, with what each carries. */
   const packagesOf = (index: number) => {
     const boxes = boxesOf(index);
-    return boxes ? [...boxes.entries()].map(([code, carries]) => ({ code, carries })) : [];
+    const info = deliveryMeta.get(form.items[index]?.issue_item_id ?? 0)?.info;
+    // Drawn as the tree they came out of — carton, box, strip — and a kept box can be
+    // checked strip by strip (2026-10-28).
+    return boxes ? [...boxes.entries()].map(([code, carries]) => {
+      const b = info?.get(code);
+      return { code, carries, name: b?.name ?? b?.pack_name, path: b?.path, inner: b?.inner };
+    }) : [];
   };
   /** Rejected base units placed in packages: whole packages left out, plus units
    *  rejected out of kept ones (2026-10-26). */
@@ -973,6 +987,7 @@ export default function OutboundQualityInspectionForm({
         value={{
           kept: serialsFor === null ? [] : resolvedSerials(serialsFor),
           partial: (serialsFor === null ? null : form.items[serialsFor]?.pack_rejections) ?? {},
+          inner: serialsFor === null ? {} : innerByLine[serialsFor] ?? {},
         }}
         target={serialsFor === null ? undefined : num(form.items[serialsFor]?.rejected_qty)}
         packName={serialsFor === null ? "package"
@@ -981,8 +996,9 @@ export default function OutboundQualityInspectionForm({
         itemLabel={serialsFor === null ? ""
           : `${form.items[serialsFor]?.item_code ?? ""} — ${form.items[serialsFor]?.item_name ?? ""}`}
         readOnly={locked}
-        onSave={({ kept, partial }) => {
+        onSave={({ kept, partial, inner }) => {
           if (serialsFor === null) return;
+          setInnerByLine((now) => ({ ...now, [serialsFor]: inner ?? {} }));
           const boxes = boxesOf(serialsFor)!;
           const lost = [...boxes.entries()].reduce((sum, [code, carries]) => sum + (kept.includes(code)
             ? Math.min(partial[code] ?? 0, carries) : carries), 0);

@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
-  cartonsTouched, heldMix, indexPacks, judgeScan, pickSentence, planOf, rollUp,
-  setStripCount, shortCode, suggestPick, takeStripsUpTo, unitsOf,
+  buildTree, cartonsTouched, clearInside, heldMix, indexPacks, judgeScan, nearestPacks,
+  nodeTaken, pickSentence, planOf, rollUp, setStripCount, shortCode, suggestPick,
+  takeAllInside, takeStripsUpTo, trailTo, unitsOf,
 } from "../packPick";
 import type { BoxSource } from "../types";
 
@@ -29,11 +30,13 @@ function shelf(opts: { openedFirst?: boolean } = {}) {
       const box = pack({
         code: `${c.code}-B${b}`, parent_id: c.id, parent_code: c.code, parent_pack_name: "Carton",
         parent_holds: c.holds, parent_size: 1000,
+        path: [{ code: c.code, name: "Carton", level: 3 }],
       });
       out.push(box);
       for (let s = 0; s < 10; s += 1) {
         out.push(pack({ code: `${box.code}-S${s}`, pack_name: "Strip", holds: 10, size: 10,
-          level: 1, parent_id: box.id, units: [`${box.code}-S${s}-U`] }));
+          level: 1, parent_id: box.id, units: [`${box.code}-S${s}-U`],
+          path: [{ code: c.code, name: "Carton", level: 3 }, { code: box.code, name: "Box", level: 2 }] }));
       }
     }
   }
@@ -143,5 +146,48 @@ describe("words", () => {
     const idx = indexPacks(shelf());
     const box = idx.groups[0].packs[0];
     expect(unitsOf(box, idx)).toHaveLength(10);
+  });
+});
+
+describe("the drill-down tree", () => {
+  it("opens at the cartons only, a carton holds its boxes, a box its strips", () => {
+    const packs = shelf();
+    const tree = buildTree(packs);
+    expect(tree.roots).toEqual(["PK-WH-1549-0000571", "PK-WH-1549-0000572"]);
+    const carton = tree.nodes.get(tree.roots[0])!;
+    expect(carton.pack).toBeUndefined();          // not an Issue container: opens only
+    expect(carton.children).toHaveLength(10);
+    const box = tree.nodes.get(carton.children[0])!;
+    expect(box.pack?.pack_name).toBe("Box");
+    expect(box.children).toHaveLength(10);
+    expect(trailTo(tree, box.children[0]).map((n) => n.name)).toEqual(["Carton", "Box", "Strip"]);
+  });
+
+  it("a carton reads all, some or none of what the line takes", () => {
+    const packs = shelf();
+    const tree = buildTree(packs);
+    const idx = indexPacks(packs);
+    const carton = tree.roots[0];
+    const box = tree.nodes.get(carton)!.children[0];
+    const strip = tree.nodes.get(box)!.children[0];
+    expect(nodeTaken(tree, carton, planOf([], idx, 0)).state).toBe("none");
+    const some = planOf([box], idx, 100);
+    expect(nodeTaken(tree, carton, some)).toEqual({ qty: 100, state: "some" });
+    expect(nodeTaken(tree, box, some).state).toBe("all");
+    // A strip inside a box taken whole is taken too.
+    expect(nodeTaken(tree, strip, some).state).toBe("all");
+  });
+
+  it("take everything inside a carton takes its boxes whole, never their strips too", () => {
+    const packs = shelf();
+    const tree = buildTree(packs);
+    const idx = indexPacks(packs);
+    const carton = tree.roots[0];
+    const strip = tree.nodes.get(tree.nodes.get(carton)!.children[0])!.children[0];
+    const all = takeAllInside([strip], tree, carton, idx);
+    expect(all).toHaveLength(10);
+    expect(all.every((c) => tree.nodes.get(c)!.pack!.pack_name === "Box")).toBe(true);
+    expect(nearestPacks(tree, carton)).toHaveLength(10);
+    expect(clearInside(all, tree, carton)).toEqual([]);
   });
 });

@@ -8,7 +8,7 @@ What these pin is WHICH stickers a document hands the printer:
 - asset / consumable codes, never a unit known only by a serial or an IMEI;
 - at the receiving end, only what the acknowledgement said ARRIVED.
 """
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 import pytest
@@ -22,9 +22,13 @@ from app.shared.models.warehouse import Warehouse
 pytestmark = pytest.mark.asyncio
 
 
+LEFT_AT = datetime(2026, 10, 28, 10, 0, 0)
+
+
 def _hu(code, *, item_id, wh_id, size, level, issue=None, line=None, parent=None,
-        content=None, status="CONSUMED", source=None, name="Box"):
+        content=None, status="CONSUMED", source=None, name="Box", closed_at=LEFT_AT):
     return m.HandlingUnit(
+        closed_at=closed_at if status == "CONSUMED" else None,
         hu_code=code, item_id=item_id, warehouse_id=wh_id, pack_hierarchy_id=1,
         level=level, pack_name=name, pack_size=Decimal(size), content_qty=content,
         parent_id=parent, status=status,
@@ -58,18 +62,27 @@ async def test_a_posted_issue_prints_its_packs_parent_first_and_its_asset_codes(
     db, client, make_user, login,
 ):
     wh, item, issue, line = await _posted_issue(db)
+    carton = _hu("PK-CAR-1", item_id=item.id, wh_id=wh.id, size=1000, level=3,
+                 name="Carton", status="SEALED", content=Decimal("900"))
+    db.add(carton)
+    await db.commit()
     box = _hu("PK-BOX-1", item_id=item.id, wh_id=wh.id, size=100, level=2,
-              issue=issue.id, line=line.id)
-    shelf = _hu("PK-BOX-2", item_id=item.id, wh_id=wh.id, size=100, level=2, status="SEALED")
+              issue=issue.id, line=line.id, parent=carton.id)
+    shelf = _hu("PK-BOX-2", item_id=item.id, wh_id=wh.id, size=100, level=2, status="SEALED",
+                parent=carton.id)
+    db.add_all([box, shelf])
+    await db.commit()
     part = _hu("PK-PART-1", item_id=item.id, wh_id=wh.id, size=10, level=1, name="Strip",
                issue=issue.id, line=line.id, content=Decimal("5"),
-               source=("ISSUE", issue.id))
-    db.add_all([box, shelf, part])
-    await db.commit()
+               source=("ISSUE", issue.id), parent=shelf.id)
+    db.add(part)
     db.add_all([
         _hu(f"PK-STRIP-{i}", item_id=item.id, wh_id=wh.id, size=10, level=1, name="Strip",
             parent=box.id) for i in range(2)
     ])
+    # Taken out of the box by an EARLIER issue: not inside it any more.
+    db.add(_hu("PK-STRIP-OLD", item_id=item.id, wh_id=wh.id, size=10, level=1, name="Strip",
+               parent=box.id, closed_at=datetime(2026, 10, 1)))
     db.add_all([
         m.SerialNumber(item_id=item.id, serial_number="S-1", asset_code="AST-0001",
                        warehouse_id=wh.id, status="ISSUED", remarks=f"Issued by issue {issue.id}"),
@@ -87,12 +100,18 @@ async def test_a_posted_issue_prints_its_packs_parent_first_and_its_asset_codes(
     packs = [r for r in body["labels"] if r["kind"] == "PACK"]
     units = [r for r in body["labels"] if r["kind"] == "UNIT"]
 
-    assert [r["code"] for r in packs] == ["PK-BOX-1", "PK-STRIP-0", "PK-STRIP-1", "PK-PART-1"]
-    assert [r["depth"] for r in packs] == [0, 1, 1, 0]
-    assert packs[1]["parent_code"] == "PK-BOX-1"
-    assert packs[0]["packs_inside"] == "2 Strips"
-    assert "PK-BOX-2" not in {r["code"] for r in packs}
-    assert packs[3]["new_here"] and packs[3]["part"] and packs[3]["qty"] == 5
+    # The tree they came out of: the carton once (a parent label, on top), the box that
+    # left whole and its strips, then the part strip cut out of the box that stayed —
+    # that box as a parent label too, because the strip's sticker names it.
+    assert [r["code"] for r in packs] == [
+        "PK-CAR-1", "PK-BOX-1", "PK-STRIP-0", "PK-STRIP-1", "PK-BOX-2", "PK-PART-1"]
+    assert [r["context"] for r in packs] == [True, False, False, False, True, False]
+    assert [r["issued"] for r in packs] == [False, True, False, False, False, True]
+    assert [p["code"] for p in packs[2]["path"]] == ["PK-CAR-1", "PK-BOX-1"]
+    assert [p["code"] for p in packs[5]["path"]] == ["PK-CAR-1", "PK-BOX-2"]
+    assert packs[1]["packs_inside"] == "2 Strips"
+    assert "PK-STRIP-OLD" not in {r["code"] for r in packs}
+    assert packs[5]["new_here"] and packs[5]["part"] and packs[5]["qty"] == 5
     assert [r["code"] for r in units] == ["AST-0001"]
     assert all(r["qr_token"] for r in body["labels"])
     assert body["lines"][0]["packs"] == 2 and body["lines"][0]["units"] == 1

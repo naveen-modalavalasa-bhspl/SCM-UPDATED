@@ -28,10 +28,11 @@ leaves under its own code; a part of a box leaves as a NEW part box with a new c
 """
 from __future__ import annotations
 
+import logging
 import math
 from decimal import Decimal
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ValidationError
@@ -47,6 +48,8 @@ from app.shared.masters import packs
 from app.shared.models.base import utcnow
 from app.shared.models.master import Item, ItemPackaging
 from app.shared.models.warehouse import Warehouse
+
+logger = logging.getLogger(__name__)
 
 ZERO = Decimal("0")
 held = wh_packing.held
@@ -134,6 +137,8 @@ async def boxes_at(db: AsyncSession, *, item_id: int, warehouse_id: int,
             .where(m.HandlingUnit.item_id == item_id,
                    m.HandlingUnit.warehouse_id == warehouse_id,
                    m.HandlingUnit.status.in_(LIVE),
+                   # An empty shell is not a box anybody can take (2026-10-28).
+                   or_(m.HandlingUnit.content_qty.is_(None), m.HandlingUnit.content_qty > 0),
                    ItemPackaging.package_id.in_(packages)))
     if batch_id:
         stmt = stmt.where(m.HandlingUnit.batch_id == batch_id)
@@ -199,6 +204,106 @@ async def _key_total(db: AsyncSession, key: dict) -> Decimal:
 
 async def _loose_unit_ids(db: AsyncSession, key: dict) -> list[int]:
     return await wh_packing._loose_units(db, key)
+
+
+async def seat_stray_units(db: AsyncSession, *, item_id: int, warehouse_id: int,
+                           batch_id: int | None = None, bin_id: int | None = None,
+                           loosen_rest: bool = False) -> int:
+    """Put the unit codes standing here into the packs standing here (2026-10-28).
+
+    A unit links to the pack it sits in, and everything that moves a pack moves the
+    units linked to it — the issue desk holds them, posting ships them, the far end
+    lands them. A unit linked to a pack that is NOT standing at its own point (a box
+    that stayed behind at the warehouse it came from, a strip consumed at the source)
+    is invisible to all of it: the strips it is physically in leave without it, its
+    code stays "available" at a point that no longer holds it, and the receiving point
+    gets the strips with no codes inside (NA/104/2026-27/STO0002).
+
+    Such a unit — and a loose unit beyond what lies loose in its lot — is seated into
+    the live packs of its own lot (batch and location) that hold fewer units than
+    their contents, innermost first. `loosen_rest` unlinks whatever is still stray
+    afterwards, so nothing here points at a pack somewhere else. A unit a document has
+    reserved is never moved. Returns how many were seated."""
+    pstmt = select(m.HandlingUnit).where(
+        m.HandlingUnit.item_id == item_id, m.HandlingUnit.warehouse_id == warehouse_id,
+        m.HandlingUnit.status.in_(LIVE))
+    ustmt = select(m.SerialNumber.id, m.SerialNumber.handling_unit_id,
+                   m.SerialNumber.batch_id, m.SerialNumber.bin_id,
+                   m.SerialNumber.remarks).where(
+        m.SerialNumber.item_id == item_id, m.SerialNumber.warehouse_id == warehouse_id,
+        m.SerialNumber.status == SerialStatus.AVAILABLE.value,
+        m.SerialNumber.is_active.is_(True))
+    sstmt = select(Stock.batch_id, Stock.bin_id, func.sum(Stock.total_qty)).where(
+        Stock.item_id == item_id, Stock.warehouse_id == warehouse_id)
+    if batch_id:
+        pstmt = pstmt.where(m.HandlingUnit.batch_id == batch_id)
+        ustmt = ustmt.where(m.SerialNumber.batch_id == batch_id)
+        sstmt = sstmt.where(Stock.batch_id == batch_id)
+    if bin_id:
+        pstmt = pstmt.where(m.HandlingUnit.bin_id == bin_id)
+        ustmt = ustmt.where(m.SerialNumber.bin_id == bin_id)
+        sstmt = sstmt.where(Stock.bin_id == bin_id)
+    live = (await db.execute(pstmt)).scalars().all()
+    if not live:
+        return 0
+    here = {hu.id: hu for hu in live}
+    units = (await db.execute(ustmt.order_by(m.SerialNumber.id))).all()
+    if not units:
+        return 0
+
+    def lot(batch, bin_):
+        return (int(batch or 0), int(bin_ or 0))
+
+    inside: dict[int, Decimal] = {}
+    for hu in live:
+        if hu.parent_id in here:
+            inside[hu.parent_id] = inside.get(hu.parent_id, ZERO) + held(hu)
+    direct: dict[int, int] = {}
+    for u in units:
+        if u.handling_unit_id in here:
+            direct[u.handling_unit_id] = direct.get(u.handling_unit_id, 0) + 1
+    rooms: dict[tuple, list] = {}
+    for hu in sorted(live, key=lambda h: (h.level, h.id)):
+        room = int(held(hu) - inside.get(hu.id, ZERO)) - direct.get(hu.id, 0)
+        if room > 0:
+            rooms.setdefault(lot(hu.batch_id, hu.bin_id), []).append([hu.id, room])
+    free = [u for u in units if not (u.remarks or "").startswith("Reserved for")]
+    stray = [u for u in free if u.handling_unit_id and u.handling_unit_id not in here]
+    if not rooms and not (loosen_rest and stray):
+        return 0
+    # Loose units beyond what lies loose in the lot belong in its packs too.
+    on_hand = {lot(b, n): _d(q) for b, n, q in (await db.execute(
+        sstmt.group_by(Stock.batch_id, Stock.bin_id))).all()}
+    in_packs: dict[tuple, Decimal] = {}
+    for hu in live:
+        if hu.parent_id not in here:
+            key = lot(hu.batch_id, hu.bin_id)
+            in_packs[key] = in_packs.get(key, ZERO) + held(hu)
+    loose: dict[tuple, list] = {}
+    for u in free:
+        if not u.handling_unit_id:
+            loose.setdefault(lot(u.batch_id, u.bin_id), []).append(u)
+    seated = 0
+    for key, slots in rooms.items():
+        lying_loose = max(ZERO, on_hand.get(key, ZERO) - in_packs.get(key, ZERO))
+        extra = loose.get(key, [])
+        pool = [u.id for u in stray if lot(u.batch_id, u.bin_id) == key]
+        pool += [u.id for u in extra[int(lying_loose):]]
+        cursor = 0
+        for slot in slots:
+            take = pool[cursor:cursor + slot[1]]
+            cursor += len(take)
+            if take:
+                await wh_packing._link_units(db, take, slot[0])
+                seated += len(take)
+        taken = set(pool[:cursor])
+        stray = [u for u in stray if u.id not in taken]
+    if loosen_rest and stray:
+        await wh_packing._link_units(db, [u.id for u in stray], None)
+    if seated:
+        logger.info("seated %s stray unit(s) of item %s at warehouse %s",
+                    seated, item_id, warehouse_id)
+    return seated
 
 
 def needs_rebox(live: list, level: int) -> bool:
@@ -270,6 +375,10 @@ async def rebox_lot(db: AsyncSession, key: dict, *, item, ladder: packing.Ladder
     """
     now, who = utcnow(), getattr(user, "full_name", None)
     warehouse = await db.get(Warehouse, key["warehouse_id"])
+    # Units still pointing at a pack somewhere else are put into the packs here first,
+    # or the boxes cut below would be made with nothing inside them.
+    await seat_stray_units(db, item_id=key["item_id"], warehouse_id=key["warehouse_id"],
+                           batch_id=key["batch_id"] or None, bin_id=key["bin_id"] or None)
     live = (await db.execute(select(m.HandlingUnit).where(
         m.HandlingUnit.item_id == key["item_id"],
         m.HandlingUnit.warehouse_id == key["warehouse_id"],
@@ -544,6 +653,10 @@ async def hold_line(db: AsyncSession, issue, line, *, named: list[str],
         return None
     batch_id = line.batch_id if line.batch_id and line.batch_id != m.NO_BATCH else None
     bin_id = line.bin_id if line.bin_id and line.bin_id != m.NO_BIN else None
+    # The unit codes must be IN the boxes this line is about to hold, or the boxes
+    # leave and their codes stay behind (2026-10-28).
+    await seat_stray_units(db, item_id=line.item_id, warehouse_id=issue.warehouse_id,
+                           batch_id=batch_id, bin_id=bin_id)
     await ensure_issue_level(db, issue, line, batch_id=batch_id, bin_id=bin_id, user=user)
     boxes = await boxes_at(db, item_id=line.item_id, warehouse_id=issue.warehouse_id,
                            batch_id=batch_id, bin_id=bin_id, packages=packages, lock=True)
@@ -627,8 +740,10 @@ async def hold_line(db: AsyncSession, issue, line, *, named: list[str],
             m.SerialNumber.warehouse_id == issue.warehouse_id,
             m.SerialNumber.status == SerialStatus.AVAILABLE.value,
             m.SerialNumber.is_active.is_(True),
+            # Free, or already this line's — never a unit another document claimed. The
+            # prefixes are ANDed: an OR of negations let any claimed unit through.
             or_(m.SerialNumber.remarks.is_(None), m.SerialNumber.remarks == marker,
-                *[~m.SerialNumber.remarks.startswith(p) for p in claimed_prefixes]))
+                and_(*[~m.SerialNumber.remarks.startswith(p) for p in claimed_prefixes])))
             .order_by(m.SerialNumber.remarks != marker, m.SerialNumber.id)
             .limit(int(take)))).scalars().all())
         if units:
@@ -675,14 +790,18 @@ async def line_view(db: AsyncSession, issue, line) -> dict | None:
         old = ", ".join(sorted({n for _, n in names.all() if n})) or "the old container"
         note = (f"This item is now issued in a different container than {old}. "
                 "Save the issue and its codes are re-made in the new container.")
+    rows = [{"code": b.hu_code, "pack_name": b.pack_name,
+             "take": float(t), "holds": float(held(b)) if b.status in LIVE else float(t),
+             "size": float(_d(b.pack_size)), "part": t < _d(b.pack_size)}
+            for b, t in zip(boxes, takes)]
+    # Where each box sits and the strips inside it (2026-10-28), so every screen after
+    # this one can group the line's packages by carton and box.
+    await decorate_packs(db, rows)
     return {
         "codes": [b.hu_code for b in boxes],
         "codes_needed": need,
         "container_note": note,
-        "boxes": [{"code": b.hu_code, "pack_name": b.pack_name,
-                   "take": float(t), "holds": float(held(b)) if b.status in LIVE else float(t),
-                   "size": float(_d(b.pack_size)), "part": t < _d(b.pack_size)}
-                  for b, t in zip(boxes, takes)],
+        "boxes": rows,
     }
 
 
@@ -746,7 +865,19 @@ async def settle_on_post(db: AsyncSession, issue, user) -> None:
             take = _d(box.held_qty) if box.held_qty is not None else have
             parent = box.parent_id
             if take >= have:
+                tree = set(_tree_ids(box, children))
+                inside = {kid.id: pid for pid, kids in children.items() for kid in kids
+                          if kid.id in tree}
                 wh_packing._consume(box, children, reason, who, now)
+                # Closing clears the links; a box that LEFT keeps them (2026-10-28): the
+                # carton it came out of is its path on QC, the consignment, the receipt
+                # and its label, and the strips that left inside it are what a kept box
+                # is checked by and what lands with it at the far end. Closed, none of
+                # it is ever counted as content of the pack it points at.
+                box.parent_id = parent
+                for kid in (k for kids in children.values() for k in kids):
+                    if kid.id in inside:
+                        kid.parent_id = inside[kid.id]
                 box.held_by, box.held_qty = issued_marker(issue.id, line.id), None
                 await wh_packing._shrink_ancestors(db, parent, have, reason=reason,
                                                    who=who, now=now)
@@ -765,6 +896,10 @@ async def settle_on_post(db: AsyncSession, issue, user) -> None:
                                source_no=issue.issue_no)
             wh_packing._close(part, HUS.CONSUMED.value, reason, who, now)
             part.held_by = issued_marker(issue.id, line.id)
+            # Where it was cut from (2026-10-28): the part pack sits, closed, in the
+            # pack the shelf box sits in, so its label says "Carton … › Box …" too.
+            # Closed, it is never counted as content of that pack.
+            part.parent_id = box.parent_id
             ids = _tree_ids(box, children)
             await db.execute(update(m.SerialNumber).where(
                 m.SerialNumber.handling_unit_id.in_(ids),
@@ -777,7 +912,22 @@ async def settle_on_post(db: AsyncSession, issue, user) -> None:
             box.held_by, box.held_qty = None, None
             await wh_packing._shrink_ancestors(db, parent, take, reason=reason,
                                                who=who, now=now)
+        await _close_empty_shells(db, item_id=line.item_id, warehouse_id=issue.warehouse_id,
+                                  reason=reason, who=who, now=now)
     await db.flush()
+
+
+async def _close_empty_shells(db: AsyncSession, *, item_id: int, warehouse_id: int,
+                              reason: str, who, now) -> int:
+    """A box whose last strip has left is not a box on the shelf (2026-10-28): close
+    every live pack of the item here that holds nothing, so no picker, label queue or
+    stock balance offers an empty shell. Returns how many were closed."""
+    empty = (await db.execute(select(m.HandlingUnit).where(
+        m.HandlingUnit.item_id == item_id, m.HandlingUnit.warehouse_id == warehouse_id,
+        m.HandlingUnit.status.in_(LIVE), m.HandlingUnit.content_qty <= 0))).scalars().all()
+    for hu in empty:
+        wh_packing._close(hu, HUS.CONSUMED.value, f"Emptied — {reason}", who, now)
+    return len(empty)
 
 
 # --------------------------------------------------------------------------- #
@@ -844,7 +994,82 @@ async def box_sources(db: AsyncSession, *, warehouse_id: int, item_id: int,
             "parent_size": float(_d(parent.pack_size)) if parent is not None else None,
             "units": units.get(box.id) if with_units else None,
         })
+    # Every pack around each one, outermost first (2026-10-28): the picker draws the
+    # whole tree — carton, box, strip — and opens it one level at a time.
+    ctx = await pack_context(db, [row["code"] for row in out])
+    for row in out:
+        row["path"] = ctx.get(row["code"], {}).get("path", [])
     return out
+
+
+async def pack_context(db: AsyncSession, codes) -> dict[str, dict]:
+    """Where each pack code sits and what is directly inside it (2026-10-28).
+
+    `path`: the packs around it, OUTERMOST first — "Carton …0572 › Box …0597" for a
+    strip — so outward QC, the consignment and the receiving site can group a line's
+    packages by the carton and box they came out of. `inner`: the packs directly
+    inside it that are still in it — live ones, or, for a pack that has left, the ones
+    that left WITH it (closed at the same moment) — so a kept box can be checked strip
+    by strip. Read only; four queries at most per level, never one per code."""
+    codes = [c for c in dict.fromkeys(codes or []) if c]
+    if not codes:
+        return {}
+    own = (await db.execute(select(m.HandlingUnit).where(
+        m.HandlingUnit.hu_code.in_(codes)))).scalars().all()
+    nodes: dict[int, m.HandlingUnit] = {hu.id: hu for hu in own}
+    frontier = {hu.parent_id for hu in own if hu.parent_id} - set(nodes)
+    for _ in range(8):
+        if not frontier:
+            break
+        found = (await db.execute(select(m.HandlingUnit).where(
+            m.HandlingUnit.id.in_(frontier)))).scalars().all()
+        for hu in found:
+            nodes[hu.id] = hu
+        frontier = {hu.parent_id for hu in found if hu.parent_id} - set(nodes)
+    kids: dict[int, list] = {}
+    for kid in (await db.execute(select(m.HandlingUnit).where(
+            m.HandlingUnit.parent_id.in_([hu.id for hu in own] or [0]))
+            .order_by(m.HandlingUnit.id))).scalars().all():
+        kids.setdefault(kid.parent_id, []).append(kid)
+    out: dict[str, dict] = {}
+    for hu in own:
+        path, node, seen = [], nodes.get(hu.parent_id) if hu.parent_id else None, set()
+        while node is not None and node.id not in seen and len(path) < 8:
+            seen.add(node.id)
+            path.append({"code": node.hu_code, "name": node.pack_name, "level": node.level})
+            node = nodes.get(node.parent_id) if node.parent_id else None
+        live = hu.status in LIVE
+
+        def still_inside(k, live=live, hu=hu) -> bool:
+            if k.status in LIVE:
+                return True
+            # A pack that has left took its contents with it at the same moment.
+            return not live and k.closed_at is not None and k.closed_at == hu.closed_at
+
+        inner = [k for k in kids.get(hu.id, []) if still_inside(k)]
+        out[hu.hu_code] = {
+            "name": hu.pack_name, "level": hu.level,
+            "path": list(reversed(path)),
+            "inner": [{"code": k.hu_code, "name": k.pack_name, "level": k.level,
+                       "carries": float(held(k)), "part": held(k) < _d(k.pack_size)}
+                      for k in inner if held(k) > ZERO],
+        }
+    return out
+
+
+async def decorate_packs(db: AsyncSession, rows: list[dict], *, key: str = "code",
+                         inner: bool = True) -> list[dict]:
+    """Add `name`, `path` and (optionally) `inner` to package rows in place."""
+    ctx = await pack_context(db, [r.get(key) for r in rows])
+    for r in rows:
+        c = ctx.get(r.get(key))
+        if c is None:
+            continue
+        r.setdefault("name", c["name"])
+        r["path"] = c["path"]
+        if inner:
+            r["inner"] = c["inner"]
+    return rows
 
 
 async def list_labels(db: AsyncSession, *, status: str | None, warehouse_id: int | None,
@@ -1050,6 +1275,11 @@ async def land_packages(db: AsyncSession, dispatch, rows, *, batch_id, user=None
             m.HandlingUnit.item_id == row.item_id).with_for_update())).scalars().first()
         if hu is None or (hu.warehouse_id == dispatch.to_warehouse_id and hu.status in LIVE):
             continue
+        # Arrived whole: the strips that left inside it land inside it, same codes
+        # (2026-10-28). Short, it lands as one pack holding what arrived — which of
+        # its strips went missing is not something the count can say.
+        if got >= held(hu) and hu.closed_at is not None:
+            await _land_inside(db, hu, dispatch, batch_id=batch_id)
         hu.warehouse_id = dispatch.to_warehouse_id
         hu.bin_id = m.NO_BIN
         hu.batch_id = batch_id or m.NO_BATCH
@@ -1062,28 +1292,38 @@ async def land_packages(db: AsyncSession, dispatch, rows, *, batch_id, user=None
         hu.source_type, hu.source_id, hu.source_no = "DISPATCH", dispatch.id, dispatch.dispatch_no
         landed += 1
     await db.flush()
-    # Each package lists exactly as many unit codes as it holds: the units these
-    # packages carried, standing here now, re-seated in order; any beyond what the
-    # packages hold stay as loose units (old per-unit history is rarely exact).
-    standing = (await db.execute(select(m.HandlingUnit).where(
-        m.HandlingUnit.hu_code.in_([row.box_code for row in rows] or [""]),
-        m.HandlingUnit.warehouse_id == dispatch.to_warehouse_id,
-        m.HandlingUnit.status.in_(LIVE)).order_by(m.HandlingUnit.id))).scalars().all()
-    if standing:
-        units = list((await db.execute(select(m.SerialNumber.id).where(
-            m.SerialNumber.handling_unit_id.in_([hu.id for hu in standing]),
-            m.SerialNumber.warehouse_id == dispatch.to_warehouse_id,
-            m.SerialNumber.status == SerialStatus.AVAILABLE.value,
-            m.SerialNumber.is_active.is_(True)).order_by(m.SerialNumber.id))).scalars().all())
-        cursor = 0
-        for hu in standing:
-            take = units[cursor:cursor + int(held(hu))]
-            cursor += len(take)
-            if take:
-                await wh_packing._link_units(db, take, hu.id)
-        if units[cursor:]:
-            await wh_packing._link_units(db, units[cursor:], None)
+    # Each package lists as many unit codes as it holds. The units it carried that
+    # landed with their own strip are already in place; the rest still point at a
+    # pack at the source, and are seated into what landed here — any beyond what
+    # the packages hold stay loose (old per-unit history is rarely exact).
+    for item_id in {row.item_id for row in rows}:
+        await seat_stray_units(db, item_id=item_id, warehouse_id=dispatch.to_warehouse_id,
+                               batch_id=batch_id or None, loosen_rest=True)
     return landed
+
+
+async def _land_inside(db: AsyncSession, top, dispatch, *, batch_id) -> None:
+    """Bring the packs that left inside `top` — closed with it, at the same moment —
+    to the point it is landing at, still inside it."""
+    frontier = [top.id]
+    for _ in range(8):
+        kids = (await db.execute(select(m.HandlingUnit).where(
+            m.HandlingUnit.parent_id.in_(frontier),
+            m.HandlingUnit.status.notin_(LIVE),
+            m.HandlingUnit.closed_at == top.closed_at).with_for_update())).scalars().all()
+        if not kids:
+            return
+        for kid in kids:
+            kid.warehouse_id = dispatch.to_warehouse_id
+            kid.bin_id = m.NO_BIN
+            kid.batch_id = batch_id or m.NO_BATCH
+            kid.project_id = dispatch.project_id or 0
+            kid.status = HUS.INSIDE.value
+            kid.held_by, kid.held_qty = None, None
+            kid.closed_reason = kid.closed_by_name = kid.closed_at = None
+            kid.source_type, kid.source_id, kid.source_no = (
+                "DISPATCH", dispatch.id, dispatch.dispatch_no)
+        frontier = [kid.id for kid in kids]
 
 
 # --------------------------------------------------------------------------- #

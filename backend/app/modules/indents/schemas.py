@@ -397,6 +397,12 @@ class ShipmentTrackRow(BaseModel):
 class AcknowledgementRow(BaseModel):
     indent_id: int
     indent_no: str
+    #: STR rows are received on Inventory > Stock Transfer, not Indents (2026-10-29).
+    indent_type: str | None = None
+    #: An STR's route, off the orders serving it: STO numbers, source(s), destination.
+    sto_nos: list[str] = []
+    from_warehouse_names: list[str] = []
+    to_warehouse_name: str | None = None
     indent_date: date | None = None
     required_date: date | None = None
     status: str

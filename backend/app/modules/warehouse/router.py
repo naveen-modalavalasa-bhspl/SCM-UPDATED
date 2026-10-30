@@ -984,6 +984,18 @@ async def get_consignment(consignment_id: int, db: AsyncSession = Depends(get_db
     return await service.get_dispatch(db, consignment_id, user)
 
 
+@router.get("/consignments/{consignment_id}/transfer-context")
+async def consignment_transfer_context(consignment_id: int, db: AsyncSession = Depends(get_db),
+                                       _=Depends(require_permission(DISPATCH_VIEW))):
+    return await service.consignment_transfer_context(db, consignment_id)
+
+
+@router.get("/issues/{issue_id}/transfer-context")
+async def issue_transfer_context(issue_id: int, db: AsyncSession = Depends(get_db),
+                                 _=Depends(require_permission(ISSUE_VIEW))):
+    return await service.issue_transfer_context(db, issue_id)
+
+
 @router.post("/consignments", response_model=s.DispatchDetail, status_code=201)
 async def create_consignment(data: s.ConsignmentWrite, db: AsyncSession = Depends(get_db),
                              user=Depends(require_permission(DISPATCH_CREATE))):
@@ -1597,6 +1609,18 @@ async def my_direct_issue_acknowledgements(search: str | None = None,
         db, user, search=search, only_actionable=only_actionable)
 
 
+# Direct STOs arriving at the caller's point: Inventory > Stock Transfer >
+# Acknowledgements (2026-10-29). Received through the direct-issue receipt routes below.
+@router.get("/acknowledgements/stock-transfers", response_model=list[s.StockTransferAckRow])
+async def my_stock_transfer_acknowledgements(search: str | None = None,
+                                             only_actionable: bool = False,
+                                             db: AsyncSession = Depends(get_db),
+                                             user=Depends(require_permission_or(
+        INDENT_VIEW, STOCK_TRANSFER_RECEIVE, service.anywhere_in_reach))):
+    return await service.stock_transfer_issues_for_receiver(
+        db, user, search=search, only_actionable=only_actionable)
+
+
 @router.get("/acknowledgements/direct-issues/{issue_id:int}",
             response_model=IndentAcknowledgementRow)
 async def direct_issue_receipt(issue_id: int, db: AsyncSession = Depends(get_db),
@@ -1883,6 +1907,13 @@ async def indent_options(search: str | None = None, warehouse_id: int | None = N
                          db: AsyncSession = Depends(get_db),
                          _=Depends(require_permission(ISSUE_VIEW))):
     return await service.indent_options(db, search, warehouse_id)
+
+
+@router.get("/options/stos")
+async def sto_issue_options(search: str | None = None, warehouse_id: int | None = None,
+                            db: AsyncSession = Depends(get_db),
+                            _=Depends(require_permission(ISSUE_VIEW))):
+    return await service.sto_issue_options(db, search, warehouse_id)
 
 
 @router.get("/options/indent-issue-source", response_model=s.IndentIssueSource)

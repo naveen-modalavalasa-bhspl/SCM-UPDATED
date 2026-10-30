@@ -1916,6 +1916,8 @@ class BoxSourceRead(BaseModel):
     parent_holds: float | None = None
     parent_size: float | None = None
     units: list[str] | None = None
+    # Every pack around it, outermost first: [{code, name, level}] (2026-10-28).
+    path: list[dict] = Field(default_factory=list)
 
 
 class BoxLabelRead(_Read):
@@ -1987,6 +1989,12 @@ class DocLabelRow(BaseModel):
     label_id: int | None = None
     # A part pack cut by this issue at posting.
     new_here: bool = False
+    # The packs around it, outermost first: [{code, name}] (2026-10-28).
+    path: list[dict] = Field(default_factory=list)
+    # A parent label (a carton, an opened box) printed on top for context, not a pack
+    # that left; and whether this row is a pack the line itself issued.
+    context: bool = False
+    issued: bool = False
 
 
 class DocLabelLine(BaseModel):
@@ -2106,6 +2114,17 @@ class IssueRead(_Read):
     destination_warehouse_name: str | None = None
     #: MAIN / MDP / LIP of the chosen destination point, for its badge.
     destination_warehouse_type: str | None = None
+    #: The Stock Transfer Order this issue executes (2026-10-29). `sto_kind` is DIRECT
+    #: for an order raised on its own, STR for the one an STR's allocation produced.
+    #: The destination of such an issue is the order's and is frozen on it.
+    sto_id: int | None = None
+    sto_no: str | None = None
+    sto_status: str | None = None
+    sto_kind: str | None = None
+    sto_str_no: str | None = None
+    sto_from_warehouse_name: str | None = None
+    sto_to_warehouse_id: int | None = None
+    sto_to_warehouse_name: str | None = None
     direction: str
     original_issue_id: int | None = None
     original_issue_no: str | None = None
@@ -2518,6 +2537,8 @@ class DispatchDetail(DispatchRead):
     public_scan_token: str | None = None
     #: Each issue line's packs, once per line — the rows are one per unit.
     line_packs: list[DispatchLinePacks] = []
+    # Carton › box for each package code on it: {code: [{code, name, level}]} (2026-10-28).
+    box_paths: dict[str, list[dict]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -4410,6 +4431,15 @@ class DirectIssueAckRow(BaseModel):
     lines: list[DirectIssueAckLine] = []
     #: The consignments carrying this issue, each with how many packages it holds.
     consignments: list[DirectIssueConsignment] = []
+
+
+class StockTransferAckRow(DirectIssueAckRow):
+    """A direct STO's issue arriving at the caller's point (2026-10-29): the receipt
+    row on Inventory > Stock Transfer > Acknowledgements, with the order it executes."""
+    sto_id: int | None = None
+    sto_no: str | None = None
+    from_warehouse_name: str | None = None
+    to_warehouse_name: str | None = None
 
 
 class IssueSerialLineIn(BaseModel):

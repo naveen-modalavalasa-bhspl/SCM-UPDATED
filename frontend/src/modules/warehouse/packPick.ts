@@ -157,6 +157,18 @@ export function suggestPick(idx: PackIndex, quantity: number): string[] {
  * the box itself is free to take.
  */
 export function rollUp(picked: string[], idx: PackIndex): string[] {
+  // Repeated until nothing changes: ten strips make a box, and ten such boxes make a
+  // carton when the carton is an Issue container too — any depth.
+  let out = rollUpOnce(picked, idx);
+  for (let i = 0; i < 8; i += 1) {
+    const next = rollUpOnce(out, idx);
+    if (next.length === out.length && next.every((c, k) => c === out[k])) break;
+    out = next;
+  }
+  return out;
+}
+
+function rollUpOnce(picked: string[], idx: PackIndex): string[] {
   let out = [...picked];
   for (const [boxId, strips] of idx.inner) {
     const box = idx.byId.get(boxId);
@@ -294,4 +306,138 @@ export function judgeScan(code: string, picked: string[], idx: PackIndex): ScanV
   const strips = new Set((idx.inner.get(hit.id) ?? []).map((s) => s.code));
   const next = rollUp([...picked.filter((c) => !strips.has(c)), hit.code], idx);
   return { tone: "ok", text: `Added ${name} ${shortCode(hit.code)} — ${fmt(hit.holds)}`, next };
+}
+
+// ---------------------------------------------------------------------------------
+//  The whole tree, for the drill-down picker (2026-10-28)
+// ---------------------------------------------------------------------------------
+
+/**
+ * One node of the shelf as it stands: a carton, a box, a strip. `pack` is set when the
+ * node is an Issue pack the line may name; a node with no `pack` (a carton that is not
+ * an Issue container) can only be OPENED. Built from each source's `path`, so the tree
+ * goes as deep as the item's ladder does.
+ */
+export interface TreeNode {
+  code: string;
+  name: string | null;
+  level: number | null;
+  pack?: BoxSource;
+  parent: string | null;
+  children: string[];
+}
+
+export interface PackTree { nodes: Map<string, TreeNode>; roots: string[] }
+
+export function buildTree(packs: BoxSource[]): PackTree {
+  const nodes = new Map<string, TreeNode>();
+  const roots: string[] = [];
+  const ensure = (code: string, name: string | null | undefined, level: number | null | undefined,
+                  parent: string | null) => {
+    let n = nodes.get(code);
+    if (!n) {
+      n = { code, name: name ?? null, level: level ?? null, parent, children: [] };
+      nodes.set(code, n);
+      if (parent) nodes.get(parent)!.children.push(code);
+      else roots.push(code);
+    }
+    return n;
+  };
+  for (const p of packs) {
+    let parent: string | null = null;
+    for (const ref of p.path ?? []) {
+      ensure(ref.code, ref.name, ref.level, parent);
+      parent = ref.code;
+    }
+    const node = ensure(p.code, p.pack_name, p.level, parent);
+    node.pack = p;
+    node.name = p.pack_name ?? node.name;
+  }
+  return { nodes, roots };
+}
+
+/** Every Issue pack inside a node (not the node itself), outermost first. */
+export function packsInside(tree: PackTree, code: string): BoxSource[] {
+  const out: BoxSource[] = [];
+  const walk = (c: string) => {
+    for (const k of tree.nodes.get(c)?.children ?? []) {
+      const n = tree.nodes.get(k)!;
+      if (n.pack) out.push(n.pack);
+      walk(k);
+    }
+  };
+  walk(code);
+  return out;
+}
+
+/** The Issue packs nearest the top inside a node — what "take everything" takes. */
+export function nearestPacks(tree: PackTree, code: string): BoxSource[] {
+  const out: BoxSource[] = [];
+  const walk = (c: string) => {
+    for (const k of tree.nodes.get(c)?.children ?? []) {
+      const n = tree.nodes.get(k)!;
+      if (n.pack) out.push(n.pack);
+      else walk(k);
+    }
+  };
+  walk(code);
+  return out;
+}
+
+/** How much a node holds: its own pack, else the packs nearest the top inside it. */
+export function nodeHolds(tree: PackTree, code: string): number {
+  const n = tree.nodes.get(code);
+  if (n?.pack) return n.pack.holds;
+  return nearestPacks(tree, code).reduce((s, p) => s + p.holds, 0);
+}
+
+export type NodeState = "all" | "some" | "none";
+
+/** What the line takes of a node, from the plan: whole, some of it, or nothing. */
+export function nodeTaken(tree: PackTree, code: string, rows: PlanRow[]): { qty: number; state: NodeState } {
+  const take = new Map(rows.map((r) => [r.code, r.take]));
+  const n = tree.nodes.get(code);
+  if (n?.pack && take.has(code)) {
+    const q = take.get(code) ?? 0;
+    return { qty: q, state: q >= n.pack.holds - EPS ? "all" : "some" };
+  }
+  // Covered by an ancestor taken whole.
+  let up = n?.parent ? tree.nodes.get(n.parent) : undefined;
+  while (up) {
+    if (up.pack && (take.get(up.code) ?? 0) >= up.pack.holds - EPS) {
+      return { qty: n?.pack?.holds ?? nodeHolds(tree, code), state: "all" };
+    }
+    up = up.parent ? tree.nodes.get(up.parent) : undefined;
+  }
+  const inside = packsInside(tree, code);
+  const qty = inside.reduce((s, p) => s + (take.get(p.code) ?? 0), 0);
+  const holds = nodeHolds(tree, code);
+  return { qty, state: qty <= EPS ? "none" : qty >= holds - EPS ? "all" : "some" };
+}
+
+/** Take everything inside a node: its nearest Issue packs, whole, the ones free. */
+export function takeAllInside(picked: string[], tree: PackTree, code: string, idx: PackIndex): string[] {
+  const take = nearestPacks(tree, code).filter((p) => isFree(p));
+  const drop = new Set(packsInside(tree, code).map((p) => p.code));
+  for (const p of take) drop.delete(p.code);
+  const next = picked.filter((c) => !drop.has(c));
+  for (const p of take) if (!next.includes(p.code) && !coveredBy(p, next, idx)) next.push(p.code);
+  return rollUp(next, idx);
+}
+
+/** Take nothing from inside a node (and not the node itself). */
+export function clearInside(picked: string[], tree: PackTree, code: string): string[] {
+  const drop = new Set([code, ...packsInside(tree, code).map((p) => p.code)]);
+  return picked.filter((c) => !drop.has(c));
+}
+
+/** The breadcrumb to a node, outermost first. */
+export function trailTo(tree: PackTree, code: string | null): TreeNode[] {
+  const out: TreeNode[] = [];
+  let n = code ? tree.nodes.get(code) : undefined;
+  while (n) {
+    out.unshift(n);
+    n = n.parent ? tree.nodes.get(n.parent) : undefined;
+  }
+  return out;
 }

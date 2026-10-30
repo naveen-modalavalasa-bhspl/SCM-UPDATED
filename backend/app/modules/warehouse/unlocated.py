@@ -56,7 +56,7 @@ from app.modules.inventory.models import NO_BIN, Stock
 from app.modules.inventory.service import rehome_balance, take_units
 from app.modules.warehouse import models as m
 from app.modules.warehouse import storage_types
-from app.modules.warehouse.enums import SerialStatus
+from app.modules.warehouse.enums import LIVE_HANDLING_UNIT_STATUSES, SerialStatus
 from app.platform.settings.service import write_audit
 from app.shared.enums import AuditAction, RefType
 from app.shared.models.warehouse import Bin, Warehouse
@@ -260,6 +260,18 @@ async def place(db: AsyncSession, warehouse_id: int, user) -> dict:
             .values(bin_id=location.id)
             .execution_options(synchronize_session="fetch"))
     summary["units"] = len(unit_ids)
+    # The packs those units sit in go with them (2026-10-28). A transfer landing at a
+    # bin-managed warehouse shelves its cartons at bin 0; left there, the stock and its
+    # codes stood in the unlocated location while the boxes stood nowhere, so the issue
+    # desk found no box to name and the line fell back to loose units.
+    await db.execute(
+        update(m.HandlingUnit)
+        .where(m.HandlingUnit.warehouse_id == wh.id,
+               m.HandlingUnit.bin_id == NO_BIN,
+               m.HandlingUnit.item_id.in_({row.item_id for row in rows}),
+               m.HandlingUnit.status.in_(LIVE_HANDLING_UNIT_STATUSES))
+        .values(bin_id=location.id)
+        .execution_options(synchronize_session="fetch"))
 
     await write_audit(
         db, entity="whs_warehouses", entity_id=wh.id, entity_no=wh.code,

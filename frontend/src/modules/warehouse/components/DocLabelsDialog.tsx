@@ -16,6 +16,7 @@ import {
   type CodeKind, type FieldKey, type LabelSettings, type PackScope,
 } from "../docLabels";
 import { LabelSticker } from "./LabelSticker";
+import { shortCode } from "../packPick";
 
 /**
  * Print the labels of ONE document (2026-10-28): every package a posted issue sent,
@@ -72,11 +73,12 @@ export function DocLabelsDialog({ open, onClose, doc, initialLineIds }: {
   useEffect(() => { if (open) saveLast(user, s); }, [s, open, user]);
 
   const chosen = useMemo(() => selectLabels(body?.labels ?? [], {
-    lineIds: scope === "ITEMS" ? lineIds : null, packs, units, copies: s.copies,
-  }), [body, scope, lineIds, packs, units, s.copies]);
+    lineIds: scope === "ITEMS" ? lineIds : null, packs, units, copies: s.copies, parents: s.parents,
+  }), [body, scope, lineIds, packs, units, s.copies, s.parents]);
+  const hasParents = (body?.labels ?? []).some((r) => r.context);
   const hasUnits = (body?.labels ?? []).some((r) => r.kind === "UNIT");
-  const hasInner = (body?.labels ?? []).some((r) => r.kind === "PACK" && r.depth > 0);
   const hasNew = (body?.labels ?? []).some((r) => r.new_here);
+  const hasInnerIssued = (body?.labels ?? []).some((r) => r.kind === "PACK" && !r.issued && !r.context);
 
   const print = useReactToPrint({
     content: () => sheetRef.current,
@@ -119,6 +121,9 @@ export function DocLabelsDialog({ open, onClose, doc, initialLineIds }: {
     if (f.batch) out.push(["Batch", r.batch_no]);
     if (f.expiry) out.push(["Expiry", r.expiry_date ? fmtDate(r.expiry_date) : null]);
     if (f.combo) out.push(["Brand", combo || null]);
+    if (f.path && r.path?.length) {
+      out.push(["Path", r.path.map((p) => `${(p.name ?? "pack").toLowerCase()} ${shortCode(p.code)}`).join(" › ")]);
+    }
     if (f.parent) out.push(["In", r.parent_code]);
     if (f.doc) out.push([body?.document_type === "RECEIPT" ? "Recd" : "Issue", body?.document_no]);
     if (f.to) out.push(["To", body?.to_name]);
@@ -185,11 +190,18 @@ export function DocLabelsDialog({ open, onClose, doc, initialLineIds }: {
                   <div className="mt-3 space-y-1.5">
                     <span className="text-[11px] font-semibold text-muted">Packages</span>
                     <Segmented value={packs} onChange={(v) => setPacks(v as PackScope)}
-                               options={[["ALL", hasInner ? "Every level" : "All"],
-                                         ...(hasInner ? [["TOP", "Outer only"] as [string, string]] : []),
+                               options={[["ALL", hasInnerIssued ? "Every level" : "All"],
+                                         ...(hasInnerIssued ? [["TOP", "Issued packs only"] as [string, string]] : []),
                                          ...(hasNew ? [["NEW", "New part packs"] as [string, string]] : []),
                                          ["NONE", "None"]]} />
                   </div>
+                  {hasParents && packs !== "NONE" && (
+                    <label className="mt-2 flex min-h-11 cursor-pointer items-center gap-2.5 text-xs text-ink">
+                      <input type="checkbox" className="h-4 w-4" checked={s.parents}
+                             onChange={(e) => set("parents", e.target.checked)} />
+                      Include parent labels — the carton (and an opened box) on top
+                    </label>
+                  )}
                   {hasUnits && (
                     <label className="mt-2 flex min-h-11 cursor-pointer items-center gap-2.5 text-xs text-ink">
                       <input type="checkbox" className="h-4 w-4" checked={units} onChange={(e) => setUnits(e.target.checked)} />

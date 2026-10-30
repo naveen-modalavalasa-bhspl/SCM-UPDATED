@@ -77,3 +77,25 @@ describe("paper", () => {
     expect(s.code).toBe("BOTH");
   });
 });
+
+describe("parent labels and issued packs (2026-10-28)", () => {
+  const tree: DocLabelRow[] = [
+    row({ key: "h-9", code: "CAR-1", context: true }),
+    row({ key: "h-1", code: "BOX-1", issued: true, depth: 1, path: [{ code: "CAR-1" }] }),
+    row({ key: "h-2", code: "STR-1", depth: 2, path: [{ code: "CAR-1" }, { code: "BOX-1" }] }),
+    row({ key: "h-8", code: "CAR-2", context: true, line_id: 2 }),
+    row({ key: "h-4", code: "BOX-9", issued: true, line_id: 2, path: [{ code: "CAR-2" }] }),
+  ];
+
+  it("a parent label rides on top of what is printed under it, and can be left off", () => {
+    expect(selectLabels(tree, { lineIds: null, packs: "ALL", units: false, parents: true }).map((r) => r.code))
+      .toEqual(["CAR-1", "BOX-1", "STR-1", "CAR-2", "BOX-9"]);
+    expect(selectLabels(tree, { lineIds: null, packs: "ALL", units: false, parents: false }).map((r) => r.code))
+      .toEqual(["BOX-1", "STR-1", "BOX-9"]);
+  });
+
+  it("issued packs only, and a parent with nothing printed under it is dropped", () => {
+    expect(selectLabels(tree, { lineIds: [1], packs: "TOP", units: false, parents: true }).map((r) => r.code))
+      .toEqual(["CAR-1", "BOX-1"]);
+  });
+});

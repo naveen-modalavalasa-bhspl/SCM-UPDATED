@@ -231,5 +231,6 @@ export default WarehouseModule;
 export { default as ConsignmentsScreen } from "./pages/Consignments";
 export { default as ConsignmentFormScreen } from "./pages/ConsignmentForm";
 export { default as ScanViewScreen } from "./pages/ScanView";
+export { TransferContextStrip } from "./components/TransferContextStrip";
 export { default as DispatchScreen } from "./pages/Dispatch";
 export { default as DispatchFormScreen } from "./pages/DispatchForm";

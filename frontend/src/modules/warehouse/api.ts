@@ -1093,6 +1093,18 @@ export const gateEntryOptions = (search?: string) =>
 export const indentOptions = (search?: string, warehouse_id?: number) =>
   get<Option[]>(`${BASE}/options/indents`, { search, warehouse_id });
 
+/** What a consignment inherits from the issue behind it (2026-10-29). */
+export const issueTransferContext = (issueId: number) =>
+  get<import("./types").TransferContext>(`${BASE}/issues/${issueId}/transfer-context`);
+
+export const consignmentTransferContext = (consignmentId: number) =>
+  get<import("./types").TransferContext | null>(
+    `${BASE}/consignments/${consignmentId}/transfer-context`);
+
+/** Approved STOs leaving this point, each with the issue that executes it. */
+export const stoIssueOptions = (search?: string, warehouse_id?: number) =>
+  get<import("./types").StoIssueOption[]>(`${BASE}/options/stos`, { search, warehouse_id });
+
 export const getIndentIssueSource = (indent_id: number, warehouse_id: number) =>
   get<{
     indent_id: number;

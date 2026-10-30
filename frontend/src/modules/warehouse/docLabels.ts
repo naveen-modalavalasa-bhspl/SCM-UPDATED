@@ -20,6 +20,7 @@ export const FIELDS = [
   ["batch", "Batch"],
   ["expiry", "Expiry"],
   ["combo", "Brand / variant / model"],
+  ["path", "Path (carton › box)"],
   ["parent", "Inside (parent pack)"],
   ["inside", "Packs inside"],
   ["doc", "Document no."],
@@ -40,6 +41,8 @@ export interface LabelSettings {
   margin: number;
   gap: number;
   fields: Record<FieldKey, boolean>;
+  /** Print the carton (and an opened box) as a parent label on top (2026-10-28). */
+  parents: boolean;
 }
 
 export interface SizePreset { id: string; label: string; w: number; h: number; layout: Layout; group: string }
@@ -60,7 +63,8 @@ export const ALL_FIELDS_ON = Object.fromEntries(FIELDS.map(([k]) => [k, true])) 
 export const DEFAULT_SETTINGS: LabelSettings = {
   sizeId: "50x25", w: 50, h: 25, layout: "ROLL", code: "BOTH", barFormat: "CODE128",
   font: "M", copies: 1, margin: 8, gap: 2,
-  fields: { ...ALL_FIELDS_ON, to: false, date: false },
+  fields: { ...ALL_FIELDS_ON, to: false, date: false, parent: false },
+  parents: true,
 };
 
 export const A4 = { w: 210, h: 297 };
@@ -107,17 +111,21 @@ export function pageCss(s: LabelSettings): string {
 /** Which stickers a choice selects, in print order (each line's packs parent first,
  *  then its codes), each repeated `copies` times. */
 export function selectLabels(labels: DocLabelRow[], opts: {
-  lineIds: number[] | null; packs: PackScope; units: boolean; copies?: number;
+  lineIds: number[] | null; packs: PackScope; units: boolean; copies?: number; parents?: boolean;
 }): DocLabelRow[] {
   const lines = opts.lineIds ? new Set(opts.lineIds) : null;
-  const picked = labels.filter((r) => {
+  const chosen = labels.filter((r) => {
     if (lines && !lines.has(r.line_id)) return false;
     if (r.kind === "UNIT") return opts.units;
     if (opts.packs === "NONE") return false;
-    if (opts.packs === "TOP") return r.depth === 0;
+    if (r.context) return opts.parents ?? true;
+    if (opts.packs === "TOP") return r.issued ?? r.depth === 0;
     if (opts.packs === "NEW") return r.new_here;
     return true;
   });
+  // A parent label only rides along with something printed under it.
+  const under = new Set(chosen.filter((r) => !r.context).flatMap((r) => (r.path ?? []).map((p) => p.code)));
+  const picked = chosen.filter((r) => !r.context || under.has(r.code));
   const copies = Math.max(1, Math.min(10, Math.floor(opts.copies ?? 1)));
   return copies === 1 ? picked : picked.flatMap((r) => Array.from({ length: copies }, () => r));
 }

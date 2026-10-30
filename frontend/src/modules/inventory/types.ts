@@ -1198,6 +1198,10 @@ export interface MyStockingPoints {
   primary_warehouse_id?: number | null;
   warehouse_ids: number[];
   tags: PositionLocationTag[];
+  /** What this person's own point IS — MAIN / MDP / LIP (`describe_point`). */
+  point_type?: string | null;
+  point_name?: string | null;
+  point_label?: string;
 }
 
 /** A position the tagging screen can offer, found by person, code or post name. */

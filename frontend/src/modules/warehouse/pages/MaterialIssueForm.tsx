@@ -1,6 +1,6 @@
-import { Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
+import { Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, StatusPill } from "@/shared/components";
 import { ladderFor, usageLevels, usePackOptions } from "@/shared/packing";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Accordion, AccordionItem } from "@heroui/react";
@@ -23,7 +23,7 @@ import { CodeAssignmentScreen } from "./CodeAssignmentScreen";
 import { SearchPicker, type PickerRow } from "../components/SearchPicker";
 import {
   acknowledgeIssue, approveIssue, auditUnlocatedStock, cancelIssue, createIssue, departmentOptions,
-  employeeOptions, getEmployeeDestination, repairUnlocatedStock, searchIssueDestinations, searchIssueEmployees, getIndentIssueSource, getIssue, getPickingIssueSource, indentOptions,
+  employeeOptions, stoIssueOptions, getEmployeeDestination, repairUnlocatedStock, searchIssueDestinations, searchIssueEmployees, getIndentIssueSource, getIssue, getPickingIssueSource, indentOptions,
   issueApprovalHistory,  postIssue, projectOptions,
   occupancyPreview,
   itemHandlingUnits,
@@ -40,13 +40,15 @@ import type {
   HandlingUnit,
   Issue, IssueItemWrite, IssueStockSource, IssueWrite, ItemOption, OccupancyMove,
   TrackingType, UnitMode, UnitSupply,
-  IssueDestinationOption, IssueEmployeeOption,
+  IssueDestinationOption, IssueEmployeeOption, StoIssueOption,
 } from "../types";
 import { usePointLabel } from "../usePointLabel";
 import { TONE_APPROVE, TONE_BLUE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
 import { codesNeeded, comboKeyOf, sourcesFor } from "../issueSplits";
 import { PackagePickerModal } from "../components/PackagePickerModal";
 import { DocLabelsDialog } from "../components/DocLabelsDialog";
+import { IssueTypeTiles, type IssueMode } from "../components/IssueTypeTiles";
+import { LockedDestination, StoContextCard } from "../components/StoContextCard";
 
 /**
  * Raise, approve and post a material issue.
@@ -68,10 +70,13 @@ import { DocLabelsDialog } from "../components/DocLabelsDialog";
  *  outright so a storekeeper can still say so on a document, but it follows the
  *  indent box whenever that is touched: the two disagreeing is not a state anybody
  *  means to be in. */
-const TYPES = [
-  { value: "INDENT_BASED", label: "Indent based" },
-  { value: "DIRECT", label: "Direct" },
-];
+/** Which of the four tiles a SAVED issue is — read off the document, never chosen
+ *  again. An STR issue that produced an STO is still an STR issue: the request is
+ *  what it serves; the order is shown beside it. */
+const modeOf = (doc: { sto_no?: string | null; sto_kind?: string | null;
+                       indent_id?: number | null; indent_type?: string | null }): IssueMode =>
+  doc.indent_id ? (doc.indent_type === "STR" ? "STR" : "INDENT")
+    : doc.sto_no ? "STO" : "DIRECT";
 
 const emptyLine = (): IssueItemWrite => ({
   item_id: 0,
@@ -270,6 +275,12 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     items: [],
   });
   const [touched, setTouched] = useState(false);
+  // What this issue serves — the four tiles (2026-10-29). Seeded from the document
+  // once it loads; on a new one, the storekeeper's choice.
+  const [mode, setMode] = useState<IssueMode>(
+    searchParams.get("mode") === "STO" ? "STO" : "DIRECT");
+  const [pickedSto, setPickedSto] = useState<StoIssueOption | null>(null);
+  const stoRows = useRef(new Map<number, StoIssueOption>());
   const [confirming, setConfirming] = useState<
     "submit" | "approve" | "reject" | "post" | "split" | "ack" | "cancel" | null
   >(null);
@@ -320,6 +331,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
 
   useEffect(() => {
     if (!doc) return;
+    setMode(modeOf(doc));
     setDestination(doc.destination_office_name ?? "");
     setDestinationSac(doc.destination_office_sac ?? null);
     setIssuedToName(doc.issued_to_name ?? null);
@@ -356,7 +368,12 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
       vehicle_id: doc.vehicle_id ?? null,
       vehicle_number: doc.vehicle_number ?? null,
       issued_to_id: doc.issued_to_id ?? null,
-      destination_warehouse_id: doc.destination_warehouse_id ?? null,
+      // An STO's issue goes where the order was approved to. One drafted before the
+      // order's destination was carried onto it reads it from the order here; the
+      // server freezes it on save either way.
+      destination_warehouse_id: doc.destination_warehouse_id
+        ?? (doc.sto_to_warehouse_id && doc.sto_to_warehouse_id !== doc.warehouse_id
+          ? doc.sto_to_warehouse_id : null),
       direction: doc.direction,
       original_issue_id: doc.original_issue_id ?? null,
       remarks: doc.remarks ?? "",
@@ -958,11 +975,42 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   // A point with no service area code (an MDP, a main warehouse) says "None" there.
   const pointHasNoSac = !!destPoint && !destPoint.sac;
   const direct = !form.indent_id && direction === "OUT";
+  // The issue executes a Stock Transfer Order whose destination is a real point: the
+  // destination is the ORDER's, shown locked (2026-10-29). Like the server
+  // (`_assert_direct_issue_parties(for_sto=)`), the order is its request, so neither
+  // a destination pick nor an issued-to person is demanded of it.
+  const stoIssue = !!doc?.sto_no && !!doc.sto_to_warehouse_id
+    && doc.sto_to_warehouse_id !== doc.warehouse_id;
   // A direct issue must say where the goods go and who takes them (2026-10-21): with
   // no indent behind it, these two are the only record of it. The server refuses the
   // same (`_build_issue`); this says it on the field before the press.
-  const missingDestination = direct && !form.destination_warehouse_id;
-  const missingIssuedTo = direct && !form.issued_to_id;
+  const missingDestination = direct && !stoIssue && !form.destination_warehouse_id;
+  const missingIssuedTo = direct && !stoIssue && !form.issued_to_id;
+
+  // A new issue seeded with an indent from elsewhere (a fulfilment pick, a deep link)
+  // is an indent issue, whichever tile was showing.
+  useEffect(() => {
+    if (!editing && form.indent_id && (mode === "DIRECT" || mode === "STO")) setMode("INDENT");
+  }, [editing, form.indent_id, mode]);
+
+  /** Switching tile on a NEW issue starts the header over: an indent, a person and a
+   *  destination chosen for one kind of issue mean nothing for another. */
+  const chooseMode = (next: IssueMode) => {
+    if (next === mode) return;
+    setMode(next);
+    setPickedSto(null);
+    setDestPoint(null);
+    setDestination("");
+    setDestinationSac(null);
+    setIssuedTo(null);
+    setIssuedToName(null);
+    setForm((f) => ({
+      ...f,
+      issue_type: next === "INDENT" || next === "STR" ? "INDENT_BASED" : "DIRECT",
+      indent_id: null, destination_warehouse_id: null, issued_to_id: null,
+      items: f.indent_id ? [] : f.items,
+    }));
+  };
 
   const pullEmployee = useMutation({
     mutationFn: (employeeId: number) => getEmployeeDestination(employeeId),
@@ -1435,6 +1483,17 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         ].filter(Boolean).join(" and ")} — pick ${missingDestination && missingIssuedTo ? "them" : "it"} under Issue details.`} />
       )}
 
+      {doc?.sto_no && (
+        <StoContextCard
+          stoNo={doc.sto_no}
+          status={doc.sto_status}
+          kind={doc.sto_kind}
+          strNo={doc.sto_str_no ?? doc.indent_no}
+          fromName={doc.sto_from_warehouse_name ?? doc.warehouse_name}
+          toName={doc.sto_to_warehouse_name ?? doc.destination_warehouse_name}
+        />
+      )}
+
       {doc && (
         <MetaCard title="Document">
           <MetaRow label="Number" value={<span className="font-mono">{doc.issue_no}</span>} />
@@ -1446,7 +1505,11 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
               : "—"}
           />
           <MetaRow label="Stock" value={doc.is_stock_posted ? `Posted ${fmtDateTime(doc.posted_at)}` : "Not posted"} />
-          <MetaRow label={doc.indent_type === "STR" ? "Against STR" : "Against indent"} value={<span className="font-mono">{doc.indent_no ?? "—"}</span>} />
+          {doc.sto_no && !doc.indent_id ? (
+            <MetaRow label="Against STO" value={<span className="font-mono">{doc.sto_no}</span>} />
+          ) : (
+            <MetaRow label={doc.indent_type === "STR" ? "Against STR" : "Against indent"} value={<span className="font-mono">{doc.indent_no ?? "—"}</span>} />
+          )}
           {doc.pick_no && (
             <MetaRow label="Fulfilment" value={<span className="font-mono">{doc.pick_no}</span>} />
           )}
@@ -1491,17 +1554,48 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
       )}
 
       <Section title={`${direction === "OUT" ? "Issue" : "Return"} details`}>
+        {direction === "OUT" && (
+          <div className="mb-4">
+            <span className="mb-1.5 block text-sm font-medium text-body">Issue type</span>
+            <IssueTypeTiles value={mode} onChange={chooseMode} disabled={editing || locked} />
+          </div>
+        )}
+        {mode === "STO" && !editing && pickedSto && (
+          <div className="mb-4">
+            <StoContextCard
+              stoNo={pickedSto.sto_no}
+              status="APPROVED"
+              kind={pickedSto.kind}
+              strNo={pickedSto.str_no}
+              fromName={pickedSto.from_warehouse_name}
+              toName={pickedSto.to_warehouse_name}
+              issueNo={pickedSto.issue_no}
+            />
+            {pickedSto.issue_id ? (
+              <div className="-mt-2 flex flex-wrap items-center gap-3 rounded-xl border border-line bg-content2/60 px-4 py-3 text-sm">
+                <Info className="h-4 w-4 shrink-0 text-info" aria-hidden />
+                <span className="min-w-0 flex-1 text-body">
+                  This order already has its issue — <b className="font-mono">{pickedSto.issue_no}</b> was
+                  drafted when the STO was approved, with its {pickedSto.item_count} line
+                  {pickedSto.item_count === 1 ? "" : "s"} and the destination locked. Pick batches and
+                  bays there; a second issue would send the same goods twice.
+                </span>
+                <Button className={TONE_BLUE} onClick={() => nav(`${listPath}/${pickedSto.issue_id}`)}>
+                  Open {pickedSto.issue_no} <ChevronRight className="h-4 w-4" />
+                </Button>
+              </div>
+            ) : (
+              <div className="-mt-2 rounded-xl border border-warn/40 bg-warn-bg px-4 py-3 text-sm text-warn">
+                No issue was drafted for this order when it was approved. Ask an administrator to
+                re-run the STO's approval hook — raising one by hand here would carry no link to the order.
+              </div>
+            )}
+          </div>
+        )}
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <Field label="Date">
             <Input type="date" value={form.issue_date} disabled={locked}
                    onChange={(e) => set("issue_date", e.target.value)} />
-          </Field>
-          <Field label="Type">
-            <Select value={form.issue_type} onChange={(v) => set("issue_type", v)}
-                    options={doc?.indent_type === "STR"
-                      ? TYPES.map((t) => (t.value === "INDENT_BASED" ? { ...t, label: "Stock transfer (STR)" } : t))
-                      : TYPES}
-                    isDisabled={locked} ariaLabel="Issue type" />
           </Field>
           <Field label="From warehouse">
             <Lookup name="warehouses" load={warehouseOptions} value={form.warehouse_id || ""}
@@ -1513,9 +1607,40 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                     }}
                     placeholder="Warehouse" />
           </Field>
-          <Field label="Against indent / STR" hint="Loads the approved stock reservation.">
-            <Lookup name={`indents-${form.warehouse_id}`}
-                    load={(search) => indentOptions(search, form.warehouse_id || undefined)}
+          {mode === "STO" ? (
+            editing ? (
+              <Field label="STO number">
+                <div className="flex min-h-11 items-center gap-2 rounded-md border border-brand/30 bg-brand/5 px-3">
+                  <Lock className="h-4 w-4 shrink-0 text-brand" aria-hidden />
+                  <span className="truncate font-mono text-sm font-bold text-ink">{doc?.sto_no ?? "—"}</span>
+                </div>
+              </Field>
+            ) : (
+              <Field label="STO number" hint="Approved orders leaving this point.">
+                <Lookup name={`stos-${form.warehouse_id}`}
+                        load={async (search) => {
+                          const rows = await stoIssueOptions(search, form.warehouse_id || undefined);
+                          stoRows.current = new Map(rows.map((r) => [r.id, r]));
+                          return rows.map((r) => ({
+                            id: r.id,
+                            name: `${r.sto_no} → ${r.to_warehouse_name ?? "—"}`
+                              + (r.kind === "STR" ? " · STR" : ""),
+                          }));
+                        }}
+                        value={pickedSto?.id ?? ""}
+                        isDisabled={!form.warehouse_id}
+                        onChange={(v) => setPickedSto(v === "" ? null : stoRows.current.get(Number(v)) ?? null)}
+                        placeholder={form.warehouse_id ? "Search STO number" : "Pick warehouse first"} />
+              </Field>
+            )
+          ) : (mode === "INDENT" || mode === "STR" || !!form.indent_id) && (
+          <Field label={mode === "STR" ? "Against STR" : "Against indent"}
+                 hint="Loads the approved stock reservation.">
+            <Lookup name={`indents-${mode}-${form.warehouse_id}`}
+                    // One list on the server, told apart by the "STR · " it puts on an
+                    // STR's name: each tile offers only its own kind.
+                    load={async (search) => (await indentOptions(search, form.warehouse_id || undefined))
+                      .filter((o) => (mode === "STR") === String(o.name ?? "").startsWith("STR · "))}
                     // The loader lists indents still open to be issued, so once this
                     // issue exists its own indent has left that list. Without the
                     // fallback the field on a saved document reads "Indent" in grey
@@ -1534,8 +1659,10 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                 if (indentId) setDestPoint(null);
                 if (!indentId) { setDestination(""); setDestinationSac(null); }
                 if (indentId && form.warehouse_id) pullIndent.mutate(indentId);
-              }} placeholder={form.warehouse_id ? "Indent / STR" : "Pick warehouse first"} />
+              }} placeholder={form.warehouse_id ? (mode === "STR" ? "STR number" : "Indent number")
+                                               : "Pick warehouse first"} />
           </Field>
+          )}
           <Field label="Department">
             <Lookup name="departments" load={departmentOptions} value={form.department_id ?? ""}
                     isDisabled={locked}
@@ -1558,7 +1685,37 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                       setProjectName(option?.name ?? null);
                     }} placeholder="Project" />
           </Field>
-          {direct ? (
+          {direct && stoIssue ? (
+            <>
+              <div className="sm:col-span-2">
+                <LockedDestination name={doc?.sto_to_warehouse_name ?? doc?.destination_warehouse_name}
+                                   stoNo={doc!.sto_no!} />
+              </div>
+              <Field label="Service area code (SAC)" hint="Of the destination point.">
+                <Input value={destinationSac ?? doc?.destination_office_sac ?? "None"} disabled />
+              </Field>
+              <Field label="Vehicle" hint="Type one if a vehicle is taking it.">
+                <Input value={form.vehicle_number ?? ""} disabled={locked}
+                       onChange={(e) => set("vehicle_number", e.target.value)} placeholder="Vehicle number" />
+              </Field>
+              <div className="sm:col-span-2">
+                <SearchPicker<IssueEmployeeOption>
+                  label="Issued to"
+                  hint="Optional — the order is the request. Name who carries or receives it."
+                  placeholder="Search name, employee or position code"
+                  value={issuedTo ? personRow(issuedTo) : (form.issued_to_id
+                    ? { id: form.issued_to_id, title: issuedToName ?? String(form.issued_to_id) }
+                    : null)}
+                  onChange={chooseEmployee}
+                  queryKey={["issue-employees", null]}
+                  load={(q) => searchIssueEmployees(q, null)}
+                  toRow={personRow}
+                  emptyText="No active employees."
+                  disabled={locked}
+                />
+              </div>
+            </>
+          ) : direct ? (
             <>
               <div className="sm:col-span-2">
                 <SearchPicker<IssueDestinationOption>

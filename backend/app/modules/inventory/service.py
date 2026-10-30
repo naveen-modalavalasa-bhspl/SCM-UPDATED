@@ -22,7 +22,7 @@ from app.modules.inventory.models import (
     NO_BATCH, NO_BIN, NO_PROJECT, Allocation, AllocationItem, MaterialRequest,
     MaterialRequestItem, Reservation, Stock,
     StockMovement, StockAdjustment, StockAdjustmentItem, StockTransferOrder,
-    StockTransferOrderItem, CycleCount, CycleCountItem, Reservation,
+    StockTransferOrderItem, CycleCount, CycleCountItem, Reservation, STO_KIND_TRANSFER,
 )
 from app.platform.hcm.models import HcmEmployee, HcmFacility, HcmOffice
 from app.platform.rbac import permissions as perms
@@ -3563,6 +3563,52 @@ async def get_near_expiry_alerts(
 
 # ---------------- STO (Stock Transfer Order) ----------------
 
+async def sto_destinations(db: AsyncSession, from_warehouse_id: int, user) -> dict:
+    """Where a direct STO from this point may go: same level, same parent, in scope.
+
+    The exact set `create_sto` accepts, served so the dropdown offers nothing the save
+    would refuse. A destination whose parent the reporting tree cannot name is still
+    offered (and flagged), because the save does not refuse it either.
+    """
+    source = await db.get(Warehouse, from_warehouse_id)
+    if source is None:
+        raise NotFoundError("Source warehouse not found")
+    visible = await _warehouse_ids_for_user(db, user)
+    tier = locations.tier_of(source.warehouse_type)
+    stmt = select(Warehouse).where(Warehouse.is_active.is_(True),
+                                   Warehouse.id != source.id)
+    if visible is not None:
+        stmt = stmt.where(Warehouse.id.in_(visible or {0}))
+    candidates = [w for w in (await db.execute(stmt.order_by(Warehouse.name))).scalars()
+                  if locations.tier_of(w.warehouse_type) == tier]
+    parents = await locations.parent_points(db, {source.id, *(w.id for w in candidates)})
+    parent_ids = {p for p in parents.values() if p is not None}
+    names = dict((await db.execute(
+        select(Warehouse.id, Warehouse.name).where(Warehouse.id.in_(parent_ids or {0}))
+    )).all())
+    source_parent = parents.get(source.id)
+    items = []
+    for w in candidates:
+        parent = parents.get(w.id)
+        if source_parent is not None and parent is not None and parent != source_parent:
+            continue
+        items.append({
+            "id": w.id, "code": w.code, "name": w.name,
+            "warehouse_type": w.warehouse_type,
+            "tier_label": locations.tier_label(tier),
+            "parent_id": parent, "parent_name": names.get(parent),
+            "parent_known": parent is not None,
+        })
+    return {
+        "from_warehouse_id": source.id,
+        "from_warehouse_name": source.name,
+        "tier_label": locations.tier_label(tier),
+        "parent_id": source_parent,
+        "parent_name": names.get(source_parent),
+        "items": items,
+    }
+
+
 async def create_sto(db: AsyncSession, data, user) -> StockTransferOrder:
     from_wh = await db.get(Warehouse, data.from_warehouse_id)
     to_wh = await db.get(Warehouse, data.to_warehouse_id)
@@ -3589,6 +3635,16 @@ async def create_sto(db: AsyncSession, data, user) -> StockTransferOrder:
         raise ValidationError(
             f"{from_wh.name} and {to_wh.name} are on different levels. A transfer stays "
             "on one level: LIP to LIP, MDP to MDP, warehouse to warehouse.")
+    # And between SIBLINGS — two points under the same parent (2026-10-29). Only
+    # refused when BOTH parents are known and differ: a parent the reporting tree
+    # cannot name is a gap in HCM, and refusing on it would strand a real transfer.
+    parents = await locations.parent_points(db, {from_wh.id, to_wh.id})
+    if (parents.get(from_wh.id) is not None and parents.get(to_wh.id) is not None
+            and parents[from_wh.id] != parents[to_wh.id]):
+        raise ValidationError(
+            f"{from_wh.name} and {to_wh.name} sit under different parent points. A direct "
+            "transfer goes between siblings of one parent; anything wider is an STR.")
+    await _assert_sto_stock(db, from_wh.id, from_wh.name, data.items)
 
     # What this move IS comes from the two points, never from the request body, so a
     # cross-project transfer cannot be relabelled into something that skips approval.
@@ -3658,9 +3714,45 @@ async def create_sto(db: AsyncSession, data, user) -> StockTransferOrder:
     await db.commit()
     await db.refresh(sto)
     if sto.status == STOStatus.APPROVED.value:
+        sto_id = sto.id   # a failed hook rolls back and expires the row
         await hooks.fire_sto_approved(db, sto, user)
-        sto = await get_sto(db, sto.id)
+        sto = await get_sto(db, sto_id)
     return sto
+
+
+async def _assert_sto_stock(db: AsyncSession, warehouse_id: int, warehouse_name: str | None,
+                            lines) -> None:
+    """Refuse a transfer the source point cannot give (2026-10-28).
+
+    Approving a direct STO drafts its material issue at the source, and the issue
+    refuses a line asking for more than the point can give. That refusal happened
+    INSIDE the post-approval hook, where it is swallowed by design — so the transfer
+    was approved, no issue was drafted, and it sat at "To issue" with nothing anyone
+    could act on. Asked here instead, at raising and again at approving, the person
+    pressing the button is told why, and nothing is half done.
+
+    Free stock only (`available_qty`, every batch and location): what is reserved for
+    somebody else is not this transfer's to send. The brand / variant / model counts
+    when the line names one."""
+    short: list[str] = []
+    for line in lines:
+        stmt = select(func.coalesce(func.sum(Stock.available_qty), 0)).where(
+            Stock.item_id == line.item_id, Stock.warehouse_id == warehouse_id)
+        for column in ("brand_id", "variant_id", "model_id"):
+            value = getattr(line, column, None)
+            if value:
+                stmt = stmt.where(getattr(Stock, column) == value)
+        free = _d(await db.scalar(stmt))
+        wanted = _d(getattr(line, "requested_qty", 0))
+        if wanted > free:
+            item = await db.get(Item, line.item_id)
+            short.append(f"{getattr(item, 'code', None) or line.item_id} asks for "
+                         f"{wanted.normalize():f}, {free.normalize():f} free")
+    if short:
+        raise ValidationError(
+            f"{warehouse_name or 'The source point'} cannot give this transfer: "
+            + "; ".join(short) + ". Reduce the quantity, or transfer from a point "
+            "that holds it.")
 
 
 async def _sto_ladder(db: AsyncSession, sto: StockTransferOrder, user):
@@ -3841,6 +3933,10 @@ async def approve_sto(db: AsyncSession, sto_id: int, user,
     sto = await get_sto(db, sto_id)
     if sto.status != STOStatus.PENDING_APPROVAL.value:
         raise ValidationError(f"STO is in status {sto.status}, cannot approve")
+    # Stock moves on while a transfer waits for its signature: asked again here, so an
+    # approval never signs a transfer its issue would then refuse to draft.
+    if sto.doc_kind == STO_KIND_TRANSFER and not sto.issue_id and not sto.str_id:
+        await _assert_sto_stock(db, sto.from_warehouse_id, sto.from_warehouse_name, sto.items)
 
     instance = await engine_instance_for(db, DocType.STOCK_TRANSFER.value, sto.id)
     if instance is not None and instance.status == InstanceStatus.IN_PROGRESS.value:
@@ -3861,9 +3957,10 @@ async def approve_sto(db: AsyncSession, sto_id: int, user,
     await db.commit()
     await db.refresh(sto)
     # The approval is committed; drafting the material issue at the source point is
-    # its consequence (warehouse, registered on the hook — rule 5).
+    # its consequence (warehouse, registered on the hook — rule 5). A hook that fails
+    # rolls back and expires the row, so its id is read first.
     await hooks.fire_sto_approved(db, sto, user)
-    return await get_sto(db, sto.id)
+    return await get_sto(db, sto_id)
 
 
 async def reject_sto(db: AsyncSession, sto_id: int, user,
