@@ -256,6 +256,12 @@ async def list_stos(params: PageParams = Depends(), status: str | None = None,
                                    date_from=date_from, date_to=date_to)
 
 
+@stock_router.get("/sto/destinations")
+async def sto_destinations(from_warehouse_id: int, db: AsyncSession = Depends(get_db),
+                           user=Depends(require_permission(perms.STOCK_TRANSFER))):
+    return await service.sto_destinations(db, from_warehouse_id, user)
+
+
 @stock_router.get("/sto/{id}", response_model=STOOut)
 async def get_sto(id: int, db: AsyncSession = Depends(get_db),
                   user=Depends(require_permission(perms.STOCK_TRANSFER_VIEW))):

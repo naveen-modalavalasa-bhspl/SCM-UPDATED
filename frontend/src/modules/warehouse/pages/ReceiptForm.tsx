@@ -18,7 +18,7 @@ import { ReceiptLinkedDocuments } from "../components/LinkedDocuments";
 import { ReceiptRoutingPanel } from "../components/ReceiptRouting";
 import { UnitCodesModal } from "../components/UnitCodesModal";
 import {
-  binOptions, completeReceipt, convertReceiptToGrn, createReceipt, forwardArrival,
+  completeReceipt, convertReceiptToGrn, createReceipt, forwardArrival,
   despatchNoteOptions, dispatchReceiptSource, gateEntryOptions, getDespatchPrefill,
   getPoLines, getReceipt, getReceiptRouting, incomingDispatchOptions, itemOptions, poOptions,
   routeParkedReceipt, submitReceipt, myWarehouseOptions, updateReceipt, uploadAttachment, vendorOptions,
@@ -555,7 +555,6 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     queryFn: () => myWarehouseOptions(),
     staleTime: 5 * 60_000,
   });
-  const binManaged = !!warehouses.find((w) => w.id === form.warehouse_id)?.is_bin_managed;
 
   /* A new receipt opens at the point the person is standing in. Left at "pick one",
    * a storekeeper tagged to a single LIP inwarded a delivery into an unrelated MDP,
@@ -1370,22 +1369,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         />
       ),
     },
-    {
-      key: "bin",
-      header: "Bin",
-      width: "w-40",
-      hideOnNarrow: true,
-      render: (l, i) => (
-        <Lookup
-          name={`bins-${form.warehouse_id}`}
-          load={(s) => binOptions(form.warehouse_id, s)}
-          value={l.bin_id ?? ""}
-          isDisabled={locked || !isGrn || !form.warehouse_id}
-          onChange={(v) => patchLine(i, { bin_id: v === "" ? null : v })}
-          placeholder="Bin"
-        />
-      ),
-    },
+
     {
       key: "rate",
       header: "Rate",
@@ -1442,7 +1426,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
   ];
 
   const columns = allColumns.filter((c) =>
-    (isGrn || !GRN_ONLY_LINE_COLUMNS.has(c.key)) && (c.key !== "bin" || binManaged));
+    (isGrn || !GRN_ONLY_LINE_COLUMNS.has(c.key)));
 
   if (editing && isLoading) return <div className="py-16 text-center text-muted">Loading…</div>;
 

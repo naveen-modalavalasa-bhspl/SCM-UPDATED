@@ -54,17 +54,54 @@ export function DispatchPrintPage() {
     { header: "Weight (kg)", align: "right", width: "10%" },
   ];
 
+  // The rows each carton carries, grouped per item: a package-coded item lists its
+  // codes under the carton › box they came out of (2026-10-28), so the paper that
+  // travels with the truck says what the stickers say.
+  const paths: Record<string, { code: string; name?: string | null }[]> = dispatchDoc.box_paths ?? {};
+  const rowsOf = (pkg: any) => {
+    const own = (dispatchDoc.items || []).filter((r: any) => r.package_id === pkg.id);
+    const source = own.length ? own : (pkg.items || []);
+    const by = new Map<string, any>();
+    for (const r of source) {
+      const key = `${r.item_id}-${r.batch_no ?? ""}-${r.brand_id ?? 0}`;
+      const e = by.get(key) ?? { ...r, id: key, quantity: 0, codes: [] as string[], serial_numbers: [] as string[] };
+      e.quantity += Number(r.quantity) || 0;
+      if (r.box_code) e.codes.push(r.box_code);
+      else if (r.serial_no) e.serial_numbers.push(r.serial_no);
+      for (const sn of r.serial_numbers ?? []) e.serial_numbers.push(sn);
+      by.set(key, e);
+    }
+    return [...by.values()];
+  };
+  const pathLabel = (code: string) => (paths[code] ?? [])
+    .map((p) => `${(p.name ?? "pack").toLowerCase()} …${p.code.split("-").pop()?.slice(-4)}`).join(" › ");
+  const codeGroups = (codes: string[]) => {
+    const by = new Map<string, string[]>();
+    for (const c of codes) by.set(pathLabel(c), [...(by.get(pathLabel(c)) ?? []), c]);
+    return [...by.entries()];
+  };
+
   const items = (dispatchDoc.packages || []).map((pkg: any) => [
     <div key={`no-${pkg.id}`} className="font-mono text-[11px] text-neutral-900">{pkg.package_no ?? "—"}</div>,
     <div key={`type-${pkg.id}`} className="text-neutral-700 capitalize">{pkg.package_type ?? "—"}</div>,
     <div key={`items-${pkg.id}`} className="space-y-1">
-      {(pkg.items || []).map((item: any) => (
+      {rowsOf(pkg).map((item: any) => (
         <div key={item.id} className="flex justify-between items-start text-[11px] border-b border-neutral-100 last:border-0 pb-1 last:pb-0">
           <div>
             <span className="font-semibold text-neutral-800">{item.item_name}</span>
             <div className="font-mono text-[10px] text-neutral-500">{item.item_code}</div>
             {combinationLabel(item) && (
               <div className="text-[10px] text-neutral-600">{combinationLabel(item)}</div>
+            )}
+            {item.codes?.length > 0 && (
+              <div className="mt-0.5 space-y-0.5 text-[9px] text-neutral-500">
+                {codeGroups(item.codes).map(([where, codes]) => (
+                  <div key={where || "-"} className="break-all">
+                    {where && <span className="font-semibold capitalize text-neutral-700">{where}: </span>}
+                    <span className="font-mono">{codes.join(", ")}</span>
+                  </div>
+                ))}
+              </div>
             )}
             {item.serial_numbers && item.serial_numbers.length > 0 && (
               <div className="mt-0.5 text-[9px] text-neutral-400 break-all">

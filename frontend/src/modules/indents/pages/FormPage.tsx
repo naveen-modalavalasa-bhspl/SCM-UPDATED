@@ -5,6 +5,7 @@ import { LibraryBig, Plus, Trash2 } from "lucide-react";
 import { CardBody, Skeleton } from "@heroui/react";
 import { PageHeader, Button, Card, Field, Input, Select, useToast } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
+import { getMyStockingPoints } from "@/modules/inventory/api";
 import {
   indentApi, indentKeys, isIndentModuleQuery,
   useIndentAccountCacheIsolation, useIndentAccountScope,
@@ -205,6 +206,21 @@ export function IndentFormPage() {
     enabled: !isEditing,
   });
 
+  // What the raiser's own point IS (2026-10-29). A warehouse or an MDP is a building
+  // goods are trucked INTO by the sender — it runs no vehicle of its own and carries no
+  // service area code — so the form stops asking for either there. Only an LIP (or a
+  // point we cannot read) keeps them. Read once; a login without stock.view has no
+  // answer, and the fields stay exactly as they were.
+  const { can } = useAuth();
+  const { data: myPoint } = useQuery({
+    queryKey: ["indent-form", "my-point", accountScope],
+    queryFn: getMyStockingPoints,
+    enabled: can?.("stock.view") ?? false,
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+  const pointType = (myPoint?.point_type ?? "").toUpperCase();
+
   const { data: vehicles = [], isLoading: isVehiclesLoading } = useQuery({
     queryKey: indentKeys.vehicles(accountScope),
     queryFn: () => indentApi.vehicles(),
@@ -283,7 +299,7 @@ export function IndentFormPage() {
   const payload = (): IndentCreate => ({
     priority,
     indent_type: indentType,
-    vehicle_id: resolvedVehicleId === "" ? null : Number(resolvedVehicleId),
+    vehicle_id: hideVehicleAndSac || resolvedVehicleId === "" ? null : Number(resolvedVehicleId),
     required_date: requiredDate || null,
     remarks: remarks || null,
     items: lines
@@ -431,6 +447,10 @@ export function IndentFormPage() {
    *  SAC of the office they happen to be posted to now would be the wrong code
    *  against that indent. Matching on the id means an office we hold no SAC for
    *  reads as absent instead of borrowing someone else's. */
+  /** A Warehouse / MDP delivery point asks for neither a vehicle nor a SAC. A draft
+   *  that already carries a vehicle keeps showing it — hiding a value that is saved on
+   *  the document would be hiding the document. */
+  const hideVehicleAndSac = !!pointType && pointType !== "LIP" && !draft?.vehicle_number;
   const officeSac = draft?.office_sac?.trim()
     || (deliveryOfficeId === ""
       ? null
@@ -706,17 +726,31 @@ export function IndentFormPage() {
             <Field label="Delivery location">
               <Input value={delivery.officeName} disabled />
             </Field>
-            <Field label="Vehicle">
-              <Input value={vehicleNumber} disabled />
-            </Field>
-            {/* Read-only like the two above it: the SAC belongs to the delivery
-                office, so it follows that office rather than being chosen. */}
-            <Field label="Service area code (SAC)">
-              <Input
-                value={officeSac ?? "No service area code for this location"}
-                disabled
-              />
-            </Field>
+            {hideVehicleAndSac ? (
+              <div className="flex items-start gap-2 rounded-lg border border-dashed border-line bg-content2/50 px-3 py-2.5 text-xs text-muted">
+                <span className="mt-0.5 rounded bg-brand/10 px-1.5 py-px text-[10px] font-bold uppercase text-brand">
+                  {pointType === "MDP" ? "MDP" : "Warehouse"}
+                </span>
+                <span>
+                  Delivered to {pointType === "MDP" ? "an MDP" : "a warehouse"} — no vehicle or
+                  service area code is needed. The sending point arranges the transport.
+                </span>
+              </div>
+            ) : (
+              <>
+                <Field label="Vehicle">
+                  <Input value={vehicleNumber} disabled />
+                </Field>
+                {/* Read-only like the two above it: the SAC belongs to the delivery
+                    office, so it follows that office rather than being chosen. */}
+                <Field label="Service area code (SAC)">
+                  <Input
+                    value={officeSac ?? "No service area code for this location"}
+                    disabled
+                  />
+                </Field>
+              </>
+            )}
             <Field label="Remarks">
               <Input value={remarks} onChange={(e) => setRemarks(e.target.value)} placeholder="Optional" />
             </Field>
@@ -742,7 +776,7 @@ export function IndentFormPage() {
             !hasSelectedItems
             || hasDuplicateError
             || save.isPending
-            || (Boolean(delivery.vehicleNumber) && isVehiclesLoading)
+            || (!hideVehicleAndSac && Boolean(delivery.vehicleNumber) && isVehiclesLoading)
           }
           onClick={() => {
             setError(null);

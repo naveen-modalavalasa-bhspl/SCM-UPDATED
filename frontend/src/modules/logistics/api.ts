@@ -317,6 +317,11 @@ export const consignmentApi = {
       .then((r) => r.data),
   get: (id: number) =>
     api.get<ConsignmentDetail>(`/api/warehouse/consignments/${id}`).then((r) => r.data),
+  /** What the consignment inherits from its issue — STR / STO number, destination,
+   *  department, project, issued-to (with phone), SAC, vehicle (2026-10-29). */
+  transferContext: (id: number) =>
+    api.get<import("@/modules/warehouse/types").TransferContext | null>(
+      `/api/warehouse/consignments/${id}/transfer-context`).then((r) => r.data),
 };
 
 /** The Smart Load Planner and the multi-drop trips it plans. Served by the warehouse

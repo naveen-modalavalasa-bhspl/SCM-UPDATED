@@ -28,6 +28,7 @@ from app.modules.inventory import allocations, locations
 from app.modules.inventory import service as inventory_service
 from app.modules.inventory.models import (
     Allocation, AllocationItem, MaterialRequest, MaterialRequestItem, Stock,
+    StockTransferOrder,
 )
 from app.platform.hcm import mappers
 from app.platform.hcm.models import (
@@ -908,6 +909,42 @@ async def indent_participant_condition(db: AsyncSession, user):
     return clause
 
 
+async def own_shelf_points(db: AsyncSession, user) -> set[int]:
+    """The stocking points whose SHELF this login holds, across every live post —
+    never its reportees'. Signing for a delivery is "it reached MY shelf"."""
+    points: set[int] = set()
+    for position_id in await locations.active_positions_of(db, user):
+        points |= await locations.held_location_ids(db, position_id, subtree=False)
+    return points
+
+
+def str_addressed_to(points: set[int]):
+    """An STR served by a Stock Transfer Order bound for one of these points
+    (2026-10-29). The destination storekeeper is a party to that delivery: anyone who
+    holds the receiving shelf may see it arrive and sign for it, not only the person
+    who happened to raise it. One rule for the list, the read and the sign-off."""
+    if not points:
+        return false()
+    return and_(
+        Indent.indent_type == IndentType.STR.value,
+        select(StockTransferOrder.id)
+        .where(StockTransferOrder.str_id == Indent.id,
+               StockTransferOrder.to_warehouse_id.in_(points))
+        .correlate(Indent).exists(),
+    )
+
+
+async def _receives_str(db: AsyncSession, indent: Indent, user) -> bool:
+    """Is this login a receiver of this STR by holding the shelf it is bound for?"""
+    if indent.indent_type != IndentType.STR.value:
+        return False
+    points = await own_shelf_points(db, user)
+    return bool(points) and bool(await db.scalar(
+        select(func.count()).select_from(StockTransferOrder)
+        .where(StockTransferOrder.str_id == indent.id,
+               StockTransferOrder.to_warehouse_id.in_(points))))
+
+
 async def _indent_visibility(db: AsyncSession, user):
     """Both halves of "may this login read this indent": the access rule AND the rung.
 
@@ -957,6 +994,14 @@ async def _assert_can_view_indent(db: AsyncSession, indent_id: int, user) -> Ind
     )
     indent = (await db.execute(stmt)).scalar_one_or_none()
     if not indent:
+        # The receiving point of an STR may read the one document it is signing for
+        # even when its rung would not list it (2026-10-29). Asked only on a miss, so
+        # every read the scope already answers costs nothing more.
+        candidate = (await db.execute(
+            select(Indent).options(selectinload(Indent.items)).where(Indent.id == indent_id)
+        )).scalar_one_or_none()
+        if candidate is not None and await _receives_str(db, candidate, user):
+            return candidate
         raise NotFoundError(f"Indent {indent_id} not found")
     return indent
 
@@ -1780,7 +1825,7 @@ async def add_receipt_attachment(db: AsyncSession, indent_id: int, upload, *,
     # matches on the position the indent was raised in, which would stop somebody who
     # has since changed posts from confirming goods they themselves asked for.
     indent = await get_indent(db, indent_id)
-    if indent.requested_by_id != user.id:
+    if indent.requested_by_id != user.id and not await _receives_str(db, indent, user):
         raise PermissionError_(
             "Only the person who raised this indent can attach its delivery proof")
     if indent.status not in _RECEIVABLE_STATUSES:
@@ -1817,7 +1862,7 @@ async def delete_receipt_attachment(db: AsyncSession, attachment_id: int, user) 
     row = await attachments.require_attachment(
         db, attachment_id, entity_type=ACK_ENTITY_TYPE)
     indent = await get_indent(db, int(row.entity_id))
-    if indent.requested_by_id != user.id:
+    if indent.requested_by_id != user.id and not await _receives_str(db, indent, user):
         raise PermissionError_(
             "Only the person who raised this indent can remove its delivery proof")
     if indent.status not in _RECEIVABLE_STATUSES:
@@ -1916,9 +1961,11 @@ async def acknowledge_receipt(db: AsyncSession, indent_id: int,
     # Unscoped load, raiser-only gate — see add_receipt_attachment. Changing post must
     # not orphan the goods you are still waiting for.
     indent = await get_indent(db, indent_id)
-    if indent.requested_by_id != user.id:
+    # Or, for an STR, whoever holds the shelf it is bound for (2026-10-29).
+    if indent.requested_by_id != user.id and not await _receives_str(db, indent, user):
         raise PermissionError_(
-            "Only the person who raised this indent can acknowledge its delivery")
+            "Only the person who raised this indent, or the receiving point, can "
+            "acknowledge its delivery")
     if indent.status not in _RECEIVABLE_STATUSES:
         raise ValidationError(
             f"{indent.indent_no} is not awaiting delivery (status {indent.status})")
@@ -3296,6 +3343,34 @@ async def _journey_operational_evidence(
             "approval_mode": None,
             "_sort_order": 40,
         })
+    # A brand given in place of the one asked for (2026-10-24) is a decision the
+    # requester must be able to read on the journey, not only on the indent's lines.
+    # Rejected and cancelled allocations gave nothing, so they changed nothing.
+    for row in allocations:
+        if row.status in (AllocationStatus.REJECTED.value, AllocationStatus.CANCELLED.value):
+            continue
+        for item in row.items:
+            if (item.indent_item_id not in target_item_ids or not item.substituted_from
+                    or _d(item.quantity) <= 0):
+                continue
+            given = " · ".join(p for p in (item.brand_name, item.variant_name,
+                                            item.model_name) if p) or "No brand"
+            events.append({
+                "id": f"allocation-brand:{row.id}:{item.id}",
+                "event_type": "BRAND_CHANGED",
+                "title": "Brand changed",
+                "description": (f"{item.item_name or 'Item'}: brand substituted from "
+                                f"{item.substituted_from} to {given}"),
+                "actor_name": row.allocated_by_name,
+                "position_name": None,
+                "timestamp": row.created_at,
+                "comments": item.substitution_reason,
+                "reference_no": row.allocation_no,
+                "quantity_summary": f"{float(_d(item.quantity)):g} {item.uom_code or ''}".strip(),
+                "stage_type": "allocation",
+                "approval_mode": None,
+                "_sort_order": 41,
+            })
 
     warehouse_workflow_events, _ = await _related_workflow_events(
         db,

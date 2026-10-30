@@ -59,6 +59,33 @@ const combosAt = (line: AllocationProposalLine, wh: string) => inStockOptions(
   (line.warehouses.find((w) => String(w.warehouse_id) === wh)?.combinations ?? [])
     .map((c) => ({ ...c, qty: c.available_qty })));
 
+/** Free stock of ONE combination at every point that holds it, most first — the
+ *  answer to "if I give this brand, where can it come from?". */
+const brandNetwork = (line: AllocationProposalLine, combo?: CombinationValue) => {
+  if (!picked(combo)) return [];
+  const key = combinationKey(combo);
+  return orderPoints(line.warehouses)
+    .map((w) => ({
+      warehouse: w,
+      qty: (w.combinations ?? []).filter((c) => combinationKey(c) === key)
+        .reduce((sum, c) => sum + c.available_qty, 0),
+    }))
+    .filter((row) => row.qty > 0)
+    .sort((a, b) => b.qty - a.qty);
+};
+
+/** The rung a point sits on, in the words the floor uses. */
+const tierWord = (type?: string | null) => {
+  const t = (type ?? "").toUpperCase();
+  return t === "LIP" ? "LIP" : t === "MDP" ? "MDP" : "Warehouse";
+};
+
+const TIER_CHIP: Record<string, string> = {
+  Warehouse: "bg-brand/10 text-brand",
+  MDP: "bg-info-bg text-info",
+  LIP: "bg-ok-bg text-ok",
+};
+
 /**
  * Where a person decides how much stock an indent actually gets.
  *
@@ -440,11 +467,23 @@ export function AllocationPage() {
                             placeholder="— none —"
                             // Warehouses first, then the distribution points, each
                             // saying what it is — see `isChainPoint`.
-                            options={orderPoints(pointsFor(line, splits, i)).map((w) => ({
-                              value: String(w.warehouse_id),
-                              label: `${w.warehouse_name} (${w.available_qty} free)`
-                                + (isChainPoint(w) ? " · distribution point" : ""),
-                            }))}
+                            // With a brand chosen, each point also says how much of
+                            // THAT brand it holds — the total alone hides that the
+                            // biggest store may have none of it.
+                            options={orderPoints(pointsFor(line, splits, i)).map((w) => {
+                              const ofBrand = picked(s.combo)
+                                ? brandNetwork(line, s.combo)
+                                    .find((r) => r.warehouse.warehouse_id === w.warehouse_id)?.qty ?? 0
+                                : null;
+                              return {
+                                value: String(w.warehouse_id),
+                                label: `${w.warehouse_name} (`
+                                  + (ofBrand !== null
+                                    ? `${ofBrand} of ${combinationLabel(s.combo)} · ` : "")
+                                  + `${w.available_qty} free)`
+                                  + (isChainPoint(w) ? " · distribution point" : ""),
+                              };
+                            })}
                           />
                         </Field>
                         {line.warehouses.some((w) => combosAt(line, String(w.warehouse_id)).length) && (
@@ -484,6 +523,52 @@ export function AllocationPage() {
                         </Button>
                       )}
                     </div>
+                    {picked(s.combo) && brandNetwork(line, s.combo).length > 0 && (
+                      <div className="rounded-lg border border-line bg-content2/60 px-3 py-2">
+                        <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted">
+                          {combinationLabel(s.combo)} free across the network ·{" "}
+                          <span className="tabular text-ink">
+                            {brandNetwork(line, s.combo).reduce((sum, r) => sum + r.qty, 0)}
+                          </span>{" "}{line.uom_code}
+                        </p>
+                        <div className="flex flex-wrap gap-1.5">
+                          {brandNetwork(line, s.combo).map(({ warehouse: w, qty }) => {
+                            const here = String(w.warehouse_id) === s.wh;
+                            const tier = tierWord(w.warehouse_type);
+                            const taken = !here && splits.some((o, j) => j !== i
+                              && o.wh === String(w.warehouse_id)
+                              && combinationKey(o.combo) === combinationKey(s.combo));
+                            return (
+                              <button
+                                key={w.warehouse_id}
+                                type="button"
+                                disabled={here || taken}
+                                title={here ? "This row draws from here"
+                                  : taken ? "Another row already draws this brand from here"
+                                  : `Take ${combinationLabel(s.combo)} from ${w.warehouse_name}`}
+                                onClick={() => {
+                                  const next = [...splits];
+                                  next[i] = { ...next[i], wh: String(w.warehouse_id) };
+                                  set(line.indent_item_id, i, {
+                                    wh: String(w.warehouse_id),
+                                    qty: clampQty(line, next, i, next[i].qty),
+                                  });
+                                }}
+                                className={`inline-flex min-h-8 items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition ${
+                                  here ? "border-brand bg-brand/10 font-semibold text-brand"
+                                    : "border-line bg-content1 text-ink-700 hover:border-brand/60 hover:text-brand disabled:opacity-50"}`}
+                              >
+                                <span className={`rounded px-1 py-px text-[10px] font-bold uppercase ${TIER_CHIP[tier]}`}>
+                                  {tier}
+                                </span>
+                                <span className="max-w-[12rem] truncate">{w.warehouse_name}</span>
+                                <span className="tabular font-semibold">{qty}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
                     {isSubstitute(line, s.combo) && (
                       <div className="flex flex-wrap items-center gap-2 rounded-lg border border-warning/30 bg-warning/5 px-3 py-2">
                         <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-warning">

@@ -3,6 +3,7 @@ import type { PackEntryIn } from "@/shared/packing";
 import type {
   BoxLabel,
   BoxSource,
+  DocLabels,
   UnlocatedStockStatus,
   IssueDestinationOption,
   IssueEmployeeOption,
@@ -498,6 +499,21 @@ export const listBoxLabels = (params: {
 
 export const markBoxLabelsPrinted = (ids: number[]) =>
   post<{ printed: number }>(`${BASE}/box-labels/printed`, { ids });
+
+/** Every label a POSTED issue's goods carry, item by item (2026-10-28). */
+export const issueLabels = (issueId: number) =>
+  get<DocLabels>(`${BASE}/issues/${issueId}/labels`);
+
+/** Labels for what a site ACKNOWLEDGED on one consignment — never what was sent. */
+export const receivedLabels = (dispatchId: number) =>
+  get<DocLabels>(`${BASE}/dispatches/${dispatchId}/received-labels`);
+
+export const docLabelsPrinted = (
+  doc: { type: "ISSUE" | "RECEIPT"; id: number },
+  body: { label_ids: number[]; printed: number; reprint?: boolean },
+) => post<{ printed: number; queue_ticked: number }>(doc.type === "ISSUE"
+  ? `${BASE}/issues/${doc.id}/labels/printed`
+  : `${BASE}/dispatches/${doc.id}/received-labels/printed`, body);
 
 export interface UnitSupplyPick {
   item_id: number;
@@ -1076,6 +1092,18 @@ export const gateEntryOptions = (search?: string) =>
 
 export const indentOptions = (search?: string, warehouse_id?: number) =>
   get<Option[]>(`${BASE}/options/indents`, { search, warehouse_id });
+
+/** What a consignment inherits from the issue behind it (2026-10-29). */
+export const issueTransferContext = (issueId: number) =>
+  get<import("./types").TransferContext>(`${BASE}/issues/${issueId}/transfer-context`);
+
+export const consignmentTransferContext = (consignmentId: number) =>
+  get<import("./types").TransferContext | null>(
+    `${BASE}/consignments/${consignmentId}/transfer-context`);
+
+/** Approved STOs leaving this point, each with the issue that executes it. */
+export const stoIssueOptions = (search?: string, warehouse_id?: number) =>
+  get<import("./types").StoIssueOption[]>(`${BASE}/options/stos`, { search, warehouse_id });
 
 export const getIndentIssueSource = (indent_id: number, warehouse_id: number) =>
   get<{

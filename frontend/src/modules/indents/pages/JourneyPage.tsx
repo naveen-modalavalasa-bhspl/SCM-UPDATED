@@ -2,7 +2,7 @@ import { useEffect, useMemo } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  AlertTriangle, ArrowLeft, Ban, Check, Circle, Clock, Loader2, Minus, RefreshCw, Undo2, X,
+  AlertTriangle, ArrowLeft, Ban, Check, Circle, Clock, Loader2, Minus, RefreshCw, Repeat2, Undo2, X,
 } from "lucide-react";
 import { CardBody, Skeleton } from "@heroui/react";
 import { Button, Card } from "@/shared/components";
@@ -504,9 +504,22 @@ export function IndentJourneyPage() {
                     <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted">{date}</h3>
                     <div className="space-y-3">
                       {events.map((event) => (
-                        <article key={event.id} className="rounded-lg border border-line bg-content2 p-3">
+                        <article
+                          key={event.id}
+                          className={event.event_type === "BRAND_CHANGED"
+                            ? "rounded-lg border border-warning/40 bg-warning/5 p-3"
+                            : "rounded-lg border border-line bg-content2 p-3"}
+                        >
                           <p className="text-xs font-semibold text-muted">{formatIndentDateTime(event.timestamp)}</p>
-                          <p className="mt-1 break-words text-sm font-semibold text-body">{event.title}</p>
+                          {/* A brand given in place of the one asked for is the one
+                              allocation fact a requester must not miss. */}
+                          {event.event_type === "BRAND_CHANGED" ? (
+                            <p className="mt-1 inline-flex items-center gap-1.5 text-sm font-semibold text-warning">
+                              <Repeat2 size={14} aria-hidden /> {event.title}
+                            </p>
+                          ) : (
+                            <p className="mt-1 break-words text-sm font-semibold text-body">{event.title}</p>
+                          )}
                           {event.description && <p className="mt-1 break-words text-sm text-muted">{event.description}</p>}
                           {event.actor_name && <p className="mt-1 break-words text-sm text-body">{event.actor_name}</p>}
                           {event.position_name && <p className="break-words text-xs text-muted">{event.position_name}</p>}

@@ -603,6 +603,14 @@ function AppRoutes() {
         {/* An STR is an indent underneath; its screens sit under Stock Transfer so the
             rail and tabs read Inventory, not Indents. */}
         <Route path="inventory/transfers/new" element={<IndentFormPage />} />
+        {/* Every stock transfer is received HERE — STR and direct STO alike — on the
+            same receipt journey Indents uses, at Stock Transfer's own address. */}
+        <Route path="inventory/transfers/acknowledgements"
+               element={<Navigate to="/inventory/transfers?tab=acknowledge" replace />} />
+        <Route path="inventory/transfers/acknowledgements/issue/:issueId"
+               element={<AcknowledgementDetailPage kind="issue" />} />
+        <Route path="inventory/transfers/acknowledgements/:indentId"
+               element={<AcknowledgementDetailPage />} />
         <Route path="inventory/transfers/requests/:id/journey" element={<IndentJourneyPage />} />
         <Route path="inventory/transfers/requests/:id" element={<IndentDetailPage />} />
         {/* An STO's material issue, worked inside Stock Transfer rather than the
