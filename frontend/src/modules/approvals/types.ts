@@ -201,6 +201,8 @@ export interface ApprovalIndentLine {
   /** Ceiling for this approver — the request, or what the level below approved. */
   max_quantity: number;
   remarks?: string | null;
+  is_excluded?: boolean;
+  excluded_by_name?: string | null;
 }
 
 export interface ApprovalIndent {
@@ -218,6 +220,7 @@ export interface ApprovalIndent {
   required_date?: string | null;
   created_at: string;
   items: ApprovalIndentLine[];
+  excluded_items?: ApprovalIndentLine[];
 }
 
 export interface ApprovalQuantityInput {

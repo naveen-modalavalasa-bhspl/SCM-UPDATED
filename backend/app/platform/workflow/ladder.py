@@ -1072,7 +1072,8 @@ async def resolve_chain(db: AsyncSession, stages: list[Stage],
                         requester_position_id: int | None,
                         requester_id: int | None,
                         context: dict | None = None,
-                        policy: str = POLICY_INDEPENDENT) -> list[dict]:
+                        policy: str = POLICY_INDEPENDENT,
+                        allow_offline: bool = True) -> list[dict]:
     """Walk up from the raiser and keep the ancestors whose rank is switched on.
 
     Returns the frozen chain: one entry per approval stage, in order. Empty means the
@@ -1131,9 +1132,10 @@ async def resolve_chain(db: AsyncSession, stages: list[Stage],
     # position — it sits outside every branch's reporting line by design, and no
     # amount of climbing from a field post will ever reach it.
     missing = [role_id for role_id in enabled if role_id not in matched]
-    if missing:
+    if missing and allow_offline:
         chain = await _add_offline_rungs(
-            db, chain, missing, enabled, stages, exclude_id)
+            db, chain, missing, enabled, stages, exclude_id,
+            requester_position_id=requester_position_id)
     return dedupe_chain(chain)
 
 
@@ -1182,7 +1184,8 @@ async def _add_offline_rungs(db: AsyncSession, chain: list[dict],
                              missing: list[int],
                              enabled: dict[int, set[int] | None],
                              stages: list[Stage],
-                             exclude_id: int | None) -> list[dict]:
+                             exclude_id: int | None,
+                             requester_position_id: int | None = None) -> list[dict]:
     """Resolve the configured ranks the climb never met, off the whole org.
 
     A central function is not anybody's ancestor. The climb answers "who above ME holds
@@ -1201,8 +1204,28 @@ async def _add_offline_rungs(db: AsyncSession, chain: list[dict],
     """
     order = {stage.position_role_id: stage.sequence for stage in stages
              if stage.position_role_id is not None}
+
+    requester_pos = await db.get(HcmPosition, requester_position_id) if requester_position_id else None
+    raiser_stage_seq = min(
+        (s.sequence for s in stages if s.position_role_id == requester_pos.role_id),
+        default=None,
+    ) if requester_pos and requester_pos.role_id else None
+
+    min_matched_seq = min(
+        (order[link["role_id"]] for link in chain if link.get("role_id") in order),
+        default=None,
+    )
+
     added: list[dict] = []
     for role_id in missing:
+        role_seq = order.get(role_id)
+        if raiser_stage_seq is not None and role_seq is not None and role_seq <= raiser_stage_seq:
+            logger.info("Skipping offline rung %s: at or below raiser's stage in ladder", role_id)
+            continue
+        if min_matched_seq is not None and role_seq is not None and role_seq < min_matched_seq:
+            logger.info("Skipping offline rung %s: sequence is below climbed rungs", role_id)
+            continue
+
         scope = enabled.get(role_id)
         status, posts, holders = await offline_rung_resolution(
             db, role_id, scope, exclude_id)
@@ -1223,6 +1246,9 @@ async def _add_offline_rungs(db: AsyncSession, chain: list[dict],
             logger.error(
                 "Ladder rung for rank %s resolves to %d position(s) that nobody "
                 "fills; the rung is not in the chain.", role_id, len(posts))
+            continue
+        if requester_pos and any(p.parent_position_id == requester_pos.id for p in posts):
+            logger.info("Skipping offline rung %s: position is subordinate to raiser", role_id)
             continue
         first = posts[0]
         added.append({

@@ -1947,22 +1947,30 @@ def _approval_out(
     indent: Indent, instance: Instance, has_previous_approval: bool,
     *, can_return_for_correction: bool = False,
 ) -> ApprovalIndentOut:
-    items = [
-        ApprovalIndentLineOut(
+    items: list[ApprovalIndentLineOut] = []
+    excluded_items: list[ApprovalIndentLineOut] = []
+    for line in sorted(indent.items, key=lambda item: (item.line_no, item.id)):
+        ceiling = _approval_ceiling(line, has_previous_approval)
+        line_out = ApprovalIndentLineOut(
             id=line.id,
             item_id=line.item_id,
             item_code=line.item_code,
             item_name=line.item_name,
             uom_code=line.uom_code,
             requested_quantity=float(line.quantity),
-            approved_quantity=float(_approval_ceiling(line, has_previous_approval)),
-            max_quantity=float(_approval_ceiling(line, has_previous_approval)),
+            approved_quantity=float(ceiling),
+            max_quantity=float(ceiling),
             remarks=line.remarks,
             is_excluded=bool(line.is_excluded),
             excluded_by_name=line.excluded_by_name,
         )
-        for line in sorted(indent.items, key=lambda item: (item.line_no, item.id))
-    ]
+        # If an earlier approver turned this item to zero or marked it excluded,
+        # it is dropped from the approval and not forwarded to subsequent approvers.
+        if has_previous_approval and (line.is_excluded or ceiling <= 0):
+            excluded_items.append(line_out)
+        else:
+            items.append(line_out)
+
     return ApprovalIndentOut(
         id=indent.id,
         indent_no=indent.indent_no,
@@ -1978,6 +1986,7 @@ def _approval_out(
         required_date=indent.required_date,
         created_at=indent.created_at,
         items=items,
+        excluded_items=excluded_items,
     )
 
 
@@ -2427,7 +2436,12 @@ def _validated_quantities(
             raise ValidationError(f"Quantity for line {item.line_id} was submitted twice")
         by_id[item.line_id] = _quantize(Decimal(str(item.approved_quantity)))
 
-    expected = {line.id for line in indent.items}
+    # Only lines that are still active (not excluded/turned to zero at an earlier rung)
+    # are expected to be submitted.
+    expected = {
+        line.id for line in indent.items
+        if not (has_previous_approval and (getattr(line, "is_excluded", False) or _approval_ceiling(line, has_previous_approval) <= 0))
+    }
     received = set(by_id)
     if received != expected:
         missing = sorted(expected - received)
@@ -2440,6 +2454,8 @@ def _validated_quantities(
         raise ValidationError("Submit one quantity for every indent line (" + "; ".join(details) + ")")
 
     for line in indent.items:
+        if line.id not in by_id:
+            continue
         approved = by_id[line.id]
         ceiling = _approval_ceiling(line, has_previous_approval)
         label = line.item_name or line.item_code or line.id
@@ -2503,6 +2519,9 @@ async def approve_indent(
     before: dict[str, float] = {}
     after: dict[str, float] = {}
     for line in indent.items:
+        if line.id not in approved_by_line:
+            # Line was already excluded / zeroed below; stays excluded
+            continue
         before[f"line_{line.id}_approved_qty"] = float(
             _approval_ceiling(line, has_previous)
         )
