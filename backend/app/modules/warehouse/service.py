@@ -4434,8 +4434,10 @@ async def create_inspection(db: AsyncSession, data: s.InspectionWrite, user) -> 
         vendor_name=receipt.vendor_name if receipt else None,
         inspection_type=data.inspection_type.value,
         status=InspectionStatus.DRAFT.value,
-        inspector_id=data.inspector_id or getattr(user, "id", None),
-        inspector_name=_name(user) if not data.inspector_id else None,
+        # The inspector is the signed-in user, never a name picked from a list
+        # (SCM_0097): whatever the client sends, the login inspecting is recorded.
+        inspector_id=getattr(user, "id", None),
+        inspector_name=_name(user),
         remarks=data.remarks,
     )
     db.add(inspection)
@@ -4460,7 +4462,7 @@ async def update_inspection(db: AsyncSession, inspection_id: int, data: s.Inspec
 
     before = {"status": inspection.status, "failed_items": inspection.failed_items}
     inspection.inspection_date = data.inspection_date
-    inspection.inspector_id = data.inspector_id or inspection.inspector_id
+    # The inspector recorded at creation stands (SCM_0097): an edit never re-points it.
     inspection.remarks = data.remarks
     inspection.status = InspectionStatus.IN_PROGRESS.value
 

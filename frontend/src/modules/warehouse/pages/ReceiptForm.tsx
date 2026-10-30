@@ -18,7 +18,7 @@ import { ReceiptLinkedDocuments } from "../components/LinkedDocuments";
 import { ReceiptRoutingPanel } from "../components/ReceiptRouting";
 import { UnitCodesModal } from "../components/UnitCodesModal";
 import {
-  binOptions, completeReceipt, convertReceiptToGrn, createReceipt, forwardArrival,
+  completeReceipt, convertReceiptToGrn, createReceipt, forwardArrival,
   despatchNoteOptions, dispatchReceiptSource, gateEntryOptions, getDespatchPrefill,
   getPoLines, getReceipt, getReceiptRouting, incomingDispatchOptions, itemOptions, poOptions,
   routeParkedReceipt, submitReceipt, myWarehouseOptions, updateReceipt, uploadAttachment, vendorOptions,
@@ -555,7 +555,6 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     queryFn: () => myWarehouseOptions(),
     staleTime: 5 * 60_000,
   });
-  const binManaged = !!warehouses.find((w) => w.id === form.warehouse_id)?.is_bin_managed;
 
   /* A new receipt opens at the point the person is standing in. Left at "pick one",
    * a storekeeper tagged to a single LIP inwarded a delivery into an unrelated MDP,

@@ -16,7 +16,7 @@ import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { InspectionLinkedDocuments } from "../components/LinkedDocuments";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import {
-  cancelInspection, completeInspection, createInspection, employeeOptions, getInspection,
+  cancelInspection, completeInspection, createInspection, getInspection,
   getReceipt, grnOptions,
   updateInspection, warehouseOptions,
 } from "../api";
@@ -111,9 +111,9 @@ export default function QualityInspectionForm({
   /* The inspector is whoever is standing at the bench. Left at "pick one" it was a
    * list of every active employee in HCM with the person actually inspecting somewhere
    * in it, so a signed inspection could carry anybody's name. Prefilled from the
-   * login, and once only — same rule as the receiving point: clearing it to name a
-   * colleague must not have it written straight back. Still editable; a bench where
-   * one person inspects and another signs off is a real arrangement. */
+   * login and shown read-only (SCM_0097): the server records the signed-in user on
+   * create and keeps that inspector on every edit, so a picker here would only offer
+   * a choice the save ignores. */
   const { me } = useAuth();
   const prefilledInspector = useRef(false);
   useEffect(() => {
@@ -778,22 +778,7 @@ export default function QualityInspectionForm({
             />
           </Field>
           <Field label="Inspector">
-            <Lookup
-              name="employees"
-              load={employeeOptions}
-              value={form.inspector_id ?? ""}
-              isDisabled={locked}
-              // The options list is capped, so the signed-in inspector is not
-              // guaranteed to be in it — without this their own name renders as the
-              // placeholder on a document that plainly has one.
-              fallback={me ? [{
-                id: me.employee.id,
-                code: me.employee.code ?? "",
-                name: me.employee.name,
-              }] : undefined}
-              onChange={(v) => set("inspector_id", v === "" ? null : v)}
-              placeholder="Inspector"
-            />
+            <Input value={(editing ? doc?.inspector_name : me?.employee?.name) ?? "—"} disabled />
           </Field>
         </div>
       </Section>
