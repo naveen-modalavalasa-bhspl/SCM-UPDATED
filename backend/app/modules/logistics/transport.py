@@ -158,6 +158,64 @@ def _and_list(names: list[str]) -> str:
 #  Reads
 # --------------------------------------------------------------------------- #
 
+async def _decorate_tr_missing_fields(db: AsyncSession, doc: TransportRequest) -> None:
+    import json
+    if not (doc.from_warehouse_address or "").strip() and doc.from_warehouse_id:
+        from app.shared.models.warehouse import Warehouse
+        from app.platform.hcm.models import HcmOffice
+        wh = await db.get(Warehouse, doc.from_warehouse_id)
+        if wh:
+            if wh.address and wh.address.strip():
+                doc.from_warehouse_address = wh.address.strip()
+            elif wh.office_id:
+                office = await db.get(HcmOffice, wh.office_id)
+                if office:
+                    if office.address and office.address.strip():
+                        doc.from_warehouse_address = office.address.strip()
+                    else:
+                        parts = []
+                        if office.raw:
+                            try:
+                                raw_data = json.loads(office.raw) if isinstance(office.raw, str) else office.raw
+                                if isinstance(raw_data, dict):
+                                    for k in ("location", "mandal_name", "district_name", "state_name"):
+                                        v = raw_data.get(k)
+                                        if v and str(v).strip() and str(v).strip() not in parts:
+                                            parts.append(str(v).strip())
+                            except Exception:
+                                pass
+                        if not parts:
+                            if office.city and office.city.strip():
+                                parts.append(office.city.strip())
+                            if office.state and office.state.strip():
+                                parts.append(office.state.strip())
+                        if parts:
+                            doc.from_warehouse_address = ", ".join(parts)
+            if not doc.from_warehouse_address and wh.name:
+                doc.from_warehouse_address = wh.name
+
+    if (not (doc.contact_person or "").strip() or not (doc.contact_phone or "").strip()) and doc.dispatch_id:
+        from app.modules.warehouse.models import Dispatch
+        disp = await db.get(Dispatch, doc.dispatch_id)
+        if disp:
+            if not (doc.contact_person or "").strip() and disp.contact_person:
+                doc.contact_person = disp.contact_person
+            if not (doc.contact_phone or "").strip() and disp.contact_phone:
+                doc.contact_phone = disp.contact_phone
+
+    if (not (doc.contact_person or "").strip() or not (doc.contact_phone or "").strip()) and doc.indent_id:
+        from app.modules.indents.models import Indent
+        from app.platform.hcm.models import HcmEmployee
+        indent = await db.get(Indent, doc.indent_id)
+        if indent and indent.created_by_id:
+            creator = await db.get(HcmEmployee, indent.created_by_id)
+            if creator:
+                if not (doc.contact_person or "").strip() and creator.full_name:
+                    doc.contact_person = creator.full_name.strip()
+                if not (doc.contact_phone or "").strip() and creator.mobile:
+                    doc.contact_phone = creator.mobile.strip()
+
+
 async def get_tr(db: AsyncSession, tr_id: int, user=None) -> TransportRequest:
     """Load one shipment, applying the same scope as the transport register.
 
@@ -175,6 +233,7 @@ async def get_tr(db: AsyncSession, tr_id: int, user=None) -> TransportRequest:
     if doc is None:
         raise NotFoundError(f"Transport request {tr_id} not found")
     await _attach_package_quantities(db, doc)
+    await _decorate_tr_missing_fields(db, doc)
     return doc
 
 
@@ -1593,6 +1652,69 @@ async def create_tr(db: AsyncSession, data, user) -> TransportRequest:
     if is_inbound(data.source_type) and not (data.to_location_name or "").strip():
         raise ValidationError("Name the warehouse this return is coming back to")
 
+    # SCM_0079: Auto-resolve from_warehouse_address and contact details if missing
+    import json
+    from_wh_address = getattr(data, "from_warehouse_address", None)
+    contact_p = data.contact_person
+    contact_ph = data.contact_phone
+
+    if data.dispatch_id and (not from_wh_address or not contact_p or not contact_ph):
+        from app.modules.warehouse.models import Dispatch
+        disp = await db.get(Dispatch, data.dispatch_id)
+        if disp:
+            if not from_wh_address and disp.warehouse_address:
+                from_wh_address = disp.warehouse_address
+            if not contact_p and disp.contact_person:
+                contact_p = disp.contact_person
+            if not contact_ph and disp.contact_phone:
+                contact_ph = disp.contact_phone
+
+    if not from_wh_address and data.from_warehouse_id:
+        from app.shared.models.warehouse import Warehouse
+        from app.platform.hcm.models import HcmOffice
+        wh = await db.get(Warehouse, data.from_warehouse_id)
+        if wh:
+            if wh.address and wh.address.strip():
+                from_wh_address = wh.address.strip()
+            elif wh.office_id:
+                office = await db.get(HcmOffice, wh.office_id)
+                if office:
+                    if office.address and office.address.strip():
+                        from_wh_address = office.address.strip()
+                    else:
+                        parts = []
+                        if office.raw:
+                            try:
+                                raw_data = json.loads(office.raw) if isinstance(office.raw, str) else office.raw
+                                if isinstance(raw_data, dict):
+                                    for k in ("location", "mandal_name", "district_name", "state_name"):
+                                        v = raw_data.get(k)
+                                        if v and str(v).strip() and str(v).strip() not in parts:
+                                            parts.append(str(v).strip())
+                            except Exception:
+                                pass
+                        if not parts:
+                            if office.city and office.city.strip():
+                                parts.append(office.city.strip())
+                            if office.state and office.state.strip():
+                                parts.append(office.state.strip())
+                        if parts:
+                            from_wh_address = ", ".join(parts)
+            if not from_wh_address and wh.name:
+                from_wh_address = wh.name
+
+    if (not contact_p or not contact_ph) and data.indent_id:
+        from app.modules.indents.models import Indent
+        from app.platform.hcm.models import HcmEmployee
+        indent = await db.get(Indent, data.indent_id)
+        if indent and indent.created_by_id:
+            creator = await db.get(HcmEmployee, indent.created_by_id)
+            if creator:
+                if not contact_p and creator.full_name:
+                    contact_p = creator.full_name.strip()
+                if not contact_ph and creator.mobile:
+                    contact_ph = creator.mobile.strip()
+
     doc = TransportRequest(
         # Same project the shipment is filed under, below.
         tr_no=await next_number(db, DocType.TRANSPORT_REQUEST.value.lower(),
@@ -1611,10 +1733,10 @@ async def create_tr(db: AsyncSession, data, user) -> TransportRequest:
         indent_id=data.indent_id, indent_no=data.indent_no,
         from_warehouse_id=data.from_warehouse_id,
         from_warehouse_name=data.from_warehouse_name,
-        from_warehouse_address=getattr(data, "from_warehouse_address", None),
+        from_warehouse_address=from_wh_address,
         to_location_name=data.to_location_name,
         delivery_address=data.delivery_address,
-        contact_person=data.contact_person, contact_phone=data.contact_phone,
+        contact_person=contact_p, contact_phone=contact_ph,
         distance_km=data.distance_km,
         project_id=data.project_id, project_name=data.project_name,
         expected_delivery=data.expected_delivery, remarks=data.remarks,

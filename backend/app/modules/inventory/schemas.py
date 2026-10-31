@@ -526,6 +526,13 @@ class AdjustmentItemIn(BaseModel):
     bin_id: int = 0
     batch_id: int = 0
     project_id: int = 0
+    # The brand / variant / model counted (2026-10-31). 100 of Brand A and 50 of Brand
+    # B on one shelf are two balances, so they are two lines, each counted and written
+    # off on its own. A number is that combination exactly (0 = stock with no brand
+    # recorded); None counts every combination at the lot together — the old shape.
+    brand_id: int | None = None
+    variant_id: int | None = None
+    model_id: int | None = None
     physical_qty: float | None = Field(default=None, ge=0)
     direction: str | None = None  # IN | OUT, direct lines only
     quantity: float | None = Field(default=None, gt=0)

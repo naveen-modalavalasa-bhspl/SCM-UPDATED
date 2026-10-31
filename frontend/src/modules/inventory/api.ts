@@ -673,6 +673,24 @@ export const getOverviewKPIs = () =>
 export const createStockAdjustment = (data: any) =>
   api.post("/api/stock/adjust", data).then((r) => r.data);
 
+/** Stock audit write-offs (2026-10-31): what the audit form counts and picks from. */
+export const getAuditItems = (warehouseId: number, search?: string) =>
+  api.get<import("./types").AuditItemOption[]>("/api/warehouse/stock-audit/items", {
+    params: { warehouse_id: warehouseId, search: search || undefined },
+  }).then((r) => r.data);
+
+export const getAuditLots = (warehouseId: number, itemId: number) =>
+  api.get<import("./types").AuditLot[]>("/api/warehouse/stock-audit/lots", {
+    params: { warehouse_id: warehouseId, item_id: itemId },
+  }).then((r) => r.data);
+
+export const getAuditSources = (warehouseId: number, itemId: number, batchId: number,
+                                binId: number, combo?: { brand_id: number; variant_id: number; model_id: number }) =>
+  api.get<import("./types").AuditSources>("/api/warehouse/stock-audit/sources", {
+    params: { warehouse_id: warehouseId, item_id: itemId, batch_id: batchId, bin_id: binId,
+              ...(combo ?? {}) },
+  }).then((r) => r.data);
+
 export const listStockAdjustments = (params?: {
   warehouse_id?: number; status?: string; search?: string; reason?: string;
   date_from?: string; date_to?: string; page?: number; size?: number;

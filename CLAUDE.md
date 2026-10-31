@@ -203,6 +203,33 @@ later shortage on the same indent is a different shortage that was being dropped
   `_assert_can_view_indent`). Do NOT put that point lookup into `_indent_visibility`:
   every indent read would pay two queries for it.
 
+### A stock audit only takes stock off, and names what it takes (2026-10-31)
+
+- **Never an addition.** `inventory.service.AUDIT_REASONS` (CYCLE_COUNT, DAMAGE, EXPIRY,
+  SHORTAGE, QUALITY_REJECTION, OTHER) — EXCESS / OPENING_BALANCE stay in the enum for old
+  rows only. A count above the system figure, a direct IN line and an inward reason are
+  all refused on create; the inward auto-approve path is gone (every write-off waits for
+  an approver or its STOCK_ADJUSTMENT chain); an old pending audit with an IN line can be
+  rejected, never approved. Found stock comes in on a goods receipt.
+- **Per brand / variant / model.** `AdjustmentItemIn.brand_id/variant_id/model_id` (None =
+  every combination, the old shape): the system figure, the duplicate key and the
+  write-off (`_write_off_combo` → `move_stock_out`) are that combination's only. A line
+  saved before this (0/0/0, not `combination_any`) draws unbranded stock, else any.
+- **Codes, per LOT** (`warehouse/audit_writeoff.py`): UNITS (serial/IMEI lot with units →
+  exactly N picked by hand), CODES (asset/consumable lot, or a box-only lot of an item
+  issued in containers → whole packs at any level + unit codes, total exactly N),
+  QUANTITY (no codes). Validated when RAISED (`inventory.hooks.ON_ADJUSTMENT_VALIDATE`)
+  and again under lock when POSTED (`ON_ADJUSTMENT_OUT` → `write_off`): a picked pack is
+  consumed with every unit inside scrapped; a picked unit shrinks its pack; ancestors
+  shrink; a pack and something inside it, a held pick, or one code on two lines are
+  refused. Units and packs carry NO brand, so brands at one batch + location share one
+  pool; `reconcile_key` is skipped on such a mixed lot (it reads one balance row).
+- **Screen**: `/inventory/adjustments/new` (`StockAuditFormPage`, a full form — the modal
+  `StockAuditForm` is gone), fed by `/api/warehouse/stock-audit/{items,lots,sources}`;
+  `WriteOffPicker` + pure `auditPick.ts` (whole packs first in "Suggest"; serials never
+  auto-picked). Tests: `warehouse/tests/test_audit_writeoff.py`, `inventory/tests/
+  auditPick.test.ts`.
+
 ### An order is received ONCE, and what it still owes is READ (2026-09-08)
 
 BHS/104/2026-27/PO0013 was received in full by REC0031 and then, the next day, in full

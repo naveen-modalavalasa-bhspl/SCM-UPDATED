@@ -66,14 +66,31 @@ export function GatePassPrintPage() {
     value: dash(carryingValue(field, doc)),
   }));
 
-  const columns: PrintColumn[] = [
-    { header: "Item", width: "39%" },
-    { header: "UOM", width: "9%" },
-    { header: "Qty", align: "right", width: "12%" },
-    { header: "Packages", align: "right", width: "12%" },
-    { header: "Weight (kg)", align: "right", width: "13%" },
-    { header: "Remarks", width: "15%" },
-  ];
+  // Hide weight details if no details entered or weight is 0 across the document
+  const hasWeight = (Number(doc.total_weight_kg) > 0)
+    || items.some((line) => line.weight_kg != null && Number(line.weight_kg) > 0);
+
+  const columns: PrintColumn[] = hasWeight
+    ? [
+        { header: "Item", width: "38%" },
+        { header: "UOM", width: "8%" },
+        { header: "Qty", align: "right", width: "11%" },
+        { header: "Packages", align: "right", width: "11%" },
+        { header: "Weight (kg)", align: "right", width: "12%" },
+        { header: "Remarks", width: "15%" },
+      ]
+    : [
+        { header: "Item", width: "44%" },
+        { header: "UOM", width: "9%" },
+        { header: "Qty", align: "right", width: "13%" },
+        { header: "Packages", align: "right", width: "13%" },
+        { header: "Remarks", width: "16%" },
+      ];
+
+  const receivedByDisplay = doc.received_by_name?.trim()
+    || (["PENDING_APPROVAL", "DRAFT", "READY", "IN_TRANSIT", "QUOTING", "AWAITING_CARRIER"].includes(doc.status)
+      ? "Pending receipt (to be signed)"
+      : "—");
 
   return (
     <PrintTemplate
@@ -117,7 +134,7 @@ export function GatePassPrintPage() {
             { label: "Contact", value: dash(doc.contact_person) },
             { label: "Contact phone", value: dash(doc.contact_phone) },
             { label: "Dispatched by", value: dash(doc.dispatched_by_name ?? doc.requested_by_name) },
-            { label: "Received by", value: dash(doc.received_by_name) },
+            { label: "Received by", value: receivedByDisplay },
           ],
         },
         /* Filled in by whoever actually knows it — the carrier in their own portal on
@@ -126,26 +143,46 @@ export function GatePassPrintPage() {
         { title: "Who is carrying it", fields: carrying },
       ]}
       columns={columns}
-      items={items.map((line) => [
-        <>
-          <span className="font-semibold" style={{ color: "#141a2a" }}>{dash(line.item_name)}</span>
-          {line.item_code && (
-            <span className="ml-1 font-mono text-[8.5px]" style={{ color: "#697187" }}>{line.item_code}</span>
-          )}
-          {line.is_fragile && (
-            <span className="ml-1 text-[8.5px] font-bold uppercase" style={{ color: "#CC004C" }}>· fragile</span>
-          )}
-        </>,
-        displayUom(line.uom_code),
-        line.quantity,
-        line.package_count,
-        line.weight_kg ?? "—",
-        dash(line.remarks),
-      ])}
-      itemsTotal={[
-        `${doc.total_items} item${doc.total_items === 1 ? "" : "s"}`,
-        "", doc.total_qty, doc.total_packages, doc.total_weight_kg, "",
-      ]}
+      items={items.map((line) => {
+        const itemCell = (
+          <>
+            <span className="font-semibold" style={{ color: "#141a2a" }}>{dash(line.item_name)}</span>
+            {line.item_code && (
+              <span className="ml-1 font-mono text-[8.5px]" style={{ color: "#697187" }}>{line.item_code}</span>
+            )}
+            {line.is_fragile && (
+              <span className="ml-1 text-[8.5px] font-bold uppercase" style={{ color: "#CC004C" }}>· fragile</span>
+            )}
+          </>
+        );
+        return hasWeight
+          ? [
+              itemCell,
+              displayUom(line.uom_code),
+              line.quantity,
+              line.package_count,
+              line.weight_kg != null && Number(line.weight_kg) > 0 ? line.weight_kg : "—",
+              dash(line.remarks),
+            ]
+          : [
+              itemCell,
+              displayUom(line.uom_code),
+              line.quantity,
+              line.package_count,
+              dash(line.remarks),
+            ];
+      })}
+      itemsTotal={
+        hasWeight
+          ? [
+              `${doc.total_items} item${doc.total_items === 1 ? "" : "s"}`,
+              "", doc.total_qty, doc.total_packages, doc.total_weight_kg, "",
+            ]
+          : [
+              `${doc.total_items} item${doc.total_items === 1 ? "" : "s"}`,
+              "", doc.total_qty, doc.total_packages, "",
+            ]
+      }
       remarks={doc.remarks}
       /* Three hands touch the load on the way out, and the pass is the only place all
          three sign. Printed as empty boxes on purpose — they are signed on paper. */
