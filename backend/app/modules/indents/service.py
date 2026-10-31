@@ -1900,13 +1900,22 @@ def owed_quantity(item) -> Decimal:
     cosmetic: most live indent lines predate the approval flow and carry `approved_qty`
     0, and treating that as "owed nothing" would close an indent the moment anyone
     acknowledged it. Same rule the allocation code already uses.
+    A line marked excluded or rejected by the approver is owed nothing.
     """
+    if getattr(item, "is_excluded", False):
+        return Decimal("0")
+    if getattr(item, "approved_quantity", None) is not None and _d(item.approved_quantity) > Decimal("0"):
+        return _d(item.approved_quantity)
     return _d(item.approved_quantity) or _d(item.quantity)
 
 
 def _fulfilment_status(items) -> str:
-    """CLOSED once every line is fully received, else PARTIALLY_FULFILLED."""
-    if all(_d(i.received_quantity) >= owed_quantity(i) for i in items):
+    """CLOSED once every active line is fully received, else PARTIALLY_FULFILLED."""
+    active_items = [
+        i for i in items
+        if not getattr(i, "is_excluded", False) and owed_quantity(i) > Decimal("0")
+    ]
+    if not active_items or all(_d(i.received_quantity) >= owed_quantity(i) for i in active_items):
         return IndentStatus.CLOSED.value
     return IndentStatus.PARTIALLY_FULFILLED.value
 
