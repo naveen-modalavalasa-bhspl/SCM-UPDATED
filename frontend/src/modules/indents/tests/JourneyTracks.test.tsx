@@ -489,4 +489,33 @@ describe("complete indent journey screen", () => {
     expect(within(remaining).getByText("In transit")).toBeInTheDocument();
     expect(within(remaining).getByText("Awaiting acknowledgement")).toBeInTheDocument();
   });
+
+  it("marks Ready for allocation as completed once allocation occurred", async () => {
+    const journeyWithReady = fulfilledJourney({
+      status: "PARTIALLY_ALLOCATED",
+      history: [
+        {
+          id: "ready-for-allocation:1",
+          event_type: "READY_FOR_ALLOCATION",
+          title: "Ready for allocation",
+          timestamp: "2026-10-31T12:46:00Z",
+        },
+        {
+          id: "allocation:1",
+          event_type: "STOCK_ALLOCATED",
+          title: "Stock allocated",
+          timestamp: "2026-10-31T12:54:00Z",
+        },
+      ],
+    });
+
+    renderJourney(journeyWithReady);
+
+    const timeline = await screen.findByRole("list", { name: "Complete indent journey timeline" });
+    const readyHeading = within(timeline).getByRole("heading", { name: "Ready for allocation" });
+    const readyCard = readyHeading.closest("article");
+    expect(readyCard).not.toBeNull();
+    expect(within(readyCard!).queryByText("Waiting for allocation")).not.toBeInTheDocument();
+    expect(within(readyCard!).getByText("Completed")).toBeInTheDocument();
+  });
 });

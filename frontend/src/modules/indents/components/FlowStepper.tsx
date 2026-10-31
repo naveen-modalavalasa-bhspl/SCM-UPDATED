@@ -1,7 +1,7 @@
 import { Skeleton } from "@heroui/react";
 import { Ban, Check, Circle, Clock, Minus, Undo2, X } from "lucide-react";
 import {
-  INDENT_APPROVAL_STAGE_TYPES, INDENT_APPROVALS_PHASE_INDEX, INDENT_PHASES,
+  INDENT_APPROVAL_STAGE_TYPES, INDENT_APPROVALS_PHASE_INDEX,
   INDENT_PROCUREMENT_STATUSES, INDENT_STATUS,
 } from "../constants";
 import type { IndentJourney, IndentJourneyStage, RaiserTracking } from "../types";
@@ -26,7 +26,18 @@ interface FlowStepperProps {
   isLoading?: boolean;
 }
 
-const PHASES = INDENT_PHASES;
+export const STEPPER_PHASES = [
+  { key: "draft", label: "Draft" },
+  { key: "submitted", label: "Submitted" },
+  { key: "approvals", label: "Approvals" },
+  { key: "allocation", label: "Allocation" },
+  { key: "warehouse", label: "Warehouse" },
+  { key: "dispatch", label: "Dispatch" },
+  { key: "delivery", label: "In-Transit" },
+  { key: "acknowledgement", label: "Acknowledgement" },
+] as const;
+
+const PHASES = STEPPER_PHASES;
 
 /** Every status the fallback can reason about — the module owns this list. */
 const RECOGNISED_STATUSES = new Set<string>(Object.values(INDENT_STATUS));
@@ -61,6 +72,7 @@ export const CURRENT_PHASE_CAPTIONS: Record<string, string> = {
   approvals: "Awaiting approval",
   allocation: "Awaiting allocation",
   warehouse: "Pending warehouse",
+  dispatch: "Pending dispatch",
   delivery: "In transit",
   acknowledgement: "Awaiting acknowledgement",
 };
@@ -106,10 +118,10 @@ function stateFromStage(stage?: IndentJourneyStage): StepState {
  * Allocation uses it to say the shortfall went to procurement rather than leaving a
  * bare "Current" that reads the same as an indent nobody has looked at yet.
  */
-const CAPTIONED_PHASE_KEYS = ["approvals", "allocation"];
+const CAPTIONED_PHASE_KEYS = ["approvals", "allocation", "warehouse", "delivery"];
 
 function stageCaption(phaseKey: string, stage: IndentJourneyStage, state: StepState) {
-  if (CAPTIONED_PHASE_KEYS.includes(phaseKey) && state === "current" && stage.approver_name) {
+  if (CAPTIONED_PHASE_KEYS.includes(phaseKey) && (state === "current" || state === "completed") && stage.approver_name) {
     return stage.approver_name;
   }
   return statusCaption(state, phaseKey);
@@ -173,31 +185,213 @@ function normalizeBackendSteps(journey: IndentJourney, statusValue: string): Sum
     if (
       !Number.isInteger(stage?.sequence)
       || stage.sequence < 1
-      || stage.sequence > PHASES.length
+      || stage.sequence > 8
       || bySequence.has(stage.sequence)
     ) return null;
     bySequence.set(stage.sequence, stage);
   }
-  if (bySequence.size !== PHASES.length) return null;
 
-  const steps: SummaryStep[] = [];
-  for (let index = 0; index < PHASES.length; index += 1) {
-    const definition = PHASES[index];
-    const stage = bySequence.get(index + 1);
-    if (!stage) return null;
-    const state = definition.key === "approvals"
-      ? approvalPhaseState(journey, stage, statusValue)
-      : stateFromStage(stage);
-    if (state === "unknown") return null;
-    steps.push({
-      key: definition.key,
-      label: definition.label,
-      state,
-      caption: definition.key === "approvals" && state === "current"
-        ? approvalDetail(journey) ?? stageCaption(definition.key, stage, state)
-        : stageCaption(definition.key, stage, state),
-    });
+  // If backend provided 8 phases directly
+  if (bySequence.size === 8) {
+    const steps: SummaryStep[] = [];
+    for (let index = 0; index < PHASES.length; index += 1) {
+      const definition = PHASES[index];
+      const stage = bySequence.get(index + 1);
+      if (!stage) return null;
+      const state = definition.key === "approvals"
+        ? approvalPhaseState(journey, stage, statusValue)
+        : stateFromStage(stage);
+      if (state === "unknown") return null;
+      steps.push({
+        key: definition.key,
+        label: definition.label,
+        state,
+        caption: definition.key === "approvals" && state === "current"
+          ? approvalDetail(journey) ?? stageCaption(definition.key, stage, state)
+          : stageCaption(definition.key, stage, state),
+      });
+    }
+    return steps;
   }
+
+  // Standard backend contract: 7 phases
+  if (bySequence.size !== 7) return null;
+
+  const draftStage = bySequence.get(1);
+  const submittedStage = bySequence.get(2);
+  const approvalsStage = bySequence.get(3);
+  const allocationStage = bySequence.get(4);
+  const warehouseStage = bySequence.get(5);
+  const deliveryStage = bySequence.get(6);
+  const ackStage = bySequence.get(7);
+
+  if (!draftStage || !submittedStage || !approvalsStage || !allocationStage || !warehouseStage || !deliveryStage || !ackStage) {
+    return null;
+  }
+
+  const draftState = stateFromStage(draftStage);
+  const submittedState = stateFromStage(submittedStage);
+  const approvalsState = approvalPhaseState(journey, approvalsStage, statusValue);
+  const allocationState = stateFromStage(allocationStage);
+
+  if (
+    draftState === "unknown"
+    || submittedState === "unknown"
+    || approvalsState === "unknown"
+    || allocationState === "unknown"
+  ) {
+    return null;
+  }
+
+  const isQcComplete = Boolean(journey.qc_complete || (journey.qc_status && String(journey.qc_status).toUpperCase() === "COMPLETED"));
+  const hasConsignment = Boolean(journey.consignment_no);
+  const isDispatched = Boolean(
+    (journey.consignment_status && ["DISPATCHED", "GATED_OUT", "IN_TRANSIT", "DELIVERED", "ACKNOWLEDGED", "CLOSED"].includes(String(journey.consignment_status).toUpperCase()))
+    || (deliveryStage.approver_name && (
+      deliveryStage.approver_name.toLowerCase().includes("in transit")
+      || deliveryStage.approver_name.toLowerCase().includes("dispatched")
+    ))
+    || deliveryStage.status === "APPROVED"
+    || deliveryStage.status === "COMPLETED"
+  );
+  const isDelivered = Boolean(
+    deliveryStage.status === "APPROVED"
+    || deliveryStage.status === "COMPLETED"
+    || ackStage.is_current
+    || ackStage.status === "APPROVED"
+    || ackStage.status === "COMPLETED"
+    || (journey.consignment_status && ["DELIVERED", "ACKNOWLEDGED", "CLOSED"].includes(String(journey.consignment_status).toUpperCase()))
+  );
+  const isAckCompleted = Boolean(ackStage.status === "APPROVED" || ackStage.status === "COMPLETED");
+
+  let warehouseState: StepState;
+  let warehouseCaption: string | undefined;
+
+  let dispatchState: StepState;
+  let dispatchCaption: string | undefined;
+
+  let deliveryState: StepState;
+  let deliveryCaption: string | undefined;
+
+  let ackState: StepState;
+  let ackCaption: string | undefined;
+
+  let effectiveAllocationState = allocationState;
+  let effectiveAllocationCaption = stageCaption("allocation", allocationStage, allocationState);
+
+  // Compute Warehouse
+  if (warehouseStage.status === "APPROVED" || warehouseStage.status === "COMPLETED" || isQcComplete || hasConsignment || isDispatched) {
+    warehouseState = "completed";
+    warehouseCaption = isQcComplete ? "QC completed" : "Completed";
+  } else if (warehouseStage.is_current || (allocationState === "completed" && warehouseStage.status === "PENDING" && !isHalted(approvalsState))) {
+    warehouseState = "current";
+    warehouseCaption = journey.qc_status ? "QC in progress" : (warehouseStage.approver_name || "QC in progress");
+  } else {
+    warehouseState = stateFromStage(warehouseStage);
+    warehouseCaption = stageCaption("warehouse", warehouseStage, warehouseState);
+  }
+
+  // If warehouse has started or completed, allocation cannot be pending in the UI!
+  if ((warehouseState === "completed" || warehouseState === "current") && effectiveAllocationState === "pending") {
+    effectiveAllocationState = "completed";
+    effectiveAllocationCaption = allocationStage.approver_name || "Completed";
+  }
+
+  // Compute Dispatch
+  if (isDispatched) {
+    dispatchState = "completed";
+    dispatchCaption = "Dispatched";
+  } else if (warehouseState === "completed" && !isDelivered) {
+    dispatchState = "current";
+    if (hasConsignment) {
+      dispatchCaption = "In consignment";
+    } else if (isQcComplete) {
+      dispatchCaption = "Awaiting consignment";
+    } else {
+      dispatchCaption = "Pending dispatch";
+    }
+  } else {
+    dispatchState = "pending";
+    dispatchCaption = "";
+  }
+
+  // Compute Delivery (In-Transit)
+  if (isDelivered) {
+    deliveryState = "completed";
+    deliveryCaption = "Delivered";
+  } else if (isDispatched && dispatchState === "completed") {
+    deliveryState = "current";
+    deliveryCaption = deliveryStage.approver_name || "In transit";
+  } else {
+    deliveryState = "pending";
+    deliveryCaption = "";
+  }
+
+  // Compute Acknowledgement
+  if (isAckCompleted) {
+    ackState = "completed";
+    ackCaption = "Completed";
+  } else if (isDelivered && deliveryState === "completed") {
+    ackState = "current";
+    ackCaption = "Awaiting acknowledgement";
+  } else {
+    ackState = "pending";
+    ackCaption = "";
+  }
+
+  const steps: SummaryStep[] = [
+    {
+      key: "draft",
+      label: "Draft",
+      state: draftState,
+      caption: stageCaption("draft", draftStage, draftState),
+    },
+    {
+      key: "submitted",
+      label: "Submitted",
+      state: submittedState,
+      caption: stageCaption("submitted", submittedStage, submittedState),
+    },
+    {
+      key: "approvals",
+      label: "Approvals",
+      state: approvalsState,
+      caption: approvalsState === "current"
+        ? approvalDetail(journey) ?? stageCaption("approvals", approvalsStage, approvalsState)
+        : stageCaption("approvals", approvalsStage, approvalsState),
+    },
+    {
+      key: "allocation",
+      label: "Allocation",
+      state: effectiveAllocationState,
+      caption: effectiveAllocationCaption,
+    },
+    {
+      key: "warehouse",
+      label: "Warehouse",
+      state: warehouseState,
+      caption: warehouseCaption,
+    },
+    {
+      key: "dispatch",
+      label: "Dispatch",
+      state: dispatchState,
+      caption: dispatchCaption,
+    },
+    {
+      key: "delivery",
+      label: "In-Transit",
+      state: deliveryState,
+      caption: deliveryCaption,
+    },
+    {
+      key: "acknowledgement",
+      label: "Acknowledgement",
+      state: ackState,
+      caption: ackCaption,
+    },
+  ];
+
   return steps;
 }
 
@@ -220,15 +414,15 @@ function fallbackSteps(statusValue: string, journey: IndentJourney): SummaryStep
 
   let states: StepState[];
   if (status === INDENT_STATUS.DRAFT) {
-    states = ["current", "pending", "pending", "pending", "pending", "pending", "pending"];
+    states = ["current", "pending", "pending", "pending", "pending", "pending", "pending", "pending"];
   } else if (status === INDENT_STATUS.SUBMITTED || status === INDENT_STATUS.PENDING_APPROVAL) {
-    states = ["completed", "completed", "current", "pending", "pending", "pending", "pending"];
+    states = ["completed", "completed", "current", "pending", "pending", "pending", "pending", "pending"];
   } else if (status === INDENT_STATUS.REJECTED) {
-    states = ["completed", "completed", "rejected", "pending", "pending", "pending", "pending"];
+    states = ["completed", "completed", "rejected", "pending", "pending", "pending", "pending", "pending"];
   } else if (status === INDENT_STATUS.RETURNED || status === INDENT_STATUS.RETURNED_FOR_CORRECTION) {
-    states = ["completed", "completed", "returned", "pending", "pending", "pending", "pending"];
+    states = ["completed", "completed", "returned", "pending", "pending", "pending", "pending", "pending"];
   } else if (status === INDENT_STATUS.CANCELLED) {
-    states = ["completed", "completed", "cancelled", "pending", "pending", "pending", "pending"];
+    states = ["completed", "completed", "cancelled", "pending", "pending", "pending", "pending", "pending"];
   } else if (
     status === INDENT_STATUS.APPROVED
     || status === INDENT_STATUS.AWAITING_ALLOCATION
@@ -236,11 +430,16 @@ function fallbackSteps(statusValue: string, journey: IndentJourney): SummaryStep
     // issued from stock, so no warehouse progress may be claimed.
     || PROCUREMENT_STATUSES.has(status)
   ) {
-    states = ["completed", "completed", "completed", "current", "pending", "pending", "pending"];
+    states = ["completed", "completed", "completed", "current", "pending", "pending", "pending", "pending"];
   } else if (status === INDENT_STATUS.CLOSED) {
-    states = ["completed", "completed", "completed", "completed", "completed", "completed", "completed"];
+    states = ["completed", "completed", "completed", "completed", "completed", "completed", "completed", "completed"];
   } else {
-    states = ["completed", "completed", "completed", "completed", "current", "pending", "pending"];
+    // Fulfilment / Warehouse / Dispatch
+    if (journey?.qc_complete) {
+      states = ["completed", "completed", "completed", "completed", "completed", "current", "pending", "pending"];
+    } else {
+      states = ["completed", "completed", "completed", "completed", "current", "pending", "pending", "pending"];
+    }
   }
 
   const detail = approvalDetail(journey);
@@ -249,7 +448,16 @@ function fallbackSteps(statusValue: string, journey: IndentJourney): SummaryStep
     label: phase.label,
     state: states[index],
     caption: phase.key === "approvals" && states[index] === "current" && detail
-      ? detail : statusCaption(states[index], phase.key),
+      ? detail
+      : phase.key === "warehouse" && states[index] === "completed" && journey?.qc_complete
+        ? "QC completed"
+        : phase.key === "warehouse" && states[index] === "current" && journey?.qc_status
+          ? "QC in progress"
+          : phase.key === "dispatch" && states[index] === "current" && journey?.consignment_no
+            ? "In consignment"
+            : phase.key === "dispatch" && states[index] === "current" && journey?.qc_complete
+              ? "Awaiting consignment"
+              : statusCaption(states[index], phase.key),
   }));
 }
 
@@ -294,6 +502,7 @@ function applyShipmentProgress(
   shipments: RaiserTracking[] | undefined,
 ) {
   if (shipments === undefined) return steps;
+  const dispatchIndex = steps.findIndex((step) => step.key === "dispatch");
   const deliveryIndex = steps.findIndex((step) => step.key === "delivery");
   const receiptIndex = steps.findIndex((step) => step.key === "acknowledgement");
   if (deliveryIndex < 0 || receiptIndex < 0) return steps;
@@ -311,6 +520,10 @@ function applyShipmentProgress(
 
   const statuses = shipments.map((leg) => String(leg.status ?? "").toUpperCase());
   const allArrived = statuses.every((status) => ARRIVED_SHIPMENT_STATUSES.has(status));
+  const anyDispatched = shipments.some((leg) => {
+    const s = String(leg.status ?? "").toUpperCase();
+    return s === "DISPATCHED" || s === "IN_TRANSIT" || ARRIVED_SHIPMENT_STATUSES.has(s);
+  });
   const allSigned = shipments.every((leg, index) => (
     Boolean(leg.acknowledged_at) || SIGNED_SHIPMENT_STATUSES.has(statuses[index])
   ));
@@ -319,14 +532,34 @@ function applyShipmentProgress(
   const onTrip = shipments.find((leg) => leg.trip_no
     && !ARRIVED_SHIPMENT_STATUSES.has(String(leg.status ?? "").toUpperCase()));
 
+  if (dispatchIndex >= 0) {
+    if (anyDispatched) {
+      next[dispatchIndex] = {
+        ...next[dispatchIndex],
+        state: "completed",
+        caption: "Dispatched",
+      };
+    } else if (shipments.length > 0 && next[dispatchIndex].state === "current") {
+      next[dispatchIndex] = {
+        ...next[dispatchIndex],
+        state: "current",
+        caption: "Pending dispatch",
+      };
+    }
+  }
+
   next[deliveryIndex] = {
     ...next[deliveryIndex],
-    state: allArrived ? "completed" : "current",
+    state: allArrived ? "completed" : anyDispatched ? "current" : next[deliveryIndex].state,
     caption: allArrived
       ? `${shipments.length} shipment${shipments.length === 1 ? "" : "s"} arrived`
       : onTrip
         ? `Shared truck · stop ${onTrip.stop_sequence ?? "?"} of ${onTrip.total_stops ?? "?"}`
-        : location ? `In transit · ${location}` : "Being handled by logistics",
+        : location
+          ? `In transit · ${location}`
+          : anyDispatched
+            ? "Being handled by logistics"
+            : next[deliveryIndex].caption,
   };
   next[receiptIndex] = {
     ...next[receiptIndex],
@@ -368,9 +601,28 @@ function fallbackStageMessage(journey: IndentJourney, steps: SummaryStep[], stat
     }
     return PROCUREMENT_MESSAGES[status] ?? "Waiting for allocation";
   }
-  if (currentIndex === 4) return "Waiting for warehouse issue";
-  if (currentIndex === 5) return "Waiting for dispatch";
-  if (currentIndex === 6) return "Waiting for acknowledgement";
+  if (currentIndex === 4) {
+    if (journey?.qc_status && journey.qc_status !== "COMPLETED") {
+      return `Quality inspection in progress${journey.qc_inspection_no ? ` · Ref ${journey.qc_inspection_no}` : ""}`;
+    }
+    if (journey?.qc_status === "COMPLETED" && !journey?.consignment_no) {
+      return "QC completed — awaiting consignment";
+    }
+    return "Waiting for warehouse issue";
+  }
+  if (currentIndex === 5) {
+    if (journey?.consignment_no) {
+      return `Pending in consignment — ready for dispatch · Ref ${journey.consignment_no}`;
+    }
+    if (journey?.qc_complete || journey?.qc_status === "COMPLETED") {
+      return "QC completed — awaiting consignment";
+    }
+    return "Waiting for dispatch";
+  }
+  if (currentIndex === 6) {
+    return "In transit";
+  }
+  if (currentIndex === 7) return "Waiting for acknowledgement";
   if (steps.some((step) => step.state === "returned")) {
     return "Returned for correction — update the indent and resubmit";
   }
@@ -446,9 +698,9 @@ function FlowStepperSkeleton() {
       role="status"
       aria-label="Loading approval progress"
     >
-      {/* Mirrors the real seven-phase grid so nothing shifts when data lands. */}
+      {/* Mirrors the real eight-phase grid so nothing shifts when data lands. */}
       <div
-        className="grid grid-cols-1 items-start gap-2 lg:grid-cols-7 lg:gap-0"
+        className="grid grid-cols-1 items-start gap-2 lg:grid-cols-8 lg:gap-0"
         data-testid="approval-progress-skeleton"
       >
         {PHASES.map((phase) => (
@@ -487,7 +739,7 @@ export function FlowStepper({
   const effectiveStatus = String(status || journey?.status || "").trim().toUpperCase();
   const currentIndex = steps.findIndex((step) => step.state === "current");
   const haltedIndex = steps.findIndex((step) => isHalted(step.state));
-  const isDeliveryOrLater = currentIndex >= 5 || steps.every((step) => step.state === "completed" || step.state === "skipped");
+  const isDeliveryOrLater = currentIndex >= 6 || steps.every((step) => step.state === "completed" || step.state === "skipped");
   const currentStageMessage = (isDeliveryOrLater ? shipmentStageMessage(shipments) : undefined)
     || journey?.current_stage_message?.trim()
     || (journey ? fallbackStageMessage(journey, steps, effectiveStatus) : undefined)
@@ -514,7 +766,7 @@ export function FlowStepper({
       aria-label="Compact indent progress"
     >
       <ol
-        className="grid min-w-0 grid-cols-1 items-start gap-2 lg:grid-cols-7 lg:gap-0"
+        className="grid min-w-0 grid-cols-1 items-start gap-2 lg:grid-cols-8 lg:gap-0"
         data-testid="compact-approval-progress"
       >
         {steps.map((step, index) => (

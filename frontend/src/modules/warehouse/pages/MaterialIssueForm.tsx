@@ -1096,7 +1096,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         // at all, or a status-guard error on a second press that had nothing to do
         // with what was actually wrong. Saving here first means submit always acts
         // on what the user is looking at.
-        if (editing) await save.mutateAsync();
+        if (editing && doc?.status === "DRAFT") await save.mutateAsync();
         return submitIssue(numId);
       }
       if (what === "approve") return approveIssue(numId, reason);

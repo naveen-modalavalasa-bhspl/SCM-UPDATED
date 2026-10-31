@@ -53,8 +53,8 @@ export const INDENT_JOURNEY_TRACKS: readonly JourneyTrackDefinition[] = [
   {
     key: "warehouse",
     label: "Warehouse",
-    caption: "Warehouse approvals, picking and the issue from stock",
-    stageTypes: ["warehouse", "warehouse_approval", "picking", "picking_approval"],
+    caption: "Warehouse approvals, picking, issue from stock and outward QC",
+    stageTypes: ["warehouse", "warehouse_approval", "picking", "picking_approval", "qc", "quality_inspection"],
     phaseTitles: ["warehouse"],
   },
   {
@@ -109,6 +109,8 @@ const HISTORY_STAGE_TYPES: Record<string, string> = {
   MATERIAL_ISSUE_CREATED: "warehouse",
   WAREHOUSE_ISSUED: "warehouse",
   WAREHOUSE_ISSUE_COMPLETED: "warehouse",
+  QUALITY_INSPECTION_CREATED: "warehouse",
+  QUALITY_INSPECTION_COMPLETED: "warehouse",
   DISPATCH_CREATED: "delivery",
   DISPATCHED: "delivery",
   DELIVERED: "delivery",
@@ -127,6 +129,8 @@ const HISTORY_STATUSES: Record<string, string> = {
   RESUBMITTED: "SUBMITTED",
   READY_FOR_ALLOCATION: "AWAITING_ALLOCATION",
   ACKNOWLEDGEMENT_SUBMITTED: "ACKNOWLEDGED",
+  QUALITY_INSPECTION_CREATED: "DRAFT",
+  QUALITY_INSPECTION_COMPLETED: "COMPLETED",
 };
 
 export const RESUBMISSION_STAGE_TITLE = "Resubmitted after correction";
@@ -181,6 +185,8 @@ const OCCURRED_STAGE_STATUSES = new Set([
   // only thing that explains why one authority acted and its peers never did.
   "NOT_REQUIRED",
   "AWAITING_ALLOCATION",
+  "DRAFT",
+  "PENDING_APPROVAL",
 ]);
 
 const UPCOMING_STAGE_STATUSES = new Set(["PENDING", "NOT_REQUIRED"]);
@@ -197,12 +203,66 @@ export function isUpcomingJourneyStage(stage: IndentJourneyStage) {
   return Boolean(stage.is_current) || UPCOMING_STAGE_STATUSES.has(stageStatus(stage));
 }
 
-/** Chronological, with sequence as the tie-break — never trust array order. */
+const HISTORY_EVENT_TIE_BREAK: Record<string, number> = {
+  CREATED: 10,
+  SUBMITTED: 20,
+  APPROVED: 30,
+  READY_FOR_ALLOCATION: 40,
+  ALLOCATION_CREATED: 41,
+  BRAND_CHANGED: 42,
+  STOCK_ALLOCATED: 43,
+  ALLOCATION_COMPLETED: 44,
+  MATERIAL_REQUEST_CREATED: 48,
+  MATERIAL_ISSUE_CREATED: 52,
+  WAREHOUSE_ISSUED: 56,
+  WAREHOUSE_ISSUE_COMPLETED: 57,
+  QUALITY_INSPECTION_CREATED: 58,
+  QUALITY_INSPECTION_COMPLETED: 60,
+  DISPATCH_CREATED: 64,
+  DISPATCHED: 70,
+  DELIVERED: 80,
+  ACKNOWLEDGEMENT_SUBMITTED: 90,
+  PARTIALLY_RECEIVED: 91,
+  FULLY_RECEIVED: 92,
+  COMPLETED: 99,
+};
+
+function eventSortWeight(event: IndentJourneyHistoryEvent): number {
+  const type = String(event.event_type ?? "").trim().toUpperCase();
+  if (HISTORY_EVENT_TIE_BREAK[type] !== undefined) return HISTORY_EVENT_TIE_BREAK[type];
+  if (type.includes("APPROVED")) return 30;
+  if (type.includes("SUBMITTED")) return 20;
+  return 50;
+}
+
+function stageSortWeight(stage: IndentJourneyStage): number {
+  const title = String(stage.title ?? "").trim().toLowerCase();
+  if (title.includes("draft created")) return 10;
+  if (title.includes("submitted")) return 20;
+  if (title.includes("allocation created")) return 41;
+  if (title.includes("stock allocated")) return 43;
+  if (title.includes("material issue draft")) return 51;
+  if (title.includes("material issue created") || title.includes("material issue recorded")) return 52;
+  if (title.includes("issued from warehouse")) return 56;
+  if (title.includes("warehouse issue completed")) return 57;
+  if (title.includes("quality inspection draft")) return 58;
+  if (title.includes("quality inspection completed")) return 60;
+  if (title.includes("dispatch created")) return 64;
+  if (title.includes("dispatched")) return 70;
+  if (title.includes("delivered")) return 80;
+  if (title.includes("acknowledgement")) return 90;
+  return 50;
+}
+
+/** Chronological, with operational weight and sequence as tie-break — never trust bare clock ties. */
 export function sortOccurredStages(stages: IndentJourneyStage[]) {
   return [...stages].sort((left, right) => {
     const leftAt = parseIndentTimestamp(left.timestamp)?.getTime() ?? 0;
     const rightAt = parseIndentTimestamp(right.timestamp)?.getTime() ?? 0;
-    return leftAt - rightAt || (left.sequence ?? 0) - (right.sequence ?? 0);
+    if (leftAt !== rightAt) return leftAt - rightAt;
+    const weightDiff = stageSortWeight(left) - stageSortWeight(right);
+    if (weightDiff !== 0) return weightDiff;
+    return (left.sequence ?? 0) - (right.sequence ?? 0);
   });
 }
 
@@ -242,16 +302,33 @@ export function derivedJourneyStages(journey: IndentJourney): IndentJourneyStage
     if (outcome) seen.add(outcome);
   });
 
-  const ordered = [...(journey.history ?? [])].sort((left, right) => (
-    (parseIndentTimestamp(left.timestamp)?.getTime() ?? 0)
-    - (parseIndentTimestamp(right.timestamp)?.getTime() ?? 0)
-  ));
+  const ordered = [...(journey.history ?? [])].sort((left, right) => {
+    const leftAt = parseIndentTimestamp(left.timestamp)?.getTime() ?? 0;
+    const rightAt = parseIndentTimestamp(right.timestamp)?.getTime() ?? 0;
+    return leftAt - rightAt || eventSortWeight(left) - eventSortWeight(right);
+  });
+
+  const hasAllocation = (journey.history ?? []).some((e) => {
+    const type = String(e.event_type ?? "").trim().toUpperCase();
+    return (
+      type === "STOCK_ALLOCATED"
+      || type === "ALLOCATION_CREATED"
+      || type === "ALLOCATION_COMPLETED"
+      || type.startsWith("ALLOCATION_")
+    );
+  });
 
   const derived: IndentJourneyStage[] = [];
   let returnedEarlier = false;
   ordered.forEach((event: IndentJourneyHistoryEvent, index) => {
+    const eventType = String(event.event_type ?? "").trim().toUpperCase();
     const eventStageType = journeyEventStageType(event.event_type);
-    const status = journeyEventStatus(event.event_type);
+    let status = (event as any).status
+      ? String((event as any).status).trim().toUpperCase()
+      : journeyEventStatus(event.event_type);
+    if (eventType === "READY_FOR_ALLOCATION" && hasAllocation) {
+      status = "COMPLETED";
+    }
     const track = journeyTrackKey(eventStageType);
     // The indent's own submit/approve cycle, as opposed to a downstream document.
     const ownCycle = track === "request" || track === "approvals";
@@ -280,7 +357,7 @@ export function derivedJourneyStages(journey: IndentJourney): IndentJourneyStage
       title: resubmission ? RESUBMISSION_STAGE_TITLE : event.title,
       status,
       is_current: false,
-      approver_name: event.actor_name ?? null,
+      approver_name: event.event_type === "READY_FOR_ALLOCATION" ? null : (event.actor_name ?? null),
       position_name: event.position_name ?? null,
       timestamp: event.timestamp,
       comments: event.comments ?? null,
@@ -386,7 +463,7 @@ function trackSummary(
     const live = upcoming.find((stage) => stage.is_current) ?? upcoming[0];
     if (!live) {
       return occurred.length > 0
-        ? `${occurred.length} ${occurred.length === 1 ? "step" : "steps"} · waiting on the next one`
+        ? `${occurred.length} ${occurred.length === 1 ? "step" : "steps"} · in progress`
         : "Waiting to start";
     }
     const actor = actorOf(live);

@@ -21324,7 +21324,8 @@ async def purchase_return_source_options(db: AsyncSession, params: PageParams, *
         from app.modules.indents.models import Indent, IndentItem as IItem
         ind_stmt = select(Indent).where(Indent.status.in_([
             IndentStatus.APPROVED.value, IndentStatus.ORDERED.value,
-            IndentStatus.CLOSED.value, IndentStatus.PARTIALLY_FULFILLED.value]))
+            IndentStatus.CLOSED.value, IndentStatus.PARTIALLY_ALLOCATED.value,
+            IndentStatus.PARTIALLY_FULFILLED.value]))
         if like:
             ind_stmt = ind_stmt.where(or_(
                 Indent.indent_no.ilike(like),

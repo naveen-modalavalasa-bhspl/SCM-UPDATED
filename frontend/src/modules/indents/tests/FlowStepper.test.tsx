@@ -69,7 +69,7 @@ describe("FlowStepper", () => {
     expect(screen.queryByText("DM Review")).not.toBeInTheDocument();
     expect(screen.queryByText("Final Approval")).not.toBeInTheDocument();
     expect(screen.getByText("Current stage")).toBeInTheDocument();
-    expect(screen.getByText("Stage 3 of 7 · Approvals")).toBeInTheDocument();
+    expect(screen.getByText("Stage 3 of 8 · Approvals")).toBeInTheDocument();
     expect(screen.getByText("Waiting for Area Coordinator review")).toBeInTheDocument();
   });
 
@@ -100,7 +100,7 @@ describe("FlowStepper", () => {
     expect(screen.getByLabelText("Draft, completed")).toHaveClass("bg-brand");
     expect(screen.getByLabelText("Submitted, completed")).toHaveClass("bg-brand");
     expect(screen.getByLabelText("Approvals, current: OE Review")).toHaveClass("bg-brand");
-    expect(screen.getByText("Stage 3 of 7 · Approvals")).toBeInTheDocument();
+    expect(screen.getByText("Stage 3 of 8 · Approvals")).toBeInTheDocument();
     expect(screen.getByText("Waiting for OE review")).toBeInTheDocument();
     expect(screen.queryByText("Status unavailable")).not.toBeInTheDocument();
   });
@@ -124,8 +124,9 @@ describe("FlowStepper", () => {
       "ApprovalsCustom Controller Review",
       "4Allocation",
       "5Warehouse",
-      "6In-Transit",
-      "7Acknowledgement",
+      "6Dispatch",
+      "7In-Transit",
+      "8Acknowledgement",
     ]);
     expect(screen.getByLabelText("Approvals, current: Custom Controller Review")).toBeInTheDocument();
   });
@@ -143,7 +144,7 @@ describe("FlowStepper", () => {
 
     render(<FlowStepper status="PENDING_APPROVAL" journey={response} />);
 
-    expect(screen.getAllByRole("listitem")).toHaveLength(7);
+    expect(screen.getAllByRole("listitem")).toHaveLength(8);
     expect(screen.getByText("Request submitted — waiting for approval")).toBeInTheDocument();
     expect(screen.queryByText("Status unavailable")).not.toBeInTheDocument();
   });
@@ -161,22 +162,44 @@ describe("FlowStepper", () => {
 
     expect(screen.getByLabelText("Draft, current")).toHaveClass("bg-brand");
     expect(screen.getByLabelText("Submitted, pending")).toHaveClass("border-line");
-    expect(screen.getByText("Stage 1 of 7 · Draft")).toBeInTheDocument();
+    expect(screen.getByText("Stage 1 of 8 · Draft")).toBeInTheDocument();
     expect(screen.queryByText("Status unavailable")).not.toBeInTheDocument();
   });
 
   it("marks only genuine downstream evidence complete", () => {
-    render(<FlowStepper status="PARTIALLY_FULFILLED" journey={journey(phases({
+    const j = journey(phases({
       3: phase(3, "Approvals", "APPROVED"),
       4: phase(4, "Allocation", "APPROVED"),
       5: phase(5, "Warehouse", "APPROVED"),
-      6: phase(6, "Delivery", "PENDING", true),
-    }))} />);
+      6: phase(6, "Delivery", "PENDING", true, "In transit"),
+    }));
+    j.consignment_status = "DISPATCHED";
+    render(<FlowStepper status="PARTIALLY_FULFILLED" journey={j} />);
 
     expect(screen.getByLabelText("Allocation, completed")).toHaveClass("bg-brand");
     expect(screen.getByLabelText("Warehouse, completed")).toHaveClass("bg-brand");
+    expect(screen.getByLabelText("Dispatch, completed: Dispatched")).toHaveClass("bg-brand");
     expect(screen.getByLabelText("In-Transit, current")).toHaveClass("bg-brand");
     expect(screen.getByLabelText("Acknowledgement, pending")).toHaveClass("border-line");
+  });
+
+  it("holds dispatch as current and in-transit as pending when QC completes but consignment is not dispatched", () => {
+    const j = journey(phases({
+      3: phase(3, "Approvals", "APPROVED"),
+      4: phase(4, "Allocation", "APPROVED"),
+      5: phase(5, "Warehouse", "APPROVED", false, "QC completed"),
+      6: phase(6, "Delivery", "PENDING", false),
+    }));
+    j.qc_complete = true;
+    j.current_stage_message = "QC completed — awaiting consignment";
+    render(<FlowStepper status="PARTIALLY_FULFILLED" journey={j} />);
+
+    expect(screen.getByLabelText("Warehouse, completed: QC completed")).toHaveClass("bg-brand");
+    expect(screen.getByLabelText("Dispatch, current: Awaiting consignment")).toHaveClass("bg-brand");
+    expect(screen.getByLabelText("In-Transit, pending")).toHaveClass("border-line");
+    expect(screen.getByLabelText("Acknowledgement, pending")).toHaveClass("border-line");
+    expect(screen.getByText("Stage 6 of 8 · Dispatch")).toBeInTheDocument();
+    expect(screen.getByText("QC completed — awaiting consignment")).toBeInTheDocument();
   });
 
   it("shows a return for correction as recoverable, never as a rejection", () => {
@@ -190,7 +213,7 @@ describe("FlowStepper", () => {
     expect(step).toHaveClass("bg-warn");
     expect(step).not.toHaveClass("bg-bad");
     expect(screen.getByLabelText("Allocation, pending")).toHaveClass("border-line");
-    expect(screen.getByText("Stage 3 of 7 · Approvals")).toBeInTheDocument();
+    expect(screen.getByText("Stage 3 of 8 · Approvals")).toBeInTheDocument();
     expect(screen.getByText("Returned for correction — update the indent and resubmit")).toBeInTheDocument();
   });
 
@@ -219,7 +242,7 @@ describe("FlowStepper", () => {
 
     expect(screen.getByLabelText("Allocation, current")).toHaveClass("bg-brand");
     expect(screen.getByLabelText("Warehouse, pending")).toHaveClass("border-line");
-    expect(screen.getByText("Stage 4 of 7 · Allocation")).toBeInTheDocument();
+    expect(screen.getByText("Stage 4 of 8 · Allocation")).toBeInTheDocument();
     expect(screen.getByText(message)).toBeInTheDocument();
   });
 
@@ -230,9 +253,9 @@ describe("FlowStepper", () => {
 
     render(<FlowStepper status="CLOSED" journey={closed} />);
 
-    expect(screen.getByText("Stage 7 of 7 · Acknowledgement")).toBeInTheDocument();
-    // Seven phase captions plus the current-stage message.
-    expect(screen.getAllByText("Completed")).toHaveLength(8);
+    expect(screen.getByText("Stage 8 of 8 · Acknowledgement")).toBeInTheDocument();
+    // Eight phase captions plus the current-stage message.
+    expect(screen.getAllByText("Completed")).toHaveLength(9);
   });
 
   it("counts the live rung of a ladder of any length, with no fixed ranks", () => {
@@ -265,15 +288,15 @@ describe("FlowStepper", () => {
     expect(screen.getByLabelText("Allocation, pending")).toHaveClass("border-line");
   });
 
-  it("uses a compact mobile column and seven equal desktop columns without overflow", () => {
+  it("uses a compact mobile column and eight equal desktop columns without overflow", () => {
     render(<FlowStepper status="PENDING_APPROVAL" journey={journey()} />);
 
     expect(screen.getByLabelText("Compact indent progress")).toHaveClass("overflow-hidden");
     expect(screen.getByTestId("compact-approval-progress")).toHaveClass(
       "grid-cols-1",
-      "lg:grid-cols-7",
+      "lg:grid-cols-8",
     );
-    expect(screen.getAllByRole("listitem")).toHaveLength(7);
+    expect(screen.getAllByRole("listitem")).toHaveLength(8);
   });
 
   it("centers every stage label and detail on the same width contract", () => {
@@ -314,7 +337,7 @@ describe("FlowStepper", () => {
     expect(screen.getByLabelText("Submitted, completed")).toHaveClass("bg-brand");
     expect(screen.getByLabelText("Approvals, current: OE Review")).toHaveClass("bg-brand");
     expect(screen.getByLabelText("Allocation, pending")).toHaveClass("border-line");
-    expect(screen.getAllByRole("listitem")).toHaveLength(7);
+    expect(screen.getAllByRole("listitem")).toHaveLength(8);
     expect(screen.queryByText("Status unavailable")).not.toBeInTheDocument();
   });
 

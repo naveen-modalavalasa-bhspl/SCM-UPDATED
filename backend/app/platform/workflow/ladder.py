@@ -120,7 +120,7 @@ DOC_TYPE_LABEL: dict[str, str] = {
     # The outward leg: transport is arranged and the consignment leaves the warehouse.
     # This is where Logistics signs.
     DocType.DISPATCH.value: "Dispatch",
-    DocType.QC_OUTWARD.value: "Outward QC (before a consignment may be raised)",
+    DocType.QC_OUTWARD.value: "Outward QC",
     DocType.PURCHASE_RETURN.value: "Purchase Return (sending material back to a vendor)",
     DocType.REQUISITION.value: "Purchase Requisition",
     DocType.CONSOLIDATION.value: "Consolidated Purchase Sheet",

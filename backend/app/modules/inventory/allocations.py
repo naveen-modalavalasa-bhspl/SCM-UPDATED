@@ -1336,4 +1336,4 @@ async def apply_to_stock(db: AsyncSession, alloc: Allocation, user,
                 bool(shortfalls))
     if given_total >= requested_total:
         return IndentStatus.ALLOCATED.value, bool(shortfalls)
-    return IndentStatus.PARTIALLY_FULFILLED.value, bool(shortfalls)
+    return IndentStatus.PARTIALLY_ALLOCATED.value, bool(shortfalls)

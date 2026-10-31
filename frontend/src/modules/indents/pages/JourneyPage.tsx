@@ -95,6 +95,8 @@ function statusLabel(stage: IndentJourneyStage, isAllocationPending = false) {
     return pendingStageLabel(stage);
   }
   const labels: Record<string, string> = {
+    DRAFT: "Draft",
+    PENDING_APPROVAL: "Awaiting approval",
     SUBMITTED: "Submitted",
     APPROVED: "Approved",
     COMPLETED: "Completed",
@@ -145,7 +147,7 @@ function StageIcon({ stage, isAllocationPending = false }: { stage: IndentJourne
   if (status === "CANCELLED") return <span className={cls}><Ban className="h-4 w-4" /></span>;
   if (status === "NOT_REQUIRED") return <span className={cls}><Minus className="h-4 w-4" /></span>;
   if (["APPROVED", "SUBMITTED", "COMPLETED", "ACKNOWLEDGED"].includes(status)) return <span className={cls}><Check className="h-4 w-4" /></span>;
-  if (stage.is_current) return <span className={cls}><Clock className="h-4 w-4" /></span>;
+  if (status === "PENDING_APPROVAL" || stage.is_current) return <span className={cls}><Clock className="h-4 w-4" /></span>;
   return <span className={cls}><Circle className="h-4 w-4" /></span>;
 }
 
@@ -364,11 +366,22 @@ export function IndentJourneyPage() {
   // - An indent waiting for allocation has no approved allocation yet.
   // - A consignment still inside the gate has no `gate_out_at` to read yet.
   // These are normal operational states, not missing or unreadable records.
+  const hasAllocationOccurred = (data.history ?? []).some((e) => {
+    const type = String(e.event_type ?? "").trim().toUpperCase();
+    return (
+      type === "STOCK_ALLOCATED"
+      || type === "ALLOCATION_CREATED"
+      || type === "ALLOCATION_COMPLETED"
+      || type.startsWith("ALLOCATION_")
+    );
+  });
   const isAllocationPending =
-    data.status === "AWAITING_ALLOCATION"
-    || data.status === "APPROVED"
-    || !data.phases.some(
-      (phase) => phase.title.toLowerCase().includes("allocation") && COMPLETED_PHASE_STATUSES.has(stageStatus(phase)),
+    !hasAllocationOccurred && (
+      data.status === "AWAITING_ALLOCATION"
+      || data.status === "APPROVED"
+      || !data.phases.some(
+        (phase) => phase.title.toLowerCase().includes("allocation") && COMPLETED_PHASE_STATUSES.has(stageStatus(phase)),
+      )
     );
   const visibleMissingSources = data.missing_sources?.filter((source) => {
     if (source === "out_dispatches.gate_out_at") return false;
@@ -429,7 +442,9 @@ export function IndentJourneyPage() {
             </div>
           </dl>
         </div>
-        <IndentStatusBadge status={data.status} journey={data} />
+        <div className="flex flex-col items-start gap-1.5 lg:items-end">
+          <IndentStatusBadge status={data.status} journey={data} />
+        </div>
       </header>
 
       {error && <p className="rounded-lg border border-bad/30 bg-bad-bg px-4 py-3 text-sm text-bad">{error.message}</p>}

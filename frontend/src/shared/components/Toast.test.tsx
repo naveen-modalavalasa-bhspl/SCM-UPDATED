@@ -59,11 +59,12 @@ describe("the toast strip", () => {
     });
     expect(shown()).toHaveLength(2);
 
-    act(() => { vi.advanceTimersByTime(10_000); });
-
-    // A failure that vanishes reads as a success.
+    act(() => { vi.advanceTimersByTime(4_000); });
     expect(screen.queryByText("Indent submitted for approval.")).toBeNull();
     expect(screen.getByText("Indent could not be submitted.")).toBeInTheDocument();
+
+    act(() => { vi.advanceTimersByTime(3_000); });
+    expect(screen.queryByText("Indent could not be submitted.")).toBeNull();
   });
 
   it("words a caught failure from the one central translation", () => {
