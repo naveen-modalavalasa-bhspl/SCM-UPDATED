@@ -85,6 +85,15 @@ ON_STOCK_IN: list[Callable[..., Awaitable[None]]] = []
 #: picker offered a code that no longer exists on the shelf.
 ON_ADJUSTMENT_OUT: list[Callable[..., Awaitable[None]]] = []
 
+#: Called for every write-off line WHEN THE AUDIT IS RAISED (2026-10-31), before a
+#: number is minted. Signature: `(db, warehouse_id, line, qty)`, where `line` is the
+#: request's line (item, batch, bin, `serial_numbers`) and `qty` the shortfall the
+#: server derived. Registered by the warehouse module, which owns the units and packs:
+#: a serial / IMEI lot must name exactly `qty` units, a coded lot must name packs and
+#: unit codes adding up to exactly `qty`. A hook that raises refuses the audit —
+#: checking only at approval would let a wrong pick sit in somebody's queue for days.
+ON_ADJUSTMENT_VALIDATE: list[Callable[..., Awaitable[None]]] = []
+
 #: The ledger `ref_type`s that mean "goods arrived at this warehouse".
 STOCK_IN_REF_TYPES = frozenset({"GRN", "RECEIPT", "DISPATCH", "TRANSFER", "STO"})
 
@@ -106,6 +115,12 @@ async def fire_stock_in(db, movement, user) -> None:
                 "stock-in hook %s failed for ledger ref %s %s",
                 getattr(hook, "__name__", hook), getattr(movement, "ref_type", None),
                 getattr(movement, "ref_no", None))
+
+
+async def fire_adjustment_validate(db, warehouse_id: int, line, qty) -> None:
+    """Run every write-off validator; the first refusal refuses the whole audit."""
+    for hook in ON_ADJUSTMENT_VALIDATE:
+        await hook(db, warehouse_id, line, qty)
 
 
 async def fire_adjustment_out(db, adjustment, adj_item, user) -> None:

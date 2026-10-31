@@ -400,6 +400,21 @@ const DEFINITIONS: AlertDef[] = [
     "{number} now asks for the amounts you entered. Approve it to send them to procurement.",
   ),
   alert("stock.audit.saved", "success", "Stock audit saved", "{number} is {status}."),
+  // SCM_0119 (2026-10-31): a stock audit's submit always says how it ended.
+  alert(
+    "stock.audit.submitted", "success", "Stock audit submitted",
+    "{number} is saved and waiting for approval. {qty} will be written off once it is approved.",
+  ),
+  alert(
+    "stock.audit.recorded", "success", "Stock audit recorded",
+    "{number} is saved. Every line matched the system, so nothing was written off.",
+  ),
+  alert("stock.audit.incomplete", "warning", "Stock audit not ready", "{reason}"),
+  alert(
+    "stock.audit.failed", "error", "Stock audit not saved",
+    "{reason} Nothing was saved — correct it and submit again.",
+  ),
+  alert("adjustment.action_failed", "error", "Not done", "{number} was not {action}: {reason}"),
   alert("adjustment.approved", "success", "Adjustment approved", "{item} now reads {qty}."),
   alert(
     "adjustment.rejected", "success", "Adjustment rejected",

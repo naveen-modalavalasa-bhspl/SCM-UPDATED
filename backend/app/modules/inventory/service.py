@@ -2372,36 +2372,23 @@ async def release_for_indent(db: AsyncSession, indent_id: int) -> Decimal:
 # An adjustment is the one way stock changes without a document behind it, so the
 # approval rules here are the only control on it.
 #
-# Auto-approve used to be "qty <= 100 AND value <= 5000". `unit_cost` is supplied by
-# the caller and is optional, so posting 0 made value 0, the value test always passed,
-# and an OUT of 100 units posted instantly with no approver. Repeated, that writes off
-# unlimited stock leaving nothing but the adjustment rows behind.
+# A stock audit only ever TAKES stock off (2026-10-31). Stock that is on the shelf but
+# not in the system comes in on a goods receipt, with a document behind every unit;
+# an audit that could add stock was a way to mint inventory nobody bought. So every
+# line is an OUT, a count above the system figure is refused, and nothing is written
+# off unattended: an audit with a shortfall always waits for its approver (or its
+# configured STOCK_ADJUSTMENT chain). The inward auto-approve that lived here is gone.
 #
-# Two changes close it: an outward adjustment is never auto-approved (destroying stock
-# always needs a second pair of eyes), and the value test falls back to the item's cost
-# when the caller says zero, so a zero cannot buy its way under the threshold.
-AUTO_APPROVE_MAX_QTY = Decimal("100")
-AUTO_APPROVE_MAX_VALUE = Decimal("5000")
-
-
-async def _adjustment_line_value(db: AsyncSession, item: Item, qty: Decimal,
-                                 unit_cost) -> Decimal:
-    """Value a line for the auto-approve test, never trusting a zero cost.
-
-    Falls back to the item's stored purchase price, which is what move_stock() keeps
-    updated from real receipts. If nothing knows the cost the line is treated as
-    un-valued, and an un-valued line cannot clear a value threshold.
-    """
-    cost = _d(unit_cost or 0)
-    if cost <= 0:
-        cost = _d(item.purchase_price or 0)
-    if cost <= 0:
-        return AUTO_APPROVE_MAX_VALUE + 1   # unknown value never auto-approves
-    return qty * cost
+# EXCESS and OPENING_BALANCE stay in AdjustmentReason so audits raised before this
+# still read; they are simply not offered, and not accepted, on a new one.
+AUDIT_REASONS = (
+    AdjustmentReason.CYCLE_COUNT, AdjustmentReason.DAMAGE, AdjustmentReason.EXPIRY,
+    AdjustmentReason.SHORTAGE, AdjustmentReason.QUALITY_REJECTION, AdjustmentReason.OTHER,
+)
 
 
 async def _free_reserved_for_write_off(db: AsyncSession, adjustment, adj_item,
-                                       user) -> None:
+                                       user, combo: dict | None = None) -> None:
     """Make a write-off line postable when the stock it names is fully reserved.
 
     An OUT adjustment names its (bin, batch); the damaged quantity may sit entire
@@ -2426,10 +2413,37 @@ async def _free_reserved_for_write_off(db: AsyncSession, adjustment, adj_item,
         .with_for_update()
         .order_by(Stock.id)
     )
+    # Only the combination the line writes off (2026-10-31): another brand's
+    # reservations on the same shelf are not this damage's to move.
+    if combo and combo.get("brand_id") is not None:
+        stmt = stmt.where(Stock.brand_id == combo["brand_id"],
+                          Stock.variant_id == combo["variant_id"],
+                          Stock.model_id == combo["model_id"])
     for stock in (await db.execute(stmt)).scalars().all():
         shortfall = _d(adj_item.quantity) - (stock.available_qty or 0)
         if shortfall > 0:
             await allocation.float_out_of_damage(db, stock, shortfall, user)
+
+
+async def _write_off_combo(db: AsyncSession, adjustment, adj_item) -> dict:
+    """Which brand / variant / model a write-off line draws from (2026-10-31).
+
+    A line that counted one combination writes off THAT combination's balance and
+    no other: Brand A's shortfall never comes out of Brand B's stock. A line that
+    named none (`combination_any`) draws from whichever stands there. A line written
+    before audits were per brand stored no brand at all (0/0/0, not "any"); it draws
+    from the unbranded balance when that covers it, else from any — its old meaning.
+    """
+    if adj_item.combination_any:
+        return {"brand_id": None, "variant_id": None, "model_id": None}
+    combo = (int(adj_item.brand_id or 0), int(adj_item.variant_id or 0),
+             int(adj_item.model_id or 0))
+    if combo == (0, 0, 0):
+        here = await _system_qty(db, adjustment.warehouse_id, adj_item.item_id,
+                                 adj_item.bin_id or 0, adj_item.batch_id or 0, combo)
+        if here < _d(adj_item.quantity):
+            return {"brand_id": None, "variant_id": None, "model_id": None}
+    return {"brand_id": combo[0], "variant_id": combo[1], "model_id": combo[2]}
 
 
 async def _post_adjustment_lines(db: AsyncSession, adjustment, adj_items, user) -> None:
@@ -2455,13 +2469,12 @@ async def _post_adjustment_lines(db: AsyncSession, adjustment, adj_items, user) 
             warehouse_id=adjustment.warehouse_id, project_id=adj_item.project_id,
         )
         if adj_item.direction == StockDirection.OUT.value:
-            await _free_reserved_for_write_off(db, adjustment, adj_item, user)
+            combo = await _write_off_combo(db, adjustment, adj_item)
+            await _free_reserved_for_write_off(db, adjustment, adj_item, user, combo)
             await move_stock_out(
                 db, item_id=adj_item.item_id, qty=adj_item.quantity,
                 bin_id=adj_item.bin_id or None, batch_id=adj_item.batch_id or None,
-                brand_id=adj_item.brand_id or None, variant_id=adj_item.variant_id,
-                model_id=adj_item.model_id,
-                **common,
+                **combo, **common,
             )
             await hooks.fire_adjustment_out(db, adjustment, adj_item, user)
         else:
@@ -2486,15 +2499,28 @@ async def _assert_warehouse_visible(db: AsyncSession, warehouse_id: int, user) -
 
 
 async def _system_qty(db: AsyncSession, warehouse_id: int, item_id: int,
-                      bin_id: int = 0, batch_id: int = 0) -> Decimal:
-    """What the system holds, read at save time - never taken from the client."""
+                      bin_id: int = 0, batch_id: int = 0,
+                      combo: tuple[int, int, int] | None = None) -> Decimal:
+    """What the system holds, read at save time - never taken from the client.
+    `combo` narrows to one brand / variant / model exactly; None sums them all."""
     stmt = select(func.coalesce(func.sum(Stock.total_qty), 0)).where(
         Stock.warehouse_id == warehouse_id, Stock.item_id == item_id)
     if bin_id:
         stmt = stmt.where(Stock.bin_id == bin_id)
     if batch_id:
         stmt = stmt.where(Stock.batch_id == batch_id)
+    if combo is not None:
+        stmt = stmt.where(Stock.brand_id == combo[0], Stock.variant_id == combo[1],
+                          Stock.model_id == combo[2])
     return _d((await db.execute(stmt)).scalar_one())
+
+
+def _line_combo(line) -> tuple[int, int, int] | None:
+    """The exact brand / variant / model a request line counts, or None for "every
+    combination at the lot together" (a line that names none — the old shape)."""
+    if line.brand_id is None and line.variant_id is None and line.model_id is None:
+        return None
+    return (int(line.brand_id or 0), int(line.variant_id or 0), int(line.model_id or 0))
 
 
 async def adjustment_count_sheet(db: AsyncSession, warehouse_id: int, user) -> list[dict]:
@@ -2552,38 +2578,84 @@ async def create_stock_adjustment(db: AsyncSession, data, user) -> StockAdjustme
     warehouse = await _assert_warehouse_visible(db, data.warehouse_id, user)
     if not data.items:
         raise ValidationError("A stock audit needs at least one line")
-    # Rule 3: the reason is an enum, not free text. It was unchecked, so a typo - or
-    # anything at all - was stored and reported on as if it were a real category.
-    valid_reasons = [r.value for r in AdjustmentReason]
+    # Rule 3: the reason is an enum, not free text. A stock audit only ever TAKES stock
+    # off (2026-10-31): EXCESS and OPENING_BALANCE stay in the enum so audits raised
+    # before this still read, but no new audit may name them.
+    valid_reasons = [r.value for r in AUDIT_REASONS]
     if data.reason not in valid_reasons:
         raise ValidationError(
-            f"Unknown adjustment reason {data.reason!r}. Use one of: "
-            f"{', '.join(valid_reasons)}")
+            f"{data.reason!r} is not a stock audit reason. A stock audit only writes "
+            f"stock off; use one of: {', '.join(valid_reasons)}. Stock that arrives "
+            "comes in on a goods receipt.")
 
     # Validated before anything is written. An adjustment naming an item that is not
     # in the master used to be accepted, snapshot its code as NULL, and then fail on
     # the FK the moment it posted - after the document already had a number.
     items_by_id: dict[int, Item] = {}
-    seen: set[tuple[int, int, int]] = set()
+    seen: set[tuple] = set()
     for line in data.items:
         if line.physical_qty is None:
-            if line.direction not in (StockDirection.IN.value, StockDirection.OUT.value):
+            if line.direction != StockDirection.OUT.value:
                 raise ValidationError(
-                    "Each line needs a physical count, or a direction (IN/OUT) and a "
-                    "quantity")
+                    "A stock audit only writes stock off. Each line needs a physical "
+                    "count, or a write-off quantity (direction OUT).")
             if line.quantity is None or _d(line.quantity) <= 0:
                 raise ValidationError("Adjustment quantity must be positive")
-        else:
-            key = (line.item_id, line.bin_id or 0, line.batch_id or 0)
-            if key in seen:
-                raise ValidationError(
-                    "The same item is counted twice on this audit. Count it once.")
-            seen.add(key)
+        # Per brand / variant / model (2026-10-31): two brands on one shelf are two
+        # balances and two lines; the same one twice is the same stock counted twice.
+        key = (line.item_id, line.bin_id or 0, line.batch_id or 0, _line_combo(line))
+        if key in seen:
+            raise ValidationError(
+                "The same item, batch, location and brand is on this audit twice. "
+                "Count it once.")
+        seen.add(key)
         if line.item_id not in items_by_id:
             item = await db.get(Item, line.item_id)
             if item is None:
                 raise NotFoundError(f"Item {line.item_id} not found in the item master")
             items_by_id[line.item_id] = item
+
+    # What each line takes off, worked out against TODAY's shelf before a number is
+    # minted. A count above the system figure is refused outright: an audit never adds
+    # stock (2026-10-31), whatever the reason says.
+    plans: list[tuple] = []
+    # Codes are not tagged by brand: one batch and location holds ONE pool of units and
+    # packs whichever brand rows stand on it. Two lines of that lot (two brands) may not
+    # write the same code off twice.
+    codes_by_lot: dict[tuple, set[str]] = {}
+    for item_data in data.items:
+        lot = (item_data.item_id, item_data.batch_id or 0, item_data.bin_id or 0)
+        mine = {str(c).strip() for c in (item_data.serial_numbers or []) if str(c).strip()}
+        twice = codes_by_lot.setdefault(lot, set()) & mine
+        if twice:
+            raise ValidationError(
+                f"{', '.join(sorted(twice)[:3])} is picked on two lines of this audit. "
+                "A code is written off once.")
+        codes_by_lot[lot] |= mine
+    for item_data in data.items:
+        item = items_by_id[item_data.item_id]
+        combo = _line_combo(item_data)
+        system_qty = await _system_qty(
+            db, data.warehouse_id, item_data.item_id,
+            item_data.bin_id or 0, item_data.batch_id or 0, combo)
+        if item_data.physical_qty is not None:
+            physical_qty = _d(item_data.physical_qty)
+            if physical_qty > system_qty:
+                raise ValidationError(
+                    f"{item.code} — counted {physical_qty:g}, but the system holds "
+                    f"{system_qty:g} here. A stock audit only records a shortfall; stock "
+                    "that is on the shelf but not in the system comes in on a goods "
+                    "receipt.")
+            qty = system_qty - physical_qty
+        else:
+            physical_qty = None
+            qty = _d(item_data.quantity)
+            if qty > system_qty:
+                raise ValidationError(
+                    f"{item.code} — writing off {qty:g}, but only {system_qty:g} is here.")
+        if qty > 0:
+            await hooks.fire_adjustment_validate(db, data.warehouse_id, item_data, qty)
+        plans.append((item_data, item, system_qty, physical_qty, qty))
 
     adj_no = await next_number(db, "adj")
     adjustment = StockAdjustment(
@@ -2599,31 +2671,17 @@ async def create_stock_adjustment(db: AsyncSession, data, user) -> StockAdjustme
     db.add(adjustment)
     await db.flush()
 
-    total_qty, total_val = Decimal("0"), Decimal("0")
-    has_outward = False
+    total_qty = Decimal("0")
     # Collected as we go: adjustment.items is a lazy relationship, and touching it
     # before the row is reloaded raises MissingGreenlet under async.
     adj_items: list[StockAdjustmentItem] = []
-    for item_data in data.items:
-        item = items_by_id[item_data.item_id]
+    for item_data, item, system_qty, physical_qty, qty in plans:
         cost = _d(item_data.unit_cost or 0)
-        system_qty = physical_qty = None
-        if item_data.physical_qty is not None:
-            system_qty = await _system_qty(
-                db, data.warehouse_id, item_data.item_id,
-                item_data.bin_id or 0, item_data.batch_id or 0)
-            physical_qty = _d(item_data.physical_qty)
-            variance = physical_qty - system_qty
-            direction = (StockDirection.OUT.value if variance < 0
-                         else StockDirection.IN.value)
-            qty = abs(variance)
-        else:
-            direction = item_data.direction
-            qty = _d(item_data.quantity)
-        if qty > 0:
-            total_qty += qty
-            total_val += await _adjustment_line_value(db, item, qty, cost)
-            has_outward = has_outward or direction == StockDirection.OUT.value
+        combo = _line_combo(item_data)
+        # Every line is a write-off (2026-10-31); a matched count is evidence, not a
+        # movement, and posts nothing.
+        direction = StockDirection.OUT.value
+        total_qty += qty
 
         adj_items.append(StockAdjustmentItem(
             adjustment_id=adjustment.id,
@@ -2641,7 +2699,14 @@ async def create_stock_adjustment(db: AsyncSession, data, user) -> StockAdjustme
             unit_cost=cost,
             serial_numbers=item_data.serial_numbers or None,
             remarks=item_data.remarks,
+            # The exact combination this line counted; `combination_any` marks a line
+            # that named none, so posting draws from whichever brand stands there.
+            brand_id=combo[0] if combo else 0,
+            variant_id=combo[1] if combo else 0,
+            model_id=combo[2] if combo else 0,
+            combination_any=combo is None,
         ))
+    await combinations.fill_names(db, adj_items)
     db.add_all(adj_items)
     await db.flush()
 
@@ -2669,16 +2734,9 @@ async def create_stock_adjustment(db: AsyncSession, data, user) -> StockAdjustme
         else:
             adjustment.current_approver_name = await engine.current_approver_label(
                 db, DocType.STOCK_ADJUSTMENT.value, adjustment.id)
-    # Outward stock is never written off unattended, however small: that was the hole
-    # a zero unit_cost walked through. Inward stock under both thresholds still posts
-    # immediately, so the everyday "found one more box" case is unchanged.
-    elif (not has_outward
-          and total_qty <= AUTO_APPROVE_MAX_QTY
-          and total_val <= AUTO_APPROVE_MAX_VALUE):
-        _mark_adjustment_approved(adjustment, user)
-        await db.flush()
-        await _post_adjustment_lines(db, adjustment, adj_items, user)
-        outcome = "and auto-approved"
+    # Otherwise it waits for a holder of `stock.adjust.approve`. Stock is never written
+    # off unattended, however small; the inward auto-approve that used to sit here went
+    # with inward audits themselves (2026-10-31).
 
     await write_audit(
         db, entity="inv_adjustments", entity_id=adjustment.id,
@@ -2730,6 +2788,16 @@ async def act_on_adjustment(db: AsyncSession, adjustment_id: int, action: str, u
         raise NotFoundError(f"Stock adjustment {adjustment_id} not found")
     if adjustment.status != AdjustmentStatus.PENDING_APPROVAL.value:
         raise ValidationError(f"Adjustment is in status {adjustment.status}, cannot change")
+    # An audit raised before inward audits were retired (2026-10-31) may still carry a
+    # line that ADDS stock. It can be rejected, never approved: approving it would mint
+    # inventory with no receipt behind it.
+    if action == "APPROVE" and any(
+            item.direction == StockDirection.IN.value and _d(item.quantity) > 0
+            for item in adjustment.items):
+        raise ValidationError(
+            f"{adjustment.adjustment_no} adds stock, which a stock audit can no longer "
+            "do. Reject it — stock on the shelf but not in the system comes in on a "
+            "goods receipt.")
 
     before = {"status": adjustment.status}
     actor_id = getattr(user, "id", None)

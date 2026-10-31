@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Check, X, RefreshCw, Download } from "lucide-react";
 import {
@@ -7,12 +7,12 @@ import {
   ResponsiveList, StatusPill, type Column,
 } from "@/shared/components";
 import {
-  listStockAdjustments, createStockAdjustment, approveStockAdjustment, rejectStockAdjustment,
+  listStockAdjustments, approveStockAdjustment, rejectStockAdjustment,
   getStockAdjustment, getWarehouses,
 } from "../api";
 import type { StockAdjustment, StockAdjustmentLine } from "../types";
-import { StockAuditForm, type AuditLinePayload } from "./StockAuditForm";
 import { alerts } from "@/modules/alerts";
+import { claimError, isAnnouncedGlobally } from "@/shared/api/errors";
 import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
 import { ErrorNote } from "./PageStates";
 import { TONE_APPROVE, TONE_REJECT, TONE_MINT, TONE_BLUE } from "@/shared/components/tones";
@@ -49,6 +49,7 @@ function lineDifference(line: StockAdjustmentLine): number {
 }
 
 export function StockAdjustmentsView() {
+  const nav = useNavigate();
   const qc = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const reviewId = Number(searchParams.get("review")) || null;
@@ -133,35 +134,25 @@ export function StockAdjustmentsView() {
       refresh();
       void qc.invalidateQueries({ queryKey: ["stock-adjustment", reviewId] });
     },
-    onError: fail,
+    // SCM_0119: an approve / reject that did not go through says so in a dialog that
+    // stays up — the inline note alone sat at the top of a page the sheet covers.
+    onError: (e: any, { approve }) => {
+      fail(e);
+      if (isAnnouncedGlobally(e)) return;
+      claimError(e);
+      void alerts.error("adjustment.action_failed", {
+        number: selected?.adjustment_no ?? "The audit",
+        action: approve ? "approved" : "rejected",
+        // `message` is the client's one translation of any failure (shared/api/errors).
+        reason: e?.message || "the server refused it",
+      });
+    },
   });
   const askThenDecide = async (approve: boolean) => {
     if (!selected) return;
     if (approve && !(await alerts.confirm("adjustment.approve", { item: selected.adjustment_no }))) return;
     decide.mutate({ id: selected.id, approve });
   };
-
-  // ---- the new-audit form modal state & mutation ----
-  const [open, setOpen] = useState(false);
-
-  const create = useMutation({
-    mutationFn: (payload: {
-      warehouse_id: number;
-      reason: string;
-      remarks: string | null;
-      items: AuditLinePayload[];
-    }) => createStockAdjustment(payload),
-    onSuccess: (saved: StockAdjustment) => {
-      void alerts.success("stock.audit.saved", {
-        number: saved.adjustment_no,
-        status: saved.status === "APPROVED" ? "approved and posted" : "waiting for approval",
-      });
-      setOpen(false);
-      setError("");
-      refresh();
-    },
-    onError: fail,
-  });
 
   const columns: Column<StockAdjustment>[] = [
     { key: "adjustment_no", header: "Audit No", render: (r) => <strong>{r.adjustment_no}</strong> },
@@ -213,7 +204,7 @@ export function StockAdjustmentsView() {
             </Button>
             <Button variant="subtle" onClick={refresh}><RefreshCw size={14} /> Refresh</Button>
             <Can do="stock.adjust">
-              <Button className={TONE_MINT} onClick={() => setOpen(true)}><Plus size={14} /> New Stock Audit</Button>
+              <Button className={TONE_MINT} onClick={() => nav("/inventory/adjustments/new")}><Plus size={14} /> New Stock Audit</Button>
             </Can>
           </>
         }
@@ -289,15 +280,6 @@ export function StockAdjustmentsView() {
           )}
         />
       </Card>
-
-      <StockAuditForm
-        isOpen={open}
-        onClose={() => setOpen(false)}
-        onSubmit={(payload) => {
-          create.mutate(payload);
-        }}
-        isSaving={create.isPending}
-      />
 
       <DetailSheet
         open={reviewId != null}

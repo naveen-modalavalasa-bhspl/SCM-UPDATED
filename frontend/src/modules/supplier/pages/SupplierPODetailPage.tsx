@@ -136,8 +136,12 @@ export function SupplierPODetailPage() {
    *  remainder rather than from the whole order. */
   const startNew = () => {
     setEditing(null);
+    const poTotal = po?.total_amount != null && !isNaN(Number(po.total_amount))
+      ? Math.max(0, Number(po.total_amount))
+      : null;
     setHeader({
-      dn_date: today(), invoice_no: "", invoice_date: null, invoice_amount: null,
+      dn_date: today(), invoice_no: "", invoice_date: null,
+      invoice_amount: poTotal,
       eway_bill_no: "", vehicle_no: "", transporter_name: "", lr_no: "",
       expected_date: null, remarks: "",
     });
@@ -163,10 +167,13 @@ export function SupplierPODetailPage() {
    *  could make things worse rather than better. */
   const startEdit = (note: DespatchNote) => {
     setEditing(note);
+    const poTotal = po?.total_amount != null && !isNaN(Number(po.total_amount))
+      ? Math.max(0, Number(po.total_amount))
+      : null;
     setHeader({
       dn_date: note.dn_date ?? today(),
       invoice_no: note.invoice_no ?? "", invoice_date: note.invoice_date ?? null,
-      invoice_amount: note.invoice_amount ?? null,
+      invoice_amount: note.invoice_amount != null ? Number(note.invoice_amount) : poTotal,
       eway_bill_no: note.eway_bill_no ?? "", vehicle_no: note.vehicle_no ?? "",
       transporter_name: note.transporter_name ?? "", lr_no: note.lr_no ?? "",
       expected_date: note.expected_date ?? null, remarks: note.remarks ?? "",
@@ -213,15 +220,28 @@ export function SupplierPODetailPage() {
     void qc.invalidateQueries({ queryKey: ["supplier-pos"] });
   };
 
+  const isNegativeInvoiceAmount = header.invoice_amount !== null && header.invoice_amount !== undefined && Number(header.invoice_amount) < 0;
+
   const save = useMutation({
-    mutationFn: () => (editing
-      ? supplierApi.updateDespatch(poId, editing.id, body())
-      : supplierApi.createDespatch(poId, body())),
-    onSuccess: (note) => { setEditing(note); refresh(); },
+    mutationFn: () => {
+      if (isNegativeInvoiceAmount) {
+        throw new Error("Invoice amount cannot be negative");
+      }
+      return editing
+        ? supplierApi.updateDespatch(poId, editing.id, body())
+        : supplierApi.createDespatch(poId, body());
+    },
+    onSuccess: (note) => { setEditing(note); refresh(); toast.success("Draft saved"); },
+    onError: (err: any) => {
+      toast.error(err?.response?.data?.detail ?? err?.message ?? "Could not save draft");
+    },
   });
 
   const submit = useMutation({
     mutationFn: async () => {
+      if (isNegativeInvoiceAmount) {
+        throw new Error("Invoice amount cannot be negative");
+      }
       // Saved first, always: submitting what is on screen rather than what was last
       // written is the difference between a note the warehouse can trust and one that
       // silently omits the batch somebody just typed.
@@ -230,7 +250,10 @@ export function SupplierPODetailPage() {
         : await supplierApi.createDespatch(poId, body());
       return supplierApi.submitDespatch(note.id);
     },
-    onSuccess: () => { setComposing(false); setEditing(null); refresh(); },
+    onSuccess: () => { setComposing(false); setEditing(null); refresh(); toast.success("Dispatch submitted"); },
+    onError: (err: any) => {
+      toast.error(err?.response?.data?.detail ?? err?.message ?? "Could not submit dispatch");
+    },
   });
 
   const cancel = useMutation({
@@ -371,6 +394,7 @@ export function SupplierPODetailPage() {
   const ewayMalformed = ewayTyped !== "" && !/^\d{12}$/.test(ewayTyped);
   const missingPapers = [
     !header.invoice_no?.trim() ? "invoice number" : null,
+    isNegativeInvoiceAmount ? "a valid non-negative invoice amount" : null,
     !hasTransportRef ? "an e-way bill, vehicle, LR or transporter" : null,
     ewayMalformed ? "a valid 12-digit e-way bill number (or none at all)" : null,
     // Same rule as vendor_submit_despatch_note: both papers on file for the order.
@@ -715,14 +739,30 @@ export function SupplierPODetailPage() {
                 onChange={(e) => setHeader((h) => ({ ...h, invoice_date: e.target.value || null }))}
               />
             </Field>
-            <Field label="Invoice amount">
+            <Field
+              label="Invoice amount"
+              error={isNegativeInvoiceAmount ? "Invoice amount cannot be negative" : null}
+            >
               <Input
                 type="number"
                 min={0}
+                step="any"
                 value={header.invoice_amount ?? ""}
-                onChange={(e) => setHeader((h) => ({
-                  ...h, invoice_amount: e.target.value === "" ? null : Number(e.target.value),
-                }))}
+                isInvalid={isNegativeInvoiceAmount}
+                onKeyDown={(e) => {
+                  if (e.key === "-" || e.key === "e" || e.key === "E") {
+                    e.preventDefault();
+                  }
+                }}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val === "") {
+                    setHeader((h) => ({ ...h, invoice_amount: null }));
+                    return;
+                  }
+                  const numVal = Number(val);
+                  setHeader((h) => ({ ...h, invoice_amount: isNaN(numVal) ? null : numVal }));
+                }}
               />
             </Field>
             <Field
@@ -975,6 +1015,12 @@ export function SupplierPODetailPage() {
             </table>
           </div>
 
+          {isNegativeInvoiceAmount && (
+            <p className="rounded-lg bg-danger/10 px-3 py-2 text-xs font-semibold text-danger">
+              Invoice amount cannot be negative.
+            </p>
+          )}
+
           {missingReasons.length > 0 && (
             <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900">
               Say why the packing changed for {missingReasons.join(", ")} — the buyer reads
@@ -1001,13 +1047,29 @@ export function SupplierPODetailPage() {
             <Button variant="ghost" disabled={busy} onClick={() => setComposing(false)}>
               Close
             </Button>
-            <Button variant="subtle" disabled={busy} onClick={() => save.mutate()}>
+            <Button
+              variant="subtle"
+              disabled={busy}
+              onClick={() => {
+                if (isNegativeInvoiceAmount) {
+                  toast.error("Invoice amount cannot be negative");
+                  return;
+                }
+                save.mutate();
+              }}
+            >
               {save.isPending ? "Saving…" : "Save draft"}
             </Button>
             <Button
-              disabled={busy || missingPapers.length > 0 || overSent.length > 0
+              disabled={busy || isNegativeInvoiceAmount || missingPapers.length > 0 || overSent.length > 0
                         || missingReasons.length > 0}
-              onClick={() => submit.mutate()}
+              onClick={() => {
+                if (isNegativeInvoiceAmount) {
+                  toast.error("Invoice amount cannot be negative");
+                  return;
+                }
+                submit.mutate();
+              }}
             >
               <Send className="h-4 w-4" /> {submit.isPending ? "Submitting…" : "Submit dispatch"}
             </Button>

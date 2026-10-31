@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core import throttle
-from app.core.dependencies import get_current_vendor, require_permission, require_permission_or
+from app.core.dependencies import get_current_user, get_current_vendor, require_permission, require_permission_or
 from app.core.pagination import Page, PageParams
 # The acknowledgement rows are an indents-module shape: this endpoint only supplies the
 # warehouse evidence behind them (rule 5 forbids the join happening the other way).
@@ -39,6 +39,8 @@ from app.modules.warehouse import trips
 from app.modules.warehouse import box_codes
 from app.modules.warehouse import issue_labels as doc_labels
 from app.modules.warehouse import packing as wh_packing
+from app.modules.warehouse import audit_writeoff
+from app.platform.rbac.permissions import STOCK_ADJUST
 from app.platform.rbac.permissions import (
     STOCK_EDIT_APPROVE, STOCK_EDIT_CREATE, STOCK_EDIT_VIEW,
     STOCK_PROJECT_HOLD_MANAGE, STOCK_PROJECT_HOLD_OVERRIDE, STOCK_PROJECT_HOLD_VIEW,
@@ -1694,6 +1696,37 @@ async def indent_fulfilment(indent_id: int, db: AsyncSession = Depends(get_db),
 # Attachments
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Stock audit write-offs (2026-10-31): what the audit form counts and picks from.
+# An audit only takes stock off; the rules are in `audit_writeoff`.
+# ---------------------------------------------------------------------------
+
+@router.get("/stock-audit/items")
+async def stock_audit_items(warehouse_id: int, search: str | None = None,
+                            db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(STOCK_ADJUST))):
+    return await audit_writeoff.audit_items(db, warehouse_id, user, search=search)
+
+
+@router.get("/stock-audit/lots")
+async def stock_audit_lots(warehouse_id: int, item_id: int,
+                           db: AsyncSession = Depends(get_db),
+                           user=Depends(require_permission(STOCK_ADJUST))):
+    return await audit_writeoff.audit_lots(db, warehouse_id, item_id, user)
+
+
+@router.get("/stock-audit/sources")
+async def stock_audit_sources(warehouse_id: int, item_id: int, batch_id: int = 0,
+                              bin_id: int = 0, brand_id: int | None = None,
+                              variant_id: int | None = None, model_id: int | None = None,
+                              db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(STOCK_ADJUST))):
+    return await audit_writeoff.lot_sources(
+        db, warehouse_id=warehouse_id, item_id=item_id, batch_id=batch_id,
+        bin_id=bin_id, user=user, brand_id=brand_id, variant_id=variant_id,
+        model_id=model_id)
+
+
 @router.get("/attachments", response_model=list[s.AttachmentRead])
 async def list_attachments(entity_type: str, entity_id: int,
                            db: AsyncSession = Depends(get_db),
@@ -1708,11 +1741,11 @@ async def list_attachments(entity_type: str, entity_id: int,
 async def add_attachment(entity_type: str = Form(...), entity_id: int = Form(...),
                          doc_category: str | None = Form(None), file: UploadFile = File(...),
                          db: AsyncSession = Depends(get_db),
-                         user=Depends(require_permission_or(
-        RECEIPT_CREATE, (QC_OUTWARD_CREATE, QC_OUTWARD_UPDATE),
-        service.anywhere_in_reach))):
-    # `entity_type`/`entity_id` arrive as form fields — see `service.add_attachment`,
-    # which scopes them before a byte is written.
+                         user=Depends(get_current_user)):
+    # The create permission is per `entity_type` — a gate pass on an ISSUE needs
+    # issue.create, a RECEIPT's needs receipt.create, and so on — so it cannot be a
+    # fixed route guard. `service.add_attachment` checks it (`assert_can_write_attachment`)
+    # and scopes the document before a byte is written.
     return await service.add_attachment(
         db, entity_type=entity_type, entity_id=entity_id, upload=file,
         doc_category=doc_category, user=user)
@@ -1731,9 +1764,9 @@ async def download_attachment(attachment_id: int, db: AsyncSession = Depends(get
 
 @router.delete("/attachments/{attachment_id}", status_code=204)
 async def delete_attachment(attachment_id: int, db: AsyncSession = Depends(get_db),
-                            user=Depends(require_permission_or(
-        RECEIPT_CREATE, (QC_OUTWARD_CREATE, QC_OUTWARD_UPDATE),
-        service.anywhere_in_reach))):
+                            user=Depends(get_current_user)):
+    # Permission is per entity_type, read off the attachment's own document; the
+    # service checks it (`assert_can_write_attachment`) after reading the row.
     await service.delete_attachment(db, attachment_id, user)
 
 

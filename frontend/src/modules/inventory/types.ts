@@ -1448,3 +1448,87 @@ export interface BoxLabelRow {
   /** Signed: the QR opens live, read-only details at /c/<token> on any phone. */
   qr_token?: string | null;
 }
+
+
+// ─── Stock audit write-offs (2026-10-31) ────────────────────────────────────
+// An audit only takes stock off. Each (batch, location) lot is written off in one of
+// three modes, decided by the server per lot (`warehouse/audit_writeoff.py`):
+//   UNITS     exactly N serials / IMEIs, picked by hand
+//   CODES     whole packs + unit codes adding up to exactly N
+//   QUANTITY  the count alone (the lot carries no codes)
+
+export type AuditMode = "UNITS" | "CODES" | "QUANTITY";
+export type AuditTracking = "SERIAL" | "IMEI" | "ASSET" | "CONSUMABLE" | "NONE";
+
+/** An item this point holds — the only items an audit can count. */
+export interface AuditItemOption {
+  item_id: number;
+  item_code: string | null;
+  item_name: string | null;
+  uom_code: string | null;
+  system_qty: number;
+  reserved_qty: number;
+  tracking: AuditTracking;
+}
+
+/** One (batch, location) of an item here, earliest expiry first. */
+export interface AuditLot {
+  batch_id: number;
+  bin_id: number;
+  batch_no: string | null;
+  expiry_date: string | null;
+  bin_code: string | null;
+  bin_name: string | null;
+  system_qty: number;
+  reserved_qty: number;
+  mode: AuditMode;
+  tracking: AuditTracking;
+  /** The brand / variant / model this balance is (0 = none recorded). Two brands on
+   *  one shelf are two lots, counted and written off apart. */
+  brand_id: number;
+  variant_id: number;
+  model_id: number;
+  brand_name: string | null;
+  variant_name: string | null;
+  model_name: string | null;
+  /** More than one brand stands at this batch and location; their codes are one pool. */
+  mixed: boolean;
+}
+
+export interface AuditPack {
+  id: number;
+  code: string;
+  name: string | null;
+  level: number;
+  holds: number;
+  size: number;
+  /** The pack it sits in, when that pack is in this lot too. */
+  parent_id: number | null;
+  /** Why it cannot be written off whole — a document holds it or something inside. */
+  held_by: string | null;
+  selectable: boolean;
+}
+
+export interface AuditUnit {
+  id: number;
+  code: string;
+  /** Its other printed identifier (an IMEI beside a serial, say). */
+  alt: string | null;
+  pack_id: number | null;
+  held_by: string | null;
+  selectable: boolean;
+}
+
+/** Everything one lot's write-off can name. */
+export interface AuditSources {
+  mode: AuditMode;
+  tracking: AuditTracking;
+  system_qty: number;
+  packs: AuditPack[];
+  units: AuditUnit[];
+  /** More units than the picker is served; scan or type the rest. */
+  truncated: boolean;
+  /** More than one brand stands here; units and packs carry no brand of their own. */
+  mixed: boolean;
+}
+

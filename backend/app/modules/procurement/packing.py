@@ -241,7 +241,7 @@ async def notify_buyer_of_changes(db: AsyncSession, note: DespatchNote,
               f"different pack hierarchy: {names}{more}. Accept or decline it on the "
               "order."),
         entity_type="PO", entity_id=po.id,
-        deep_link=f"/procurement/pos/{po.id}?tab=packing")
+        deep_link=f"/pos/{po.id}?tab=packing")
 
 
 async def list_pack_changes(db: AsyncSession, po_id: int) -> list[dict]:

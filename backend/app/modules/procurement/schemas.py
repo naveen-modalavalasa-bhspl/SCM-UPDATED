@@ -1221,6 +1221,13 @@ class DespatchNoteIn(BaseModel):
     remarks: str | None = None
     lines: list[DespatchLineIn] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
 
+    @field_validator("invoice_amount")
+    @classmethod
+    def _validate_invoice_amount(cls, v: float | None) -> float | None:
+        if v is not None and v < 0:
+            raise ValueError("Invoice amount cannot be negative")
+        return v
+
 
 class DespatchItemOut(CombinationOut):
     model_config = ConfigDict(from_attributes=True)
