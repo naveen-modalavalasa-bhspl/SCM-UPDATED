@@ -521,10 +521,22 @@ def uom_class_out(row: UomClassRow) -> dict:
 
 
 class UomIn(BaseModel):
-    code: str = Field(min_length=1, max_length=20)
-    name: str
+    # Same rule the form enforces (uomTabs.tsx): letters, digits and "/" only. The
+    # server must hold it too, or an API call / bulk upload saves what the form refuses.
+    code: str = Field(min_length=1, max_length=20, pattern=r"^[A-Za-z0-9/]+$")
+    name: str = Field(min_length=1, max_length=100)
     uom_class: str
     is_active: bool = True
+
+    @field_validator("code", "name", mode="before")
+    @classmethod
+    def _strip(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("code")
+    @classmethod
+    def _upper_code(cls, value):
+        return value.upper()
 
 
 def uom_out(u: Uom) -> dict:
