@@ -967,10 +967,7 @@ async def _indent_visibility(db: AsyncSession, user):
     for the same reason `scope_condition` always OR-s in `mine`: narrow the rung and
     you narrow whose work you see, never whether you can do your own.
     """
-    scm_statuses = await _scm_stage_statuses(db, user)
     branches = [await indent_participant_condition(db, user)]
-    if scm_statuses:
-        branches.append(Indent.status.in_(scm_statuses))
     branches.append(
         and_(
             await indent_access_condition(db, user),
