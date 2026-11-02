@@ -381,6 +381,7 @@ async def create_po_from_indent(db: AsyncSession, indent_id: int, data: POCreate
         IndentStatus.APPROVED.value,
         IndentStatus.PARTIALLY_ORDERED.value,
         IndentStatus.PENDING_PROCUREMENT.value,
+        IndentStatus.PARTIALLY_ALLOCATED.value,
         IndentStatus.PARTIALLY_FULFILLED.value,
     )
     if indent.status not in BUYABLE:
@@ -391,6 +392,7 @@ async def create_po_from_indent(db: AsyncSession, indent_id: int, data: POCreate
     approved_mr_items: list[MaterialRequestItem] = []
     if indent.status in {
         IndentStatus.PENDING_PROCUREMENT.value,
+        IndentStatus.PARTIALLY_ALLOCATED.value,
         IndentStatus.PARTIALLY_FULFILLED.value,
     }:
         approved_mr_items = list((await db.execute(

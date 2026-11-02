@@ -482,6 +482,11 @@ class IndentJourneyOut(BaseModel):
     phases: list[IndentJourneyStage]
     history: list[IndentJourneyHistoryEvent]
     missing_sources: list[str] = Field(default_factory=list)
+    qc_status: str | None = None
+    qc_inspection_no: str | None = None
+    qc_complete: bool = False
+    consignment_no: str | None = None
+    consignment_status: str | None = None
 
     @field_serializer("created_at", when_used="json")
     def serialize_datetime(self, value: datetime):

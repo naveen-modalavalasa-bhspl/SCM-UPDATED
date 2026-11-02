@@ -13911,15 +13911,19 @@ async def _close_indent_if_delivered(db: AsyncSession, indent_id: int | None, us
     # allocation has 0 allocated against a full approved quantity, which reads as
     # entirely unserved. Those close on the acknowledgement exactly as they always did —
     # the remainder guard below only speaks for indents the allocation flow has touched.
+    active_owed_lines = [
+        line for line in owed_lines
+        if not getattr(line, "is_excluded", False) and owed_quantity(line) > ZERO
+    ]
     covered = sum(
         (_d(line.allocated_quantity) + committed.get(line.id, ZERO)
-         for line in owed_lines),
+         for line in active_owed_lines),
         ZERO,
     )
     if covered > ZERO and any(
         owed_quantity(line) - _d(line.allocated_quantity)
         - committed.get(line.id, ZERO) > ZERO
-        for line in owed_lines
+        for line in active_owed_lines
     ):
         return
 
@@ -21324,7 +21328,8 @@ async def purchase_return_source_options(db: AsyncSession, params: PageParams, *
         from app.modules.indents.models import Indent, IndentItem as IItem
         ind_stmt = select(Indent).where(Indent.status.in_([
             IndentStatus.APPROVED.value, IndentStatus.ORDERED.value,
-            IndentStatus.CLOSED.value, IndentStatus.PARTIALLY_FULFILLED.value]))
+            IndentStatus.CLOSED.value, IndentStatus.PARTIALLY_ALLOCATED.value,
+            IndentStatus.PARTIALLY_FULFILLED.value]))
         if like:
             ind_stmt = ind_stmt.where(or_(
                 Indent.indent_no.ilike(like),
@@ -24008,7 +24013,7 @@ def _pending_with(approved: Decimal, issued: Decimal, dispatched: Decimal,
     bought line was described as sitting "in the warehouse, not yet issued" — the one
     place it certainly was not.
     """
-    if received >= approved:
+    if approved <= ZERO or received >= approved:
         return None
     if dispatched > received:
         return "On the way to you"
@@ -24463,6 +24468,7 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
             line_boxes = boxes_by_line.get(item.id, [])
             if line_boxes:
                 line_serials = []
+            is_excluded = bool(getattr(item, "is_excluded", False))
             lines.append({
                 "indent_item_id": item.id,
                 "item_id": item.item_id,
@@ -24498,7 +24504,7 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
                 # The packs it was sent in, merged over its issue lines (2026-10-22).
                 **(wh_packing.merge_breakdowns(packs_by_indent_line.get(item.id, []),
                                                item.uom_code) or {}),
-                "pending_with": _pending_with(approved, issued, dispatched, received,
+                "pending_with": None if is_excluded else _pending_with(approved, issued, dispatched, received,
                                               indent.status, on_order),
             })
         out.append({

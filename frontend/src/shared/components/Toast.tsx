@@ -2,35 +2,9 @@ import {
   createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
   type ReactNode,
 } from "react";
+import { useInRouterContext, useLocation } from "react-router-dom";
 import { describeError, type Notice, type NoticeLevel } from "@/shared/api/errors";
 import { NoticeCard, NOTICE_WIDTH } from "./notice";
-
-/**
- * The app's transient notification strip.
- *
- * Deliberately narrow about what earns one. A toast is for the outcome of something
- * the user pressed — a submission, an approval, a dispatch — and for the failure of
- * one. Opening a page, changing a filter, loading a list and picking from a dropdown
- * are not outcomes and get nothing; a system that announces everything trains people
- * to look away from it.
- *
- * Four levels, and they mean different things:
- *
- *   success — the write landed. Closes itself; safe to miss.
- *   info    — a passing remark. Closes itself.
- *   warning — the operation did not go through and the person can fix it here
- *             (a missing field, a duplicate, a rule they can satisfy). Stays.
- *   error   — it did not go through and they cannot fix it here (no permission,
- *             session gone, server down). Stays.
- *
- * A failure that vanished after three seconds leaves somebody believing their work
- * saved, which is why only the two quiet levels self-close. Where a screen has a form
- * to pin the message next to, `<ErrorBanner>` is still the better surface; this is
- * for the call sites that have nowhere to pin one.
- *
- * Hand-rolled rather than a library: it is a list, a timer and a fixed div. sonner
- * and friends bring a portal system and an animation engine for the same result.
- */
 
 type ToastTone = NoticeLevel;
 
@@ -46,6 +20,7 @@ export type ToastInput = string | ToastContent;
 interface Toast extends ToastContent {
   id: number;
   tone: ToastTone;
+  duration: number;
   /** Identity for de-duplication: same tone, same words. */
   key: string;
 }
@@ -53,9 +28,9 @@ interface Toast extends ToastContent {
 interface ToastApi {
   /** Auto-dismisses. For a submission that landed. */
   success: (content: ToastInput) => void;
-  /** Stays until dismissed — a failure must not vanish on its own. */
+  /** Auto-dismisses after 6s or when dismissed / navigated away. */
   error: (content: ToastInput) => void;
-  /** Stays until dismissed. The operation did not go through. */
+  /** Auto-dismisses after 6s or when dismissed / navigated away. */
   warning: (content: ToastInput) => void;
   /** Auto-dismisses. */
   info: (content: ToastInput) => void;
@@ -73,11 +48,8 @@ interface ToastApi {
 
 const ToastContext = createContext<ToastApi | null>(null);
 
-/* The card, the tones, the icons and the countdown all come from `notice.tsx`, so
- * the strip and the alert dialog are literally the same component wearing the same
- * measurements. They used to be two hand-kept copies that drifted. */
-
 const DISMISS_AFTER = 3500;
+const ERROR_DISMISS_AFTER = 6000;
 /** Beyond three, a strip of toasts is a wall nobody reads. Oldest goes. */
 const MAX_VISIBLE = 3;
 
@@ -88,6 +60,24 @@ const toastKey = (tone: ToastTone, content: ToastInput) => {
   const { title, message } = asContent(content);
   return `${tone}|${title}|${message ?? ""}`;
 };
+
+function RouteWatcher({ onNavigate }: { onNavigate: () => void }) {
+  const inRouter = useInRouterContext();
+  if (!inRouter) return null;
+  return <RouteWatcherInner onNavigate={onNavigate} />;
+}
+
+function RouteWatcherInner({ onNavigate }: { onNavigate: () => void }) {
+  const location = useLocation();
+  const lastPath = useRef(location.pathname);
+  useEffect(() => {
+    if (lastPath.current !== location.pathname) {
+      lastPath.current = location.pathname;
+      onNavigate();
+    }
+  }, [location.pathname, onNavigate]);
+  return null;
+}
 
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -101,6 +91,12 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     setToasts((all) => all.filter((t) => t.id !== id));
   }, []);
 
+  const clearAll = useCallback(() => {
+    timers.current.forEach(clearTimeout);
+    timers.current.clear();
+    setToasts([]);
+  }, []);
+
   useEffect(() => {
     const running = timers.current;
     return () => running.forEach(clearTimeout);
@@ -111,20 +107,15 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     if (!title && !message) return;
     const key = toastKey(tone, content);
     const id = nextId.current++;
+    const duration = (tone === "success" || tone === "info") ? DISMISS_AFTER : ERROR_DISMISS_AFTER;
 
     setToasts((all) => {
-      // Two presses of the same button, or one failure caught by both a mutation
-      // handler and a screen, must not read as two separate things going wrong.
-      // The existing toast stays where it is and its timer is restarted below.
       if (all.some((t) => t.key === key)) return all;
-      const next = [...all, { id, tone, title, message, key }];
+      const next = [...all, { id, tone, title, message, key, duration }];
       return next.length > MAX_VISIBLE ? next.slice(next.length - MAX_VISIBLE) : next;
     });
 
-    const selfCloses = tone === "success" || tone === "info";
-    if (selfCloses) {
-      timers.current.set(id, setTimeout(() => remove(id), DISMISS_AFTER));
-    }
+    timers.current.set(id, setTimeout(() => remove(id), duration));
   }, [remove]);
 
   const dismiss = useCallback((tone: ToastTone, content: ToastInput) => {
@@ -159,6 +150,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
   return (
     <ToastContext.Provider value={api}>
+      <RouteWatcher onNavigate={clearAll} />
       {children}
       {/* aria-live so a screen reader announces the write landing; the visual toast
           is easy to miss and this is the only confirmation either way. */}
@@ -172,22 +164,17 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         // so a toast and a dialog never look like two different systems talking.
         className={`pointer-events-none fixed left-1/2 top-20 z-100 flex ${NOTICE_WIDTH} -translate-x-1/2 flex-col items-center gap-2`}
       >
-        {toasts.map((toast) => {
-          // Only the two quiet levels draw a countdown; a failure with no bar is
-          // itself the signal that this one is waiting to be read.
-          const selfCloses = toast.tone === "success" || toast.tone === "info";
-          return (
-            <div key={toast.id} className="pointer-events-auto w-full">
-              <NoticeCard
-                tone={toast.tone}
-                title={toast.title}
-                message={toast.message}
-                onClose={() => remove(toast.id)}
-                countdownMs={selfCloses ? DISMISS_AFTER : null}
-              />
-            </div>
-          );
-        })}
+        {toasts.map((toast) => (
+          <div key={toast.id} className="pointer-events-auto w-full">
+            <NoticeCard
+              tone={toast.tone}
+              title={toast.title}
+              message={toast.message}
+              onClose={() => remove(toast.id)}
+              countdownMs={toast.duration}
+            />
+          </div>
+        ))}
       </div>
     </ToastContext.Provider>
   );

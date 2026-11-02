@@ -517,6 +517,11 @@ export interface IndentJourney {
   phases: IndentJourneyStage[];
   history: IndentJourneyHistoryEvent[];
   missing_sources: string[];
+  qc_status?: string | null;
+  qc_inspection_no?: string | null;
+  qc_complete?: boolean;
+  consignment_no?: string | null;
+  consignment_status?: string | null;
 }
 
 /** A material issue raised against no indent, as the person it was issued to sees it. */

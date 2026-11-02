@@ -538,7 +538,8 @@ async def get_user_permissions(
     # approval of forty-one indents paid for the same five queries forty-one times.
     # Keyed by (employee, position) exactly as the answer is derived, so the grant set
     # is still per login and per hat; nothing about who may do what moves.
-    memo = db.info.setdefault("user_permissions_memo", {})
+    db_info = getattr(db, "info", None)
+    memo = db_info.setdefault("user_permissions_memo", {}) if isinstance(db_info, dict) else {}
     key = (user.id, position_id)
     if key in memo:
         return set(memo[key])

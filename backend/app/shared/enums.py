@@ -19,7 +19,8 @@ class IndentStatus(str, Enum):
     # who decides how much to give and from where.
     AWAITING_ALLOCATION = "AWAITING_ALLOCATION"
     ALLOCATED = "ALLOCATED"                       # every line reserved from stock
-    PARTIALLY_FULFILLED = "PARTIALLY_FULFILLED"   # some reserved, rest went to an MR
+    PARTIALLY_ALLOCATED = "PARTIALLY_ALLOCATED"   # some reserved, rest went to an MR
+    PARTIALLY_FULFILLED = "PARTIALLY_FULFILLED"   # physical goods partially received
     PENDING_PROCUREMENT = "PENDING_PROCUREMENT"   # nothing given, all of it to an MR
     PARTIALLY_ORDERED = "PARTIALLY_ORDERED"
     ORDERED = "ORDERED"
@@ -29,6 +30,12 @@ class IndentStatus(str, Enum):
     # (workflow.engine.return_for_correction / resubmit_correction). Not DRAFT —
     # a draft has no live approval behind it.
     RETURNED_FOR_CORRECTION = "RETURNED_FOR_CORRECTION"
+    # Live downstream fulfilment stages
+    QC_PASSED = "QC_PASSED"
+    QC_IN_PROGRESS = "QC_IN_PROGRESS"
+    IN_CONSIGNMENT = "IN_CONSIGNMENT"
+    IN_TRANSIT = "IN_TRANSIT"
+    DELIVERED = "DELIVERED"
 
 
 class POStatus(str, Enum):
