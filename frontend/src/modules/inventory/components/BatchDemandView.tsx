@@ -12,6 +12,7 @@ import { isChainPoint, orderPoints } from "../warehouseTiers";
 import type {
   AllocationDecision, BatchDemandItem, BatchDemandLine,
 } from "../types";
+import { guardNumberKeys } from "@/shared/quantity";
 
 /**
  * The fulfilment queue turned on its side: one row per ITEM, not per indent.
@@ -619,7 +620,7 @@ function ItemRow({ item, plan, onChange }: {
                       <td className="px-2 py-2 text-right">
                         <div className="flex items-center justify-end gap-2">
                           <input
-                            type="number"
+                            type="number" onKeyDown={guardNumberKeys}
                             min={0}
                             max={line.pending_qty}
                             value={plan.edited[line.indent_item_id] ?? fmt(gets)}

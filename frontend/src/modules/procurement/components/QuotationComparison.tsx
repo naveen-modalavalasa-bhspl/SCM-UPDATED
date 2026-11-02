@@ -5,6 +5,7 @@ import { Button } from "./ActionButton";
 import { fmtDate } from "@/shared/datetime";
 import { money } from "../pages/RequisitionListPage";
 import type { Comparison, ComparisonCell, ComparisonTotal } from "../types";
+import { guardNumberKeys } from "@/shared/quantity";
 
 /**
  * The quotation comparison sheet: one column per vendor, one row per item, and the
@@ -500,7 +501,7 @@ export function QuotationComparison({
                             {isAnyAwarded ? "Additional quantity" : "Award quantity"}
                           </div>
                           <input
-                            type="number" min="0" step="0.001"
+                            type="number" onKeyDown={guardNumberKeys} min="0" step="0.001"
                             value={split[splitKey(row.rfq_item_id, total.vendor_id)] ?? ""}
                             aria-label={`Quantity for ${total.vendor_name ?? "supplier"} on ${row.item_name ?? row.item_id}`}
                             onChange={(e) => setSplit((current) => ({

@@ -1,6 +1,7 @@
 import { Fragment, useState, useEffect, type ReactNode } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { Button } from "@/shared/components";
+import { guardNumberKeys } from "@/shared/quantity";
 
 /**
  * The editable line grid behind every warehouse document form.
@@ -253,6 +254,7 @@ export function QtyInput({
       disabled={disabled}
       aria-label={ariaLabel}
       onKeyDown={(e) => {
+        guardNumberKeys(e);   // no "e", "+", or "-" in a quantity box
         // Whole-unit items (Nos, Box…) never take a fraction — refuse the
         // decimal point at the keyboard rather than only on blur or save.
         if (places === 0 && (e.key === "." || e.key === ",")) e.preventDefault();

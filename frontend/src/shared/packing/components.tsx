@@ -9,6 +9,7 @@ import {
   packWarnings, partEntry, USAGE_LABEL, levelsFor, type ContainerUsage,
 } from "./packing";
 import { usePackOptions } from "./api";
+import { guardNumberKeys } from "../quantity";
 
 /* ---------------------------------------------------------------------------
  * Pack hierarchies on screen (2026-10-08). The pieces every module uses:
@@ -638,7 +639,7 @@ export function PackBreakdownEditor({
                     <Minus size={14} />
                   </StepButton>
                   <input
-                    type="number" inputMode={lv.level === 0 ? "decimal" : "numeric"}
+                    type="number" onKeyDown={guardNumberKeys} inputMode={lv.level === 0 ? "decimal" : "numeric"}
                     min={0} step={lv.level === 0 ? "any" : 1}
                     aria-label={`${lv.level === 0 ? "Loose" : lv.name} count`}
                     disabled={disabled}
@@ -702,7 +703,7 @@ export function PackBreakdownEditor({
                   </span>
                 ) : (
                   <>
-                    <input type="number" min={1} step={1} aria-label="How many part packs"
+                    <input type="number" onKeyDown={guardNumberKeys} min={1} step={1} aria-label="How many part packs"
                            value={num(e.qty) || ""}
                            onChange={(ev) => setPart(index, { qty: Math.max(0, Math.floor(num(ev.target.value))) })}
                            className="h-10 w-16 rounded-lg border border-line bg-content1 px-1 text-center font-semibold tabular" />
@@ -712,7 +713,7 @@ export function PackBreakdownEditor({
                       {packLevels.map((p) => <option key={p.level} value={p.level}>{p.name}</option>)}
                     </select>
                     <span className="text-xs text-muted">holding</span>
-                    <input type="number" min={0} step="any" aria-label="Each holds"
+                    <input type="number" onKeyDown={guardNumberKeys} min={0} step="any" aria-label="Each holds"
                            value={num(e.fill) || ""}
                            onChange={(ev) => setPart(index, { fill: num(ev.target.value) })}
                            className="h-10 w-24 rounded-lg border border-line bg-content1 px-1 text-center font-semibold tabular" />

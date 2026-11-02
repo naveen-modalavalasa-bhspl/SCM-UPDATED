@@ -40,6 +40,7 @@ import type {
   PurchaseReturnWrite,
 } from "../types";
 import { CombinationTag } from "@/shared/combination";
+import { guardNumberKeys } from "@/shared/quantity";
 
 /**
  * Warehouse → Vendor Purchase Return — the Storekeeper's single screen.
@@ -1017,7 +1018,7 @@ export default function PurchaseReturnForm() {
                       ] as const).map(([field, label]) => (
                         <td key={field} className="py-2 pr-3 w-[108px]">
                           <input
-                            type="number"
+                            type="number" onKeyDown={guardNumberKeys}
                             min="0"
                             value={line[field]}
                             onChange={(e) => setManualLine(line.key, field, e.target.value)}

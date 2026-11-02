@@ -17,6 +17,7 @@ import {
   comboFrom, comboPayload, useCombinationOptions,
   type CombinationValue,
 } from "@/shared/combination";
+import { guardNumberKeys } from "@/shared/quantity";
 
 const money = (n: number) =>
   `₹${n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -447,7 +448,7 @@ export function SupplierRFQDetailPage() {
                         <div>
                           <label className="block text-[11px] text-muted">Counter Quantity</label>
                           <input
-                            type="number" min="0" step="0.001"
+                            type="number" onKeyDown={guardNumberKeys} min="0" step="0.001"
                             value={edit.qty}
                             onChange={(e) => setCounterEdits({ ...counterEdits, [line.quotation_item_id]: { ...edit, qty: e.target.value } })}
                             className="h-9 w-full rounded-md border border-line bg-white px-2 text-xs text-ink outline-none focus:border-brand"
@@ -456,7 +457,7 @@ export function SupplierRFQDetailPage() {
                         <div>
                           <label className="block text-[11px] text-muted">Counter Rate (₹)</label>
                           <input
-                            type="number" min="0" step="0.01"
+                            type="number" onKeyDown={guardNumberKeys} min="0" step="0.01"
                             value={edit.rate}
                             onChange={(e) => setCounterEdits({ ...counterEdits, [line.quotation_item_id]: { ...edit, rate: e.target.value } })}
                             className="h-9 w-full rounded-md border border-line bg-white px-2 text-xs text-ink outline-none focus:border-brand"
@@ -465,7 +466,7 @@ export function SupplierRFQDetailPage() {
                         <div>
                           <label className="block text-[11px] text-muted">Counter Discount %</label>
                           <input
-                            type="number" min="0" max="100" step="0.01"
+                            type="number" onKeyDown={guardNumberKeys} min="0" max="100" step="0.01"
                             value={edit.discount}
                             onChange={(e) => setCounterEdits({ ...counterEdits, [line.quotation_item_id]: { ...edit, discount: e.target.value } })}
                             className="h-9 w-full rounded-md border border-line bg-white px-2 text-xs text-ink outline-none focus:border-brand"

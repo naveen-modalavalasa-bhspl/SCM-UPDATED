@@ -10,6 +10,7 @@ import { BoxLabelsPanel } from "../components/BoxLabelsPanel";
 import { IssueLabelsPanel } from "../components/IssueLabelsPanel";
 import { getStockBalances, getWarehouses, listBoxLabels } from "../api";
 import type { StockBalanceItem } from "../types";
+import { guardNumberKeys } from "@/shared/quantity";
 
 /**
  * Label printing for shelf/bin stickers.
@@ -263,7 +264,7 @@ function ItemLabels({ tabs }: { tabs: React.ReactNode }) {
                   </button>
                   {picked[r.id] && (
                     <input
-                      type="number"
+                      type="number" onKeyDown={guardNumberKeys}
                       min={1}
                       value={copies[r.id] ?? "1"}
                       aria-label={`Copies for ${r.item_code}`}

@@ -4,6 +4,7 @@ import {
   AlertTriangle, Box, Boxes, Check, CheckCheck, ChevronDown, Minus, PackageX, Plus,
 } from "lucide-react";
 import { Button } from "./ui";
+import { guardNumberKeys } from "../quantity";
 
 /**
  * Check a line package by package (2026-10-26) — outward QC and the receiving site.
@@ -370,7 +371,7 @@ export function PackageCheckModal({
                       className="grid h-9 w-9 place-items-center rounded-lg border border-line hover:border-brand">
                 <Minus className="h-3.5 w-3.5" />
               </button>
-              <input type="number" min={0} max={pkg.carries - 1} value={partial[pkg.code] ?? 0}
+              <input type="number" onKeyDown={guardNumberKeys} min={0} max={pkg.carries - 1} value={partial[pkg.code] ?? 0}
                      onChange={(e) => setPart(pkg, Number(e.target.value))}
                      aria-label={`${copy.partial} ${pkg.code}`}
                      className="h-9 w-14 rounded-lg border border-line bg-content1 text-center text-sm outline-none focus:border-brand" />

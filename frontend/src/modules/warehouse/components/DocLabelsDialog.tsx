@@ -17,6 +17,7 @@ import {
 } from "../docLabels";
 import { LabelSticker } from "./LabelSticker";
 import { shortCode } from "../packPick";
+import { guardNumberKeys } from "@/shared/quantity";
 
 /**
  * Print the labels of ONE document (2026-10-28): every package a posted issue sent,
@@ -271,7 +272,7 @@ export function DocLabelsDialog({ open, onClose, doc, initialLineIds }: {
                   </div>
                   <div className="mt-2 flex items-center gap-3 text-xs">
                     <span className="text-[11px] font-semibold text-muted">Copies of each</span>
-                    <input type="number" min={1} max={10} value={s.copies} aria-label="Copies of each label"
+                    <input type="number" onKeyDown={guardNumberKeys} min={1} max={10} value={s.copies} aria-label="Copies of each label"
                            onChange={(e) => set("copies", Math.max(1, Math.min(10, Math.floor(Number(e.target.value) || 1))))}
                            className="h-10 w-16 rounded-lg border border-line bg-content1 px-2 text-center tabular" />
                   </div>
@@ -405,7 +406,7 @@ function MmInput({ label, value, min = 0, max, onChange }: {
   return (
     <label className="flex items-center gap-1">
       <span className="text-[11px] text-muted">{label}</span>
-      <input type="number" min={min} max={max} value={value} aria-label={`${label} in mm`}
+      <input type="number" onKeyDown={guardNumberKeys} min={min} max={max} value={value} aria-label={`${label} in mm`}
              onChange={(e) => onChange(Math.max(min, Math.min(max, Number(e.target.value) || 0)))}
              className="h-10 w-16 rounded-lg border border-line bg-content1 px-2 text-center tabular" />
       <span className="text-[11px] text-muted">mm</span>

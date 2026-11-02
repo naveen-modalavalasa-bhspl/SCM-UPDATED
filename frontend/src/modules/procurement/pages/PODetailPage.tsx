@@ -27,6 +27,7 @@ import { formatPONo } from "@/shared/format";
 import { TONE_APPROVE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
 import { comboFrom, comboPayload } from "@/shared/combination";
 import { CombinationTag } from "@/shared/combination";
+import { guardNumberKeys } from "@/shared/quantity";
 
 const money = (value: number | null | undefined) =>
   new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value ?? 0);
@@ -552,7 +553,7 @@ export function PODetailPage() {
                               {isQtyChanged && <div className="text-[11px] font-semibold text-blue-700">was <span className="line-through">{prev.quantity}</span></div>}
                               <div className="flex items-center justify-end gap-1">
                                 <input
-                                  type="number"
+                                  type="number" onKeyDown={guardNumberKeys}
                                   min={1}
                                   max={original}
                                   step="0.001"

@@ -8,6 +8,7 @@ import {
   stageSplit, whenText, type Instalment, type PaymentStage, type PlanValues,
 } from "../paymentPlan";
 import type { PaymentSplit } from "../types";
+import { guardNumberKeys } from "@/shared/quantity";
 
 /**
  * The payment plan of a payment term: how much of the order each of the four stages
@@ -52,7 +53,7 @@ export function PaymentPlanEditor({
             On an order of
             <span className="relative">
               <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-sm text-muted">₹</span>
-              <input type="number" min={0} value={sample}
+              <input type="number" onKeyDown={guardNumberKeys} min={0} value={sample}
                      onChange={(e) => setSample(e.target.value)}
                      aria-label="Sample order value"
                      className="h-11 w-36 rounded-xl border border-line bg-content1 pl-6 pr-2 text-sm tabular-nums text-ink outline-none focus:border-brand" />
@@ -204,7 +205,7 @@ function StageCard({
             Share of order
           </span>
           <span className="relative block">
-            <input type="number" min={0} max={100} step="0.01" inputMode="decimal"
+            <input type="number" onKeyDown={guardNumberKeys} min={0} max={100} step="0.01" inputMode="decimal"
                    aria-label={`${stage.label} share of the order, percent`}
                    value={String(values[`${k}_pct`] ?? "")}
                    onChange={(e) => onPatch({ [`${k}_pct`]: e.target.value })}
@@ -233,7 +234,7 @@ function StageCard({
           {split === "ONE" ? (
             <label className="flex flex-wrap items-center gap-2 text-sm text-body">
               Pay the full {pct}% in one payment, within
-              <input type="number" min={0} max={3650} inputMode="numeric"
+              <input type="number" onKeyDown={guardNumberKeys} min={0} max={3650} inputMode="numeric"
                      aria-label={`${stage.label} payable within days`}
                      value={String(values[`${k}_days`] ?? "")}
                      onChange={(e) => onPatch({ [`${k}_days`]: e.target.value })}
@@ -252,7 +253,7 @@ function StageCard({
                           className="flex h-11 w-11 items-center justify-center text-body hover:bg-content2 disabled:opacity-40">
                     <Minus className="h-4 w-4" />
                   </button>
-                  <input type="number" min={MIN_INSTALMENTS} max={MAX_INSTALMENTS}
+                  <input type="number" onKeyDown={guardNumberKeys} min={MIN_INSTALMENTS} max={MAX_INSTALMENTS}
                          aria-label="Number of instalments" value={days.length}
                          onChange={(e) => setCount(Number(e.target.value) || MIN_INSTALMENTS)}
                          className="h-11 w-12 border-x border-line bg-transparent text-center text-sm font-semibold tabular-nums text-ink outline-none" />

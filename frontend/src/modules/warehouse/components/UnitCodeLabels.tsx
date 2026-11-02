@@ -16,6 +16,7 @@ import {
   safeFileName, svgSize, svgToPngBlob,
 } from "../codeLabels";
 import type { PutawayCodes, PutawayUnitCode } from "../types";
+import { guardNumberKeys } from "@/shared/quantity";
 
 /**
  * The label sheet for the codes a putaway minted.
@@ -390,7 +391,7 @@ function LabelPanel({ head }: { head: PutawayCodes }) {
               Copies each
             </span>
             <input
-              type="number"
+              type="number" onKeyDown={guardNumberKeys}
               min={1}
               max={20}
               value={copies}
@@ -623,7 +624,7 @@ function MmInput({ label, value, onChange }: {
         {label}
       </span>
       <input
-        type="number"
+        type="number" onKeyDown={guardNumberKeys}
         min={20}
         max={200}
         value={String(value)}

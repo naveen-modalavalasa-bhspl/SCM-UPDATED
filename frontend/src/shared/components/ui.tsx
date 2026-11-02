@@ -1,6 +1,7 @@
 import { useEffect, useState, useMemo } from "react";
 import type { ButtonHTMLAttributes, InputHTMLAttributes, MouseEvent, ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
+import { guardNumberKeys } from "../quantity";
 import { ArrowDownRight, ArrowLeft, ArrowUpRight } from "lucide-react";
 import {
   Autocomplete,
@@ -202,12 +203,19 @@ interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
 }
 
 export function Input({ className, ...props }: InputProps) {
+  // Every number box gets the keyboard guard (no "e", "+", or a "-" on a non-negative
+  // box). A caller's own onKeyDown still runs, after the guard.
+  const own = props.onKeyDown;
+  const onKeyDown = props.type === "number"
+    ? (event: any) => { guardNumberKeys(event); if (!event.defaultPrevented) own?.(event); }
+    : own;
   return (
     <HInput
       variant="bordered"
       radius="md"
       classNames={{ inputWrapper: `min-h-11 border-line bg-content1 ${className ?? ""}` }}
       {...(props as any)}
+      onKeyDown={onKeyDown}
     />
   );
 }

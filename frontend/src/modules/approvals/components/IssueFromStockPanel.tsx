@@ -4,6 +4,7 @@ import { PackageCheck } from "lucide-react";
 import { Button, Card, StatusPill } from "@/shared/components";
 import { approvalsApi } from "../api";
 import type { IndentAvailabilityLine } from "../types";
+import { guardNumberKeys } from "@/shared/quantity";
 
 const fmt = (value: number) => {
   const rounded = Math.round(value * 1000) / 1000;
@@ -219,7 +220,7 @@ function LineRow({ line, field, quantity, source, onQuantity, onSource }: {
           <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">Issue</span>
           <input
             className={field}
-            type="number"
+            type="number" onKeyDown={guardNumberKeys}
             min={0}
             max={ceiling}
             step="any"

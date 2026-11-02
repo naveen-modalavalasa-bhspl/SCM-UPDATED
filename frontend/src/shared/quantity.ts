@@ -102,3 +102,33 @@ export function sanitizeQuantityInput(raw: string, decimals = 3): string {
   if (rest.length === 0) return whole;
   return `${whole}.${rest.join("").slice(0, decimals)}`;
 }
+
+/**
+ * `onKeyDown` guard for `type="number"` boxes.
+ *
+ * A number box refuses most letters but not all: the browser still lets `e`, `E`, `+`
+ * and `-` through ("1e5", "--", "+") because they are valid in an exponent, and the
+ * field then holds text nobody meant as a quantity. Nothing in this app takes an
+ * exponent, so those are refused at the keyboard. Two more follow from the box's own
+ * attributes, read off the element so one function serves every box:
+ *
+ * - `-` is refused when `min` is 0 or more (a quantity cannot be negative);
+ * - `.` and `,` are refused when `step` is a whole number (a whole-unit unit like NOS).
+ *
+ * Shortcuts (Ctrl/Cmd/Alt combinations) are left alone, and so is everything else:
+ * digits, arrows, Backspace, Tab and a pasted number all behave as before.
+ */
+export function guardNumberKeys(event: {
+  key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean;
+  preventDefault: () => void; currentTarget: { min?: string; step?: string };
+}): void {
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  const { key } = event;
+  const { min, step } = event.currentTarget;
+  const minimum = min === undefined || min === "" ? NaN : Number(min);
+  const stepValue = step === undefined || step === "" || step === "any" ? NaN : Number(step);
+  const wholeOnly = Number.isInteger(stepValue) && stepValue >= 1;
+  if (key === "e" || key === "E" || key === "+") event.preventDefault();
+  else if (key === "-" && minimum >= 0) event.preventDefault();
+  else if ((key === "." || key === ",") && wholeOnly) event.preventDefault();
+}

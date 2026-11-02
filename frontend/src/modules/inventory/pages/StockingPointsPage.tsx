@@ -13,6 +13,7 @@ import {
 } from "../api";
 import type { PositionLocationTag, PositionSearchHit } from "../types";
 import { DetailSheet } from "../components/DetailSheet";
+import { guardNumberKeys } from "@/shared/quantity";
 
 /** Tier colouring, so the chain reads at a glance rather than by reading numbers. */
 const TIER_TONE: Record<number, string> = {
@@ -351,7 +352,7 @@ export function StockingPointsPage() {
           <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">Project id</span>
           <input
             className={field}
-            type="number"
+            type="number" onKeyDown={guardNumberKeys}
             aria-label="Project id"
             placeholder="0 = unassigned"
             value={projectId}

@@ -13,6 +13,7 @@ import { useConsolidationDecisions } from "../consolidationDecisions";
 import { PriorityFilter, PriorityTag } from "../components/PriorityFilter";
 import { formatQty, resolveItem } from "./ConsolidationPage";
 import type { ConsolidationIndentSummary } from "../types";
+import { guardNumberKeys } from "@/shared/quantity";
 
 /** One consolidated item, and everyone who asked for it.
  *
@@ -356,7 +357,7 @@ export function ConsolidationItemPage() {
                         className={`${control} h-12 w-full px-3 text-lg font-semibold tabular placeholder:font-normal placeholder:text-muted ${
                           item.uom_code ? "pr-16" : ""
                         }`}
-                        type="number"
+                        type="number" onKeyDown={guardNumberKeys}
                         min={0}
                         max={resolved.ceiling}
                         // The unit's own step. A countable item cannot be typed as
