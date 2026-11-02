@@ -24,6 +24,7 @@ import { approvalsApi } from "@/modules/approvals/api";
 import { HistoryTimeline } from "@/modules/approvals/components/HistoryTimeline";
 import { alerts } from "@/modules/alerts";
 import { useAuth } from "@/shared/auth/AuthContext";
+import { sanitizeQuantityInput } from "@/shared/quantity";
 import type { MaterialRequestItem } from "../types";
 import { TONE_APPROVE, TONE_REJECT } from "@/shared/components/tones";
 
@@ -267,7 +268,10 @@ export function MaterialRequestDetailPage() {
             aria-label={`Quantity for ${row.item_name ?? row.item_code ?? "line"}`}
             value={shown(row)}
             onChange={(e) =>
-              setEdits((current) => ({ ...current, [row.id]: e.target.value }))}
+              setEdits((current) => ({
+                ...current,
+                [row.id]: sanitizeQuantityInput(e.target.value),
+              }))}
             className="w-28"
           />
           <span className="text-xs text-muted">{row.uom_code ?? ""}</span>

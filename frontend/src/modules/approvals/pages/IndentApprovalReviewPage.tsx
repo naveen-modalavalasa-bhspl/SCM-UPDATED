@@ -10,6 +10,7 @@ import type { ReactNode } from "react";
 import { Button, Card, ConfirmModal, PageHeader, StatusPill } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { fmtDate } from "@/shared/datetime";
+import { sanitizeQuantityInput } from "@/shared/quantity";
 import { approvalsApi } from "../api";
 import { IssueFromStockPanel } from "../components/IssueFromStockPanel";
 import { HistoryTimeline } from "../components/HistoryTimeline";
@@ -155,7 +156,7 @@ function QuantityField({
           aria-invalid={Boolean(error)}
           aria-describedby={`qty-help-${line.id}`}
           value={value}
-          onChange={(event) => onChange(event.target.value)}
+          onChange={(event) => onChange(sanitizeQuantityInput(event.target.value))}
           className={`h-full min-w-0 flex-1 rounded-xl bg-transparent px-3 text-right font-semibold tabular-nums outline-none ${
             isZero ? "text-danger" : "text-ink"
           }`}

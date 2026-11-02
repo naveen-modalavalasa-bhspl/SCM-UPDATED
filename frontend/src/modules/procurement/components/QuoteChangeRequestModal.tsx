@@ -5,6 +5,7 @@ import { AlertTriangle, ArrowRight, TrendingDown, TrendingUp } from "lucide-reac
 import { ErrorBanner, NoticeChip, Textarea, useToast } from "@/shared/components";
 import { Button } from "./ActionButton";
 import { rfqApi } from "../api";
+import { sanitizeQuantityInput } from "@/shared/quantity";
 import type { Quotation, QuoteItem } from "../types";
 import {
   CombinationPicker, askedLabel, combinationKey, combinationLabel, comboFrom, comboPayload,
@@ -274,7 +275,7 @@ export function QuoteChangeRequestModal({ quote, onClose }: {
                                 type="text" inputMode="decimal"
                                 className="mt-0.5 h-9 w-full rounded-md border border-line bg-content1 px-2 text-sm text-ink outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
                                 value={d.quantity}
-                                onChange={(e) => update(d.quotation_item_id, { quantity: e.target.value })}
+                                onChange={(e) => update(d.quotation_item_id, { quantity: sanitizeQuantityInput(e.target.value) })}
                                 aria-label="Proposed quantity"
                               />
                             </label>

@@ -9,6 +9,7 @@ import {
 import { Button } from "../components/ActionButton";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { fmtDate } from "@/shared/datetime";
+import { sanitizeQuantityInput } from "@/shared/quantity";
 import { approvalTrailApi, approvalTrailKey, rfqApi } from "../api";
 import { ApprovalTrail } from "../components/ApprovalTrail";
 import {
@@ -274,7 +275,7 @@ export function RFQDetailPage() {
           <input
             type="text" inputMode="decimal" className="h-11 w-28 rounded-md border border-line bg-content1 px-3 text-sm text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
             value={qtyEdits[r.id] ?? String(r.quantity)}
-            onChange={(e) => setQtyEdits((current) => ({ ...current, [r.id]: e.target.value }))}
+            onChange={(e) => setQtyEdits((current) => ({ ...current, [r.id]: sanitizeQuantityInput(e.target.value) }))}
             title="Approved quantity — up to the source document quantity; 0 removes the line."
             aria-label={`Quantity for ${r.item_name ?? r.item_id}`}
           />
@@ -543,7 +544,7 @@ export function RFQDetailPage() {
                             <input
                               type="text" inputMode="decimal" className="h-11 w-28 rounded-md border border-line bg-content1 px-3 text-sm text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
                               value={qtyEdits[r.id] ?? String(r.quantity)}
-                              onChange={(e) => setQtyEdits((current) => ({ ...current, [r.id]: e.target.value }))}
+                              onChange={(e) => setQtyEdits((current) => ({ ...current, [r.id]: sanitizeQuantityInput(e.target.value) }))}
                               aria-label={`Quantity for ${r.item_name ?? r.item_id}`}
                             />
                             <span className="text-xs text-muted">{r.uom_code ?? ""}</span>

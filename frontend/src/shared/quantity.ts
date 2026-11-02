@@ -81,3 +81,24 @@ export function splitQuantity(
   }
   return given.map((units) => units / scale);
 }
+
+/**
+ * Keystroke filter for a quantity typed into a plain text box (the ones that are
+ * deliberately not `type="number"` — no spinner, no wheel stepping).
+ *
+ * A text box takes whatever it is given, so letters used to land in the field and only
+ * an error message afterwards said they should not be there. Run the typed or pasted
+ * value through this in `onChange` and they never appear: only digits and a single
+ * decimal point survive, the fraction is cut to the unit's `decimals`, and a whole-unit
+ * unit (NOS, BOX — `decimals` 0) loses the point and everything after it.
+ *
+ * A half-typed number is allowed to exist ("5." and "" and ".5"): the keyboard filters,
+ * validation still judges.
+ */
+export function sanitizeQuantityInput(raw: string, decimals = 3): string {
+  const cleaned = raw.replace(/[^\d.]/g, "");
+  const [whole, ...rest] = cleaned.split(".");
+  if (decimals <= 0) return whole;
+  if (rest.length === 0) return whole;
+  return `${whole}.${rest.join("").slice(0, decimals)}`;
+}
