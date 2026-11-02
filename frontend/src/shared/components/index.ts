@@ -3,6 +3,7 @@
  */
 export { BackLink, Button, Card, PageHeader, StatCard, Field, Input, Textarea, Select, selectOnFocus } from "./ui";
 export { StatusPill } from "./StatusPill";
+export { NotificationItem, timeAgo } from "./NotificationItem";
 export { ResponsiveList, type Column } from "./ResponsiveList";
 export { ResponsiveGrid } from "./ResponsiveGrid";
 export { ScrollBox } from "./ScrollBox";

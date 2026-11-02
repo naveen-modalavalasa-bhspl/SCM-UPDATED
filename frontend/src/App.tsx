@@ -168,6 +168,7 @@ const RulesPage = lazy(() => import("@/modules/admin/pages/RulesPage").then((m) 
 const SettingsPage = lazy(() => import("@/modules/settings/pages/SettingsPage").then((m) => ({ default: m.SettingsPage })));
 const MonthlyIndentPage = lazy(() => import("@/modules/settings/pages/MonthlyIndentPage").then((m) => ({ default: m.MonthlyIndentPage })));
 const StockAdjustmentsView = lazy(() => import("@/modules/inventory/components/StockAdjustmentsView").then((m) => ({ default: m.StockAdjustmentsView })));
+const StockAuditFormPage = lazy(() => import("@/modules/inventory/pages/StockAuditFormPage"));
 const StockBalanceView = lazy(() => import("@/modules/inventory/components/StockBalanceView").then((m) => ({ default: m.StockBalanceView })));
 const StockLedgerView = lazy(() => import("@/modules/inventory/components/StockLedgerView").then((m) => ({ default: m.StockLedgerView })));
 const StockMovementPrintPage = lazy(() => import("@/modules/warehouse/pages/StockMovementPrintPage").then((m) => ({ default: m.StockMovementPrintPage })));
@@ -625,6 +626,7 @@ function AppRoutes() {
         <Route path="inventory/transfers/issues/:id"
                element={<MaterialIssueForm basePath="/inventory/transfers/issues" />} />
         <Route path="inventory/adjustments" element={<StockAdjustmentsView />} />
+        <Route path="inventory/adjustments/new" element={<StockAuditFormPage />} />
         <Route path="inventory/stock-edits" element={<StockEditsPage />} />
         <Route path="accounts" element={<Navigate to="/accounts/payments" replace />} />
         <Route path="accounts/payments" element={<VendorPaymentsPage />} />

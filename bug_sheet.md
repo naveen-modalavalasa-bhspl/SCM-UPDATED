@@ -299,6 +299,28 @@ titles itself `"DC/DOD - Document of Deliverable"` (line 80).
 
 ---
 
+### SCM_0079 — DC/DOD Document: Missing field data not fetched or displayed 🟢
+**Report:** In the Logistics DC/DOD document (Gate Pass), several fields are not fetched or displayed:
+- From Address displays `—`
+- Contact and Contact Phone display `—`
+- Received by displays `—` during in-transit / pending approval
+- Weight (kg) shows `—` and Total 0 when no package weights were entered
+
+**Root cause:**
+- `from_warehouse_address` was not populated because `whs_warehouses.address` is empty across synced records, and neither the warehouse consignment builder nor transport request creation fell back to the warehouse's linked office geographic details (`mandal_name`, `district_name`, `state_name` from `hcm_offices`).
+- `contact_person` and `contact_phone` were not captured on forms and were not auto-inherited from the underlying Material Issue (`issued_to` employee), Indent (requester), or destination warehouse in-charge.
+- `received_by_name` is legitimately null before the load is delivered/acknowledged at the destination, but displaying a bare dash caused confusion alongside the physical signature box.
+- Weight (kg) column was rendered unconditionally, displaying dashes and 0 when weight details were omitted during packing.
+
+**Fix:**
+1. In `GatePassPrintPage.tsx`, conditionally render the Weight (kg) column and total only when weight details are present (`hasWeight`), cleanly hiding the column when omitted per user instruction.
+2. In `GatePassPrintPage.tsx`, display `"Pending receipt (to be signed)"` during transit/pending approval states instead of a bare dash.
+3. In `warehouse/service.py` and `logistics/transport.py`, auto-resolve warehouse origin address from linked office/facility location when warehouse address is empty.
+4. Auto-inherit destination `contact_person` and `contact_phone` from the Material Issue's `issued_to` employee or Indent requester.
+5. In `get_tr` and `get_dispatch`, auto-decorate missing address and contact fields on read so existing documents also display complete information.
+
+---
+
 ### SCM_0061 — Save Consignment inactive with no validation message 🟢
 **Report:** Save button inactive; no message explaining what's missing.
 

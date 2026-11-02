@@ -1418,7 +1418,7 @@ async def send_back_po(db: AsyncSession, po_id: int, comments: str, user) -> Pur
         await notifications.notify(
             db, [int(owner_id)], title=f"{po.po_no} sent back to you",
             body=f"{user.full_name}: {reason}",
-            entity_type="PO", entity_id=po.id, deep_link=f"/procurement/pos/{po.id}")
+            entity_type="PO", entity_id=po.id, deep_link=f"/pos/{po.id}")
     await db.commit()
     await db.refresh(po)
     return await get_po_detail(db, po.id, user)
@@ -1601,7 +1601,7 @@ async def pass_po_correction_down(db: AsyncSession, po_id: int, comments: str,
         await notifications.notify(
             db, [int(owner_id)], title=f"{po.po_no} sent back to you",
             body=f"{user.full_name}: {reason}",
-            entity_type="PO", entity_id=po.id, deep_link=f"/procurement/pos/{po.id}")
+            entity_type="PO", entity_id=po.id, deep_link=f"/pos/{po.id}")
     await db.commit()
     await db.refresh(po)
     return await get_po_detail(db, po.id, user)
@@ -4618,8 +4618,11 @@ async def propose_quote_change(db: AsyncSession, quotation_id: int,
     await db.commit()
     await db.refresh(cr)
 
-    await notifications.notify(
-        db, [quote.vendor_id], title=f"{quote.quotation_no} — the buyer proposed changes",
+    # The VENDOR's own bell. `notifications.notify` is keyed on employee ids, so handing
+    # it a vendor id filed this in the bell of whichever employee shares that number,
+    # with a supplier-portal link they could not open (found fixing SCM_0074/0075).
+    await notify_vendor(
+        db, quote.vendor_id, title=f"{quote.quotation_no} — the buyer proposed changes",
         body=f"{cr.proposed_by_name or 'The buyer'} asked for changes on "
              f"{rfq.rfq_no} ({cr.cr_no}). Review and respond on your portal.",
         entity_type="QUOTATION", entity_id=quote.id,
@@ -6368,7 +6371,7 @@ async def _revert_rejected_amendment(db: AsyncSession, po: PurchaseOrder,
     body += f". The order is back to revision {po.revision_no}."
     await notifications.notify(
         db, [po.created_by_id], title=f"{po.po_no} - amendment declined", body=body,
-        entity_type="PO", entity_id=po.id, deep_link=f"/procurement/pos/{po.id}")
+        entity_type="PO", entity_id=po.id, deep_link=f"/pos/{po.id}")
     logger.info("%s revision %s declined by vendor; reverted to revision %s",
                 po.po_no, declined, po.revision_no)
     return True
@@ -6613,6 +6616,8 @@ async def vendor_save_despatch_note(db: AsyncSession, vendor_id: int, po_id: int
     # for a day that has not happened.
     if data.invoice_date and data.invoice_date > today:
         raise ValidationError(f"Invoice date {data.invoice_date} is in the future")
+    if data.invoice_amount is not None and data.invoice_amount < 0:
+        raise ValidationError("Invoice amount cannot be negative")
 
     # REQ_111 — one PO line may be sent in several batches, one note line per batch.
     # The ceiling is therefore checked on the SUM of this note's lines per PO line:

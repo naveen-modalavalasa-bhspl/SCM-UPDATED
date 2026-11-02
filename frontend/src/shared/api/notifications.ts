@@ -18,8 +18,37 @@ export interface NotificationRow {
   entity_type?: string | null;
   entity_id?: number | null;
   deep_link?: string | null;
+  /** Where a click goes, resolved by the server on read (SCM_0074/0075): the row's own
+   *  document, with stale or generic links already corrected. */
+  target?: string | null;
   is_read: boolean;
   created_at: string;
+}
+
+/** Where opening this notification goes. A row with no document behind it opens the
+ *  Alerts & Notifications page focused on itself — never a click that does nothing. */
+export const notificationHref = (row: NotificationRow): string =>
+  row.target ?? row.deep_link ?? `/notifications?tab=all&focus=${row.id}`;
+
+/** Does the row point at a document (true), or only at itself on the inbox (false)? */
+export const hasDocument = (row: NotificationRow): boolean => !!(row.target ?? row.deep_link);
+
+export type NotificationKind =
+  | "indent" | "procurement" | "warehouse" | "transfer" | "allocation" | "stock"
+  | "logistics" | "approval" | "update";
+
+/** What the notification is about, from its entity type — drives the icon and label. */
+export function notificationKind(row: NotificationRow): NotificationKind {
+  const t = (row.entity_type ?? "").toUpperCase();
+  if (t.startsWith("INDENT") || t === "MONTHLY_INDENT") return "indent";
+  if (["PO", "RFQ", "QUOTATION", "REQUISITION", "CONSOLIDATION", "MR", "DESPATCH_NOTE"].includes(t)) return "procurement";
+  if (["WH_ISSUE", "ISSUE", "OWN_STOCK_ISSUE", "FORWARD_ISSUE", "GRN", "RECEIPT", "DISPATCH", "PURCHASE_RETURN"].includes(t)) return "warehouse";
+  if (t.startsWith("STOCK_TRANSFER") || t === "STOCK_MOVEMENT_ORDER") return "transfer";
+  if (t.includes("ALLOCATION")) return "allocation";
+  if (["STK_BALANCE", "STOCK_ADJUSTMENT", "STOCK_EDIT"].includes(t)) return "stock";
+  if (t === "TRANSPORT_REQUEST") return "logistics";
+  if (["REMINDER", "ESCALATION", "APPROVAL_QUEUE"].includes(t)) return "approval";
+  return "update";
 }
 
 export interface Paginated<T> {

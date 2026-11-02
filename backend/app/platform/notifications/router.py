@@ -12,7 +12,7 @@ service.py of its own.
 from datetime import datetime
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, computed_field
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,6 +20,7 @@ from app.core.database import get_db
 from app.core.dependencies import get_current_user
 from app.core.exceptions import NotFoundError
 from app.core.pagination import Page, PageParams, paginate
+from app.platform.notifications.service import resolve_link
 from app.platform.settings.models import Notification
 
 router = APIRouter(prefix="/api/notifications", tags=["notifications"])
@@ -35,6 +36,13 @@ class NotificationRow(BaseModel):
     deep_link: str | None = None
     is_read: bool
     created_at: datetime
+
+    @computed_field
+    @property
+    def target(self) -> str | None:
+        """Where a click goes (SCM_0074/0075): the row's own document, resolved on
+        read so old rows with a stale or generic link open the right screen too."""
+        return resolve_link(self.deep_link, self.entity_type, self.entity_id)
 
 
 class UnreadCount(BaseModel):

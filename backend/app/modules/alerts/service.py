@@ -506,6 +506,29 @@ _DEFINITIONS: list[AlertDef] = [
         "stock.audit.saved", AlertVariant.SUCCESS, "Stock audit saved",
         "{number} is {status}.",
     ),
+    # SCM_0119 (2026-10-31): a stock audit's submit always says how it ended — saved
+    # and waiting, saved with nothing short, not ready, or not saved and why.
+    _alert(
+        "stock.audit.submitted", AlertVariant.SUCCESS, "Stock audit submitted",
+        "{number} is saved and waiting for approval. {qty} will be written off once "
+        "it is approved.",
+    ),
+    _alert(
+        "stock.audit.recorded", AlertVariant.SUCCESS, "Stock audit recorded",
+        "{number} is saved. Every line matched the system, so nothing was written off.",
+    ),
+    _alert(
+        "stock.audit.incomplete", AlertVariant.WARNING, "Stock audit not ready",
+        "{reason}",
+    ),
+    _alert(
+        "stock.audit.failed", AlertVariant.ERROR, "Stock audit not saved",
+        "{reason} Nothing was saved — correct it and submit again.",
+    ),
+    _alert(
+        "adjustment.action_failed", AlertVariant.ERROR, "Not done",
+        "{number} was not {action}: {reason}",
+    ),
     _alert(
         "adjustment.approved", AlertVariant.SUCCESS, "Adjustment approved",
         "{item} now reads {qty}.",

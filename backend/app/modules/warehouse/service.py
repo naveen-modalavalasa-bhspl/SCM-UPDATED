@@ -51,7 +51,8 @@ from app.modules.warehouse import schemas as s
 from app.modules.warehouse import storage_types
 from app.modules.warehouse import unlocated
 from app.modules.warehouse.enums import (
-    DEAD_ISSUE_STATUSES, UNSERVED_ISSUE_STATUSES, QC_OUTWARD_CREATE, QC_OUTWARD_VIEW, RECEIPT_CREATE,
+    DEAD_ISSUE_STATUSES, UNSERVED_ISSUE_STATUSES, QC_OUTWARD_CREATE, QC_OUTWARD_UPDATE,
+    QC_OUTWARD_VIEW, RECEIPT_CREATE, ISSUE_CREATE, DISPATCH_CREATE, INSPECTION_EXECUTE,
     SINGLE_ISSUE_REF_TYPES, STOCK_VIEW,
     ConsignmentRefType, DispatchEventType, DispatchSourceType, DispatchStatus, DispatchType, InspectionResult, InspectionStatus,
     InspectionType, IssueDirection, IssueStatus, IssueType, PackageStatus,
@@ -447,6 +448,41 @@ _ATTACHMENT_PARENTS = {
 
 #: What an outward-QC grant alone (no stock.view / receipt.create) may file against.
 _QC_OUTWARD_ATTACHMENT_TYPES = {"OUTBOUND_INSPECTION"}
+
+
+# The permission that may FILE or REMOVE a document against each parent (2026-10-30).
+# It is the grant that WRITES the document itself — a gate pass on a material issue
+# needs issue.create, a consignment's paperwork needs dispatch.create, inbound QC its
+# execute grant, outward QC its own pair — never a blanket receipt.create for every
+# kind. This is the write half of _ATTACHMENT_PARENTS, which gates the read.
+_ATTACHMENT_WRITE_PERMS: dict[str, tuple[str, ...]] = {
+    "RECEIPT": (RECEIPT_CREATE,),
+    "INSPECTION": (INSPECTION_EXECUTE,),
+    "ISSUE": (ISSUE_CREATE,),
+    "DISPATCH": (DISPATCH_CREATE,),
+    "OUTBOUND_INSPECTION": (QC_OUTWARD_CREATE, QC_OUTWARD_UPDATE),
+}
+
+
+async def assert_can_write_attachment(db: AsyncSession, user, entity_type: str) -> None:
+    """May this login file or remove a document of this kind?
+
+    Gated on the permission that writes the parent document, so a file follows its own
+    document rather than sharing one permission with every other kind (2026-10-30).
+    Raised in the same shape as `require_permission` ("Missing permission: <code>"), so
+    the screen names the exact permission to ask an administrator for.
+    """
+    if user is None:
+        return
+    allowed = _ATTACHMENT_WRITE_PERMS.get((entity_type or "").upper())
+    if allowed is None:
+        raise ValidationError(
+            f"{entity_type!r} is not a document files can be filed against")
+    from app.platform.rbac.service import get_user_permissions
+    granted = await get_user_permissions(
+        db, user, getattr(user, "active_position_id", None))
+    if not any(code in granted for code in allowed):
+        raise PermissionError_(f"Missing permission: {allowed[0]}")
 
 
 async def assert_attachment_scope(db: AsyncSession, user, entity_type: str,
@@ -11152,6 +11188,116 @@ async def _is_final_delivery_leg(
     return point is None or point.id == dispatch.to_warehouse_id
 
 
+async def _resolve_warehouse_address(db: AsyncSession, wh: Warehouse | None) -> str | None:
+    if not wh:
+        return None
+    if wh.address and wh.address.strip():
+        return wh.address.strip()
+    if wh.office_id:
+        from app.platform.hcm.models import HcmOffice
+        office = await db.get(HcmOffice, wh.office_id)
+        if office:
+            if office.address and office.address.strip():
+                return office.address.strip()
+            parts = []
+            if office.raw:
+                try:
+                    raw_data = json.loads(office.raw) if isinstance(office.raw, str) else office.raw
+                    if isinstance(raw_data, dict):
+                        for k in ("location", "mandal_name", "district_name", "state_name"):
+                            v = raw_data.get(k)
+                            if v and str(v).strip() and str(v).strip() not in parts:
+                                parts.append(str(v).strip())
+                except Exception:
+                    pass
+            if not parts:
+                if office.city and office.city.strip():
+                    parts.append(office.city.strip())
+                if office.state and office.state.strip():
+                    parts.append(office.state.strip())
+            if parts:
+                return ", ".join(parts)
+            if office.name and office.name.strip():
+                return office.name.strip()
+    return wh.name or None
+
+
+async def _resolve_consignment_contact(
+    db: AsyncSession,
+    data_contact_person: str | None,
+    data_contact_phone: str | None,
+    issues: list[m.MaterialIssue],
+    to_wh: Warehouse | None = None,
+    destination_office_id: int | None = None,
+) -> tuple[str | None, str | None]:
+    person_name = (data_contact_person or "").strip() or None
+    phone = (data_contact_phone or "").strip() or None
+    if person_name and phone:
+        return person_name, phone
+
+    from app.platform.hcm.models import HcmEmployee, HcmOffice
+    from app.modules.indents.models import Indent
+
+    # 1. From issues: issued_to employee
+    for iss in issues:
+        if not iss:
+            continue
+        if not person_name and iss.issued_to_name:
+            person_name = iss.issued_to_name.strip()
+        if not phone and iss.issued_to_id:
+            emp = await db.get(HcmEmployee, iss.issued_to_id)
+            if emp:
+                if not person_name and emp.full_name:
+                    person_name = emp.full_name.strip()
+                if emp.mobile:
+                    phone = emp.mobile.strip()
+        if person_name and phone:
+            return person_name, phone
+
+    # 2. From indents behind issues
+    for iss in issues:
+        if not iss:
+            continue
+        if iss.indent_id:
+            indent = await db.get(Indent, iss.indent_id)
+            if indent and indent.created_by_id:
+                creator = await db.get(HcmEmployee, indent.created_by_id)
+                if creator:
+                    if not person_name and creator.full_name:
+                        person_name = creator.full_name.strip()
+                    if not phone and creator.mobile:
+                        phone = creator.mobile.strip()
+        if person_name and phone:
+            return person_name, phone
+
+    # 3. From destination warehouse incharge
+    if to_wh:
+        if not person_name and to_wh.incharge_name:
+            person_name = to_wh.incharge_name.strip()
+        if not phone and to_wh.incharge_id:
+            incharge = await db.get(HcmEmployee, to_wh.incharge_id)
+            if incharge:
+                if not person_name and incharge.full_name:
+                    person_name = incharge.full_name.strip()
+                if incharge.mobile:
+                    phone = incharge.mobile.strip()
+        if person_name and phone:
+            return person_name, phone
+
+    # 4. From destination office phone
+    if destination_office_id and not phone:
+        dest_off = await db.get(HcmOffice, destination_office_id)
+        if dest_off and dest_off.raw:
+            try:
+                raw_off = json.loads(dest_off.raw) if isinstance(dest_off.raw, str) else dest_off.raw
+                if isinstance(raw_off, dict) and raw_off.get("phone"):
+                    phone = str(raw_off["phone"]).strip()
+            except Exception:
+                pass
+
+    return person_name, phone
+
+
 async def _decorate_dispatch_destination(
     db: AsyncSession,
     dispatch: m.Dispatch,
@@ -11164,6 +11310,22 @@ async def _decorate_dispatch_destination(
     setattr(dispatch, "destination_office_id", office_id)
     setattr(dispatch, "destination_office_name", office_name)
     setattr(dispatch, "destination_office_sac", await _office_sac(db, office_id))
+    # SCM_0079: ensure origin warehouse_address and destination contact details are populated
+    if not (dispatch.warehouse_address or "").strip() and dispatch.warehouse_id:
+        wh = await db.get(Warehouse, dispatch.warehouse_id)
+        if wh:
+            resolved_addr = await _resolve_warehouse_address(db, wh)
+            if resolved_addr:
+                dispatch.warehouse_address = resolved_addr
+    if (not (dispatch.contact_person or "").strip() or not (dispatch.contact_phone or "").strip()) and issue:
+        to_wh = await db.get(Warehouse, dispatch.to_warehouse_id) if dispatch.to_warehouse_id else None
+        cp, cph = await _resolve_consignment_contact(
+            db, dispatch.contact_person, dispatch.contact_phone, [issue], to_wh, office_id
+        )
+        if not (dispatch.contact_person or "").strip() and cp:
+            dispatch.contact_person = cp
+        if not (dispatch.contact_phone or "").strip() and cph:
+            dispatch.contact_phone = cph
     return dispatch
 
 
@@ -16003,6 +16165,11 @@ async def _build_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -
     _, destination_office_name = await _issue_destination(db, issue)
     project_id, project_name = await _consignment_project(db, issue, data.project_id)
 
+    warehouse_addr = await _resolve_warehouse_address(db, wh)
+    resolved_cp, resolved_cph = await _resolve_consignment_contact(
+        db, data.contact_person, data.contact_phone, issues, to_wh
+    )
+
     dispatch = m.Dispatch(
         items=[], packages=[], events=[], sources=[],
         # From the issue it ships — see the note on the GRN above.
@@ -16011,7 +16178,7 @@ async def _build_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -
         dispatch_date=data.dispatch_date,
         warehouse_id=wh.id,
         warehouse_name=wh.name,
-        warehouse_address=wh.address,
+        warehouse_address=warehouse_addr,
         to_warehouse_id=to_wh.id if to_wh else None,
         to_warehouse_name=to_wh.name if to_wh else None,
         customer_id=data.customer_id,
@@ -16024,8 +16191,8 @@ async def _build_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -
         project_name=project_name,
         delivery_address=(data.delivery_address
                           or _address_without_vehicle(destination_office_name)),
-        contact_person=data.contact_person,
-        contact_phone=data.contact_phone,
+        contact_person=resolved_cp,
+        contact_phone=resolved_cph,
         ref_type=(ConsignmentRefType.MULTI_ISSUE.value if multi
                   else ConsignmentRefType.WH_ISSUE.value),
         ref_id=None if multi else issue.id,
@@ -16090,8 +16257,7 @@ async def update_consignment(db: AsyncSession, dispatch_id: int, data: s.Consign
     dispatch.dispatch_type = data.dispatch_type.value
     dispatch.dispatch_date = data.dispatch_date
     dispatch.warehouse_id = wh.id
-    dispatch.warehouse_name = wh.name
-    dispatch.warehouse_address = wh.address
+    dispatch.warehouse_address = await _resolve_warehouse_address(db, wh)
     dispatch.to_warehouse_id = to_wh.id if to_wh else None
     dispatch.to_warehouse_name = to_wh.name if to_wh else None
     dispatch.customer_id = data.customer_id
@@ -16100,8 +16266,11 @@ async def update_consignment(db: AsyncSession, dispatch_id: int, data: s.Consign
     dispatch.project_id = data.project_id or issue.project_id
     dispatch.delivery_address = (data.delivery_address
                                  or _address_without_vehicle(destination_office_name))
-    dispatch.contact_person = data.contact_person
-    dispatch.contact_phone = data.contact_phone
+    resolved_cp, resolved_cph = await _resolve_consignment_contact(
+        db, data.contact_person, data.contact_phone, issues, to_wh
+    )
+    dispatch.contact_person = resolved_cp
+    dispatch.contact_phone = resolved_cph
     dispatch.ref_type = (ConsignmentRefType.MULTI_ISSUE.value if multi
                          else ConsignmentRefType.WH_ISSUE.value)
     dispatch.ref_id = None if multi else issue.id
@@ -23929,7 +24098,12 @@ async def add_attachment(db: AsyncSession, *, entity_type: str, entity_id: int,
     is the same check the list and download routes have run since they were fixed; it
     also refuses an `entity_type` that is not one of the four, so the form field can no
     longer file bytes under an arbitrary key that only another module reads.
+
+    The create PERMISSION is checked here too (2026-10-30), per entity_type, since the
+    route no longer gates it: a gate pass on an issue takes issue.create, not the blanket
+    receipt.create the one route used to demand of every document kind.
     """
+    await assert_can_write_attachment(db, user, entity_type)
     await assert_attachment_scope(db, user, entity_type, entity_id)
     return await attachments.add_attachment(
         db, entity_type=entity_type, entity_id=entity_id, upload=upload,
@@ -23946,6 +24120,7 @@ async def delete_attachment(db: AsyncSession, attachment_id: int, user) -> None:
     """
     row = await attachments.require_attachment(
         db, attachment_id, entity_type=tuple(_ATTACHMENT_PARENTS))
+    await assert_can_write_attachment(db, user, row.entity_type)
     await assert_attachment_scope(db, user, row.entity_type, row.entity_id)
     await attachments.delete_attachment(
         db, attachment_id, user,
@@ -27954,77 +28129,23 @@ async def transport_acknowledged(db: AsyncSession, tr, user) -> None:
 async def write_off_units_for_adjustment(
     db: AsyncSession, adjustment, adj_item, user
 ) -> None:
-    """Retire a write-off line's unit codes the moment its stock leaves.
+    """Retire what an approved stock-audit write-off line named, the moment its stock
+    leaves — the units, AND the packs around them (2026-10-31).
 
-    The audit's OUT movement shrinks `stk_balance`; the units on `whs_serial_numbers`
-    would otherwise still read `available`, and the issue screen's code auto-fill and
-    picker would keep offering codes for units the audit just declared gone. This is
-    the codes' half of the same posting: same transaction, so they are retired with
-    the stock or not at all.
-
-    `adj_item.serial_numbers` are the codes the auditor PICKED on the form, matched
-    to this line's item, batch and bin; a code naming some other unit is refused, so
-    the audit cannot retire stock it did not name. When it names none, the damaged
-    units had no known identity worth telling apart — the oldest N available codes
-    on the (item, batch, bin) are retired instead, so the unit rows stay in step
-    with the balance and the picker cannot offer them.
-
-    Registered on `inventory.hooks.ON_ADJUSTMENT_OUT` at import time; inventory may
-    not import warehouse (rule 5).
+    Registered on `inventory.hooks.ON_ADJUSTMENT_OUT` at import time; inventory may not
+    import warehouse (rule 5). The rules — UNITS / CODES / QUANTITY per lot, exact picks,
+    packs consumed and shrunk — live in `audit_writeoff`, beside the validator that
+    checked the same picks when the audit was raised.
     """
-    wanted = int(_d(adj_item.quantity or 0))
-    if wanted <= 0:
-        return
-    picked = [str(c).strip() for c in (adj_item.serial_numbers or []) if str(c).strip()]
+    from app.modules.warehouse import audit_writeoff
+    await audit_writeoff.write_off(db, adjustment, adj_item, user)
 
-    stmt = (
-        select(m.SerialNumber)
-        .where(
-            m.SerialNumber.item_id == adj_item.item_id,
-            m.SerialNumber.warehouse_id == adjustment.warehouse_id,
-            m.SerialNumber.status == SerialStatus.AVAILABLE.value,
-            m.SerialNumber.is_active.is_(True),
-            m.SerialNumber.batch_id == (adj_item.batch_id or None),
-            m.SerialNumber.bin_id == (adj_item.bin_id or None),
-        )
-        .order_by(m.SerialNumber.id.asc())
-        .with_for_update()
-    )
-    rows = (await db.execute(stmt)).scalars().all()
-    by_code = {}
-    for row in rows:
-        for code in (row.serial_number, row.imei, row.asset_code, row.consumable_code):
-            if code:
-                by_code[code] = row
 
-    if picked:
-        missing = [c for c in picked if c not in by_code]
-        if missing:
-            raise ValidationError(
-                f"{len(missing)} of the codes picked on this audit line are not "
-                f"available units of this item at this batch and location "
-                f"(e.g. {', '.join(missing[:3])}) — the audit cannot write them off"
-            )
-        victims = [by_code[c] for c in picked]
-    else:
-        # Unclaimed units first. Retiring a code an open issue already holds would
-        # leave that issue naming a unit that no longer exists, and it would fail at
-        # posting; only when the free ones run out are claimed ones taken.
-        def claimed(row) -> bool:
-            return any((row.remarks or "").startswith(prefix)
-                       for prefix in _CLAIMED_REMARK_PREFIXES)
-        victims = sorted(rows, key=lambda row: (claimed(row), row.id))[:wanted]
-    if not victims:
-        return
-
-    label = f"Written off by {adjustment.adjustment_no}"
-    await _set_unit_fields(
-        db,
-        [row.id for row in victims],
-        status=SerialStatus.SCRAPPED.value,
-        is_active=False,
-        remarks=label,
-    )
+async def validate_audit_write_off(db: AsyncSession, warehouse_id: int, line, qty) -> None:
+    """`inventory.hooks.ON_ADJUSTMENT_VALIDATE`: a write-off line's codes must cover its
+    shortfall exactly, checked when the audit is raised (`audit_writeoff`)."""
+    from app.modules.warehouse import audit_writeoff
+    await audit_writeoff.validate_write_off(db, warehouse_id, line, qty)
 
 
 def _register_transport_hooks() -> None:
@@ -28072,6 +28193,8 @@ def _register_audit_write_off_hook() -> None:
 
     if write_off_units_for_adjustment not in inv_hooks.ON_ADJUSTMENT_OUT:
         inv_hooks.ON_ADJUSTMENT_OUT.append(write_off_units_for_adjustment)
+    if validate_audit_write_off not in inv_hooks.ON_ADJUSTMENT_VALIDATE:
+        inv_hooks.ON_ADJUSTMENT_VALIDATE.append(validate_audit_write_off)
 
 
 _register_audit_write_off_hook()
