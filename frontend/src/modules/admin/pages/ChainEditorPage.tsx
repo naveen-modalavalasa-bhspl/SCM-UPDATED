@@ -137,8 +137,17 @@ export function ChainEditorPage({ docType: fixedDocType, embedded = false }: {
       fallback_position_id: chain.data?.fallback_position_id ?? null,
     }, raiserRoleId),
     onSuccess: (saved) => {
-      toast.success(`Saved as v${saved.version}`);
+      if (steps.length === 0 && !noApproval) {
+        toast.success(
+          raiserRoleId
+            ? "Custom chain cleared — will follow default approval chain"
+            : "Custom chain cleared — will follow standard reporting hierarchy"
+        );
+      } else {
+        toast.success(`Saved as v${saved.version}`);
+      }
       setDirty(false);
+      setLoaded(false);
       queryClient.invalidateQueries({ queryKey: ["approval-flow"] });
       queryClient.invalidateQueries({ queryKey: ["approval-flow-chain"] });
       queryClient.invalidateQueries({ queryKey: ["approval-flow-versions"] });
@@ -269,12 +278,31 @@ export function ChainEditorPage({ docType: fixedDocType, embedded = false }: {
           className="mb-2 flex min-h-11 items-center gap-1 text-sm text-muted hover:text-body"
         >
           <ChevronLeft size={16} /> Approval Flow
+          {projectName && <span className="text-muted/70">· {projectName}</span>}
         </button>
       )}
 
       <PageHeader
         eyebrow={chain.data?.is_legacy ? "Built on the old screen" : undefined}
-        title={embedded ? `${label} approval chain` : label}
+        title={
+          <div className="flex flex-wrap items-center gap-2.5">
+            <span>{embedded ? `${label} approval chain` : label}</span>
+            <span
+              className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-semibold tracking-wide border ${
+                projectId
+                  ? "bg-primary/10 text-primary border-primary/25"
+                  : "bg-content2 text-muted border-line"
+              }`}
+            >
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${
+                  projectId ? "bg-primary" : "bg-muted"
+                }`}
+              />
+              {projectName ? projectName : "Company-wide (All projects)"}
+            </span>
+          </div>
+        }
         actions={
           <div className="flex gap-2">
             <Button variant="ghost" onClick={() => { setCopyTargets([]); setCopying(true); }}>
@@ -285,7 +313,7 @@ export function ChainEditorPage({ docType: fixedDocType, embedded = false }: {
             </Button>
             <Button
               onClick={() => save.mutate()}
-              disabled={!dirty || save.isPending || (!noApproval && steps.length === 0)}
+              disabled={!dirty || save.isPending}
             >
               {save.isPending ? "Saving…" : "Save"}
             </Button>

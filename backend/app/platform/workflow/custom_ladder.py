@@ -454,11 +454,53 @@ async def save_custom(db: AsyncSession, data, user) -> dict:
     order.
     """
     ladder_config_validate(data.doc_type)
-    # NO_APPROVAL is the one policy with nothing to tick: the document is born
-    # approved, so demanding a rung would make the setting unsaveable. Every other
-    # policy still needs at least one post or it would resolve to nobody.
+    raiser_role_id = getattr(data, "raiser_role_id", None)
+    raiser_role_name = None
+    if raiser_role_id is not None:
+        raiser_role_name = (await db.execute(
+            select(HcmPosition.role_name)
+            .where(HcmPosition.role_id == raiser_role_id,
+                   HcmPosition.role_name.isnot(None))
+            .limit(1)
+        )).scalar()
+
+    # Retire only this BUCKET's live rows. Retiring the whole scope is right when
+    # saving the default chain — one scope, one default, and an old rank ladder from
+    # the previous screen must not compete with it — but a chain pinned to Store
+    # Keeper says nothing about the one everybody else uses, and taking the default
+    # down with it would leave every other rank falling through to the reporting line.
+    previous = list((await db.execute(
+        select(Workflow).where(
+            Workflow.doc_type == data.doc_type,
+            (Workflow.project_id == data.project_id if data.project_id is not None
+             else Workflow.project_id.is_(None)),
+            (Workflow.raiser_role_id == raiser_role_id if raiser_role_id is not None
+             else Workflow.raiser_role_id.is_(None)),
+            Workflow.is_active.is_(True),
+        ).order_by(Workflow.version.desc(), Workflow.id.desc())
+    )).scalars().all())
+
+    # When all steps are removed under "Someone else must approve", clear this custom
+    # chain so documents revert back to the default chain (or reporting line).
     if not data.steps and data.self_approval_policy != ladder.POLICY_NONE:
-        raise ValidationError("Pick at least one approver")
+        for row in previous:
+            row.is_active = False
+            row.effective_to = utcnow().date()
+        if previous:
+            await write_audit(
+                db, entity="wf_workflows", entity_id=previous[0].id,
+                entity_no=previous[0].code,
+                action=AuditAction.UPDATE, actor=user,
+                before={"is_active": True}, after={"is_active": False},
+                summary=f"Custom approval ladder cleared "
+                        f"{f'for raisers at {raiser_role_name} ' if raiser_role_name else ''}"
+                        f"— reverted to {'default chain' if raiser_role_id else 'reporting line'}",
+            )
+        await db.commit()
+        logger.info("Custom approval ladder %s/%s/%s cleared by %s",
+                    data.project_id, data.doc_type, raiser_role_id,
+                    getattr(user, "full_name", user))
+        return await get_custom(db, data.project_id, data.doc_type, raiser_role_id)
 
     wanted_positions = [s.position_id for s in data.steps if s.position_id is not None]
     if wanted_positions:
@@ -489,31 +531,6 @@ async def save_custom(db: AsyncSession, data, user) -> dict:
         )).scalars().first()
         project_name = employee.project_name if employee else None
 
-    raiser_role_id = getattr(data, "raiser_role_id", None)
-    raiser_role_name = None
-    if raiser_role_id is not None:
-        raiser_role_name = (await db.execute(
-            select(HcmPosition.role_name)
-            .where(HcmPosition.role_id == raiser_role_id,
-                   HcmPosition.role_name.isnot(None))
-            .limit(1)
-        )).scalar()
-
-    # Retire only this BUCKET's live rows. Retiring the whole scope is right when
-    # saving the default chain — one scope, one default, and an old rank ladder from
-    # the previous screen must not compete with it — but a chain pinned to Store
-    # Keeper says nothing about the one everybody else uses, and taking the default
-    # down with it would leave every other rank falling through to the reporting line.
-    previous = list((await db.execute(
-        select(Workflow).where(
-            Workflow.doc_type == data.doc_type,
-            (Workflow.project_id == data.project_id if data.project_id is not None
-             else Workflow.project_id.is_(None)),
-            (Workflow.raiser_role_id == raiser_role_id if raiser_role_id is not None
-             else Workflow.raiser_role_id.is_(None)),
-            Workflow.is_active.is_(True),
-        ).order_by(Workflow.version.desc(), Workflow.id.desc())
-    )).scalars().all())
     version = max([w.version for w in previous], default=0) + 1
     for row in previous:
         # Retired, not deleted: documents already climbing it must still resolve their

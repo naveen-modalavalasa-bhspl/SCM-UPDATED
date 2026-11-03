@@ -325,7 +325,12 @@ async def test_single_reporting_manager_stage_climbs_to_final_top_pair(db):
     await engine.act(db, "INDENT", 44, "APPROVE", rm, context={"requester_position_id": 1000})
     assert {row.approver_id for row in (await db.execute(
         select(Pending).where(Pending.doc_id == 44)
-    )).scalars().all()} == {sph.id, coo.id}
+    )).scalars().all()} == {sph.id}
+
+    await engine.act(db, "INDENT", 44, "APPROVE", sph, context={"requester_position_id": 1000})
+    assert {row.approver_id for row in (await db.execute(
+        select(Pending).where(Pending.doc_id == 44)
+    )).scalars().all()} == {coo.id}
 
     final = await engine.act(
         db, "INDENT", 44, "APPROVE", coo, context={"requester_position_id": 1000},

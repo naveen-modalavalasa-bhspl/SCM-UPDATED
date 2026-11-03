@@ -71,7 +71,7 @@ export function Card({ children, className = "" }: { children: ReactNode; classN
 
 export function PageHeader({ eyebrow: _eyebrow, title, actions, back }: {
   eyebrow?: string;
-  title: string;
+  title: ReactNode;
   actions?: ReactNode;
   /** The way out of a screen you arrived AT rather than navigated to.
    *
@@ -367,18 +367,18 @@ function SearchableSelect({
 }) {
   const [inputValue, setInputValue] = useState("");
 
-  // Narrow the list as the user types.
-  // Whether the text in the box is the user's own search, or just the chosen
-  // option's name. Only a search narrows the list — opening a filled field must
-  // still offer every option, not only the one already chosen.
+  const encodeKey = (val: string | number | null | undefined) =>
+    val === "" ? "__empty__" : val == null ? null : String(val);
+
+  const decodeKey = (key: unknown) =>
+    key === "__empty__" || key == null ? "" : String(key);
+
   const [typing, setTyping] = useState(false);
   const selectedLabel = useMemo(
     () => (selected === null ? "" : options.find((o) => String(o.value) === selected)?.label ?? ""),
     [options, selected],
   );
-  // A value set from outside — a saved document opening, a prefill, an option list
-  // that arrives after the value — shows its name. Without this the box stayed empty
-  // over a value that was set (Warehouse / Department / Issued to on a saved issue).
+
   useEffect(() => {
     if (!typing) setInputValue(selectedLabel);
   }, [selectedLabel, typing]);
@@ -394,23 +394,27 @@ function SearchableSelect({
       <Autocomplete
         {...(common as any)}
         placeholder={placeholder ?? "Type to search…"}
-        // Controlled item list — we filter it ourselves (see filteredItems).
         items={filteredItems}
-        selectedKey={selected}
+        selectedKey={encodeKey(selected)}
         inputValue={inputValue}
-        onInputChange={(text) => { setInputValue(text); setTyping(text !== selectedLabel); }}
-        onBlur={() => { setTyping(false); setInputValue(selectedLabel); }}
+        onInputChange={(text) => {
+          setInputValue(text);
+          setTyping(text !== selectedLabel);
+        }}
+        onClose={() => {
+          setTyping(false);
+          setInputValue(selectedLabel);
+        }}
         onSelectionChange={(key) => {
           setTyping(false);
-          // Push the new value to the caller.
-          onChange(key == null ? "" : String(key));
-          // Sync the text box to show the selected item's label so the field
-          // looks right after a pick and after clearing.
-          if (key != null) {
-            const opt = options.find((o) => String(o.value) === String(key));
+          const rawKey = decodeKey(key);
+          onChange(rawKey);
+          if (rawKey !== "") {
+            const opt = options.find((o) => String(o.value) === rawKey);
             setInputValue(opt?.label ?? "");
           } else {
-            setInputValue("");
+            const opt = options.find((o) => o.value === "");
+            setInputValue(opt?.label ?? "");
           }
         }}
         inputProps={{
@@ -418,7 +422,7 @@ function SearchableSelect({
         }}
       >
         {(option: SelectOption) => (
-          <AutocompleteItem key={String(option.value)} textValue={option.label}>
+          <AutocompleteItem key={encodeKey(option.value) ?? "__empty__"} textValue={option.label}>
             <span className="block w-full truncate">{option.label}</span>
           </AutocompleteItem>
         )}

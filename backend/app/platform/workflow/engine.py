@@ -332,16 +332,27 @@ async def _holders_for_positions(
 async def _next_reporting_ladder_approvers(
     db: AsyncSession, instance: Instance, user, context: dict,
 ) -> tuple[list, bool]:
-    """Resolve the next reporting manager, or the final top-pair ANY_ONE group.
+    """Resolve the next reporting manager, climbing up HCM's position tree after
+    each approval until the final top authority (SPH / position with no parent) is reached.
 
-    This is an engine capability for one-stage REPORTING_MANAGER workflows: the
-    workflow row stays the same, but wf_pending advances up HCM's position tree after
-    each approval until the final authority pair is reached.
+    Climbs step-by-step: OE -> District Manager -> Regional Manager -> SPH.
     """
     if instance.current_stage_name == FINAL_REPORTING_STAGE_NAME:
         return [], False
 
     active_position_id = getattr(user, "active_position_id", None)
+    if active_position_id is None and getattr(user, "id", None):
+        assignments = (await db.execute(
+            select(HcmPositionAssignment.position_id)
+            .where(
+                HcmPositionAssignment.employee_id == user.id,
+                HcmPositionAssignment.is_active.is_(True),
+            )
+            .order_by(HcmPositionAssignment.is_primary.desc())
+        )).scalars().all()
+        if assignments:
+            active_position_id = assignments[0]
+
     active_position = (
         await hcm_service.get_position(db, active_position_id)
         if active_position_id is not None else None
@@ -349,23 +360,18 @@ async def _next_reporting_ladder_approvers(
     if not active_position or not active_position.parent_position_id:
         return [], False
 
-    next_position = await hcm_service.get_position(db, active_position.parent_position_id)
-    if not next_position:
-        return [], False
+    curr_pos = active_position
+    while curr_pos and curr_pos.parent_position_id:
+        next_pos = await hcm_service.get_position(db, curr_pos.parent_position_id)
+        if not next_pos:
+            break
+        holders = await _holders_for_positions(db, [next_pos.id], instance.started_by_id)
+        if holders:
+            is_final = (next_pos.parent_position_id is None)
+            return holders, is_final
+        curr_pos = next_pos
 
-    position_ids = [next_position.id]
-    is_final = False
-    if next_position.parent_position_id is None:
-        is_final = True
-    else:
-        top_position = await hcm_service.get_position(db, next_position.parent_position_id)
-        if top_position and top_position.parent_position_id is None:
-            position_ids.append(top_position.id)
-            is_final = True
-
-    return await _holders_for_positions(
-        db, position_ids, instance.started_by_id,
-    ), is_final
+    return [], False
 
 
 async def _notify_pending(db: AsyncSession, instance: Instance, approvers: list,
