@@ -4,7 +4,8 @@ import { PackageCheck } from "lucide-react";
 import { Button, Card, StatusPill } from "@/shared/components";
 import { approvalsApi } from "../api";
 import type { IndentAvailabilityLine } from "../types";
-import { guardNumberKeys } from "@/shared/quantity";
+import { QuantityInput } from "@/shared/components/QuantityInput";
+import { useUomDecimals } from "@/shared/hooks/useUomDecimals";
 
 const fmt = (value: number) => {
   const rounded = Math.round(value * 1000) / 1000;
@@ -181,6 +182,7 @@ function LineRow({ line, field, quantity, source, onQuantity, onSource }: {
   onQuantity: (value: string) => void;
   onSource: (value: string) => void;
 }) {
+  const uomDecimals = useUomDecimals();
   const spent = line.remainder === 0;
   // What THIS source can actually cover. "You hold" is the total across every point,
   // but an allocation comes out of one shelf, so the ceiling on the box is the chosen
@@ -218,17 +220,16 @@ function LineRow({ line, field, quantity, source, onQuantity, onSource }: {
         <div className="flex gap-2">
         <label className="block flex-1">
           <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">Issue</span>
-          <input
+          <QuantityInput
             className={field}
-            type="number" onKeyDown={guardNumberKeys}
+            decimals={uomDecimals(line.uom_code)}
             min={0}
             max={ceiling}
-            step="any"
             aria-label={`Issue quantity for ${line.item_name ?? line.item_code}`}
             placeholder={fmt(ceiling)}
             disabled={ceiling <= 0}
             value={quantity}
-            onChange={(e) => onQuantity(e.target.value)}
+            onChange={onQuantity}
           />
           {/* Said before submitting, not after. The gap between "you hold 505" and
               "this shelf has 5" is the whole confusion, so it is named where the

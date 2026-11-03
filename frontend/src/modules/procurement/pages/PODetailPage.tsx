@@ -27,7 +27,9 @@ import { formatPONo } from "@/shared/format";
 import { TONE_APPROVE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
 import { comboFrom, comboPayload } from "@/shared/combination";
 import { CombinationTag } from "@/shared/combination";
-import { guardNumberKeys } from "@/shared/quantity";
+import { QuantityInput } from "@/shared/components/QuantityInput";
+import { useUomDecimals } from "@/shared/hooks/useUomDecimals";
+import { quantityProblem } from "@/shared/quantity";
 
 const money = (value: number | null | undefined) =>
   new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value ?? 0);
@@ -246,6 +248,7 @@ export function PODetailPage() {
   // ── approval quantity editing (decrease only) ────────────────────────
   const [qtyDraft, setQtyDraft] = useState<Record<number, string>>({});
   const [qtyTouched, setQtyTouched] = useState(false);
+  const uomDecimals = useUomDecimals();
 
   useEffect(() => {
     if (po.data?.items) {
@@ -271,7 +274,15 @@ export function PODetailPage() {
   }, [qtyDraft, po.data?.items]);
 
   const hasQtyIncrease = qtyChanges.some((c) => c.quantity > c.prev);
-  const hasInvalidQty = qtyChanges.some((c) => c.quantity <= 0);
+  const lineById = new Map<number, any>((po.data?.items ?? []).map((it: any) => [it.id, it]));
+  // Zero is not a valid PO quantity here (a line is removed another way), and nothing
+  // finer than the unit allows, nothing above what the PO already holds.
+  const hasInvalidQty = qtyChanges.some((c) => {
+    const line = lineById.get(c.id);
+    return c.quantity <= 0 || Boolean(quantityProblem(String(c.quantity), {
+      decimals: uomDecimals(line?.uom_code), min: 0, max: c.prev, unit: line?.uom_code,
+    }));
+  });
 
   const saveQty = useMutation({
     mutationFn: () => poApi.updateApprovalQuantities(poId, qtyChanges.map((c) => ({ id: c.id, quantity: c.quantity }))),
@@ -552,13 +563,13 @@ export function PODetailPage() {
                             <div className="ml-auto flex max-w-[160px] flex-col items-end gap-1">
                               {isQtyChanged && <div className="text-[11px] font-semibold text-blue-700">was <span className="line-through">{prev.quantity}</span></div>}
                               <div className="flex items-center justify-end gap-1">
-                                <input
-                                  type="number" onKeyDown={guardNumberKeys}
+                                <QuantityInput
+                                  decimals={uomDecimals(item.uom_code)}
                                   min={1}
                                   max={original}
-                                  step="0.001"
                                   value={draftVal}
-                                  onChange={(e) => { setQtyDraft((s) => ({ ...s, [item.id]: e.target.value })); setQtyTouched(true); }}
+                                  aria-label={`Quantity for ${item.item_name ?? item.item_id}`}
+                                  onChange={(raw) => { setQtyDraft((s) => ({ ...s, [item.id]: raw })); setQtyTouched(true); }}
                                   className={`w-24 rounded-lg border px-2 py-1.5 text-right text-sm font-bold outline-none focus:ring-2 ${isIncrease ? "border-red-300 bg-red-50 text-red-700 ring-red-200" : isDecrease ? "border-amber-300 bg-amber-50 text-amber-800 ring-amber-200" : "border-emerald-200 bg-white text-ink ring-emerald-200"}`}
                                 />
                                 <span className="text-xs text-muted">{item.uom_code ?? ""}</span>

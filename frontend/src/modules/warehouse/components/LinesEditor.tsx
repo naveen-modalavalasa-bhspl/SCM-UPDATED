@@ -1,7 +1,9 @@
 import { Fragment, useState, useEffect, type ReactNode } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { Button } from "@/shared/components";
-import { guardNumberKeys } from "@/shared/quantity";
+import { QuantityInput } from "@/shared/components/QuantityInput";
+import { useUomDecimals } from "@/shared/hooks/useUomDecimals";
+import { quantityProblem } from "@/shared/quantity";
 
 /**
  * The editable line grid behind every warehouse document form.
@@ -197,35 +199,42 @@ export function LinesEditor<T>({
   );
 }
 
-/** A compact numeric cell editor, sized for the grid. */
+/** A compact quantity cell editor, sized for the grid.
+ *
+ *  It follows the unit of the line it sits on. Pass `uom` (the line's `uom_code`) and
+ *  the box reads that unit's "Allows decimal" setting: a whole-unit unit refuses "."
+ *  and every digit after it at the keyboard, a divisible one takes up to three places,
+ *  and a value outside `min`..`max` is flagged. `decimals`, when given, wins over `uom`
+ *  (the issue-split screens already know it). With neither, the old behaviour stays:
+ *  shown to two places, typed to the three the column holds.
+ */
 export function QtyInput({
   value,
   onChange,
   max,
+  min = 0,
   disabled,
   invalid,
   ariaLabel,
-  step,
   decimals,
+  uom,
 }: {
   value: number | string;
   onChange: (value: any) => void;
   max?: number;
+  min?: number;
   disabled?: boolean;
   invalid?: boolean;
   ariaLabel: string;
-  /** Warehouse quantities and money are entered at two decimal places by
-   *  default. Overridden by `decimals` when the item's own unit is whole. */
-  step?: string;
-  /** How many decimal places this quantity's unit allows. 0 means a
-   *  whole-unit UOM (Nos, Box…) — the input then blocks "." entirely and
-   *  rounds on blur, instead of letting a fraction through for the server to
-   *  refuse afterwards (SCM_0080). `undefined`/`null` keeps the old 2-dp
-   *  behaviour for a line whose unit is not yet known. */
+  /** Places the line's unit allows: 0 = whole units. Overrides `uom`. */
   decimals?: number | null;
+  /** The line's unit code; its decimals are looked up from the UOM type. */
+  uom?: string | null;
 }) {
-  const places = decimals === 0 ? 0 : 2;
-  const effectiveStep = step ?? (places === 0 ? "1" : "0.01");
+  const uomDecimals = useUomDecimals();
+  const resolved: number | null = decimals ?? (uom ? uomDecimals(uom) : null);
+  const typePlaces = resolved ?? 3;        // what the keyboard lets through
+  const places = resolved ?? 2;            // what the cell shows
   const fmt = (n: number) => n.toFixed(places);
   const [local, setLocal] = useState<string>(
     value === 0 ? fmt(0) : value === "" || value == null ? "" : fmt(Number(value))
@@ -243,25 +252,22 @@ export function QtyInput({
     }
   }, [value, local, places]);
 
+  // The net under the keyboard filter: the unit's places, the minimum and the maximum.
+  const problem = quantityProblem(local, { decimals: typePlaces, min, max, unit: uom, required: false });
+
   return (
-    <input
-      type="number"
-      inputMode={places === 0 ? "numeric" : "decimal"}
-      min={0}
+    <QuantityInput
+      decimals={typePlaces}
+      min={min}
       max={max}
-      step={effectiveStep}
       value={local}
       disabled={disabled}
       aria-label={ariaLabel}
-      onKeyDown={(e) => {
-        guardNumberKeys(e);   // no "e", "+", or "-" in a quantity box
-        // Whole-unit items (Nos, Box…) never take a fraction — refuse the
-        // decimal point at the keyboard rather than only on blur or save.
-        if (places === 0 && (e.key === "." || e.key === ",")) e.preventDefault();
-      }}
-      onChange={(e) => {
-        setLocal(e.target.value);
-        onChange(e.target.value === "" ? "" : e.target.value);
+      aria-invalid={Boolean(invalid || problem)}
+      title={problem ?? undefined}
+      onChange={(raw) => {
+        setLocal(raw);
+        onChange(raw);
       }}
       onBlur={(e) => {
         if (e.target.value !== "") {
@@ -274,7 +280,7 @@ export function QtyInput({
         }
       }}
       className={`min-h-11 w-full rounded-md border bg-content1 px-2 text-right text-sm text-ink outline-none focus:border-brand disabled:bg-content2 disabled:text-muted ${
-        invalid ? "border-bad" : "border-line"
+        invalid || problem ? "border-bad" : "border-line"
       }`}
     />
   );

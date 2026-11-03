@@ -33,6 +33,9 @@ import {
 // pulled into this screen. See the note on `sendToVendor`.
 import type { WizardLine } from "../components/SendToVendorWizard";
 import { fmtMoney, fmtQty, today } from "../format";
+import { QuantityInput } from "@/shared/components/QuantityInput";
+import { useUomDecimals } from "@/shared/hooks/useUomDecimals";
+import { quantityProblem } from "@/shared/quantity";
 import type {
   ItemDetail,
   PurchaseReturnItemWrite,
@@ -128,6 +131,11 @@ const GHOST_INPUT =
   "w-full min-w-0 bg-transparent outline-none placeholder:text-muted/60"
   + " border-b border-transparent hover:border-line focus:border-brand"
   + " disabled:cursor-not-allowed disabled:opacity-60";
+
+/** The boxed return-quantity field (the old HeroUI bordered input, as a plain input). */
+const RETURN_QTY_BOX =
+  "min-h-11 w-full rounded-md border bg-content1 px-3 text-right text-sm text-ink tabular"
+  + " outline-none focus:border-brand disabled:bg-content2 disabled:text-muted";
 
 /** "" -> null, so an untouched box is not posted as 0. */
 const numOrNull = (raw: string): number | null => {
@@ -334,6 +342,7 @@ export default function PurchaseReturnForm() {
   const purchase = detail?.purchase;
   const items = useMemo(() => detail?.items ?? [], [detail]);
 
+  const uomDecimals = useUomDecimals();
   const setQty = (key: string, val: string) =>
     setQtyByLine((prev) => ({ ...prev, [key]: val }));
 
@@ -345,12 +354,14 @@ export default function PurchaseReturnForm() {
     const price = Number(it.unit_price ?? 0);
     let problem: string | null = null;
     if (raw !== "") {
-      if (!Number.isFinite(qty) || qty <= 0) problem = "Return quantity must be greater than 0";
+      const unitProblem = quantityProblem(raw, { decimals: uomDecimals(it.uom_code), unit: it.uom_code });
+      if (unitProblem) problem = unitProblem;
+      else if (!Number.isFinite(qty) || qty <= 0) problem = "Return quantity must be greater than 0";
       else if (qty > available)
         problem = `Cannot exceed available quantity of ${fmtQty(available)}`;
     }
     return { it, key, raw, qty, available, price, problem, amount: qty * price };
-  }), [items, qtyByLine]);
+  }), [items, qtyByLine, uomDecimals]);
 
   const activeLines = lineState.filter((l) => l.raw !== "" && Number.isFinite(l.qty) && l.qty > 0);
 
@@ -372,7 +383,11 @@ export default function PurchaseReturnForm() {
     const named = l.item_name.trim() !== "";
     const hasQty = l.quantity.trim() !== "" && Number.isFinite(qty) && qty > 0;
     let problem: string | null = null;
-    if (l.quantity.trim() !== "" && (!Number.isFinite(qty) || qty <= 0)) {
+    const unitProblem = l.quantity.trim() === "" ? null : quantityProblem(l.quantity, {
+      decimals: uomDecimals(l.uom_code), unit: l.uom_code || null });
+    if (unitProblem) {
+      problem = unitProblem;
+    } else if (l.quantity.trim() !== "" && (!Number.isFinite(qty) || qty <= 0)) {
       problem = "Return quantity must be greater than 0";
     } else if (hasQty && !named) {
       problem = "Enter the item name for this line";
@@ -1017,7 +1032,7 @@ export default function PurchaseReturnForm() {
                         ["rate", "Unit price"],
                       ] as const).map(([field, label]) => (
                         <td key={field} className="py-2 pr-3 w-[108px]">
-                          <input
+                          {field === "rate" ? <input
                             type="number" onKeyDown={guardNumberKeys}
                             min="0"
                             value={line[field]}
@@ -1026,21 +1041,29 @@ export default function PurchaseReturnForm() {
                             aria-label={`${label} for ${line.item_name || "this line"}`}
                             disabled={locked}
                             className={GHOST_INPUT + " text-right tabular text-ink"}
-                          />
+                          /> : <QuantityInput
+                            decimals={uomDecimals(line.uom_code)}
+                            value={line[field]}
+                            onChange={(raw) => setManualLine(line.key, field, raw)}
+                            placeholder="—"
+                            aria-label={`${label} for ${line.item_name || "this line"}`}
+                            disabled={locked}
+                            className={GHOST_INPUT + " text-right tabular text-ink"}
+                          />}
                         </td>
                       ))}
 
                       {/* The one boxed field, exactly as on the sourced table. */}
                       <td className="py-2 pr-3 w-[130px]">
-                        <Input
-                          type="number"
-                          min="0"
+                        <QuantityInput
+                          decimals={uomDecimals(line.uom_code)}
                           value={line.quantity}
-                          onChange={(e) => setManualLine(line.key, "quantity", e.target.value)}
+                          onChange={(raw) => setManualLine(line.key, "quantity", raw)}
                           placeholder="0"
                           aria-label={`Return quantity for ${line.item_name || "this line"}`}
-                          isInvalid={!!problem}
+                          aria-invalid={!!problem}
                           disabled={locked}
+                          className={RETURN_QTY_BOX + (problem ? " border-bad" : " border-line")}
                         />
                       </td>
 
@@ -1125,15 +1148,15 @@ export default function PurchaseReturnForm() {
                     <td className="py-2 pr-3 text-right font-semibold tabular">{fmtQty(l.available)}</td>
                     <td className="py-2 pr-3 text-right tabular">{l.price ? fmtMoney(l.price) : "—"}</td>
                     <td className="py-2 pr-3">
-                      <Input
-                        type="number"
-                        min="0"
+                      <QuantityInput
+                        decimals={uomDecimals(l.it.uom_code)}
                         value={l.raw}
-                        onChange={(e) => setQty(l.key, e.target.value)}
+                        onChange={(raw) => setQty(l.key, raw)}
                         placeholder="0"
                         aria-label={`Return quantity for ${l.it.item_name ?? l.it.item_code}`}
-                        isInvalid={!!l.problem}
+                        aria-invalid={!!l.problem}
                         disabled={locked || l.available <= 0}
+                        className={RETURN_QTY_BOX + (l.problem ? " border-bad" : " border-line")}
                       />
                       {l.problem && <p className="mt-1 text-xs text-red-600">{l.problem}</p>}
                     </td>

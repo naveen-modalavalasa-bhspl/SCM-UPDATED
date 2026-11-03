@@ -96,3 +96,13 @@ describe("formatQuantity", () => {
     expect(formatQuantity(-2)).toBe("-2");
   });
 });
+
+describe("quantityError respects the unit", () => {
+  it("whole-unit lines refuse any fraction", () => {
+    expect(quantityError(line({ max_quantity: 15, uom_decimals: 0 }), "2.5")).toMatch(/whole/);
+    expect(quantityError(line({ max_quantity: 15, uom_decimals: 0 }), "2")).toBeNull();
+  });
+  it("uses the places of the unit instead of the stored three", () => {
+    expect(quantityError(line({ uom_decimals: 1 }), "1.25")).toMatch(/up to 1 decimal place/);
+  });
+});

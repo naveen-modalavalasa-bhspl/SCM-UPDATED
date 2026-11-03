@@ -13,7 +13,7 @@ import { useConsolidationDecisions } from "../consolidationDecisions";
 import { PriorityFilter, PriorityTag } from "../components/PriorityFilter";
 import { formatQty, resolveItem } from "./ConsolidationPage";
 import type { ConsolidationIndentSummary } from "../types";
-import { guardNumberKeys } from "@/shared/quantity";
+import { QuantityInput } from "@/shared/components/QuantityInput";
 
 /** One consolidated item, and everyone who asked for it.
  *
@@ -353,21 +353,19 @@ export function ConsolidationItemPage() {
                       <SlidersHorizontal className="h-3.5 w-3.5 text-brand" /> Approve (total)
                     </span>
                     <span className="relative block">
-                      <input
+                      <QuantityInput
                         className={`${control} h-12 w-full px-3 text-lg font-semibold tabular placeholder:font-normal placeholder:text-muted ${
                           item.uom_code ? "pr-16" : ""
                         }`}
-                        type="number" onKeyDown={guardNumberKeys}
+                        // The unit's own places: a countable item cannot be typed as
+                        // 5.7 here any more than it can be split into 5.7 below.
+                        decimals={item.uom_decimals ?? 3}
                         min={0}
                         max={resolved.ceiling}
-                        // The unit's own step. A countable item cannot be typed as
-                        // 5.7 here any more than it can be split into 5.7 below.
-                        step={item.uom_decimals === 0 ? 1 : "any"}
-                        inputMode={item.uom_decimals === 0 ? "numeric" : "decimal"}
                         aria-label={`Approved quantity for ${name}`}
                         placeholder={formatQty(resolved.ceiling)}
                         value={decision?.approved ?? ""}
-                        onChange={(e) => setApproved(Number(itemId), e.target.value)}
+                        onChange={(raw) => setApproved(Number(itemId), raw)}
                       />
                       {item.uom_code && (
                         <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs font-semibold uppercase tracking-wide text-muted">

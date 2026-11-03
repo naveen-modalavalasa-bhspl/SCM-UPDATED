@@ -565,6 +565,7 @@ export default function OutboundQualityInspectionForm({
       ) : (
         <QtyInput
           ariaLabel={`Inspected quantity, line ${i + 1}`}
+          uom={savedLine(i)?.uom_code ?? (delivery?.items ?? []).find((x) => x.id === l.issue_item_id)?.uom_code}
           value={l.inspected_qty}
           disabled={locked}
           onChange={(v) => patchLine(i, { inspected_qty: v })}
@@ -586,6 +587,7 @@ export default function OutboundQualityInspectionForm({
       ) : (
         <QtyInput
           ariaLabel={`Accepted quantity, line ${i + 1}`}
+          uom={savedLine(i)?.uom_code ?? (delivery?.items ?? []).find((x) => x.id === l.issue_item_id)?.uom_code}
           value={l.accepted_qty}
           max={num(l.inspected_qty)}
           disabled={locked}
@@ -603,6 +605,7 @@ export default function OutboundQualityInspectionForm({
         <div>
           <QtyInput
             ariaLabel={`Rejected quantity, line ${i + 1}`}
+            uom={savedLine(i)?.uom_code ?? (delivery?.items ?? []).find((x) => x.id === l.issue_item_id)?.uom_code}
             value={l.rejected_qty}
             max={num(l.inspected_qty)}
             disabled={locked}
@@ -622,6 +625,7 @@ export default function OutboundQualityInspectionForm({
       ) : (
         <QtyInput
           ariaLabel={`Rejected quantity, line ${i + 1}`}
+          uom={savedLine(i)?.uom_code ?? (delivery?.items ?? []).find((x) => x.id === l.issue_item_id)?.uom_code}
           value={l.rejected_qty}
           max={num(l.inspected_qty)}
           disabled={locked}

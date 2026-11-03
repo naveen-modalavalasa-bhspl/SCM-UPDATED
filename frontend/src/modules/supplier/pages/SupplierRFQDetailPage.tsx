@@ -18,6 +18,8 @@ import {
   type CombinationValue,
 } from "@/shared/combination";
 import { guardNumberKeys } from "@/shared/quantity";
+import { QuantityInput } from "@/shared/components/QuantityInput";
+import { useUomDecimals } from "@/shared/hooks/useUomDecimals";
 
 const money = (n: number) =>
   `₹${n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -59,6 +61,7 @@ interface QuoteLine {
  * submission; what shows here is read-only, the same figure the server computes.
  */
 export function SupplierRFQDetailPage() {
+  const uomDecimals = useUomDecimals();
   const { id } = useParams();
   const nav = useNavigate();
   const toast = useToast();
@@ -447,10 +450,10 @@ export function SupplierRFQDetailPage() {
                       <div className="mt-2 grid grid-cols-1 sm:grid-cols-3 gap-2">
                         <div>
                           <label className="block text-[11px] text-muted">Counter Quantity</label>
-                          <input
-                            type="number" onKeyDown={guardNumberKeys} min="0" step="0.001"
+                          <QuantityInput
+                            decimals={uomDecimals(line.uom_code)} min={0}
                             value={edit.qty}
-                            onChange={(e) => setCounterEdits({ ...counterEdits, [line.quotation_item_id]: { ...edit, qty: e.target.value } })}
+                            onChange={(raw) => setCounterEdits({ ...counterEdits, [line.quotation_item_id]: { ...edit, qty: raw } })}
                             className="h-9 w-full rounded-md border border-line bg-white px-2 text-xs text-ink outline-none focus:border-brand"
                           />
                         </div>

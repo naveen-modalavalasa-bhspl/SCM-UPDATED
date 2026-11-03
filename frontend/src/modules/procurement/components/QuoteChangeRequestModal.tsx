@@ -5,7 +5,9 @@ import { AlertTriangle, ArrowRight, TrendingDown, TrendingUp } from "lucide-reac
 import { ErrorBanner, NoticeChip, Textarea, useToast } from "@/shared/components";
 import { Button } from "./ActionButton";
 import { rfqApi } from "../api";
-import { sanitizeQuantityInput } from "@/shared/quantity";
+import { QuantityInput } from "@/shared/components/QuantityInput";
+import { useUomDecimals } from "@/shared/hooks/useUomDecimals";
+import { quantityProblem } from "@/shared/quantity";
 import type { Quotation, QuoteItem } from "../types";
 import {
   CombinationPicker, askedLabel, combinationKey, combinationLabel, comboFrom, comboPayload,
@@ -70,6 +72,11 @@ export function QuoteChangeRequestModal({ quote, onClose }: {
 
   const touched = drafts.filter((d) => d.included);
 
+  const uomDecimals = useUomDecimals();
+  // The net under the keyboard filter: a proposed quantity the unit cannot hold.
+  const quantityInvalid = drafts.some((d) => Boolean(quantityProblem(d.quantity, {
+    decimals: uomDecimals(quote.items.find((i) => i.id === d.quotation_item_id)?.uom_code),
+  })));
   const update = (id: number, patch: Partial<DraftLine>) =>
     setDrafts(drafts.map((d) => (d.quotation_item_id === id ? { ...d, ...patch } : d)));
 
@@ -124,7 +131,7 @@ export function QuoteChangeRequestModal({ quote, onClose }: {
   const hasRateViolation = touched.some(rateIncreased);
   const hasUnchanged = touched.some((d) => !changed(d));
 
-  const canSend = !propose.isPending
+  const canSend = !propose.isPending && !quantityInvalid
     && touched.length > 0
     && reason.trim().length >= 3
     && !hasRateViolation
@@ -271,11 +278,11 @@ export function QuoteChangeRequestModal({ quote, onClose }: {
                           <div className="mt-2.5 grid grid-cols-3 gap-2">
                             <label className="text-[10px] uppercase tracking-wide text-muted">
                               Qty
-                              <input
-                                type="text" inputMode="decimal"
+                              <QuantityInput
+                                decimals={uomDecimals(quote.items.find((i) => i.id === d.quotation_item_id)?.uom_code)}
                                 className="mt-0.5 h-9 w-full rounded-md border border-line bg-content1 px-2 text-sm text-ink outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
                                 value={d.quantity}
-                                onChange={(e) => update(d.quotation_item_id, { quantity: sanitizeQuantityInput(e.target.value) })}
+                                onChange={(raw) => update(d.quotation_item_id, { quantity: raw })}
                                 aria-label="Proposed quantity"
                               />
                             </label>

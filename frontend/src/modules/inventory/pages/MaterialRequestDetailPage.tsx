@@ -24,7 +24,9 @@ import { approvalsApi } from "@/modules/approvals/api";
 import { HistoryTimeline } from "@/modules/approvals/components/HistoryTimeline";
 import { alerts } from "@/modules/alerts";
 import { useAuth } from "@/shared/auth/AuthContext";
-import { sanitizeQuantityInput } from "@/shared/quantity";
+import { QuantityInput } from "@/shared/components/QuantityInput";
+import { useUomDecimals } from "@/shared/hooks/useUomDecimals";
+import { quantityProblem } from "@/shared/quantity";
 import type { MaterialRequestItem } from "../types";
 import { TONE_APPROVE, TONE_REJECT } from "@/shared/components/tones";
 
@@ -50,6 +52,7 @@ export function MaterialRequestDetailPage() {
   // seeding this from the server would send every line back on every save and make an
   // untouched line indistinguishable from one edited to the same number.
   const [edits, setEdits] = useState<Record<number, string>>({});
+  const uomDecimals = useUomDecimals();
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["material-request", mrId],
@@ -229,6 +232,8 @@ export function MaterialRequestDetailPage() {
   const problem = (row: MaterialRequestItem): string | null => {
     const raw = edits[row.id];
     if (raw === undefined) return null;
+    const unitProblem = quantityProblem(raw, { decimals: uomDecimals(row.uom_code), unit: row.uom_code });
+    if (unitProblem && raw.trim() !== "") return unitProblem;
     const value = Number(raw);
     if (raw.trim() === "" || Number.isNaN(value)) return "Enter a number";
     if (value <= 0) return "Must be more than zero — reject instead";
@@ -263,16 +268,14 @@ export function MaterialRequestDetailPage() {
               of a narrow box, which hid the digits being typed, and the scroll-wheel
               changes a quantity nobody meant to touch. `inputMode` still brings up the
               numeric keypad on a phone. */}
-          <Input
-            inputMode="decimal"
+          <QuantityInput
+            decimals={uomDecimals(row.uom_code)}
             aria-label={`Quantity for ${row.item_name ?? row.item_code ?? "line"}`}
+            aria-invalid={Boolean(issue)}
             value={shown(row)}
-            onChange={(e) =>
-              setEdits((current) => ({
-                ...current,
-                [row.id]: sanitizeQuantityInput(e.target.value),
-              }))}
-            className="w-28"
+            onChange={(raw) => setEdits((current) => ({ ...current, [row.id]: raw }))}
+            className={`h-11 w-28 rounded-md border bg-content1 px-3 text-sm text-ink outline-none focus:border-brand ${
+              issue ? "border-bad" : "border-line"}`}
           />
           <span className="text-xs text-muted">{row.uom_code ?? ""}</span>
         </div>

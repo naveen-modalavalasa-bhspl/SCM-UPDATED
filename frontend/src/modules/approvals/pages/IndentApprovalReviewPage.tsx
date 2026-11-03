@@ -10,12 +10,12 @@ import type { ReactNode } from "react";
 import { Button, Card, ConfirmModal, PageHeader, StatusPill } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { fmtDate } from "@/shared/datetime";
-import { sanitizeQuantityInput } from "@/shared/quantity";
+import { QuantityInput } from "@/shared/components/QuantityInput";
 import { approvalsApi } from "../api";
 import { IssueFromStockPanel } from "../components/IssueFromStockPanel";
 import { HistoryTimeline } from "../components/HistoryTimeline";
 import {
-  allowedRange, approvalCeiling, formatQuantity, quantityError,
+  allowedRange, approvalCeiling, formatQuantity, lineDecimals, lineMinimum, quantityError,
   quantityValue, wasReducedBelow,
 } from "../quantityRules";
 import { isIndentModuleQuery } from "@/modules/indents/api";
@@ -148,15 +148,15 @@ function QuantityField({
               : "border-line focus-within:border-brand focus-within:ring-brand/25"
         }`}
       >
-        <input
-          type="text"
-          inputMode="decimal"
-          autoComplete="off"
+        <QuantityInput
+          decimals={lineDecimals(line)}
+          min={lineMinimum(line)}
+          max={approvalCeiling(line)}
           aria-label={`Approved quantity for ${line.item_name ?? line.id}`}
           aria-invalid={Boolean(error)}
           aria-describedby={`qty-help-${line.id}`}
           value={value}
-          onChange={(event) => onChange(sanitizeQuantityInput(event.target.value))}
+          onChange={onChange}
           className={`h-full min-w-0 flex-1 rounded-xl bg-transparent px-3 text-right font-semibold tabular-nums outline-none ${
             isZero ? "text-danger" : "text-ink"
           }`}

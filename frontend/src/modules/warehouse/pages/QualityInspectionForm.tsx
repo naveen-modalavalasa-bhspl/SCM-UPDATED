@@ -512,6 +512,7 @@ export default function QualityInspectionForm({
       render: (l, i) => (
         <QtyInput
           ariaLabel={`Inspected quantity, line ${i + 1}`}
+          uom={savedLine(i)?.uom_code ?? deliveryMeta.get(l.receipt_item_id ?? 0)?.uom}
           value={l.inspected_qty}
           disabled={locked}
           onChange={(v) => patchLine(i, { inspected_qty: v })}
@@ -531,6 +532,7 @@ export default function QualityInspectionForm({
           <div className="space-y-1">
             <QtyInput
               ariaLabel={`Accepted quantity, line ${i + 1}`}
+              uom={savedLine(i)?.uom_code ?? deliveryMeta.get(l.receipt_item_id ?? 0)?.uom}
               value={l.accepted_qty}
               max={num(l.inspected_qty)}
               disabled={locked}
@@ -563,6 +565,7 @@ export default function QualityInspectionForm({
       render: (l, i) => (
         <QtyInput
           ariaLabel={`Rejected quantity, line ${i + 1}`}
+          uom={savedLine(i)?.uom_code ?? deliveryMeta.get(l.receipt_item_id ?? 0)?.uom}
           value={l.rejected_qty}
           max={num(l.inspected_qty)}
           disabled={locked}

@@ -5,7 +5,9 @@ import { Button } from "./ActionButton";
 import { fmtDate } from "@/shared/datetime";
 import { money } from "../pages/RequisitionListPage";
 import type { Comparison, ComparisonCell, ComparisonTotal } from "../types";
-import { guardNumberKeys } from "@/shared/quantity";
+import { QuantityInput } from "@/shared/components/QuantityInput";
+import { useUomDecimals } from "@/shared/hooks/useUomDecimals";
+import { quantityProblem } from "@/shared/quantity";
 
 /**
  * The quotation comparison sheet: one column per vendor, one row per item, and the
@@ -173,6 +175,7 @@ export function QuotationComparison({
   const [linesExpanded, setLinesExpanded] = useState(isAnyAwarded);
   const [split, setSplit] = useState<Record<string, string>>({});
   const [splitting, setSplitting] = useState(false);
+  const uomDecimals = useUomDecimals();
   // Keyed by RFQ LINE (2026-10-26): one item asked in two brands is two lines, each
   // awarded on its own — keying by item added them together.
   const splitKey = (rfqItemId: number, vendorId: number) => `${rfqItemId}:${vendorId}`;
@@ -500,13 +503,13 @@ export function QuotationComparison({
                           <div className="mb-1 text-right text-[10px] font-medium uppercase tracking-wide text-muted">
                             {isAnyAwarded ? "Additional quantity" : "Award quantity"}
                           </div>
-                          <input
-                            type="number" onKeyDown={guardNumberKeys} min="0" step="0.001"
+                          <QuantityInput
+                            decimals={uomDecimals(row.uom_code)} min={0}
                             value={split[splitKey(row.rfq_item_id, total.vendor_id)] ?? ""}
                             aria-label={`Quantity for ${total.vendor_name ?? "supplier"} on ${row.item_name ?? row.item_id}`}
-                            onChange={(e) => setSplit((current) => ({
+                            onChange={(raw) => setSplit((current) => ({
                               ...current,
-                              [splitKey(row.rfq_item_id, total.vendor_id)]: e.target.value,
+                              [splitKey(row.rfq_item_id, total.vendor_id)]: raw,
                             }))}
                             className="min-h-9 w-full rounded-md border border-line bg-content1 px-2 text-right text-sm text-ink outline-none focus:border-brand"
                           />
@@ -614,6 +617,9 @@ export function QuotationComparison({
                       sum + liveAllocation(row, vendorId)
                         + additionalAward(row, vendorId), 0)
                       > Number(row.quantity));
+                    const badSplit = (comparison.items ?? []).some((row) => splitVendorIds.some((vendorId) =>
+                      Boolean(quantityProblem(split[splitKey(row.rfq_item_id, vendorId)], {
+                        decimals: uomDecimals(row.uom_code), required: false }))));
                     return (
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="text-xs text-muted">
@@ -638,7 +644,7 @@ export function QuotationComparison({
                             presses down the sheet, and a buyer who stopped halfway left
                             a decided tender part-ordered with nothing saying so. Each
                             order still lands in DRAFT and climbs the PO ladder. */}
-                        <Button disabled={busy || over.length > 0 || (!allocations.length
+                        <Button disabled={busy || over.length > 0 || badSplit || (!allocations.length
                           || (isAnyAwarded && !hasAdditionalQuantity))}
                                 onClick={() => onAwardSplit(allocations)}>
                           Award &amp; generate POs

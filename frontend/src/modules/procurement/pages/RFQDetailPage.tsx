@@ -9,7 +9,9 @@ import {
 import { Button } from "../components/ActionButton";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { fmtDate } from "@/shared/datetime";
-import { sanitizeQuantityInput } from "@/shared/quantity";
+import { QuantityInput } from "@/shared/components/QuantityInput";
+import { useUomDecimals } from "@/shared/hooks/useUomDecimals";
+import { quantityProblem } from "@/shared/quantity";
 import { approvalTrailApi, approvalTrailKey, rfqApi } from "../api";
 import { ApprovalTrail } from "../components/ApprovalTrail";
 import {
@@ -108,6 +110,14 @@ export function RFQDetailPage() {
   // The approved quantity is what the supplier is asked to price — `_publish_rfq`
   // copies `RFQItem.quantity` into the draft quotation at approval time.
   const [qtyEdits, setQtyEdits] = useState<Record<number, string>>({});
+  const uomDecimals = useUomDecimals();
+  // The unit's own rule for the number in the box (places, minimum). Only an edited
+  // line is judged: an untouched one shows the quantity the document already holds.
+  const qtyProblem = (r: { id: number; quantity: number | string; uom_code?: string | null }) =>
+    r.id in qtyEdits
+      ? quantityProblem(qtyEdits[r.id], { decimals: uomDecimals(r.uom_code), unit: r.uom_code })
+      : null;
+  const hasInvalidQty = (rfq?.items ?? []).some((r: any) => Boolean(qtyProblem(r)));
   const saveQuantities = useMutation({
     mutationFn: () => rfqApi.setQuantities(
       rfqId,
@@ -129,6 +139,7 @@ export function RFQDetailPage() {
       // Save any pending quantity edits before approving — an approver who trims
       // 12 -> 10 and presses "Approve & publish" expects 10 to be what the vendor sees.
       // Without this the edit is discarded and the supplier is asked for the original.
+      if (hasInvalidQty) throw new Error("Correct the highlighted quantities before approving.");
       const edits = Object.entries(qtyEdits)
         .filter(([, value]) => {
           if (value === "") return false;
@@ -272,10 +283,12 @@ export function RFQDetailPage() {
       className: "text-right",
       render: (r) => (editableQty ? (
         <div className="flex items-center justify-end gap-2">
-          <input
-            type="text" inputMode="decimal" className="h-11 w-28 rounded-md border border-line bg-content1 px-3 text-sm text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
+          <QuantityInput
+            decimals={uomDecimals(r.uom_code)}
+            className="h-11 w-28 rounded-md border border-line bg-content1 px-3 text-sm text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
             value={qtyEdits[r.id] ?? String(r.quantity)}
-            onChange={(e) => setQtyEdits((current) => ({ ...current, [r.id]: sanitizeQuantityInput(e.target.value) }))}
+            onChange={(raw) => setQtyEdits((current) => ({ ...current, [r.id]: raw }))}
+            aria-invalid={Boolean(qtyProblem(r))}
             title="Approved quantity — up to the source document quantity; 0 removes the line."
             aria-label={`Quantity for ${r.item_name ?? r.item_id}`}
           />
@@ -541,10 +554,12 @@ export function RFQDetailPage() {
                         <CombinationTag value={r} />
                         {editableQty ? (
                           <div className="flex items-center gap-2">
-                            <input
-                              type="text" inputMode="decimal" className="h-11 w-28 rounded-md border border-line bg-content1 px-3 text-sm text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
+                            <QuantityInput
+                              decimals={uomDecimals(r.uom_code)}
+                              className="h-11 w-28 rounded-md border border-line bg-content1 px-3 text-sm text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
                               value={qtyEdits[r.id] ?? String(r.quantity)}
-                              onChange={(e) => setQtyEdits((current) => ({ ...current, [r.id]: sanitizeQuantityInput(e.target.value) }))}
+                              onChange={(raw) => setQtyEdits((current) => ({ ...current, [r.id]: raw }))}
+                              aria-invalid={Boolean(qtyProblem(r))}
                               aria-label={`Quantity for ${r.item_name ?? r.item_id}`}
                             />
                             <span className="text-xs text-muted">{r.uom_code ?? ""}</span>
@@ -565,7 +580,7 @@ export function RFQDetailPage() {
                     <div className="flex justify-end border-t border-line/60 p-3">
                       <Button
                         variant="subtle"
-                        disabled={saveQuantities.isPending || Object.keys(qtyEdits).length === 0}
+                        disabled={saveQuantities.isPending || hasInvalidQty || Object.keys(qtyEdits).length === 0}
                         onClick={() => saveQuantities.mutate()}
                       >
                         {saveQuantities.isPending ? "Saving\u2026" : "Save quantities"}

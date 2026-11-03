@@ -200,6 +200,10 @@ export interface ApprovalIndentLine {
   approved_quantity: number;
   /** Ceiling for this approver — the request, or what the level below approved. */
   max_quantity: number;
+  /** Places the unit allows (UOM type "Allows decimal"): 0 = whole numbers. */
+  uom_decimals?: number;
+  /** Lowest the approver may enter; 0 so a line can always be cut to nothing. */
+  min_quantity?: number;
   remarks?: string | null;
   is_excluded?: boolean;
   excluded_by_name?: string | null;

@@ -87,6 +87,20 @@ async def decimals_by_code(db: AsyncSession, codes: Iterable[str | None]) -> dic
             if (d := _resolve(_unit_maps(rows), code)) is not None}
 
 
+async def decimals_map(db: AsyncSession) -> dict[str, int]:
+    """Every spelling a document may carry for a unit -> the places it allows.
+
+    Keys are the exact code, the code lower-cased and the NAME lower-cased, with the
+    same precedence `_resolve` uses (code beats folded code beats name). A screen
+    looks a unit up as `map[code] ?? map[code.toLowerCase()]` and gets the answer the
+    server will enforce, without every API having to ship `uom_decimals` per line.
+    """
+    rows = _with_flags((await db.execute(_UNITS)).all(),
+                       (await db.execute(_CLASS_FLAGS)).all())
+    by_code, folded, by_name = _unit_maps(rows)
+    return {**by_name, **folded, **by_code}
+
+
 # Two reads, matched in Python: mst_uom and mst_uom_classes carry different
 # collations on the live server, so joining uom_class = code raises MySQL 1267.
 _UNITS = select(Uom.code, Uom.name, Uom.uom_class)

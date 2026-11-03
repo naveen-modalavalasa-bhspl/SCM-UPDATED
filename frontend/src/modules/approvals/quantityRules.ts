@@ -1,11 +1,10 @@
 import { displayUom } from "@/modules/indents/displayFormat";
+import { quantityProblem } from "@/shared/quantity";
 
 import type { ApprovalIndentLine } from "./types";
 
 /** Quantities are stored as NUMERIC(16,3); anything finer cannot be persisted. */
 export const QUANTITY_DECIMALS = 3;
-/** The shape of a number part-way through being typed: "", "-", "1.", "1.25". */
-const NUMERIC_SHAPE = /^-?\d*(\.\d*)?$/;
 
 /**
  * The most this approver may pass on.
@@ -45,11 +44,12 @@ export function allowedRange(line: ApprovalIndentLine): string {
   return `0 to ${ceilingLabel(line)}`;
 }
 
-/** Digits typed after the decimal point — "1.2345" has four, one more than we store. */
-function decimalPlaces(raw: string): number {
-  const point = raw.indexOf(".");
-  return point < 0 ? 0 : raw.length - point - 1;
-}
+/** Places this line's unit allows — the UOM type's "Allows decimal", else the stored three. */
+export const lineDecimals = (line: ApprovalIndentLine): number =>
+  line.uom_decimals ?? QUANTITY_DECIMALS;
+
+/** The lowest this approver may enter. 0 unless the server says otherwise. */
+export const lineMinimum = (line: ApprovalIndentLine): number => line.min_quantity ?? 0;
 
 /**
  * Null when the line may be submitted, else the message to show under the input.
@@ -62,33 +62,22 @@ function decimalPlaces(raw: string): number {
 export function quantityError(
   line: ApprovalIndentLine, raw: string | undefined,
 ): string | null {
-  const ceiling = approvalCeiling(line);
   const range = allowedRange(line);
   const text = (raw ?? "").trim();
 
   if (text === "") {
     return `Enter a quantity from ${range}. Enter 0 to reject this item.`;
   }
-  // The minus sign is caught on its own keystroke, before the number is even
-  // complete: "-" and "-1" are the same mistake, and the approver hears about it
-  // at the first one rather than after typing a value we were never going to take.
-  if (text.startsWith("-")) {
-    return "Cannot enter a negative number.";
-  }
-  const value = Number(text);
-  if (!NUMERIC_SHAPE.test(text) || !Number.isFinite(value)) {
-    return `Enter a valid number from ${range}.`;
-  }
-  if (value < 0) {
-    return "Cannot enter a negative number.";
-  }
-  if (value > ceiling) {
+  // The same judgement the box itself uses, so the keystroke filter and this message
+  // can never disagree: the unit's places, the minimum, and the ceiling.
+  const unit = displayUom(line.uom_code);
+  const problem = quantityProblem(text, {
+    decimals: lineDecimals(line), min: lineMinimum(line), max: approvalCeiling(line), unit,
+  });
+  if (problem?.startsWith("You can't enter more than")) {
     return `You can't approve more than ${ceilingLabel(line)}.`;
   }
-  if (decimalPlaces(text) > QUANTITY_DECIMALS) {
-    return `Use up to ${QUANTITY_DECIMALS} decimal places (for example 1.5).`;
-  }
-  return null;
+  return problem;
 }
 
 /** The number to send. Only meaningful once `quantityError` returns null. */

@@ -1943,9 +1943,15 @@ def _approval_ceiling(line, has_previous_approval: bool) -> Decimal:
     return min(_quantize(Decimal(str(line.approved_quantity or 0))), requested)
 
 
+async def _indent_uom_decimals(db: AsyncSession, indent: Indent) -> dict[str, int]:
+    """{uom_code: decimals} for the units on one indent (UOM type "Allows decimal")."""
+    return await decimals_by_code(db, {line.uom_code for line in indent.items})
+
+
 def _approval_out(
     indent: Indent, instance: Instance, has_previous_approval: bool,
     *, can_return_for_correction: bool = False,
+    decimals_by_uom: dict[str, int] | None = None,
 ) -> ApprovalIndentOut:
     items: list[ApprovalIndentLineOut] = []
     excluded_items: list[ApprovalIndentLineOut] = []
@@ -1960,6 +1966,8 @@ def _approval_out(
             requested_quantity=float(line.quantity),
             approved_quantity=float(ceiling),
             max_quantity=float(ceiling),
+            uom_decimals=(decimals_by_uom or {}).get(line.uom_code, MAX_DECIMALS),
+            min_quantity=0,
             remarks=line.remarks,
             is_excluded=bool(line.is_excluded),
             excluded_by_name=line.excluded_by_name,
@@ -1997,6 +2005,7 @@ async def get_indent_for_approval(
     can_return = await indent_service.can_return_indent_for_correction(db, indent, user)
     return _approval_out(
         indent, instance, has_previous, can_return_for_correction=can_return,
+        decimals_by_uom=await _indent_uom_decimals(db, indent),
     )
 
 
@@ -2426,8 +2435,10 @@ async def consolidation_workspace(
 def _validated_quantities(
     indent: Indent, submitted: list[ApprovalQuantityIn],
     has_previous_approval: bool = False,
+    decimals_by_uom: dict[str, int] | None = None,
 ) -> dict[int, Decimal]:
     by_id: dict[int, Decimal] = {}
+    raw_by_id: dict[int, Decimal] = {}
     excluded_set: set[int] = {
         item.line_id for item in submitted if getattr(item, "excluded", False)
     }
@@ -2435,6 +2446,7 @@ def _validated_quantities(
         if item.line_id in by_id:
             raise ValidationError(f"Quantity for line {item.line_id} was submitted twice")
         by_id[item.line_id] = _quantize(Decimal(str(item.approved_quantity)))
+        raw_by_id[item.line_id] = Decimal(str(item.approved_quantity))
 
     # Only lines that are still active (not excluded/turned to zero at an earlier rung)
     # are expected to be submitted.
@@ -2461,6 +2473,18 @@ def _validated_quantities(
         label = line.item_name or line.item_code or line.id
         if approved < 0:
             raise ValidationError(f"Approved quantity for {label} cannot be negative")
+        # The unit's own step. The screen already refuses the keystroke; this is the
+        # net for a client that skipped it, and it refuses rather than rounds, so what
+        # the approver typed is exactly what is stored.
+        places = (decimals_by_uom or {}).get(line.uom_code, MAX_DECIMALS)
+        raw = raw_by_id[line.id]
+        if raw != raw.quantize(Decimal(1).scaleb(-places), rounding=ROUND_DOWN):
+            if places == 0:
+                raise ValidationError(
+                    f"Approved quantity for {label} must be a whole number: "
+                    f"{line.uom_code or 'this unit'} does not allow decimals.")
+            raise ValidationError(
+                f"Approved quantity for {label} allows up to {places} decimal places.")
         if approved > ceiling:
             source = (
                 "the quantity approved at the previous level"
@@ -2509,7 +2533,8 @@ async def approve_indent(
     the same three-query load twice per indent, 900 times over. Loaded here when it is
     not supplied, so the single-indent route is unchanged."""
     indent, instance, has_previous = task or await _load_indent_task(db, indent_id, user)
-    approved_by_line = _validated_quantities(indent, quantities, has_previous)
+    approved_by_line = _validated_quantities(
+        indent, quantities, has_previous, await _indent_uom_decimals(db, indent))
 
     # Which lines this approver DROPPED, as opposed to cut to nothing. Only lines the
     # screen actually sent can be excluded; a line it never mentioned keeps whatever it
@@ -2571,7 +2596,8 @@ async def approve_indent(
     ).order_by(Instance.id.desc()))).scalars().first()
     if next_instance is None:
         next_instance = instance
-    return _approval_out(updated, next_instance, True)
+    return _approval_out(updated, next_instance, True,
+                         decimals_by_uom=await _indent_uom_decimals(db, updated))
 
 
 async def approve_consolidation(
@@ -2658,7 +2684,8 @@ async def reject_indent(
     updated = await indent_service.act_on_indent(
         db, indent_id, ApprovalAction.REJECTED, comments, user,
     )
-    return _approval_out(updated, instance, has_previous)
+    return _approval_out(updated, instance, has_previous,
+                         decimals_by_uom=await _indent_uom_decimals(db, updated))
 
 
 async def return_indent(
@@ -2675,7 +2702,8 @@ async def return_indent(
     """
     indent, instance, has_previous = await _load_indent_task(db, indent_id, user)
     updated = await indent_service.return_indent_for_correction(db, indent_id, comments, user)
-    return _approval_out(updated, instance, has_previous)
+    return _approval_out(updated, instance, has_previous,
+                         decimals_by_uom=await _indent_uom_decimals(db, updated))
 
 
 # ---------------- Monthly allocation cycles in the approval inbox ----------------

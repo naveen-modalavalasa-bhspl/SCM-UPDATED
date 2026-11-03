@@ -8,7 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_user, require_permission
+from app.core.dependencies import get_current_user, get_current_vendor, require_permission
 from app.core.exceptions import NotFoundError, ValidationError
 from app.platform.hcm.models import HcmDepartment, HcmFacility
 from app.platform.rbac import permissions as perms
@@ -184,6 +184,22 @@ async def create_suggested_uoms(
         created.append(code)
     await db.commit()
     return {"created": created, "skipped": [c for c in data.codes if c in taken]}
+
+
+@_uom.get("/api/uom-decimals")
+async def uom_decimals(db: AsyncSession = Depends(get_db),
+                       user=Depends(get_current_user)):
+    """{unit spelling: places it allows}, for every quantity box in the staff app."""
+    from app.shared.uom import decimals_map
+    return await decimals_map(db)
+
+
+@_uom.get("/api/supplier/uom-decimals")
+async def vendor_uom_decimals(db: AsyncSession = Depends(get_db),
+                              account=Depends(get_current_vendor)):
+    """The same map for the vendor portals, which carry a vendor token, not a staff one."""
+    from app.shared.uom import decimals_map
+    return await decimals_map(db)
 
 
 router.include_router(_uom)

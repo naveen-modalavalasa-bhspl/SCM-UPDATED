@@ -2,6 +2,7 @@
  * e.g. import { Button, Card, StatCard, StatusPill, ResponsiveList, Can } from "@/shared/components";
  */
 export { BackLink, Button, Card, PageHeader, StatCard, Field, Input, Textarea, Select, selectOnFocus } from "./ui";
+export { QuantityInput, type QuantityInputProps } from "./QuantityInput";
 export { StatusPill } from "./StatusPill";
 export { NotificationItem, timeAgo } from "./NotificationItem";
 export { ResponsiveList, type Column } from "./ResponsiveList";

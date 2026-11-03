@@ -8,6 +8,10 @@ vi.mock("@/shared/auth/AuthContext", () => ({
   useAuth: () => ({ can: () => true }),
 }));
 
+vi.mock("@/shared/hooks/useUomDecimals", () => ({
+  useUomDecimals: () => () => 3,
+}));
+
 const cell = (quotationId: number, vendorId: number): ComparisonCell => ({
   quotation_id: quotationId,
   vendor_id: vendorId,

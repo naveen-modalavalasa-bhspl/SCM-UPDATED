@@ -104,6 +104,72 @@ export function sanitizeQuantityInput(raw: string, decimals = 3): string {
 }
 
 /**
+ * Would typing `insert` over the selection leave a value the unit can hold?
+ *
+ * The keystroke test behind `QuantityInput`: the box is allowed to change only when
+ * the result survives `sanitizeQuantityInput` untouched. A letter, a second point, a
+ * point in a whole-unit unit, or one digit too many after the point all fail it, so
+ * the key does nothing — instead of landing in the box and being trimmed afterwards.
+ */
+export function acceptsQuantityEdit(
+  current: string, selectionStart: number, selectionEnd: number,
+  insert: string, decimals = 3,
+): boolean {
+  const next = current.slice(0, selectionStart) + insert + current.slice(selectionEnd);
+  return sanitizeQuantityInput(next, decimals) === next;
+}
+
+/** Digits typed after the decimal point. */
+export const fractionDigits = (raw: string) => {
+  const point = raw.indexOf(".");
+  return point < 0 ? 0 : raw.length - point - 1;
+};
+
+export interface QuantityBounds {
+  /** Places the unit allows (UOM type "Allows decimal": 0 or 3). */
+  decimals?: number;
+  min?: number;
+  max?: number;
+  /** Shown in messages: "15 EA". */
+  unit?: string | null;
+  /** Whether an empty box is a mistake. Defaults to true. */
+  required?: boolean;
+}
+
+const trimNumber = (value: number, decimals: number) =>
+  String(Number(value.toFixed(Math.max(decimals, 0))));
+
+/**
+ * Null when `raw` is a quantity the unit and the bounds allow, else the message.
+ *
+ * The keyboard filter keeps most mistakes out of the box; this is the net under it,
+ * for the value that arrives some other way (a drop, autofill, a state set from code)
+ * and for the rules a keystroke cannot judge: the minimum and the maximum.
+ */
+export function quantityProblem(raw: string | undefined, bounds: QuantityBounds = {}): string | null {
+  const { decimals = 3, min = 0, max, unit, required = true } = bounds;
+  const text = (raw ?? "").trim();
+  const withUnit = (n: number) => `${trimNumber(n, decimals)}${unit ? ` ${unit}` : ""}`;
+  const range = max === undefined ? `${withUnit(min)} or more` : `${withUnit(min)} to ${withUnit(max)}`;
+
+  if (text === "") return required ? `Enter a quantity from ${range}.` : null;
+  if (text.startsWith("-")) return "Cannot enter a negative number.";
+  const value = Number(text);
+  if (!/^\d*(\.\d*)?$/.test(text) || text === "." || !Number.isFinite(value)) {
+    return `Enter a valid number from ${range}.`;
+  }
+  if (decimals <= 0 && text.includes(".")) {
+    return `${unit ?? "This unit"} is counted in whole units. Enter a whole number.`;
+  }
+  if (fractionDigits(text) > decimals) {
+    return `Use up to ${decimals} decimal place${decimals === 1 ? "" : "s"} (for example 1.5).`;
+  }
+  if (value < min) return `Quantity cannot be less than ${withUnit(min)}.`;
+  if (max !== undefined && value > max) return `You can't enter more than ${withUnit(max)}.`;
+  return null;
+}
+
+/**
  * `onKeyDown` guard for `type="number"` boxes.
  *
  * A number box refuses most letters but not all: the browser still lets `e`, `E`, `+`

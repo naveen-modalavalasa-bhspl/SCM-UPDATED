@@ -1207,6 +1207,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
               line's own hierarchy, and the Serial / IMEI rows are sized off it. */}
           <QtyInput
             ariaLabel={`Received quantity, line ${i + 1}`}
+            uom={savedLine(i)?.uom_code ?? l.uom_code}
             value={l.received_qty}
             disabled={locked}
             max={declaredQty(l) ?? (l.po_item_id ? num(l.ordered_qty) : undefined)}
@@ -1289,6 +1290,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       render: (l, i) => (
         <QtyInput
           ariaLabel={`Accepted quantity, line ${i + 1}`}
+          uom={savedLine(i)?.uom_code ?? l.uom_code}
           value={l.accepted_qty ?? 0}
           max={num(l.received_qty)}
           disabled={locked || !isGrn}
@@ -1380,7 +1382,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         <QtyInput
           ariaLabel={`Rate, line ${i + 1}`}
           value={l.rate ?? 0}
-          step="0.01"
+          decimals={2}
           disabled={locked}
           onChange={(v) => patchLine(i, { rate: rate2(v) })}
         />

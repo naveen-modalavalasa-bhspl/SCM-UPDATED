@@ -174,6 +174,12 @@ class ApprovalIndentLineOut(BaseModel):
     # The ceiling for this approver: the request at the first level, and whatever the
     # level below approved after that. Approvers may only reduce.
     max_quantity: float
+    # The field's own bounds and step, read from the unit (UOM type "Allows decimal")
+    # so the screen and the server judge the same number the same way. `uom_decimals`
+    # is 0 for a unit counted in whole numbers; `min_quantity` is 0 because an approver
+    # may always cut a line to nothing.
+    uom_decimals: int = 3
+    min_quantity: float = 0
     remarks: str | None = None
     # Dropped by an approver below, not cut to zero. The screen shows "Excluded"
     # instead of a quantity and offers no second Exclude button for it.
