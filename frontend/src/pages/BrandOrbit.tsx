@@ -2,11 +2,7 @@ import {
   Boxes, ClipboardCheck, FileText, ShoppingCart, Truck, Users, Warehouse,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { BrandMark } from "./BrandMark";
-// SWAP THE CENTRE — step 1 of 2. Uncomment this line and comment the one
-// above to put the courier back; then do the same to the two blocks marked
-// "step 2" in the JSX below. Nothing else changes.
-// import courier from "@/assets/courier.png";
+import supplyChainCenter from "@/assets/supply-chain-center.png";
 import scmMark from "@/assets/scm-mark.png";
 import bavyaLogo from "@/assets/bavya-logo.png";
 
@@ -130,21 +126,8 @@ export function BrandOrbit({ className = "" }: { className?: string }) {
 
         {/* What the ring is for, at the centre of it. Never turns. */}
         <div className="orbit-core">
-          {/* SWAP THE CENTRE — step 2 of 2. Comment this line out... */}
-          <BrandMark />
-          {/* ...and uncomment this one to bring the courier back. He is a
-              cut-out of the original artwork: the pale map flood-filled away
-              from the border (so his shirt and the clipboard face, which the
-              border cannot reach, survive), then every detached scrap dropped
-              by keeping only the largest connected island. `courier.png` is
-              still in assets and still committed.
-              With the courier, set --core back to 0.44 in the CSS below — he is
-              square where the mark is tall, so the same value sizes them very
-              differently.
-
-          <img src={courier} alt="" aria-hidden draggable={false}
+          <img src={supplyChainCenter} alt="Supply Chain" aria-hidden draggable={false}
                className="orbit-core-photo" />
-          */}
         </div>
       </div>
 
@@ -168,20 +151,11 @@ export function BrandOrbit({ className = "" }: { className?: string }) {
 const ORBIT_CSS = `
 .brand-orbit {
   --o: clamp(20rem, 33vw, 31rem);
-  /* The ring has to CLEAR him, and the numbers are what decide that, not taste:
-     a badge reaches inward to (--r minus its own radius), and he reaches out to
-     half of --core. At the old 0.385 / 0.50 those two overlapped, which is why
-     badges sat on his box and his clipboard. 0.415 against 0.44 leaves a clear
-     band between them at every size.
-     Sizing the badge off --o rather than off the viewport matters for the same
-     reason: a badge on a fixed rem clamp grows relative to a shrinking ring and
-     eats the gap back on a narrow screen. */
+  /* The ring has to CLEAR the center artwork:
+     a badge reaches inward to (--r minus its own radius), and the core reaches out to
+     half of --core. 0.415 against 0.58 leaves a clear, beautiful band between them. */
   --r: calc(var(--o) * 0.415);          /* orbit radius: the badges and the track */
-  /* The mark is TALLER than it is wide (a box plus its shadow), where the
-     courier was square, so the same --core made it reach much further and it
-     crowded the badges. At 0.33 its far corner sits at 0.27 of --o against the
-     0.357 the badges reach in to. */
-  --core: calc(var(--o) * 0.33);        /* the drawn mark, not a disc */
+  --core: calc(var(--o) * 0.58);        /* the full supply chain fleet & courier */
   --badge: calc(var(--o) * 0.115);
   --spin: 60s;
   width: var(--o);
@@ -277,7 +251,7 @@ const ORBIT_CSS = `
   position: relative;
   width: var(--core);
   display: grid;
-  place-items: end center;
+  place-items: center;
   pointer-events: none;
 }
 .orbit-core svg {
