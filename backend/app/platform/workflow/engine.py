@@ -845,13 +845,6 @@ async def _start_resolved(db, doc_type: str, doc_id: int, chain: list[dict],
                                        project_id)
 
 
-#: When on, a document raised by someone who sits at a LATER step of its chain does not
-#: wait on the steps below them: those are skipped (with a SKIPPED row on the trail) and
-#: the document opens at the raiser's own step, which `_auto_advance` then signs for
-#: them. Off by default — it removes a review, so it is switched on per environment with
-#: WORKFLOW_SKIP_STAGES_BELOW_RAISER=1.
-SKIP_STAGES_BELOW_RAISER = ladder.SKIP_STAGES_BELOW_RAISER
-
 SKIPPED_BELOW_RAISER_COMMENT = ("Skipped: the person who raised this document holds a "
                                 "later step in this chain")
 
@@ -860,12 +853,16 @@ async def _skip_stages_below_raiser(db, instance: Instance | None,
                                     context: dict) -> Instance | None:
     """Open the document at the raiser's own step instead of at step 1.
 
+    A document raised by someone who sits at a LATER step of its chain does not wait on
+    the steps below them: those are skipped (with a SKIPPED row on the trail) and the
+    document opens at the raiser's own step, which `_auto_advance` then signs for them.
+
     Only runs on a freshly submitted instance (still on its first step, nothing acted
     on) and only moves FORWARD. If the raiser is an approver of no step, or of step 1
     itself, nothing changes. If they hold several steps the FIRST one wins; any steps
     after it are handled by `_auto_advance` exactly as before.
     """
-    if (not SKIP_STAGES_BELOW_RAISER or instance is None
+    if (instance is None
             or instance.status != InstanceStatus.IN_PROGRESS.value
             or not instance.started_by_id):
         return instance
@@ -1378,7 +1375,7 @@ async def _start(db, doc_type: str, doc_id: int, context: dict, user) -> Instanc
     # Rule 4 for plain reporting-manager workflows: a raiser at the root of the hierarchy
     # has no manager to ask, so the document is approved by them rather than handed to
     # the administrator safety net.
-    if (applicable and ladder.SKIP_STAGES_BELOW_RAISER
+    if (applicable
             and all(s.approver_type == ApproverType.REPORTING_MANAGER.value
                     for s in applicable)
             and await ladder.is_hierarchy_root(db, requester_position_id)):

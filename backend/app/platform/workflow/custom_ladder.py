@@ -343,11 +343,10 @@ async def resolve_fixed_chain(db: AsyncSession, stages: list[Stage],
     exclude_id = None if policy == ladder.POLICY_CREATOR_ALLOWED else requester_id
 
     # A raiser who holds a rank that is IN this ladder does not wait on the rungs at or
-    # below it: the document goes to the next rung up. Opt-in, see
-    # `ladder.SKIP_STAGES_BELOW_RAISER`. A raiser whose rank is not in the ladder at all
-    # follows every rung, in the order the admin built it.
+    # below it: the document goes to the next rung up. A raiser whose rank is not in the
+    # ladder at all follows every rung, in the order the admin built it.
     skip_through: int | None = None
-    if ladder.SKIP_STAGES_BELOW_RAISER and requester_position_id is not None:
+    if requester_position_id is not None:
         raiser_post = await db.get(HcmPosition, requester_position_id)
         held = [s.sequence for s in stages if s.is_enabled and (
             s.position_id == requester_position_id
@@ -362,7 +361,7 @@ async def resolve_fixed_chain(db: AsyncSession, stages: list[Stage],
     # Not for a raiser with no position (the Administrator account): such a raiser has
     # never been routed up a ladder and stays approval-free, exactly as before.
     company_wide = False
-    if (ladder.SKIP_STAGES_BELOW_RAISER and requester_position_id is not None
+    if (requester_position_id is not None
             and stages and stages[0].workflow_id is not None):
         wf_row = await db.get(Workflow, stages[0].workflow_id)
         company_wide = wf_row is not None and wf_row.project_id is None
@@ -402,8 +401,7 @@ async def resolve_fixed_chain(db: AsyncSession, stages: list[Stage],
                 logger.info("Rung %r skipped: nobody holds rank %s",
                             stage.name, stage.position_role_id)
                 continue
-            if ladder.SKIP_STAGES_BELOW_RAISER and await _all_below(
-                    db, allowed, requester_position_id):
+            if await _all_below(db, allowed, requester_position_id):
                 logger.info("Rung %r skipped: sits beneath the raiser", stage.name)
                 continue
             chain.append({

@@ -36,7 +36,6 @@ document. Reaching the top with nothing collected means the raiser IS the top â€
 document is self-approved, recorded explicitly.
 """
 import logging
-import os
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -237,12 +236,6 @@ def is_ladder(stages: list[Stage]) -> bool:
     return any(s.position_role_id is not None for s in stages)
 
 
-#: Opt-in (WORKFLOW_SKIP_STAGES_BELOW_RAISER=1): a raiser who holds a rank in a ladder
-#: does not wait on the rungs at or below it â€” the document goes to the next rung up.
-SKIP_STAGES_BELOW_RAISER = os.getenv(
-    "WORKFLOW_SKIP_STAGES_BELOW_RAISER", "0").strip().lower() in ("1", "true", "yes")
-
-
 async def is_hierarchy_root(db: AsyncSession, position_id: int | None) -> bool:
     """True when the post has nobody above it in the reporting tree."""
     if position_id is None:
@@ -261,10 +254,9 @@ async def raiser_is_final(db: AsyncSession, stages: list[Stage],
 
     Only consulted when the chain came out EMPTY. It is what separates "the raiser is
     the top, so the document is theirs to approve" from "something is misconfigured",
-    which still goes to the independent-approver fallback. Opt-in, like the rest of
-    the raiser-aware routing (`SKIP_STAGES_BELOW_RAISER`).
+    which still goes to the independent-approver fallback.
     """
-    if not SKIP_STAGES_BELOW_RAISER or requester_position_id is None:
+    if requester_position_id is None:
         return False
     position = await db.get(HcmPosition, requester_position_id)
     if position is None:
