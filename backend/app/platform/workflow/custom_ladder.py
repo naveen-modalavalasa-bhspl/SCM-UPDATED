@@ -402,6 +402,10 @@ async def resolve_fixed_chain(db: AsyncSession, stages: list[Stage],
                 logger.info("Rung %r skipped: nobody holds rank %s",
                             stage.name, stage.position_role_id)
                 continue
+            if ladder.SKIP_STAGES_BELOW_RAISER and await _all_below(
+                    db, allowed, requester_position_id):
+                logger.info("Rung %r skipped: sits beneath the raiser", stage.name)
+                continue
             chain.append({
                 "sequence": len(chain) + 1,
                 "position_id": None,
@@ -460,6 +464,33 @@ async def resolve_fixed_chain(db: AsyncSession, stages: list[Stage],
 
 
 # ---------------- saving ----------------
+
+async def _all_below(db: AsyncSession, position_ids: list[int],
+                      raiser_position_id: int | None) -> bool:
+    """True when EVERY one of these posts reports (at any depth) to the raiser's post.
+
+    A rung that sits wholly beneath the raiser is not an approval, it is a subordinate
+    signing off their superior's work — so it is skipped, the document moving on to the
+    next rung up. A rank carried by posts both below and elsewhere is kept.
+    """
+    if raiser_position_id is None or not position_ids:
+        return False
+    for position_id in position_ids:
+        seen: set[int] = set()
+        position = await db.get(HcmPosition, position_id)
+        below = False
+        while position is not None and position.parent_position_id and len(seen) < ladder.MAX_CLIMB:
+            if position.parent_position_id == raiser_position_id:
+                below = True
+                break
+            if position.parent_position_id in seen:
+                break
+            seen.add(position.parent_position_id)
+            position = await db.get(HcmPosition, position.parent_position_id)
+        if not below:
+            return False
+    return True
+
 
 async def _is_desk_rank(db: AsyncSession, role_id: int) -> bool:
     """True for a rank held by only a handful of posts (Manager-SCM, CPO, Director).
