@@ -695,6 +695,11 @@ async def _resolve_ladder_chain(db, wf, stages, context: dict, user,
     # the post the project nominated — and if none was nominated, to the reporting line
     # and then the admin safety net. Recorded loudly either way; never silent.
     independent_fallback = ""
+    # Rule 4: a raiser who is at the end of the chain (or the top of the hierarchy) has
+    # no one above them — the document is theirs, so it is NOT sent to a stand-in.
+    if (not chain and policy == ladder.POLICY_INDEPENDENT
+            and await ladder.raiser_is_final(db, stages, requester_position_id)):
+        return chain, independent_fallback
     if not chain and policy == ladder.POLICY_INDEPENDENT:
         chain = await ladder.fallback_chain(db, fallback_position_id, user.id)
         independent_fallback = fallback.REASON_INDEPENDENT_FALLBACK if chain else ""
@@ -1370,6 +1375,25 @@ async def _start(db, doc_type: str, doc_id: int, context: dict, user) -> Instanc
         await fallback.record(db, instance, fallback.REASON_NO_WORKFLOW, [],
                               wf.name)
     await db.flush()
+    # Rule 4 for plain reporting-manager workflows: a raiser at the root of the hierarchy
+    # has no manager to ask, so the document is approved by them rather than handed to
+    # the administrator safety net.
+    if (applicable and ladder.SKIP_STAGES_BELOW_RAISER
+            and all(s.approver_type == ApproverType.REPORTING_MANAGER.value
+                    for s in applicable)
+            and await ladder.is_hierarchy_root(db, requester_position_id)):
+        db.add(Action(
+            instance_id=instance.id, stage_sequence=0,
+            stage_name=ladder.DOC_TYPE_LABEL.get(doc_type, doc_type),
+            actor_id=user.id, actor_name=user.full_name,
+            actor_position=context.get("requester_position_name"),
+            action=ApprovalAction.APPROVED.value, comments=SELF_APPROVED_COMMENT,
+        ))
+        instance.status = InstanceStatus.APPROVED.value
+        instance.completed_at = utcnow()
+        instance.current_stage_name = None
+        await db.flush()
+        return instance
     if applicable:
         await _materialize_pending(db, instance, applicable[0], context)
     return instance
