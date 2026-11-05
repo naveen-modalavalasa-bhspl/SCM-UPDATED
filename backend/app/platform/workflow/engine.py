@@ -878,10 +878,15 @@ async def _skip_stages_below_raiser(db, instance: Instance | None,
     skipped = [link for link in links if link["sequence"] < target["sequence"]]
     await _clear_pending(db, instance.id)
     for link in skipped:
+        # Recorded as the SYSTEM, never as the raiser. The indent ledger treats every
+        # row a person authored (bar SUBMITTED) as a decision of theirs and stops that
+        # person's reading of the trail there, so a skip written in the raiser's name
+        # would hide everything that happens after it from their own document. Same shape
+        # as the FALLBACK rows `fallback.record` writes.
         db.add(Action(
             instance_id=instance.id, stage_sequence=link["sequence"],
-            stage_name=link["role_name"], actor_id=instance.started_by_id,
-            actor_name=instance.started_by_name, actor_position=None,
+            stage_name=link["role_name"], actor_id=None,
+            actor_name="System", actor_position="Automatic routing",
             action=ApprovalAction.SKIPPED.value,
             comments=SKIPPED_BELOW_RAISER_COMMENT,
         ))
