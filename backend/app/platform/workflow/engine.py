@@ -845,8 +845,29 @@ async def _start_resolved(db, doc_type: str, doc_id: int, chain: list[dict],
                                        project_id)
 
 
-SKIPPED_BELOW_RAISER_COMMENT = ("Skipped: the person who raised this document holds a "
-                                "later step in this chain")
+SKIPPED_BELOW_RAISER_REASON = ("the person who raised this document holds a later "
+                               "step in this chain")
+
+
+def _skipped_row_fields(link: dict, raiser_name: str | None,
+                        raiser_role: str | None) -> dict:
+    """What a SKIPPED trail row says: WHO was skipped, and who skipped them.
+
+    The timeline draws `actor_name` beside the SKIPPED pill, so that is the person who
+    was passed over and their role ("MURALI KRISHNA (MANAGER-SCM)"); the comment opens
+    with who skipped them ("Skipped by Rajendra Pinniti (CPO) — ..."). The row itself
+    is still written by the system (no actor id) — see `_skip_stages_below_raiser`.
+    """
+    role = link.get("position_name") or link.get("role_name")
+    names = ", ".join(n for n in (link.get("approver_names") or []) if n)
+    skipped = f"{names} ({role})" if names and role else (names or role or "System")
+    by = (f"{raiser_name} ({raiser_role})" if raiser_name and raiser_role
+          else raiser_name or "the raiser")
+    return {
+        "actor_name": skipped[:200],
+        "actor_position": "Automatic routing",
+        "comments": f"Skipped by {by} — {SKIPPED_BELOW_RAISER_REASON}",
+    }
 
 
 async def _skip_stages_below_raiser(db, instance: Instance | None,
@@ -876,6 +897,10 @@ async def _skip_stages_below_raiser(db, instance: Instance | None,
         return instance
 
     skipped = [link for link in links if link["sequence"] < target["sequence"]]
+    raiser_role = context.get("requester_position_name")
+    if not raiser_role:
+        position_ids = await _requester_position_ids(db, instance, context)
+        raiser_role = await _position_name(db, position_ids[0] if position_ids else None)
     await _clear_pending(db, instance.id)
     for link in skipped:
         # Recorded as the SYSTEM, never as the raiser. The indent ledger treats every
@@ -886,9 +911,8 @@ async def _skip_stages_below_raiser(db, instance: Instance | None,
         db.add(Action(
             instance_id=instance.id, stage_sequence=link["sequence"],
             stage_name=link["role_name"], actor_id=None,
-            actor_name="System", actor_position="Automatic routing",
             action=ApprovalAction.SKIPPED.value,
-            comments=SKIPPED_BELOW_RAISER_COMMENT,
+            **_skipped_row_fields(link, instance.started_by_name, raiser_role),
         ))
     await db.flush()
     await _open_ladder_link(db, instance, target, context)
