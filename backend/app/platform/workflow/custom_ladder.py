@@ -355,6 +355,14 @@ async def resolve_fixed_chain(db: AsyncSession, stages: list[Stage],
                 and s.position_role_id == raiser_post.role_id))]
         skip_through = min(held) if held else None
 
+    # A company-wide ladder saved with a desk rank as ROLE (older saves, and any save
+    # made before `_rank_approver_type` knew better) is read as the chair it is, so the
+    # rule holds for every document type without every ladder being re-saved.
+    company_wide = False
+    if ladder.SKIP_STAGES_BELOW_RAISER and stages and stages[0].workflow_id is not None:
+        wf_row = await db.get(Workflow, stages[0].workflow_id)
+        company_wide = wf_row is not None and wf_row.project_id is None
+
     chain: list[dict] = []
     for stage in sorted(stages, key=lambda s: s.sequence):
         if not stage.is_enabled:
@@ -374,7 +382,10 @@ async def resolve_fixed_chain(db: AsyncSession, stages: list[Stage],
         # straight off its holders — climbing to it is impossible by construction, and
         # that is exactly why these rungs were being invented as local posts before HCM
         # created the real ones.
-        if stage.approver_type == ApproverType.ROLE_ANY.value and stage.position_role_id:
+        if stage.position_role_id and (
+                stage.approver_type == ApproverType.ROLE_ANY.value
+                or (company_wide and stage.approver_type == ApproverType.ROLE.value
+                    and await _is_desk_rank(db, stage.position_role_id))):
             people = await ladder.rank_any_holders(
                 db, stage.position_role_id, exclude_id)
             # FIXED 2026-08-20 — see `ladder.positions_of_rank`. The rung is gated on
@@ -446,6 +457,21 @@ async def resolve_fixed_chain(db: AsyncSession, stages: list[Stage],
 
 # ---------------- saving ----------------
 
+async def _is_desk_rank(db: AsyncSession, role_id: int) -> bool:
+    """True for a rank held by only a handful of posts (Manager-SCM, CPO, Director).
+
+    Such a chair is not anyone's ancestor, so climbing to it from a peer finds nothing;
+    its holders are read directly instead. A field rank (OE, Store Keeper, Driver...) is
+    held by hundreds or thousands of posts and keeps climbing. Same threshold the
+    offline-rung resolution already uses.
+    """
+    held = (await db.execute(
+        select(func.count()).select_from(HcmPosition).where(
+            HcmPosition.role_id == role_id, HcmPosition.is_active.is_(True))
+    )).scalar() or 0
+    return 0 < held <= ladder.MAX_OFFLINE_RANK_POSITIONS
+
+
 async def _rank_approver_type(db: AsyncSession, role_id: int,
                               project_id: int | None) -> str:
     """ROLE if the rank is climbable from this project, ROLE_ANY if it is a chair.
@@ -455,20 +481,12 @@ async def _rank_approver_type(db: AsyncSession, role_id: int,
     rank held by this project's own people is climbed to exactly as before; one held
     only elsewhere — SCM HEAD, INDENT TEAM, the PO desk — is a shared chair, and
     climbing to it would resolve to nobody every time.
+
+    A company-wide ladder has no project to climb through, so a desk rank is a chair
+    and a field rank is climbed (see `_is_desk_rank`).
     """
     if project_id is None:
-        # A company-wide ladder has no project whose people could be climbed through, so
-        # "is this rank on the raiser's line?" cannot be answered at save time. A rank held
-        # by only a handful of posts is a desk (Manager-SCM, CPO, Director): read its
-        # holders directly, so the chain does not depend on who raised the document. A
-        # field rank (OE, Store Keeper...) is far too widely held for that — it keeps
-        # climbing. Same threshold the offline-rung resolution already uses.
-        held = (await db.execute(
-            select(func.count()).select_from(HcmPosition).where(
-                HcmPosition.role_id == role_id, HcmPosition.is_active.is_(True))
-        )).scalar() or 0
-        return (ApproverType.ROLE_ANY.value
-                if 0 < held <= ladder.MAX_OFFLINE_RANK_POSITIONS
+        return (ApproverType.ROLE_ANY.value if await _is_desk_rank(db, role_id)
                 else ApproverType.ROLE.value)
     mine = {rank["role_id"] for rank in await ladder.project_ranks(db, project_id)}
     return (ApproverType.ROLE.value if role_id in mine
