@@ -341,9 +341,26 @@ async def resolve_fixed_chain(db: AsyncSession, stages: list[Stage],
     matching hat to be active before it will accept a decision.
     """
     exclude_id = None if policy == ladder.POLICY_CREATOR_ALLOWED else requester_id
+
+    # A raiser who holds a rank that is IN this ladder does not wait on the rungs at or
+    # below it: the document goes to the next rung up. Opt-in, see
+    # `ladder.SKIP_STAGES_BELOW_RAISER`. A raiser whose rank is not in the ladder at all
+    # follows every rung, in the order the admin built it.
+    skip_through: int | None = None
+    if ladder.SKIP_STAGES_BELOW_RAISER and requester_position_id is not None:
+        raiser_post = await db.get(HcmPosition, requester_position_id)
+        held = [s.sequence for s in stages if s.is_enabled and (
+            s.position_id == requester_position_id
+            or (raiser_post is not None and raiser_post.role_id is not None
+                and s.position_role_id == raiser_post.role_id))]
+        skip_through = min(held) if held else None
+
     chain: list[dict] = []
     for stage in sorted(stages, key=lambda s: s.sequence):
         if not stage.is_enabled:
+            continue
+        if skip_through is not None and stage.sequence <= skip_through:
+            logger.info("Rung %r skipped: at or below the raiser's own rung", stage.name)
             continue
 
         # A locally-owned chair: HCM has no position for this step at all.
@@ -440,7 +457,19 @@ async def _rank_approver_type(db: AsyncSession, role_id: int,
     climbing to it would resolve to nobody every time.
     """
     if project_id is None:
-        return ApproverType.ROLE.value
+        # A company-wide ladder has no project whose people could be climbed through, so
+        # "is this rank on the raiser's line?" cannot be answered at save time. A rank held
+        # by only a handful of posts is a desk (Manager-SCM, CPO, Director): read its
+        # holders directly, so the chain does not depend on who raised the document. A
+        # field rank (OE, Store Keeper...) is far too widely held for that — it keeps
+        # climbing. Same threshold the offline-rung resolution already uses.
+        held = (await db.execute(
+            select(func.count()).select_from(HcmPosition).where(
+                HcmPosition.role_id == role_id, HcmPosition.is_active.is_(True))
+        )).scalar() or 0
+        return (ApproverType.ROLE_ANY.value
+                if 0 < held <= ladder.MAX_OFFLINE_RANK_POSITIONS
+                else ApproverType.ROLE.value)
     mine = {rank["role_id"] for rank in await ladder.project_ranks(db, project_id)}
     return (ApproverType.ROLE.value if role_id in mine
             else ApproverType.ROLE_ANY.value)

@@ -36,6 +36,7 @@ document. Reaching the top with nothing collected means the raiser IS the top â€
 document is self-approved, recorded explicitly.
 """
 import logging
+import os
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -234,6 +235,12 @@ def ladder_code(project_id: int | None, doc_type: str) -> str:
 def is_ladder(stages: list[Stage]) -> bool:
     """A workflow is a ladder when its stages name ranks rather than positions."""
     return any(s.position_role_id is not None for s in stages)
+
+
+#: Opt-in (WORKFLOW_SKIP_STAGES_BELOW_RAISER=1): a raiser who holds a rank in a ladder
+#: does not wait on the rungs at or below it â€” the document goes to the next rung up.
+SKIP_STAGES_BELOW_RAISER = os.getenv(
+    "WORKFLOW_SKIP_STAGES_BELOW_RAISER", "0").strip().lower() in ("1", "true", "yes")
 
 
 def is_custom_ladder(wf: Workflow) -> bool:

@@ -10,7 +10,6 @@ Rules honoured:
 Engine functions flush but do not commit — the calling module owns the transaction.
 """
 import logging
-import os
 from types import SimpleNamespace
 
 from sqlalchemy import func, select
@@ -846,8 +845,7 @@ async def _start_resolved(db, doc_type: str, doc_id: int, chain: list[dict],
 #: the document opens at the raiser's own step, which `_auto_advance` then signs for
 #: them. Off by default — it removes a review, so it is switched on per environment with
 #: WORKFLOW_SKIP_STAGES_BELOW_RAISER=1.
-SKIP_STAGES_BELOW_RAISER = os.getenv(
-    "WORKFLOW_SKIP_STAGES_BELOW_RAISER", "0").strip().lower() in ("1", "true", "yes")
+SKIP_STAGES_BELOW_RAISER = ladder.SKIP_STAGES_BELOW_RAISER
 
 SKIPPED_BELOW_RAISER_COMMENT = ("Skipped: the person who raised this document holds a "
                                 "later step in this chain")
