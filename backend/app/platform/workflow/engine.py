@@ -10,6 +10,7 @@ Rules honoured:
 Engine functions flush but do not commit — the calling module owns the transaction.
 """
 import logging
+import os
 from types import SimpleNamespace
 
 from sqlalchemy import func, select
@@ -783,6 +784,7 @@ async def start_resolved_chain(db, doc_type: str, doc_id: int, chain: list[dict]
     """`_start_resolved_chain`, then forward past the raiser's own steps (2026-10-26)."""
     instance = await _start_resolved_chain(db, doc_type, doc_id, chain, context, user,
                                            project_id)
+    instance = await _skip_stages_below_raiser(db, instance, context or {})
     return await _auto_advance(db, instance, context or {})
 
 
@@ -837,6 +839,56 @@ async def _start_resolved(db, doc_type: str, doc_id: int, chain: list[dict],
                           context: dict, user, project_id: int | None) -> Instance:
     return await _start_resolved_chain(db, doc_type, doc_id, chain, context, user,
                                        project_id)
+
+
+#: When on, a document raised by someone who sits at a LATER step of its chain does not
+#: wait on the steps below them: those are skipped (with a SKIPPED row on the trail) and
+#: the document opens at the raiser's own step, which `_auto_advance` then signs for
+#: them. Off by default — it removes a review, so it is switched on per environment with
+#: WORKFLOW_SKIP_STAGES_BELOW_RAISER=1.
+SKIP_STAGES_BELOW_RAISER = os.getenv(
+    "WORKFLOW_SKIP_STAGES_BELOW_RAISER", "0").strip().lower() in ("1", "true", "yes")
+
+SKIPPED_BELOW_RAISER_COMMENT = ("Skipped: the person who raised this document holds a "
+                                "later step in this chain")
+
+
+async def _skip_stages_below_raiser(db, instance: Instance | None,
+                                    context: dict) -> Instance | None:
+    """Open the document at the raiser's own step instead of at step 1.
+
+    Only runs on a freshly submitted instance (still on its first step, nothing acted
+    on) and only moves FORWARD. If the raiser is an approver of no step, or of step 1
+    itself, nothing changes. If they hold several steps the FIRST one wins; any steps
+    after it are handled by `_auto_advance` exactly as before.
+    """
+    if (not SKIP_STAGES_BELOW_RAISER or instance is None
+            or instance.status != InstanceStatus.IN_PROGRESS.value
+            or not instance.started_by_id):
+        return instance
+    links = _chain_links(instance)
+    first_sequence = links[0]["sequence"] if links else None
+    if first_sequence is None or instance.current_sequence != first_sequence:
+        return instance
+    target = next((link for link in links
+                   if instance.started_by_id in (link.get("approver_ids") or [])), None)
+    if target is None or target["sequence"] <= first_sequence:
+        return instance
+
+    skipped = [link for link in links if link["sequence"] < target["sequence"]]
+    await _clear_pending(db, instance.id)
+    for link in skipped:
+        db.add(Action(
+            instance_id=instance.id, stage_sequence=link["sequence"],
+            stage_name=link["role_name"], actor_id=instance.started_by_id,
+            actor_name=instance.started_by_name, actor_position=None,
+            action=ApprovalAction.SKIPPED.value,
+            comments=SKIPPED_BELOW_RAISER_COMMENT,
+        ))
+    await db.flush()
+    await _open_ladder_link(db, instance, target, context)
+    await db.flush()
+    return instance
 
 
 #: The trail's words for a step approved because its approver raised the document.
@@ -1243,6 +1295,7 @@ async def start(db, doc_type: str, doc_id: int, context: dict, user) -> Instance
     """Open the approval, then move forward past every step the raiser holds
     (2026-10-26) — see `_auto_advance`."""
     instance = await _start(db, doc_type, doc_id, context, user)
+    instance = await _skip_stages_below_raiser(db, instance, context or {})
     return await _auto_advance(db, instance, context or {})
 
 
