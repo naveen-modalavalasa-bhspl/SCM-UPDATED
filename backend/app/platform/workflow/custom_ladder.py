@@ -358,8 +358,12 @@ async def resolve_fixed_chain(db: AsyncSession, stages: list[Stage],
     # A company-wide ladder saved with a desk rank as ROLE (older saves, and any save
     # made before `_rank_approver_type` knew better) is read as the chair it is, so the
     # rule holds for every document type without every ladder being re-saved.
+    #
+    # Not for a raiser with no position (the Administrator account): such a raiser has
+    # never been routed up a ladder and stays approval-free, exactly as before.
     company_wide = False
-    if ladder.SKIP_STAGES_BELOW_RAISER and stages and stages[0].workflow_id is not None:
+    if (ladder.SKIP_STAGES_BELOW_RAISER and requester_position_id is not None
+            and stages and stages[0].workflow_id is not None):
         wf_row = await db.get(Workflow, stages[0].workflow_id)
         company_wide = wf_row is not None and wf_row.project_id is None
 
