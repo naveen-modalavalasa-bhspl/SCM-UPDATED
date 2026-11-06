@@ -25,8 +25,8 @@ import type { TrackingType } from "@/modules/warehouse/types";
 import { indentApi, indentKeys, receiptApi, useIndentAccountScope, type ReceiptKind } from "../api";
 import { cancelIndentReceiptReads, commitConfirmedIndentReceipt } from "../receiptRefresh";
 import type {
-  Acknowledgement, AcknowledgementLine, AcknowledgementPackageQuantity, Indent,
-  RaiserTracking, ReceiptAttachment, ShipmentTrack,
+  AcknowledgeLine, Acknowledgement, AcknowledgementLine, AcknowledgementPackageQuantity, Indent,
+  RaiserTracking, ReceiptAttachment, ReceiptReturn, ShipmentTrack,
 } from "../types";
 import {
   BILL, PHOTO, STAGE, STAGE_HINT, TRACKING, dayStamp, lineStage, neededBy, onOrder, qty,
@@ -34,6 +34,10 @@ import {
 } from "../components/acknowledgementParts";
 import { CombinationTag, combinationKey, combinationLabel } from "@/shared/combination";
 import { PackageCheckModal, packGroups, shortPackCode, type PackageCheck } from "@/shared/components";
+import { RejectionEditor } from "../components/RejectionEditor";
+import {
+  rejectedTotal, rejectionPayload, rejectionProblems, type RejectionReason, type RejectionRow,
+} from "../receiptRejections";
 
 /**
  * One indent's delivery, walked the way the delivery itself happens.
@@ -266,6 +270,8 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc, backTo, ba
   const [pickedSerials, setPickedSerials] = useState<Record<string, string[]>>({});
   // Packages checked carton by carton, for lines issued in packages (2026-10-26).
   const [packChecks, setPackChecks] = useState<Record<string, PackageCheck>>({});
+  // What is being turned away, by reason, for each item in each carton (2026-11-06).
+  const [rejections, setRejections] = useState<Record<string, RejectionRow[]>>({});
   // Labels for what was RECEIVED on one consignment (2026-10-28) — never what was sent.
   const [labelDispatch, setLabelDispatch] = useState<number | null>(null);
   const [viewing, setViewing] = useState<
@@ -273,6 +279,12 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc, backTo, ba
 
   const trackingMeta = useTrackingMeta();
   const server = receiptApi(kind);
+  const reasons = useQuery({
+    queryKey: ["ack-rejection-reasons"],
+    queryFn: () => indentApi.rejectionReasons(),
+    staleTime: Infinity,
+  });
+  const reasonList: RejectionReason[] = reasons.data ?? [];
 
   const attachments = useQuery({
     queryKey: [kind === "issue" ? "direct-issue-receipt-attachments" : "indent-receipt-attachments", row.indent_id],
@@ -302,7 +314,7 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc, backTo, ba
     mutationFn: () =>
       server.acknowledge(
         row.indent_id,
-        acknowledgementPayload(row.lines, received, packChecks),
+        acknowledgementPayload(row.lines, received, packChecks, rejections),
       ),
     onMutate: () => (kind === "indent"
       ? cancelIndentReceiptReads(qc, accountScope, row.indent_id) : undefined),
@@ -316,7 +328,16 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc, backTo, ba
       qc.invalidateQueries({ queryKey: ["indent-fulfilment"] });
       // Said out loud. The press used to drop the person back on the list with
       // nothing to say it had worked, which is how a receipt gets signed twice.
-      void alerts.success("issue.acknowledged", { number: row.indent_no });
+      const raised = (updated as { receipt_returns?: ReceiptReturn[] } | null)?.receipt_returns ?? [];
+      if (raised.length > 0) {
+        // The goods turned away are now returns waiting in Returns, one per reason.
+        void alerts.success("issue.acknowledged_rejected", {
+          number: row.indent_no, returns: raised.map((item) => item.return_no).join(", "),
+        });
+        qc.invalidateQueries({ queryKey: ["returns"] });
+      } else {
+        void alerts.success("issue.acknowledged", { number: row.indent_no });
+      }
       onDone();
     },
   });
@@ -356,13 +377,15 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc, backTo, ba
       ["DRAFT", "PENDING_APPROVAL", "QUOTING", "AWAITING_CARRIER", "READY"].includes(leg.status))
     : undefined;
   const receivingSummary = useMemo(() => {
-    const payload = acknowledgementPayload(row.lines, received);
+    const payload = acknowledgementPayload(row.lines, received, {}, rejections);
     return {
       quantity: payload.reduce((sum, line) => sum + line.received_quantity, 0),
+      rejected: payload.reduce((sum, line) =>
+        sum + (line.rejections ?? []).reduce((inner, item) => inner + item.quantity, 0), 0),
       lines: payload.length,
     };
-  }, [row.lines, received]);
-  const entered = receivingSummary.quantity > 0;
+  }, [row.lines, received, rejections]);
+  const entered = receivingSummary.quantity + receivingSummary.rejected > 0;
 
   const consignments = useMemo(
     () => receiptConsignments(row, tracking.data),
@@ -391,7 +414,10 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc, backTo, ba
     const value = received[line.receipt_key] ?? "";
     const counted = value.trim() !== "";
     const count = receivedNumber(value);
-    const photographed = count <= 0 || photosOf(line, packKey).length > 0;
+    const rejected = rejectedTotal(rejections[line.receipt_key]);
+    // Accepted OR turned away: either way the item reached the requester, and the server
+    // wants a photo of it.
+    const photographed = count + rejected <= 0 || photosOf(line, packKey).length > 0;
     const serials = line.serial_numbers?.filter(Boolean) ?? [];
     const needSerials = requiredSerialCount(line, value);
     const matched = serialPickForQuantity(
@@ -399,17 +425,38 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc, backTo, ba
     return {
       counted,
       count,
+      rejected,
       photographed,
       coded: serials.length > 0,
       serialsDone: matched >= needSerials,
     };
   };
 
+  /** Why this carton's "not accepting" rows cannot be sent yet, if they cannot. */
+  const rejectionIssuesFor = (pack?: ReceiptPackage): string[] =>
+    (pack?.lines ?? []).flatMap((line) => rejectionProblems(
+      rejections[line.receipt_key],
+      Number(line.package_quantity ?? receivable(line)),
+      reasonList,
+    ));
+
+  /** Turning goods away takes them off what is being accepted, so the two never overlap. */
+  const changeRejections = (line: ReceiptPackageLine, rows: RejectionRow[]) => {
+    const max = Number(line.package_quantity ?? receivable(line));
+    setRejections((current) => ({ ...current, [line.receipt_key]: rows }));
+    setReceived((current) => {
+      const room = Math.max(max - rejectedTotal(rows), 0);
+      return receivedNumber(current[line.receipt_key]) > room
+        ? { ...current, [line.receipt_key]: String(room) }
+        : current;
+    });
+  };
+
   const countedFor = (pack?: ReceiptPackage) => {
     const lines = (pack?.lines ?? []).filter(
       (line) => Number(line.package_quantity ?? receivable(line)) > 0);
     const progress = lines.map((line) => lineProgress(line, pack?.key ?? ""));
-    const present = progress.filter((item) => item.count > 0);
+    const present = progress.filter((item) => item.count + item.rejected > 0);
     const coded = present.filter((item) => item.coded);
     return {
       total: lines.length,
@@ -467,6 +514,9 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc, backTo, ba
           ? "Match the serial numbers"
           : `Match serial numbers (${counted.matched} of ${counted.coded})`,
       });
+    }
+    if (rejectionIssuesFor(target.pack).length > 0) {
+      tasks.push({ done: false, label: "Finish the items you are not accepting" });
     }
     return tasks;
   };
@@ -636,6 +686,9 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc, backTo, ba
           onChange={(key, value) =>
             setReceived((current) => ({ ...current, [key]: value }))}
           onPickSerials={setSerialTarget}
+          rejections={rejections}
+          reasons={reasonList}
+          onRejections={changeRejections}
           {...sharedPhotoProps}
         />
       )}
@@ -656,7 +709,7 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc, backTo, ba
             <span className="line-clamp-2">
               {anythingToConfirm
                 ? blocker
-                  ?? `Ready to acknowledge: ${qty(receivingSummary.quantity)} across ${receivingSummary.lines} item${receivingSummary.lines === 1 ? "" : "s"}`
+                  ?? `Ready to acknowledge: ${qty(receivingSummary.quantity)} across ${receivingSummary.lines} item${receivingSummary.lines === 1 ? "" : "s"}${receivingSummary.rejected > 0 ? `, ${qty(receivingSummary.rejected)} not accepted` : ""}`
                 : heldLeg
                   ? `Nothing to acknowledge yet — shipment ${heldLeg.tr_no} is ${heldLeg.status.replace(/_/g, " ").toLowerCase()} and has not left the warehouse. Logistics must dispatch it first.`
                   : "Nothing to acknowledge."}
@@ -1024,13 +1077,14 @@ function initialReceivedByReceiptLine(lines: AcknowledgementLine[]) {
   );
 }
 
-function acknowledgementPayload(
+export function acknowledgementPayload(
   lines: AcknowledgementLine[],
   received: Record<string, string>,
   checks: Record<string, PackageCheck> = {},
-) {
+  rejections: Record<string, RejectionRow[]> = {},
+): AcknowledgeLine[] {
   return lines
-    .map((line) => {
+    .map((line): AcknowledgeLine => {
       const parts = packagePartsForLine(line);
       const total = parts.length > 0
         ? parts.reduce((sum, part) =>
@@ -1048,13 +1102,20 @@ function acknowledgementPayload(
           }
         });
       });
-      return {
+      // What is turned away, from every carton this item came in, by reason.
+      const turnedAway = parts.length > 0
+        ? parts.flatMap((part) => rejectionPayload(rejections[packageLineKey(line, part)]))
+        : rejectionPayload(rejections[fallbackLineKey(line)]);
+      const result: AcknowledgeLine = {
         indent_item_id: line.indent_item_id,
         received_quantity: Math.min(total, receivable(line)),
-        ...(Object.keys(packageReceipts).length ? { package_receipts: packageReceipts } : {}),
       };
+      if (Object.keys(packageReceipts).length) result.package_receipts = packageReceipts;
+      if (turnedAway.length) result.rejections = turnedAway;
+      return result;
     })
-    .filter((line) => line.received_quantity > 0);
+    // A line turned away whole has nothing accepted and is still a line to send.
+    .filter((line) => line.received_quantity > 0 || (line.rejections?.length ?? 0) > 0);
 }
 
 function receivedNumber(value: string | undefined) {
@@ -2076,7 +2137,8 @@ function Handling({ icon: Icon, tone, label }: {
 
 function PackageStop({
   pack, tasks, position, total, photos, received, pickedSerials, packChecks, onPackCheck,
-  photosOf, onUpload, onUploadItem, onChange, onPickSerials, ...photoProps
+  photosOf, onUpload, onUploadItem, onChange, onPickSerials, rejections, reasons, onRejections,
+  ...photoProps
 }: {
   pack: ReceiptPackage;
   tasks: StepTask[];
@@ -2093,6 +2155,10 @@ function PackageStop({
   onUploadItem: (line: ReceiptPackageLine, file: File) => void;
   onChange: (receiptKey: string, value: string) => void;
   onPickSerials: (line: ReceiptPackageLine) => void;
+  /** What is being turned away, by reason, per item in this carton (2026-11-06). */
+  rejections: Record<string, RejectionRow[]>;
+  reasons: RejectionReason[];
+  onRejections: (line: ReceiptPackageLine, rows: RejectionRow[]) => void;
 } & PhotoProps) {
   return (
     <StepSheet
@@ -2120,6 +2186,9 @@ function PackageStop({
               onPackCheck={(check) => onPackCheck(line.receipt_key, check)}
               photos={photosOf(line)}
               onUploadPhoto={(file) => onUploadItem(line, file)}
+              rows={rejections[line.receipt_key] ?? []}
+              reasons={reasons}
+              onRows={(rows) => onRejections(line, rows)}
               {...photoProps}
             />
           ))}
@@ -2242,7 +2311,7 @@ function PackageIdentityCard({ pack }: { pack: ReceiptPackage }) {
  */
 function PackageLineRow({
   line, value, onChange, selectedSerials, onPickSerials, packCheck, onPackCheck, photos,
-  onUploadPhoto, ...photoProps
+  onUploadPhoto, rows, reasons, onRows, ...photoProps
 }: {
   line: ReceiptPackageLine;
   value: string;
@@ -2254,6 +2323,10 @@ function PackageLineRow({
   /** This line's own pictures, taken in this package. */
   photos: ReceiptAttachment[];
   onUploadPhoto: (file: File) => void;
+  /** What is being turned away from THIS item in THIS carton, by reason (2026-11-06). */
+  rows: RejectionRow[];
+  reasons: RejectionReason[];
+  onRows: (rows: RejectionRow[]) => void;
 } & PhotoProps) {
   const max = Number(line.package_quantity ?? receivable(line));
   const serials = line.serial_numbers?.filter(Boolean) ?? [];
@@ -2264,9 +2337,12 @@ function PackageLineRow({
   const unit = (tracking ?? TRACKING.SERIAL).unit;
   const serialComplete = displayedSerials.length === requiredSerials && requiredSerials > 0;
   const current = receivedNumber(value);
-  const short = max > 0 && current < max;
+  const rejected = rejectedTotal(rows);
+  // Accepted and turned away both reached the requester; only the rest is missing.
+  const accounted = current + rejected;
+  const short = max > 0 && accounted < max;
   const label = line.item_name ?? line.item_code ?? "item";
-  const finished = max > 0 && current > 0 && photos.length > 0
+  const finished = max > 0 && accounted > 0 && photos.length > 0
     && (serials.length === 0 || serialComplete);
   // A line issued in PACKAGES (2026-10-26): counted package by package.
   const packs = line.package_box_codes ?? [];
@@ -2344,7 +2420,7 @@ function PackageLineRow({
             <span className="text-[11px] text-muted">{qty(current)} of {qty(max)} {line.uom_code ?? ""} received</span>
           </div>
         ) : max > 0 ? (
-          <QuantityStepper value={value} max={max} onChange={onChange} label={label} />
+          <QuantityStepper value={value} max={Math.max(max - rejected, 0)} onChange={onChange} label={label} />
         ) : (
           <span className="text-xs text-muted">
             {line.pending_with || "Nothing to confirm here"}
@@ -2357,17 +2433,19 @@ function PackageLineRow({
            not a problem. Not started is grey -- every line begins there, and opening
            a package to a wall of amber teaches somebody to ignore amber. */
         <p className={`mt-2.5 flex items-start gap-1.5 text-xs leading-relaxed ${
-          current <= 0 ? "text-muted" : short ? "text-warn" : "text-ok"
+          accounted <= 0 ? "text-muted" : short ? "text-warn" : "text-ok"
         }`}>
-          {current > 0 && !short
+          {accounted > 0 && !short
             ? <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
             : <Circle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />}
           <span>
-            {current <= 0
+            {accounted <= 0
               ? "Not counted yet"
               : short
-                ? `${qty(max - current)} missing. They can still come later.`
-                : `All ${qty(max)} here`}
+                ? `${qty(max - accounted)} missing. They can still come later.`
+                : rejected > 0
+                  ? `All ${qty(max)} here — ${qty(rejected)} not accepted, they will be returned`
+                  : `All ${qty(max)} here`}
           </span>
         </p>
       )}
@@ -2380,6 +2458,20 @@ function PackageLineRow({
               photos={photos}
               onUpload={onUploadPhoto}
               {...photoProps}
+            />
+          )}
+          {max > 0 && packs.length === 0 && !signedOff && (
+            // Not every delivery is right (2026-11-06): some of it can be turned away, by
+            // reason, and each reason becomes a return. Lines issued in packages are
+            // checked package by package above and are not split by reason yet.
+            <RejectionEditor
+              rows={rows}
+              reasons={reasons}
+              max={max}
+              uom={line.uom_code}
+              label={label}
+              coded={serials.length > 0}
+              onChange={onRows}
             />
           )}
           {packs.length > 0 && (

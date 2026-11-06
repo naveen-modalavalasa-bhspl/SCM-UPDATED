@@ -23,7 +23,9 @@ export const qty = (value: number) => Number(value ?? 0).toLocaleString();
 
 /** The most it makes sense to confirm today: what reached you but is unconfirmed. */
 export const receivable = (line: AcknowledgementLine) =>
-  Math.max(line.dispatched_quantity - line.received_quantity, 0);
+  // Goods already turned away have arrived and been accounted for: they are not offered
+  // for acknowledgement a second time.
+  Math.max(line.dispatched_quantity - line.received_quantity - (line.rejected_quantity ?? 0), 0);
 
 export const outstanding = (line: AcknowledgementLine) =>
   Math.max(line.approved_quantity - line.received_quantity, 0);
