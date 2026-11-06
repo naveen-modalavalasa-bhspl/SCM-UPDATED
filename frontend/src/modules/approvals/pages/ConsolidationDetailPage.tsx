@@ -37,8 +37,8 @@ export function ConsolidationDetailPage() {
     />
     <p className="mb-4 text-sm text-body">
       Everything this cycle asked for, one row per item, with the total everyone
-      requested. Open an item to see which indents asked for it, set the quantity going
-      out and leave indents out of it. Approve all sends every indent in this
+      requested. Open an item to see which indents asked for it, then set each indent's
+      quantity or exclude it in its own row. Approve all sends every indent in this
       consolidation on at those quantities.
     </p>
 
