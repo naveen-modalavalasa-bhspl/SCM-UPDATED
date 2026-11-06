@@ -1988,6 +1988,7 @@ def _approval_out(
         position_name=indent.position_name,
         department_name=indent.department_name,
         office_name=indent.office_name,
+        indent_type=indent.indent_type,
         current_stage_name=instance.current_stage_name,
         current_approver_name=indent.current_approver_name,
         can_return_for_correction=can_return_for_correction,
@@ -2535,6 +2536,9 @@ async def approve_indent(
     indent, instance, has_previous = task or await _load_indent_task(db, indent_id, user)
     approved_by_line = _validated_quantities(
         indent, quantities, has_previous, await _indent_uom_decimals(db, indent))
+    # Before anything is written: what an STR may not sign, and why (2026-11-05).
+    from .fulfilment import assert_str_approvable
+    await assert_str_approvable(db, indent, instance, approved_by_line, user)
 
     # Which lines this approver DROPPED, as opposed to cut to nothing. Only lines the
     # screen actually sent can be excluded; a line it never mentioned keeps whatever it

@@ -1212,6 +1212,8 @@ export interface Issue {
    *  screen tells the two apart without asking a second question. */
   parent_issue_id?: number | null;
   parent_issue_no?: string | null;
+  /** Status to show: a split parent closed after its floor issues posted reads ISSUED. */
+  display_status?: string | null;
   floor_location_id?: number | null;
   floor_location_name?: string | null;
   /** Who holds that floor — the in-charge(s) a split piece was handed to. */
@@ -3395,6 +3397,9 @@ export interface DocLabelRow {
   key: string;
   kind: "PACK" | "UNIT";
   code: string;
+  /** A serial / IMEI tracked unit's own numbers (2026-11-02). */
+  serial_number?: string | null;
+  imei?: string | null;
   line_id: number;
   item_id: number;
   item_code?: string | null;

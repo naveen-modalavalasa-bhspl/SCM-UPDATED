@@ -372,6 +372,7 @@ export function PackageCheckModal({
                 <Minus className="h-3.5 w-3.5" />
               </button>
               <input type="number" onKeyDown={guardNumberKeys} min={0} max={pkg.carries - 1} value={partial[pkg.code] ?? 0}
+                data-uom={uom ?? ""}
                      onChange={(e) => setPart(pkg, Number(e.target.value))}
                      aria-label={`${copy.partial} ${pkg.code}`}
                      className="h-9 w-14 rounded-lg border border-line bg-content1 text-center text-sm outline-none focus:border-brand" />

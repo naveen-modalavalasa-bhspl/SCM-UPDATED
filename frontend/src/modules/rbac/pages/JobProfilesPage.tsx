@@ -515,10 +515,6 @@ const PLAIN_FEATURE_HELP: Record<string, string> = {
     "Serve a stock transfer request: pick which of your points gives what (the To serve tab). Only STRs.",
   "stock.transfer.serve_approve":
     "Approve or reject how an STR is being served. Only STRs — not ordinary indent allocations.",
-  "stock.transfer.issue":
-    "Work a stock transfer's material issue — batch, bay, serials, submit. Only transfer issues.",
-  "stock.transfer.issue_post":
-    "Approve and post a stock transfer's material issue — the stock leaves the point. Only transfer issues.",
   "stock.transfer.qc":
     "Run the outward QC of a stock transfer (the Outward QC tab). Only transfer QCs.",
   "stock.transfer.qc_approve":
@@ -767,7 +763,8 @@ export const ACTION_LOCATIONS: Record<string, { button: string; where: string }>
   "po.create": { button: "New purchase order", where: "Procurement > Purchase Orders" },
   "po.approve": { button: "Approve", where: "Procurement > Purchase Orders > Open an order > Approve this order" },
   "po.reject": { button: "Reject", where: "Procurement > Purchase Orders > Open an order > Approve this order" },
-  "issue.create": { button: "New issue", where: "Warehouse > Material Issues (the same button also submits a draft for approval)" },
+  "issue.create": { button: "New issue / Save", where: "Warehouse > Material Issues (with View, also Inventory > Stock Transfer > Orders > Open material issue)" },
+  "issue.submit": { button: "Submit for approval", where: "Warehouse > Material Issues > Open a draft issue" },
   "issue.issue": { button: "Issue from stock", where: "Warehouse > Material Issues > Open an approved issue (the same code carries Approve / Reject while the issue is pending)" },
   "po.send_vendor": { button: "Send to vendor", where: "Procurement > Purchase Orders > Open an approved order" },
   "rfq.create": { button: "New RFQ", where: "Procurement > RFQs (also [Create RFQ] on an approved requisition or consolidation)" },
@@ -779,7 +776,6 @@ export const ACTION_LOCATIONS: Record<string, { button: string; where: string }>
   "stock.transfer.approve": { button: "Approve / Reject", where: "Inventory > Stock Transfer > Orders > Open a pending order" },
   "stock.transfer.serve": { button: "Allocate", where: "Inventory > Stock Transfer > To serve" },
   "stock.transfer.qc": { button: "New inspection / Outward QC", where: "Inventory > Stock Transfer > Outward QC (or an order's Outward QC button)" },
-  "stock.transfer.issue": { button: "Open material issue", where: "Inventory > Stock Transfer > Orders > Open an order" },
   "stock.transfer.receive": { button: "Confirm receipt", where: "Inventory > Stock Transfer > Acknowledgements" },
   "putaway.execute": { button: "Start / Confirm putaway", where: "Warehouse > Put-away > Open a task" },
   "master.location.manage": { button: "New warehouse / Edit / Add location / Storage types", where: "Warehouse > Masters" },

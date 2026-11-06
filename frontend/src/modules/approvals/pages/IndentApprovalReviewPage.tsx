@@ -13,11 +13,13 @@ import { fmtDate } from "@/shared/datetime";
 import { QuantityInput } from "@/shared/components/QuantityInput";
 import { approvalsApi } from "../api";
 import { IssueFromStockPanel } from "../components/IssueFromStockPanel";
+import { StrSourcePanel } from "../components/StrSourcePanel";
 import { HistoryTimeline } from "../components/HistoryTimeline";
 import {
-  allowedRange, approvalCeiling, formatQuantity, lineDecimals, lineMinimum, quantityError,
-  quantityValue, wasReducedBelow,
+  allowedRange, approvalCeiling, formatQuantity, isRejectedLine, lineDecimals, lineMinimum,
+  quantityError, quantityValue, signedTotal, wasReducedBelow,
 } from "../quantityRules";
+import { strDecision } from "../strDecision";
 import { isIndentModuleQuery } from "@/modules/indents/api";
 import { displayUom } from "@/modules/indents/displayFormat";
 import { alerts } from "@/modules/alerts";
@@ -30,6 +32,26 @@ const CHECKS = [
   "I checked the business need and priority.",
   "I checked the approved quantities shown below.",
 ];
+
+/** What a level below already allocated on this line, under the item's name. */
+function ServedNote({ line, unit }: { line: ApprovalIndentLine; unit: string }) {
+  if (!line.served_quantity) return null;
+  return (
+    <p className="mt-1 inline-flex items-center gap-1 rounded-full bg-ok-bg px-2 py-0.5 text-[11px] font-semibold text-ok">
+      <PackageCheck className="h-3 w-3" aria-hidden />
+      {formatQuantity(line.served_quantity)} {unit} allocated
+    </p>
+  );
+}
+
+/** Stands in for the quantity box when nothing is left on a line to decide. */
+function FullyServed() {
+  return (
+    <p className="flex min-h-11 items-center justify-end gap-1.5 text-sm font-semibold text-ok">
+      <CheckCircle2 className="h-4 w-4 shrink-0" aria-hidden /> Fully allocated
+    </p>
+  );
+}
 
 /* ---------------------------------------------------------------------------
  * Local presentation pieces.
@@ -152,6 +174,7 @@ function QuantityField({
           decimals={lineDecimals(line)}
           min={lineMinimum(line)}
           max={approvalCeiling(line)}
+          data-uom={line.uom_code ?? ""}
           aria-label={`Approved quantity for ${line.item_name ?? line.id}`}
           aria-invalid={Boolean(error)}
           aria-describedby={`qty-help-${line.id}`}
@@ -258,6 +281,16 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
     queryFn: () => approvalsApi.indentAvailability(indentId),
     enabled: Number.isFinite(indentId) && indentId > 0,
   });
+  // An STR's source verdict (2026-11-04). The panel reads the same cached query; the
+  // page needs it only to word the footer and to ask a forwarding approver why.
+  const isStr = indent.data?.indent_type === "STR";
+  const strReview = useQuery({
+    queryKey: ["approvals", "str-source", indentId],
+    queryFn: () => approvalsApi.strSource(indentId),
+    enabled: isStr && Number.isFinite(indentId) && indentId > 0,
+  });
+  // What approving means here, worded once for the panel, the button and the dialog.
+  const decision = strDecision(isStr ? strReview.data : undefined);
   const history = useQuery({
     queryKey: ["approvals", "history", "INDENT", indentId],
     queryFn: () => approvalsApi.history("INDENT", indentId),
@@ -267,19 +300,22 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
   // Active items to review: lines already cut to zero or excluded by an earlier
   // approver are dropped and not forwarded to this level for approval.
   const reviewItems = useMemo(() => {
-    const remainderByLine = new Map(
-      (availability.data?.items ?? []).map((line) => [line.line_id, line.remainder]),
+    const availableByLine = new Map(
+      (availability.data?.items ?? []).map((line) => [line.line_id, line]),
     );
     return (indent.data?.items ?? [])
       .filter((line) => !line.is_excluded && approvalCeiling(line) > 0)
       .map((line) => {
-        const remainder = remainderByLine.get(line.id);
-        if (remainder === undefined) return line;
-        const outstanding = Math.max(0, Number(remainder));
+        const available = availableByLine.get(line.id);
+        if (available === undefined) return line;
+        const outstanding = Math.max(0, Number(available.remainder));
+        const served = Number(available.allocated_quantity) + Number(available.committed_quantity);
         return {
           ...line,
           approved_quantity: Math.min(line.approved_quantity, outstanding),
           max_quantity: Math.min(line.max_quantity, outstanding),
+          served_quantity: served,
+          fully_served: outstanding <= 0 && served > 0,
         };
       });
   }, [availability.data, indent.data]);
@@ -309,7 +345,7 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
   )).length, [errorByLine, quantities, reviewItems]);
 
   const zeroLinesCount = useMemo(() => reviewItems.filter((line) => (
-    !errorByLine[line.id] && quantities[line.id]?.trim() !== "" && quantityValue(quantities[line.id]) === 0
+    !errorByLine[line.id] && isRejectedLine(line, quantities[line.id])
   )).length, [errorByLine, quantities, reviewItems]);
 
   const allZero = reviewItems.length > 0 && zeroLinesCount === reviewItems.length;
@@ -348,7 +384,7 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
       indentId,
       reviewItems.map((line) => ({
         line_id: line.id,
-        approved_quantity: quantityValue(quantities[line.id]),
+        approved_quantity: signedTotal(line, quantities[line.id]),
       })),
       comments,
     ),
@@ -368,6 +404,8 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
 
   const confirm = () => {
     if ((confirming === "reject" || confirming === "return") && !reason.trim()) return;
+    // Forwarding an STR whose source is not yours says why, for the next rung.
+    if (confirming === "approve" && !allZero && (!decision.canApprove || (decision.needsReason && !comments.trim()))) return;
     if (confirming === "return" && !canReturnForCorrection) return;
     if (busy) return;
     if (confirming === "approve") approve.mutate();
@@ -449,10 +487,13 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
         <StatusPill status={indent.data.current_stage_name ?? indent.data.status} />
         {/* Next to the status, and deliberately NOT the primary button: serving from
             your own stock is an action on the whole document, like approving, but the
-            decision this screen exists for is the one in the bar at the foot of it. */}
-        <Button variant="subtle" onClick={() => setServing((open) => !open)}>
-          <PackageCheck className="h-4 w-4" /> {serving ? "Hide own stock" : "Serve from own stock"}
-        </Button>
+            decision this screen exists for is the one in the bar at the foot of it.
+            An STR serves through its source card instead — one door, not two. */}
+        {!isStr && (
+          <Button variant="subtle" onClick={() => setServing((open) => !open)}>
+            <PackageCheck className="h-4 w-4" /> {serving ? "Hide own stock" : "Serve from own stock"}
+          </Button>
+        )}
       </>}
     />
 
@@ -489,6 +530,32 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
           </Fact>
         </dl>
       </Card>
+
+      {isStr && (
+        <StrSourcePanel
+          indentId={indentId}
+          lines={Object.fromEntries(reviewItems.map((line) => [
+            line.id, { name: line.item_name ?? line.item_code ?? `Line ${line.id}`, unit: displayUom(line.uom_code) },
+          ]))}
+          signed={reviewItems.map((line) => ({
+            line_id: line.id, approved_quantity: signedTotal(line, quantities[line.id]),
+          }))}
+          ready={!invalidQuantity && !allZero && checksDone}
+          blocker={invalidQuantity
+            ? "Correct the highlighted quantities below first."
+            : allZero ? "Every item is at 0 — this request can only be rejected."
+              : !checksDone ? "Confirm the checklist below to enable these buttons." : null}
+          onForward={() => setConfirming("approve")}
+          onForwarded={finish("approve")}
+          onAllocated={(result) => {
+            if (result.closed) finish("approve")();
+            else {
+              qc.invalidateQueries({ queryKey: ["approvals"], refetchType: "all" });
+              qc.invalidateQueries({ predicate: isIndentModuleQuery, refetchType: "all" });
+            }
+          }}
+        />
+      )}
 
       {/* Serve-from-own-stock sits above the decision, not after it: an approver who
           holds the goods should give them and let only the remainder climb. Behind a
@@ -537,9 +604,10 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
                 choice is made. */}
             <Note tone="warn" icon={TriangleAlert} title="Reducing is not the same as serving">
               Reduce a quantity only to cut the request for good — the difference is not owed to
-              anyone afterwards. If you simply do not hold enough, leave the quantity as it is and
-              enter what you can give under <strong>Serve from own stock</strong>; the remainder
-              stays on this indent and carries on to the fulfilment queue.
+              anyone afterwards. If you simply do not hold enough, leave the quantity as it is
+              {isStr
+                ? <> and use <strong>Transfer source</strong> above; what the point cannot give stays owed and moves on with the request.</>
+                : <> and enter what you can give under <strong>Serve from own stock</strong>; the remainder stays on this indent and carries on to the fulfilment queue.</>}
             </Note>
           </div>
 
@@ -592,6 +660,7 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
                               {line.item_name}
                             </strong>
                             <p className="truncate font-mono text-xs text-muted">{line.item_code}</p>
+                            <ServedNote line={line} unit={unit} />
                           </div>
                         </div>
                       </td>
@@ -610,14 +679,16 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
                           from under the box. */}
                       <td className="px-4 py-3 align-top">
                         <div className="ml-auto max-w-44">
-                          <QuantityField
-                            line={line}
-                            unit={unit}
-                            value={raw}
-                            error={lineError}
-                            isZero={isZero}
-                            onChange={(value) => setQuantity(line, value)}
-                          />
+                          {line.fully_served ? <FullyServed /> : (
+                            <QuantityField
+                              line={line}
+                              unit={unit}
+                              value={raw}
+                              error={lineError}
+                              isZero={isZero}
+                              onChange={(value) => setQuantity(line, value)}
+                            />
+                          )}
                         </div>
                       </td>
                       <td className="px-4 py-3 text-right align-top">
@@ -659,6 +730,7 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
                     <div className="min-w-0 flex-1">
                       <strong className="block truncate font-semibold text-ink">{line.item_name}</strong>
                       <p className="truncate font-mono text-xs text-muted">{line.item_code}</p>
+                      <ServedNote line={line} unit={unit} />
                     </div>
                     <DifferenceChip difference={difference} unit={unit} isZero={isZero} />
                   </div>
@@ -681,14 +753,16 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
                     <span className="mb-1.5 block text-[10px] font-semibold uppercase tracking-wider text-muted">
                       Approved at this level
                     </span>
-                    <QuantityField
-                      line={line}
-                      unit={unit}
-                      value={raw}
-                      error={lineError}
-                      isZero={isZero}
-                      onChange={(value) => setQuantity(line, value)}
-                    />
+                    {line.fully_served ? <FullyServed /> : (
+                      <QuantityField
+                        line={line}
+                        unit={unit}
+                        value={raw}
+                        error={lineError}
+                        isZero={isZero}
+                        onChange={(value) => setQuantity(line, value)}
+                      />
+                    )}
                   </div>
                 </div>
               );
@@ -790,6 +864,9 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
             : allZero
               ? <><X className="h-4 w-4 shrink-0 text-danger" aria-hidden />
                   All requested items are set to 0. Submitting will stop this request as REJECTED.</>
+              : !decision.canApprove
+              ? <><TriangleAlert className="h-4 w-4 shrink-0 text-warn" aria-hidden />
+                  <span className="text-warn">{decision.blocker}</span></>
               : checksDone
                 ? <><CheckCircle2 className="h-4 w-4 shrink-0" aria-hidden />
                     Ready to sign — {reviewItems.length - zeroLinesCount} approved
@@ -809,11 +886,12 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
           <Button
             className={allZero ? TONE_REJECT : TONE_APPROVE}
             variant={allZero ? "danger" : "primary"}
-            disabled={busy || invalidQuantity || (!allZero && !checksDone)}
+            disabled={busy || invalidQuantity || (!allZero && (!checksDone || !decision.canApprove))}
+            title={!allZero && !decision.canApprove ? decision.message : undefined}
             onClick={() => setConfirming("approve")}
           >
             {allZero ? <X className="h-4 w-4" /> : <Check className="h-4 w-4" />}
-            {allZero ? "Reject Indent (All items 0)" : "Approve"}
+            {allZero ? "Reject Indent (All items 0)" : decision.label}
           </Button>
         </div>
       </Card>
@@ -833,17 +911,31 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
         : confirming === "approve"
           ? (zeroLinesCount > 0
               ? `${zeroLinesCount} item(s) with 0 quantity will be rejected. The remaining ${reviewItems.length - zeroLinesCount} item(s) will move forward.`
-              : "The saved quantities move to the next approval level or complete the approval.")
+              : decision.message)
           : confirming === "reject"
             ? "The request will stop and the requester will see your reason."
             : "Your correction instructions will be recorded in approval history."}
-      confirmLabel={allZero && confirming === "approve" ? "Reject Request" : confirming === "approve" ? "Approve" : confirming === "reject" ? "Reject" : "Return for correction"}
+      confirmLabel={allZero && confirming === "approve" ? "Reject Request" : confirming === "approve" ? decision.label : confirming === "reject" ? "Reject" : "Return for correction"}
       danger={confirming === "reject" || (allZero && confirming === "approve")}
       busy={busy || ((confirming === "reject" || confirming === "return") && !reason.trim())}
+      confirmDisabled={confirming === "approve" && decision.needsReason && !allZero && !comments.trim()}
       error={actionError}
       onClose={() => !busy && setConfirming(null)}
       onConfirm={confirm}
     >
+      {confirming === "approve" && decision.needsReason && !allZero && (
+        <label className="block text-sm font-semibold text-ink">
+          Why are you forwarding it?
+          <textarea
+            autoFocus
+            value={comments}
+            onChange={(event) => setComments(event.target.value)}
+            className="mt-2 min-h-24 w-full rounded-xl border border-line bg-content1 p-3 text-sm font-normal text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/25"
+            placeholder="e.g. The source point is not under me"
+          />
+          {!comments.trim() && <p className="mt-1 text-xs font-normal text-danger">A reason is required.</p>}
+        </label>
+      )}
       {(confirming === "reject" || confirming === "return") && (
         <label className="block text-sm font-semibold text-ink">
           {confirming === "reject" ? "Rejection reason" : "What must be corrected?"}

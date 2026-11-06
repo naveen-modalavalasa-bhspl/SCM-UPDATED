@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { baseOf, packable, type PackHierarchy } from "@/shared/packing";
 import { IssuePickPacking } from "./IssuePickPacking";
+import { ItemStockCard } from "./ItemStockCard";
 import {
   AlertTriangle, Barcode, Check, MessageSquare, PackageX, Plus, ScanLine, Trash2, Undo2,
 } from "lucide-react";
@@ -615,49 +616,22 @@ function ItemRow(props: ItemProps) {
             </div>
           )}
 
-          {/* What the WAREHOUSE holds of this item, which is the question the picks
-            * below are answers to. It is not a sum of what is on screen: a location
-            * another document has reserved outright is not offered as a source at
-            * all, so the stock would silently disappear from any figure the grid
-            * added up for itself. Served — see `IssueStockSource`.
-            *
-            * Two numbers, because they are two facts. What is standing here, and how
-            * much of it this document is allowed to take. */}
+          {/* The shelf for this item, split the way the decision needs it: free to
+            * anybody, held for this document, reserved by other documents — then what
+            * this issue can take and what is left once it goes (2026-11-03). Replaces
+            * the separate "Stock on the shelf" panel that sat above the grid. */}
           {group.warehouseTotal !== null && (
-            <div className="mt-2.5 rounded-lg border border-line/60 bg-content2/40 px-2.5 py-1.5">
-              <div className={HEAD}>In this warehouse</div>
-              <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2">
-                <span className="tabular text-sm font-semibold text-ink">
-                  {fmtQty(group.warehouseTotal)}
-                </span>
-                <span className="text-[11px] text-muted">on the shelf</span>
-              </div>
-              {group.warehouseDrawable !== null && (
-                <div className={`mt-0.5 text-[10px] leading-tight ${
-                  group.warehouseDrawable <= 0 ? "text-warn" : "text-muted"
-                }`}>
-                  <span className="tabular font-semibold">
-                    {fmtQty(group.warehouseDrawable)}
-                  </span>{" "}
-                  this issue can take
-                  {group.warehouseDrawable < group.warehouseTotal
-                    && " — the rest is held by other documents"}
-                </div>
-              )}
-              {/* And what the shelf reads once this document has gone out. The
-                * quantity on screen is a promise about stock that is still there;
-                * the number that decides whether to reorder is this one. */}
-              {group.issued > 0 && (
-                <div className="mt-0.5 text-[10px] leading-tight text-muted">
-                  <span className={`tabular font-semibold ${
-                    round(group.warehouseTotal - group.issued) <= 0 ? "text-warn" : "text-ink"
-                  }`}>
-                    {fmtQty(round(group.warehouseTotal - group.issued))}
-                  </span>{" "}
-                  left here after this issue
-                </div>
-              )}
-            </div>
+            <ItemStockCard
+              total={group.warehouseTotal}
+              free={group.warehouseFree ?? 0}
+              mine={group.heldForThis ?? 0}
+              others={group.heldByOthers ?? 0}
+              drawable={group.warehouseDrawable}
+              issued={group.issued}
+              asked={group.requested}
+              direct={group.direct}
+              rows={group.stockRows}
+            />
           )}
 
           {onRemoveGroup && !locked && (group.itemId > 0 || !group.splits[0]?.line.indent_item_id) && (
@@ -1136,6 +1110,7 @@ function PickRow(props: PickProps) {
                 * exactly, never rounded up to a whole package. */}
               <CellLabel>Issue qty ({packWord(2).split(" ")[1]})</CellLabel>
               <QtyInput
+                decimals={0}
                 ariaLabel={`Packages to issue from pick ${position + 1}`}
                 decimals={0}
                 value={packsHeld}

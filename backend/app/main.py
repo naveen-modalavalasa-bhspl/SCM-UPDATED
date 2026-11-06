@@ -99,7 +99,9 @@ async def lifespan(app: FastAPI):
     # Register screens added since the last deploy. Additive only — it never drops a
     # page — so unlike scripts.seed this is safe to run against the live database.
     try:
-        from app.platform.rbac.page_registry import sync_pages, sync_permission_labels
+        from app.platform.rbac.page_registry import (
+            retire_permissions, sync_pages, sync_permission_labels,
+        )
 
         # Permissions FIRST, pages second. `sync_pages` will create a missing page
         # permission itself, but it grants that row to Admin and nobody else — it has
@@ -110,6 +112,7 @@ async def lifespan(app: FastAPI):
         # find the row already there and only link it.
         async with SessionLocal() as db:
             relabelled = await sync_permission_labels(db)
+            relabelled += await retire_permissions(db)
             result = await sync_pages(db)
         if result["added"] or result["updated"]:
             log.info("rbac_pages synced: %s", result)
@@ -258,6 +261,8 @@ def _include_routers() -> None:
     router_paths = [
         "app.platform.auth.router",
         "app.platform.hcm.router",
+        "app.platform.org_directory.router",
+        "app.platform.doc_numbering.router",
         "app.platform.settings.router",
         "app.platform.mail.router",
         "app.platform.notifications.router",

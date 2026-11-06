@@ -431,9 +431,6 @@ export function QuotationComparison({
                     {row.item_name ?? `Item ${row.item_id}`}
                   </div>
                   <div className="font-mono text-[11px] text-muted">{row.item_code ?? "—"}</div>
-                  <div className="mt-1 text-xs text-body">
-                    {row.quantity} {row.uom_code ?? ""}
-                  </div>
                   {row.requested_combination && (
                     <div className="mt-1 inline-flex rounded-full bg-brand/10 px-2 py-0.5 text-[10px] font-semibold text-brand">
                       Asked: {row.requested_combination}
@@ -506,6 +503,7 @@ export function QuotationComparison({
                           <QuantityInput
                             decimals={uomDecimals(row.uom_code)} min={0}
                             value={split[splitKey(row.rfq_item_id, total.vendor_id)] ?? ""}
+                            data-uom={row.uom_code ?? ""}
                             aria-label={`Quantity for ${total.vendor_name ?? "supplier"} on ${row.item_name ?? row.item_id}`}
                             onChange={(raw) => setSplit((current) => ({
                               ...current,

@@ -1,3 +1,4 @@
+import type { QuantityChangeRow } from "@/shared/components";
 import { api } from "@/shared/api/client";
 import type { Paginated } from "@/shared/types";
 import type { PackEntryIn } from "@/shared/packing";
@@ -138,6 +139,10 @@ export const poApi = {
 };
 
 export const requisitionApi = {
+  /** Every recorded quantity change, oldest first (2026-11-03). */
+  quantityChanges: (id: number) =>
+    api.get<{ items: QuantityChangeRow[] }>(`/api/requisitions/${id}/quantity-changes`)
+      .then((r) => r.data.items),
   list: (params: {
     status?: string; search?: string; pending_for_me?: boolean;
     page?: number; size?: number;

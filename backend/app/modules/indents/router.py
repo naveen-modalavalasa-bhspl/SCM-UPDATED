@@ -20,7 +20,7 @@ from app.modules.indents.enums import (
 from app.modules.indents.schemas import (
     AcknowledgeIn, AcknowledgmentRow, ActionIn, ActivityRow, IndentCreate, IndentListRow,
     IndentJourneyOut, IndentNotificationRow, IndentOut, IndentStatsOut, IndentUpdate,
-    MonthlyCopyIn, MonthlySubmitIn,
+    MonthlyCopyIn, MonthlySubmitIn, StrSourceOption,
 )
 # Allocation is a decision about an indent, so its endpoints live here. The
 # mechanics are in modules/inventory/allocations.py -- indents may import inventory,
@@ -92,6 +92,7 @@ async def list_stock_transfer_requests(params: PageParams = Depends(),
                                        # to serve — the Fulfilment Queue's own filters.
                                        has_remainder: bool = False,
                                        to_serve: bool = False,
+                                       source_warehouse_id: int | None = None,
                                        db: AsyncSession = Depends(get_db),
                                        user=Depends(require_permission_or(
                                            perms.STOCK_TRANSFER_VIEW,
@@ -101,7 +102,18 @@ async def list_stock_transfer_requests(params: PageParams = Depends(),
         db, params, search=search, date_from=created_date_from,
         date_to=created_date_to, statuses=status, has_remainder=has_remainder,
         to_serve=to_serve, indent_types=[IndentType.STR], user=user,
+        source_warehouse_id=source_warehouse_id,
     )
+
+
+@indent_router.get("/stock-transfer-requests/sources")
+async def stock_transfer_request_sources(db: AsyncSession = Depends(get_db),
+                                         user=Depends(require_permission_or(
+                                             perms.STOCK_TRANSFER_VIEW,
+                                             perms.STOCK_TRANSFER_SERVE,
+                                             service.anywhere_in_reach))):
+    """The source points named on the STRs this login can read — the Source filter."""
+    return await service.str_sources_in_use(db, user)
 
 
 @indent_router.get("/approved-pending-po", response_model=Page[IndentListRow])
@@ -234,6 +246,13 @@ async def region_options(db: AsyncSession = Depends(get_db),
                          user=Depends(require_permission_or(
         perms.INDENT_VIEW, perms.STOCK_TRANSFER_VIEW, service.anywhere_in_reach))):
     return await service.list_region_options(db, user)
+
+
+@indent_router.get("/options/str-sources", response_model=list[StrSourceOption])
+async def str_source_options(db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(perms.STOCK_TRANSFER_REQUEST))):
+    """Where an STR may ask stock to come from: the points held at the raiser's rank."""
+    return await service.str_source_options(db, user)
 
 
 @indent_router.get("/options/vehicles")

@@ -14,6 +14,7 @@ import { alerts } from "@/modules/alerts";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { FlowStepper } from "../components/FlowStepper";
 import { TripDeliveryCard } from "../components/TripDeliveryCard";
+import { StrRouteCard } from "../components/StrRoute";
 import { IndentStatusBadge } from "../components/IndentStatusBadge";
 import { activityLedgerReturnUrlFromState } from "../context/ActivityLedgerUrlState";
 import { allRequestsReturnUrlFromState } from "../context/AllRequestsUrlState";
@@ -271,6 +272,11 @@ export function IndentDetailPage() {
     // it, and this is the last of four fallbacks: an SAC nobody can find is a blank
     // field, never a blank screen.
     ?? nonEmptyText(me?.positions?.find((position) => position.office_id === indent.office_id)?.office_sac);
+  // A warehouse or an MDP takes neither a vehicle nor an SAC (2026-11-04) — the
+  // delivery point's tier is served; unknown keeps both rows, as before. A saved
+  // vehicle is still shown: hiding a value on the document would hide the document.
+  const showVehicleAndSac = indent.needs_vehicle_and_sac !== false || Boolean(indent.vehicle_number);
+  const isStrDoc = isStrType(indent.indent_type);
   const returnedBy = returnedByFromJourney(journey);
   const correctionOwner = nonEmptyText(indent.correction_owner?.employee_name)
     ?? (indent.correction_owner?.employee_id ? `Employee #${indent.correction_owner.employee_id}` : null);
@@ -404,6 +410,16 @@ export function IndentDetailPage() {
 
       {isRaiser && <TripDeliveryCard indentId={indent.id} shipments={shipments} />}
 
+      {isStrDoc && (
+        <StrRouteCard
+          source={indent.str_source ?? (indent.source_warehouse_name
+            ? { warehouse_name: indent.source_warehouse_name, warehouse_code: indent.source_warehouse_code }
+            : null)}
+          destination={indent.str_destination}
+          changes={indent.str_source_changes}
+        />
+      )}
+
       <div className="grid gap-5 lg:grid-cols-3">
         <Card className="lg:col-span-2">
           <CardBody className="p-5">
@@ -469,10 +485,15 @@ export function IndentDetailPage() {
               <Detail label="Position" value={indent.position_name} />
               <Detail label="Department" value={indent.department_name} />
               <Detail label="Deliver to" value={delivery.officeName} />
-              <Detail label="Vehicle" value={delivery.vehicleNumber} />
-              {/* The delivery office's code, not the viewer's: an approver reading
-                  someone else's indent sees the SAC it will be delivered against. */}
-              <Detail label="Service area code (SAC)" value={officeSac} />
+              {isStrDoc && (
+                <Detail label="Source" value={indent.source_warehouse_name} />
+              )}
+              {showVehicleAndSac && <>
+                <Detail label="Vehicle" value={delivery.vehicleNumber} />
+                {/* The delivery office's code, not the viewer's: an approver reading
+                    someone else's indent sees the SAC it will be delivered against. */}
+                <Detail label="Service area code (SAC)" value={officeSac} />
+              </>}
               <Detail label="Priority" value={indent.priority} />
               {indent.current_approver_name && (
                 <Detail label="With" value={indent.current_approver_name} />

@@ -95,6 +95,7 @@ export function PurchaseConsolidationListPage() {
         </span>
       ),
     },
+    { key: "organisation", header: "Organisation", hideOnNarrow: true, render: (r) => r.organization_name ?? "—" },
     {
       key: "project",
       header: "Project",

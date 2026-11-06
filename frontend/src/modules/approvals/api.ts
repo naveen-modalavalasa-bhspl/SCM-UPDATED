@@ -6,7 +6,7 @@ import type {
   IndentAvailability, IssueFromStockLine, IssueFromStockResult,
   ConsolidationFilterOptions, ConsolidationQuery, ConsolidationWorkspace,
   CorrectionIndent, PendingApproval,
-  PendingSummary, AllocationCycleRow, DecisionLedger, CycleLedger,
+  PendingSummary, AllocationCycleRow, DecisionLedger, CycleLedger, StrSourceReview,
 } from "./types";
 import type { Paginated } from "@/shared/types";
 
@@ -174,6 +174,31 @@ export const approvalsApi = {
     api.post<ConsolidationApprovalResult>("/api/approvals/consolidation/approve", body)
       .then((r) => r.data),
   /** What is still owed on each line, and what this approver holds against it. */
+  /** An STR's source, and whether it sits in this approver's scope (2026-11-04). */
+  strSource: (indentId: number) =>
+    api.get<StrSourceReview>(`/api/approvals/indents/${indentId}/str-source`).then((r) => r.data),
+  /** Approve this rung AND allocate the STR from a point in the approver's scope —
+   *  its own source, or (with a reason) one of the approver's points it is moved to. */
+  strAllocate: (
+    indentId: number,
+    body: {
+      source_warehouse_id?: number | null;
+      reason?: string;
+      items: { line_id: number; approved_quantity: number }[];
+    },
+  ) =>
+    api.post<IssueFromStockResult>(`/api/approvals/indents/${indentId}/str-allocate`, body)
+      .then((r) => r.data),
+  /** Move the STR's source to one of the approver's points and forward it, allocating nothing. */
+  strForward: (
+    indentId: number,
+    body: {
+      source_warehouse_id: number;
+      reason: string;
+      items: { line_id: number; approved_quantity: number }[];
+    },
+  ) =>
+    api.post(`/api/approvals/indents/${indentId}/str-forward`, body).then((r) => r.data),
   indentAvailability: (indentId: number) =>
     api.get<IndentAvailability>(`/api/approvals/indents/${indentId}/availability`)
       .then((r) => r.data),

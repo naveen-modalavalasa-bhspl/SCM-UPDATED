@@ -126,6 +126,7 @@ LABELS: dict[str, str] = {
     "to_uom_id": "To unit",
     "transport_conditions": "Transport conditions",
     "uom_class": "Unit type",
+    "allows_decimal": "Allows decimal",
     "uom_id": "Unit of measure",
     "valuation_method": "Valuation method",
     "vendor_id": "Vendor",
@@ -139,7 +140,7 @@ LABELS: dict[str, str] = {
 
 HINTS: dict[str, str] = {
     "code": "A short code: letters and numbers, a hyphen only between them.",
-    "uom_class": "What the unit measures: Count, Weight, Volume ... (Masters › UOM Types).",
+    "uom_class": "What the unit measures: Count, Weight, Volume ...",
     "segment_code": "Two digits, 00 to 99.",
     "is_batch_tracked": "Each delivery keeps its own batch number.",
     "is_serial_tracked": "Every single unit has its own serial number.",

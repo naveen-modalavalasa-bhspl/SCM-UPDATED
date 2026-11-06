@@ -1057,6 +1057,8 @@ export default function PurchaseReturnForm() {
                       <td className="py-2 pr-3 w-[130px]">
                         <QuantityInput
                           decimals={uomDecimals(line.uom_code)}
+                          data-uom={line.uom_code ?? ""}
+                          min="0"
                           value={line.quantity}
                           onChange={(raw) => setManualLine(line.key, "quantity", raw)}
                           placeholder="0"

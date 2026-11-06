@@ -171,6 +171,33 @@ describe("what inventory allocated, and what the picks now say", () => {
     expect(out.splits[0].batchDrawable).toBe(10);
   });
 
+  it("splits the shelf into free, held for this document and held by others (2026-11-03)", () => {
+    // 300 here: 122 nobody's, 10 reserved for this indent, the other 168 reserved by
+    // other documents (on locations not offered at all, so not in the rows).
+    const sources = [
+      source({ bin_id: 1, batch_id: 11, available_qty: 10, reserved_qty: 40, own_reserved_qty: 10,
+               item_total_qty: 300, item_available_qty: 122 }),
+      source({ bin_id: 2, batch_id: 12, available_qty: 112, reserved_qty: 138,
+               item_total_qty: 300, item_available_qty: 122 }),
+    ];
+    const out = group([line({ requested_qty: 10, issued_qty: 10, batch_id: 11, bin_id: 1 })], sources);
+    expect(out.warehouseTotal).toBe(300);
+    expect(out.warehouseFree).toBe(122);
+    expect(out.heldForThis).toBe(10);
+    expect(out.heldByOthers).toBe(168);
+    expect(out.warehouseFree! + out.heldForThis! + out.heldByOthers!).toBe(out.warehouseTotal);
+  });
+
+  it("a direct issue's own hold counts as held for this document", () => {
+    const sources = [
+      source({ bin_id: 1, batch_id: 11, available_qty: 5, issue_hold_qty: 3,
+               item_total_qty: 8, item_available_qty: 5 }),
+    ];
+    const out = group([line({ indent_item_id: undefined, issued_qty: 3, batch_id: 11, bin_id: 1 })], sources);
+    expect(out.heldForThis).toBe(3);
+    expect(out.heldByOthers).toBe(0);
+  });
+
   it("says nothing about either width until the sources have been read", () => {
     const out = groupIssueLines([line({ issued_qty: 5, batch_id: 11, bin_id: 1 })])[0];
     expect(out.warehouseTotal).toBeNull();

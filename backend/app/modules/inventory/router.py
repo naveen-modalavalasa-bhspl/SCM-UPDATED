@@ -376,6 +376,13 @@ async def mr_item_claims(mr_id: int, item_id: int, db: AsyncSession = Depends(ge
     return await service.mr_item_claims(db, mr_id, item_id)
 
 
+@mr_router.get("/{mr_id}/quantity-changes")
+async def mr_quantity_changes(mr_id: int, db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(perms.MR_VIEW))):
+    """Every quantity change since the request was raised, oldest first (2026-11-03)."""
+    return {"items": await service.mr_quantity_changes(db, mr_id, user)}
+
+
 @mr_router.patch("/{mr_id}/items", response_model=MROut)
 async def revise_mr_items(mr_id: int, body: MRReviseIn,
                           db: AsyncSession = Depends(get_db),

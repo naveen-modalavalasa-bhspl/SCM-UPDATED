@@ -104,8 +104,6 @@ STOCK_TRANSFER_VIEW = "stock.transfer.view"
 STOCK_TRANSFER_STR_APPROVE = "stock.transfer.str_approve"
 STOCK_TRANSFER_SERVE = "stock.transfer.serve"
 STOCK_TRANSFER_SERVE_APPROVE = "stock.transfer.serve_approve"
-STOCK_TRANSFER_ISSUE = "stock.transfer.issue"
-STOCK_TRANSFER_ISSUE_POST = "stock.transfer.issue_post"
 STOCK_TRANSFER_QC = "stock.transfer.qc"
 STOCK_TRANSFER_QC_APPROVE = "stock.transfer.qc_approve"
 STOCK_TRANSFER_RECEIVE = "stock.transfer.receive"
@@ -134,6 +132,11 @@ MR_REJECT = "mr.reject"
 # --- Issues ---
 ISSUE_VIEW = "issue.view"
 ISSUE_CREATE = "issue.create"
+# Sending a draft material issue into approval (2026-11-03). Was part of ISSUE_CREATE —
+# one button, one code — so whoever could write a draft could also put it in front of
+# an approver. Carved out so the two can be given separately; it inherits every grant
+# of ISSUE_CREATE (INHERITS_GRANTS_FROM), so nobody loses the button on the deploy.
+ISSUE_SUBMIT = "issue.submit"
 ISSUE_ISSUE = "issue.issue"
 # Passing an arrived consignment on to a point below (WH -> MDP -> LIP). Separate from
 # ISSUE_CREATE because the people who forward are not the people who decide what leaves
@@ -412,10 +415,6 @@ ALL_PERMISSIONS: list[Perm] = [
          "Serve a stock transfer request — decide which point gives what"),
     Perm(STOCK_TRANSFER_SERVE_APPROVE, "inventory", "stock", "transfer_serve_approve",
          "Approve or reject how a stock transfer request is served"),
-    Perm(STOCK_TRANSFER_ISSUE, "inventory", "stock", "transfer_issue",
-         "Work a stock transfer's material issue — picks, batches, bays, submit"),
-    Perm(STOCK_TRANSFER_ISSUE_POST, "inventory", "stock", "transfer_issue_post",
-         "Approve and post a stock transfer's material issue (stock leaves the point)"),
     Perm(STOCK_TRANSFER_QC, "inventory", "stock", "transfer_qc",
          "Run the outward QC of a stock transfer"),
     Perm(STOCK_TRANSFER_QC_APPROVE, "inventory", "stock", "transfer_qc_approve",
@@ -449,6 +448,8 @@ ALL_PERMISSIONS: list[Perm] = [
     # See the GRN block above: the screen is /warehouse/material-issues.
     Perm(ISSUE_VIEW, "warehouse", "issue", "view", "View issues"),
     Perm(ISSUE_CREATE, "warehouse", "issue", "create", "Create issues"),
+    Perm(ISSUE_SUBMIT, "warehouse", "issue", "submit",
+         "Submit a material issue for approval"),
     Perm(ISSUE_ISSUE, "warehouse", "issue", "issue", "Issue stock to a department"),
     Perm(ISSUE_SPLIT, "warehouse", "issue", "split",
          "Split an issue across the floors that hold the stock"),
@@ -656,8 +657,8 @@ INHERITS_GRANTS_FROM: dict[str, str] = {
     STOCK_TRANSFER_STR_APPROVE: INDENT_APPROVE,
     STOCK_TRANSFER_SERVE: ALLOCATION_CREATE,
     STOCK_TRANSFER_SERVE_APPROVE: ALLOCATION_APPROVE,
-    STOCK_TRANSFER_ISSUE: ISSUE_CREATE,
-    STOCK_TRANSFER_ISSUE_POST: ISSUE_ISSUE,
+    # Submitting was part of creating until 2026-11-03.
+    ISSUE_SUBMIT: ISSUE_CREATE,
     STOCK_TRANSFER_QC: QC_OUTWARD_CREATE,
     STOCK_TRANSFER_QC_APPROVE: QC_OUTWARD_APPROVE,
     STOCK_TRANSFER_RECEIVE: INDENT_ACKNOWLEDGE,
@@ -1037,3 +1038,19 @@ INHERITS_GRANTS_FROM.update({
     page_view_code("rep_transport"): TRANSPORT_VIEW,
     page_view_code("rep_returns"): RETURN_VIEW,
 })
+
+
+# Permissions taken OUT of the catalogue. Leaving a code off `ALL_PERMISSIONS` is not
+# enough: `sync_permission_labels` never deletes a row it does not know, so the code
+# would stay on the Job Profiles screen and stay granted. `page_registry.
+# retire_permissions` deletes each one's grants and row on every start, idempotently.
+#
+# 2026-11-03 — the two Stock Transfer material-issue codes. The screens read holding
+# one as holding issue.view/create/issue (shared/auth/scopedGrants.ts), so a login with
+# no "Create issues" was shown Warehouse > Material Issues' New issue button. A
+# transfer's material issue is now worked under the Warehouse issue codes alone.
+RETIRED_PERMISSIONS: dict[str, str] = {
+    # retired code -> the Warehouse code that now covers what it did
+    "stock.transfer.issue": ISSUE_CREATE,
+    "stock.transfer.issue_post": ISSUE_ISSUE,
+}

@@ -1530,15 +1530,48 @@ def test_allows_decimal_flag_decides_a_units_decimals():
     from app.shared.uom import _resolve, _unit_maps
     rows = [NS(code="BAG", name="Bag", uom_class="SACK", allows_decimal=False),
             NS(code="KG", name="Kilogram", uom_class="WEIGHT", allows_decimal=True),
-            NS(code="NOS", name="nos", uom_class="COUNT", allows_decimal=None)]
+            NS(code="NOS", name="nos", uom_class="COUNT", allows_decimal=None),
+            NS(code="LTR", name="Litre", uom_class="VOLUME", allows_decimal=None)]
     maps = _unit_maps(rows)
     assert _resolve(maps, "BAG") == 0           # the flag, not the class name
     assert _resolve(maps, "kg") == 3
-    assert _resolve(maps, "nos") == 0           # no type row → built-in whole classes
+    assert _resolve(maps, "nos") == 0
+    # A unit whose switch is off is whole-only, whatever its type suggests.
+    assert _resolve(maps, "LTR") == 0
 
 
-async def test_uom_type_carries_allows_decimal(client, admin):
-    row = (await client.post("/api/uom-classes",
-                             json={"code": "SACK", "name": "Sack", "allows_decimal": False},
+async def test_uom_carries_its_own_allows_decimal(client, admin):
+    """2026-11-04: the switch is on the UOM; the UOM Types master is gone."""
+    row = (await client.post("/api/uom", json={"code": "KGW", "name": "Kilo W",
+                                               "uom_class": "WEIGHT", "allows_decimal": True},
                              headers=admin)).json()
-    assert row["allows_decimal"] is False
+    assert row["allows_decimal"] is True
+    plain = (await client.post("/api/uom", json={"code": "BGX", "name": "Bag X",
+                                                 "uom_class": "PACKAGING"},
+                               headers=admin)).json()
+    assert plain["allows_decimal"] is False      # whole units unless switched on
+    gone = await client.get("/api/uom-classes", headers=admin)
+    assert gone.status_code in (404, 405)
+
+
+async def test_a_site_defined_uom_type_is_refused(client, admin):
+    r = await client.post("/api/uom", json={"code": "CNX", "name": "Count X",
+                                            "uom_class": "CNT"}, headers=admin)
+    assert r.status_code in (400, 422), r.text
+
+
+async def test_any_signed_in_user_reads_each_units_decimals(db, client, viewer):
+    """2026-11-03: the screens' quantity boxes refuse a "." in a whole unit as it is
+    typed, off the same answer the flush guard enforces — so a storekeeper with no
+    master permission must still be able to read it."""
+    db.add_all([Uom(code="BAG", name="Bag", uom_class="PACKAGING", allows_decimal=False),
+                Uom(code="KGX", name="Kilo", uom_class="WEIGHT", allows_decimal=True),
+                # Switch never turned on: whole numbers only.
+                Uom(code="LTRX", name="Litre", uom_class="VOLUME")])
+    await db.commit()
+    got = await client.get("/api/uom/decimals", headers=viewer)
+    assert got.status_code == 200, got.text
+    table = {row["code"]: row for row in got.json()["items"]}
+    assert table["BAG"]["decimals"] == 0 and table["BAG"]["name"] == "Bag"
+    assert table["KGX"]["decimals"] == 3
+    assert table["LTRX"]["decimals"] == 0

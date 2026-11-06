@@ -88,6 +88,7 @@ export function RequisitionListPage() {
         </div>
       ),
     },
+    { key: "organisation", header: "Organisation", hideOnNarrow: true, render: (r) => r.organization_name ?? "—" },
     { key: "project", header: "Project", hideOnNarrow: true, render: (r) => r.project_name ?? "—" },
     { key: "status", header: "Status", render: (r) => <StatusPill status={r.status} /> },
     {

@@ -23,7 +23,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
-from app.modules.indents.enums import IndentStatus
+from app.modules.indents.enums import IndentStatus, IndentType
 from app.modules.indents.models import Indent, IndentItem
 from app.modules.inventory import allocations, locations
 # Unsigned promises only. Every caller pairs this with `allocated_quantity`, which is
@@ -289,6 +289,7 @@ async def _wrong_hat_message(db: AsyncSession, indent_id: int, user) -> str | No
 async def issue_from_my_stock(
     db: AsyncSession, indent_id: int, requests: list, user, reason: str = "",
     forward_remainder: bool = False,
+    approved_quantities: dict[int, float] | None = None,
 ) -> dict:
     """Record what this approver intends to give, from their own point.
 
@@ -360,7 +361,10 @@ async def issue_from_my_stock(
             "item_code": line.item_code,
             "item_name": line.item_name,
             "uom_code": line.uom_code,
-            "requested_qty": float(owed),
+            # An STR's remainder travels on to the next level, so what this point cannot
+            # give is not a shortage: stated as owed it would raise a material request
+            # for goods the levels above have not been asked about yet.
+            "requested_qty": float(qty if indent.indent_type == IndentType.STR.value else owed),
             "quantity": float(qty),
             "warehouse_id": source,
             "project_id": indent.project_id or NO_PROJECT,
@@ -437,9 +441,15 @@ async def issue_from_my_stock(
             [
                 ApprovalQuantityIn(
                     line_id=line.id,
-                    approved_quantity=float(_d(line.approved_quantity)),
+                    # The approver's own numbers when the caller carries them (the STR
+                    # source panel signs the quantities on screen); otherwise the
+                    # quantities already decided, untouched.
+                    approved_quantity=float(
+                        approved_quantities[line.id]
+                        if approved_quantities and line.id in approved_quantities
+                        else _d(line.approved_quantity)),
                 )
-                for line in remaining
+                for line in remaining if not line.is_excluded
             ],
             (f"Allocated {alloc.allocation_no} from own stock. "
              + ("Served in full." if outstanding == 0
@@ -471,3 +481,342 @@ async def issue_from_my_stock(
         # waiting on, exactly as before.
         "closed": closed,
     }
+
+
+# ---------------- Stock Transfer Request: the source point (2026-11-04) ----------------
+#
+# An STR names the point the stock should come FROM. Every approver on its ladder is
+# shown whether that point is in THEIR scope (a point they hold, or one reporting under
+# them — `locations.location_ids_for_user`, the same set "Serve from own stock" draws
+# on), and the screen offers the matching act:
+#
+#   in scope      -> approve and allocate from the source, here, now;
+#   out of scope  -> forward to the next level, or pull the request onto one of their
+#                    own points (recorded), then allocate there or forward it.
+#
+# SERVED IN FULL ENDS IT (2026-11-05). An approver who allocates everything ends the
+# ladder there; only what is still owed goes up. Allocating reserves the stock, but its
+# issue is only drafted when the approval ends (`indents._fulfilment_drafts`), and a
+# rejection or a return gives the stock back (`indents._withdraw_str_allocations`).
+#
+# NO NEXT LEVEL. "Last" means no rung above in the FROZEN ladder, never that HCM has no
+# parent. At the last level, a source outside scope with something still owed cannot be
+# approved (`assert_str_approvable`): the approver changes the source, returns or
+# rejects, and an admin adds the missing rung on Settings > Approvals Config. Nothing
+# here moves stock — allocating is the same intent `issue_from_my_stock` records,
+# reserved when the allocation is signed.
+
+NO_NEXT_LEVEL_MESSAGE = (
+    "No next approval level is configured, and the source point is outside your scope. "
+    "Change the source to one of your points, return or reject the request, or ask your "
+    "admin to add the next level on Settings > Approvals Config."
+)
+
+
+def _is_last_level(instance) -> bool | None:
+    """True when no rung of the frozen ladder sits above the current one. None when
+    the instance was not resolved as a ladder (nothing to count)."""
+    chain = getattr(instance, "resolved_chain", None)
+    if not isinstance(chain, list) or not chain:
+        return None
+    current = int(getattr(instance, "current_sequence", 0) or 0)
+    return not any(isinstance(link, dict) and int(link.get("sequence", 0) or 0) > current
+                   for link in chain)
+
+
+def _ladder_levels(instance) -> list[dict]:
+    """The frozen ladder as the screen draws it: who has signed, who is signing, who is
+    still to come. Empty for an instance not resolved as a ladder."""
+    chain = getattr(instance, "resolved_chain", None)
+    if not isinstance(chain, list):
+        return []
+    current = int(getattr(instance, "current_sequence", 0) or 0)
+    levels = []
+    for link in chain:
+        if not isinstance(link, dict):
+            continue
+        sequence = int(link.get("sequence", 0) or 0)
+        levels.append({
+            "sequence": sequence,
+            "role_name": link.get("role_name"),
+            "position_name": link.get("position_name"),
+            "state": ("DONE" if sequence < current
+                      else "CURRENT" if sequence == current else "NEXT"),
+        })
+    return sorted(levels, key=lambda level: level["sequence"])
+
+
+def _served(line: IndentItem, committed: dict[int, Decimal]) -> Decimal:
+    """How much of a line an allocation already covers, signed or not."""
+    return _d(line.allocated_quantity) + committed.get(line.id, Decimal("0"))
+
+
+def _assert_keeps_what_is_served(line: IndentItem, approved: Decimal,
+                                 committed: dict[int, Decimal]) -> None:
+    served = _served(line, committed)
+    if approved < served:
+        raise ValidationError(
+            f"{line.item_name or line.item_code}: {served.normalize():f} is already "
+            "allocated, so it cannot be approved below that.")
+
+
+async def assert_str_approvable(db: AsyncSession, indent: Indent, instance,
+                                approved_by_line: dict[int, Decimal], user) -> None:
+    """What an STR's approver may not sign: less than is already allocated, or a remainder
+    with nowhere to go. Asked before anything is written. Every line at zero is the
+    rejection path and is not asked, since rejecting gives the allocations back."""
+    if indent.indent_type != IndentType.STR.value:
+        return
+    if not any(qty > 0 for qty in approved_by_line.values()):
+        return
+    committed = await committed_by_line(db, indent.id)
+    owed = Decimal("0")
+    for line in indent.items:
+        if line.id not in approved_by_line:
+            continue
+        approved = approved_by_line[line.id]
+        _assert_keeps_what_is_served(line, approved, committed)
+        owed += approved - _served(line, committed)
+    if owed <= 0 or _is_last_level(instance) is not True:
+        return
+    scope = await locations.location_ids_for_user(db, user)
+    if indent.source_warehouse_id not in scope:
+        raise ValidationError(NO_NEXT_LEVEL_MESSAGE)
+
+
+async def _str_task(db: AsyncSession, indent_id: int, user):
+    """The STR this login is approving right now, with its live instance."""
+    from app.modules.indents.enums import IndentType
+    from . import service as approvals_service
+
+    indent, instance, _previous = await approvals_service._load_indent_task(
+        db, indent_id, user)
+    if indent.indent_type != IndentType.STR.value:
+        raise ValidationError("Only a stock transfer request has a source point")
+    return indent, instance
+
+
+async def str_source_review(db: AsyncSession, indent_id: int, user) -> dict:
+    """What the STR approval screen says about the source, and what it can offer."""
+    from app.modules.indents import service as indent_service
+
+    indent, instance = await _str_task(db, indent_id, user)
+    source_id = indent.source_warehouse_id
+    destination_id = await indent_service.str_destination_point(db, indent)
+    scope = await locations.location_ids_for_user(db, user)
+    in_scope = bool(source_id) and source_id in scope
+
+    committed = await committed_by_line(db, indent_id)
+    lines = [line for line in (await db.execute(
+        select(IndentItem).where(IndentItem.indent_id == indent_id)
+        .order_by(IndentItem.line_no)
+    )).scalars().all() if not getattr(line, "is_excluded", False)]
+    owed_by_line = {
+        line.id: max(remainder_of(line) - committed.get(line.id, Decimal("0")), Decimal("0"))
+        for line in lines
+    }
+
+    # The approver's own points that could take the request over: in scope, not the
+    # delivery point, holding something free for at least one line.
+    candidates = scope - ({destination_id} if destination_id else set())
+    free: dict[int, dict[int, Decimal]] = {}   # point -> line -> free
+    source_free: dict[int, Decimal] = {}
+    for line in lines:
+        if owed_by_line[line.id] <= 0:
+            continue
+        points = candidates | ({source_id} if source_id else set())
+        by_point = await _stock_at(db, line.item_id, points, indent_id=indent_id)
+        for wid, qty in by_point.items():
+            if wid in candidates:
+                free.setdefault(wid, {})[line.id] = qty
+        if source_id:
+            source_free[line.id] = by_point.get(source_id, Decimal("0"))
+
+    owing = [line for line in lines if owed_by_line[line.id] > 0]
+    wanted = set(free) | {w for w in (source_id, destination_id) if w}
+    names = await _names_for(db, wanted)
+    types = dict((await db.execute(
+        select(Warehouse.id, Warehouse.warehouse_type).where(Warehouse.id.in_(wanted or {0}))
+    )).all())
+    holders = await locations.point_holder_names(
+        db, {w for w in (source_id, destination_id) if w})
+
+    def _point(wid):
+        if not wid:
+            return None
+        tier = locations.tier_of(types.get(wid))
+        return {"warehouse_id": wid,
+                "warehouse_name": names.get(wid)
+                or (indent.source_warehouse_name if wid == source_id else None),
+                "tier_label": locations.tier_label(tier),
+                "held_by": holders.get(wid, [])}
+
+    options = []
+    for wid, per_line in free.items():
+        if wid == source_id:
+            continue
+        covers_full = sum(1 for line in owing
+                          if per_line.get(line.id, Decimal("0")) >= owed_by_line[line.id])
+        covers_any = sum(1 for line in owing if per_line.get(line.id, Decimal("0")) > 0)
+        options.append({
+            **_point(wid),
+            "covers_full": covers_full, "covers_any": covers_any,
+            "lines": [{"line_id": line.id,
+                       "free_quantity": float(per_line.get(line.id, Decimal("0")))}
+                      for line in owing],
+        })
+    options.sort(key=lambda o: (-o["covers_full"], -o["covers_any"],
+                                (o["warehouse_name"] or "").lower()))
+
+    from app.modules.indents.models import StrSourceChange
+    changes = (await db.execute(
+        select(StrSourceChange).where(StrSourceChange.indent_id == indent.id)
+        .order_by(StrSourceChange.id))).scalars().all()
+
+    # What the levels below have already allocated, in the words of the document.
+    allocated_rows = (await db.execute(
+        select(AllocationItem, Allocation)
+        .join(Allocation, Allocation.id == AllocationItem.allocation_id)
+        .where(Allocation.indent_id == indent.id,
+               Allocation.status.in_(allocations.ACTIVE_ALLOCATION_STATUSES),
+               AllocationItem.quantity > 0)
+        .order_by(Allocation.id, AllocationItem.id)
+    )).all()
+    allocated_names = await _names_for(
+        db, {row.warehouse_id for row, _ in allocated_rows if row.warehouse_id})
+
+    levels = _ladder_levels(instance)
+    return {
+        "indent_id": indent.id,
+        "indent_no": indent.indent_no,
+        "levels": levels,
+        "next_level": next((lv for lv in levels if lv["state"] == "NEXT"), None),
+        "fully_served": bool(allocated_rows) and not owing,
+        "allocated": [{
+            "allocation_no": alloc.allocation_no,
+            "signed": alloc.status in allocations.SETTLED_ALLOCATION_STATUSES,
+            "allocated_by_name": alloc.allocated_by_name,
+            "item_name": row.item_name or row.item_code,
+            "uom_code": row.uom_code,
+            "quantity": float(_d(row.quantity)),
+            "warehouse_name": allocated_names.get(row.warehouse_id),
+        } for row, alloc in allocated_rows],
+        "changes": [{
+            "id": c.id, "from_warehouse_id": c.from_warehouse_id,
+            "from_warehouse_name": c.from_warehouse_name,
+            "to_warehouse_id": c.to_warehouse_id, "to_warehouse_name": c.to_warehouse_name,
+            "stage_name": c.stage_name, "reason": c.reason,
+            "changed_by_name": c.changed_by_name, "position_name": c.position_name,
+            "created_at": c.created_at.isoformat() if c.created_at else None,
+        } for c in changes],
+        "source": _point(source_id),
+        "destination": _point(destination_id),
+        "in_scope": in_scope,
+        "is_last_level": _is_last_level(instance),
+        "stage_name": instance.current_stage_name,
+        "lines_owing": len(owing),
+        "source_lines": [{"line_id": line.id,
+                          "owed_quantity": float(owed_by_line[line.id]),
+                          "free_quantity": float(source_free.get(line.id, Decimal("0")))}
+                         for line in owing],
+        "my_points": options,
+    }
+
+
+class _Req:
+    """The shape `issue_from_my_stock` reads off each request."""
+
+    def __init__(self, line_id: int, warehouse_id: int, quantity: Decimal):
+        self.line_id, self.warehouse_id, self.quantity = line_id, warehouse_id, quantity
+
+
+async def str_allocate(db: AsyncSession, indent_id: int, body, user) -> dict:
+    """Approve this rung AND allocate from a point in the approver's scope — the STR's
+    own source, or one of their points they pull it onto (recorded, with a reason).
+
+    Each line takes what the point has free, up to what this approver signs on it;
+    whatever the point cannot give stays owed and travels on, exactly as "Serve from
+    own stock" leaves a remainder."""
+    from app.modules.indents import service as indent_service
+
+    indent, instance = await _str_task(db, indent_id, user)
+    scope = await locations.location_ids_for_user(db, user)
+    target = int(body.source_warehouse_id or indent.source_warehouse_id or 0)
+    if not target:
+        raise ValidationError("This request has no source point — choose one of yours")
+    if target not in scope:
+        raise ValidationError(
+            "That point is not in your scope. Forward the request to the next level, "
+            "or choose one of your own points")
+    moving = target != indent.source_warehouse_id
+    reason = (body.reason or "").strip()
+    if moving and not reason:
+        raise ValidationError("Say why you are changing the source point")
+
+    signed = {q.line_id: Decimal(str(q.approved_quantity)) for q in body.items}
+    committed = await committed_by_line(db, indent_id)
+    lines = (await db.execute(
+        select(IndentItem).where(IndentItem.indent_id == indent_id)
+    )).scalars().all()
+
+    requests = []
+    for line in lines:
+        if line.id not in signed:
+            continue
+        _assert_keeps_what_is_served(line, signed[line.id], committed)
+        owed = (min(signed[line.id] - _d(line.allocated_quantity), remainder_of(line))
+                - committed.get(line.id, Decimal("0")))
+        if owed <= 0:
+            continue
+        here = (await _stock_at(db, line.item_id, {target}, indent_id=indent_id)).get(
+            target, Decimal("0"))
+        qty = min(owed, here)
+        if qty > 0:
+            requests.append(_Req(line.id, target, qty))
+    point_name = (await _names_for(db, {target})).get(target) or f"Point {target}"
+    if not requests:
+        raise ValidationError(
+            f"{point_name} has none of these items free. Forward the request to the "
+            f"next level, or choose another of your points.")
+
+    previous = indent.source_warehouse_name
+    if moving:
+        await indent_service.change_str_source(
+            db, indent, target, user, reason=reason,
+            stage_name=instance.current_stage_name)
+    note = (f"Allocated from {point_name}"
+            + (f" (source moved from {previous or 'none'})" if moving else "")
+            + (f" — {reason}" if reason else ""))
+    return await issue_from_my_stock(
+        db, indent_id, requests, user, reason=note, forward_remainder=True,
+        approved_quantities={k: float(v) for k, v in signed.items()},
+    )
+
+
+async def str_forward(db: AsyncSession, indent_id: int, body, user):
+    """Move an STR's source to one of the approver's points and forward it without
+    allocating: the level above decides what happens at the new source. The move is
+    recorded with its reason, exactly as moving and allocating is."""
+    from app.modules.indents import service as indent_service
+    from . import service as approvals_service
+
+    indent, instance = await _str_task(db, indent_id, user)
+    if _is_last_level(instance) is True:
+        raise ValidationError(
+            "No next approval level is configured, so this request cannot be forwarded. "
+            "Allocate it from your point, or ask your admin to add the next level on "
+            "Settings > Approvals Config.")
+    target = body.source_warehouse_id
+    if not target or target not in await locations.location_ids_for_user(db, user):
+        raise ValidationError("Choose one of your own points as the new source")
+    if target == await indent_service.str_destination_point(db, indent):
+        raise ValidationError("The source cannot be the point receiving the stock")
+    reason = (body.reason or "").strip()
+    if not reason:
+        raise ValidationError("Say why you are changing the source point")
+    await indent_service.change_str_source(
+        db, indent, target, user, reason=reason, stage_name=instance.current_stage_name)
+    return await approvals_service.approve_indent(
+        db, indent_id, body.items,
+        f"Source moved to {indent.source_warehouse_name} and forwarded — {reason}", user,
+    )

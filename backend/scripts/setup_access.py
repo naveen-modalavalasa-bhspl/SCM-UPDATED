@@ -95,7 +95,7 @@ WAREHOUSE_PERMS = VIEW_ONLY + [
     "inspection.view", "inspection.execute",
     "putaway.view", "putaway.execute",
     "picking.view", "picking.pick",
-    "issue.view", "issue.create", "issue.issue", "issue.forward",
+    "issue.view", "issue.create", "issue.submit", "issue.issue", "issue.forward",
     "dispatch.view", "dispatch.create", "dispatch.gate_out",
     "dispatch.acknowledge", "dispatch.approve",
     "allocation.view", "allocation.create", "allocation.submit",

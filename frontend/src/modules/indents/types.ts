@@ -45,6 +45,17 @@ export interface Indent {
   required_date?: string | null;
   vehicle_id?: number | null;
   vehicle_number?: string | null;
+  /** A Stock Transfer Request's source point (2026-11-04). */
+  source_warehouse_id?: number | null;
+  source_warehouse_name?: string | null;
+  source_warehouse_code?: string | null;
+  /** The STR's route, decorated on single-document reads. */
+  str_source?: StrPoint | null;
+  str_destination?: StrPoint | null;
+  str_source_changes?: StrSourceChange[];
+  /** False when the delivery point is not the bottom rung (a warehouse or an MDP) —
+   *  no vehicle and no SAC belong on it. Null/undefined = unknown, shown as before. */
+  needs_vehicle_and_sac?: boolean | null;
   requested_by_id?: number | null;
   requested_by_name?: string | null;
   position_id?: number | null;
@@ -92,6 +103,41 @@ export interface Indent {
   items: IndentItem[];
 }
 
+/** One end of an STR's route. */
+export interface StrPoint {
+  warehouse_id?: number | null;
+  warehouse_code?: string | null;
+  warehouse_name?: string | null;
+  warehouse_type?: string | null;
+  tier_label?: string | null;
+  held_by?: string[];
+}
+
+/** An approver moved an STR's source onto a point of theirs. */
+export interface StrSourceChange {
+  id: number;
+  from_warehouse_id?: number | null;
+  from_warehouse_name?: string | null;
+  to_warehouse_id: number;
+  to_warehouse_name?: string | null;
+  stage_name?: string | null;
+  reason?: string | null;
+  changed_by_name?: string | null;
+  position_name?: string | null;
+  created_at: string;
+}
+
+/** A point an STR may name as its source: held at the raiser's own rank. */
+export interface StrSourceOption {
+  warehouse_id: number;
+  warehouse_code?: string | null;
+  warehouse_name?: string | null;
+  warehouse_type?: string | null;
+  tier?: number | null;
+  tier_label?: string | null;
+  held_by?: string[];
+}
+
 export interface IndentListRow {
   id: number;
   indent_no: string;
@@ -100,6 +146,8 @@ export interface IndentListRow {
   department_name?: string | null;
   region_id?: number | null;
   region_name?: string | null;
+  source_warehouse_id?: number | null;
+  source_warehouse_name?: string | null;
   status: string;
   priority: string;
   total_items: number;
@@ -427,6 +475,8 @@ export interface IndentCreate {
   priority: string;
   indent_type?: IndentType;
   vehicle_id?: number | null;
+  /** Required on an STR: where the stock should come from. */
+  source_warehouse_id?: number | null;
   remarks?: string | null;
   items: {
     item_id: number; quantity: number; remarks?: string;

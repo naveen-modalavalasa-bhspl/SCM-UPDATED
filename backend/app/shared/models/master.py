@@ -1,7 +1,7 @@
 """mst_ tables — SCM's own master data. Owned by shared/."""
 from sqlalchemy import (
-    JSON, BigInteger, Boolean, Column, Date, ForeignKey, Index, Integer, Numeric, String,
-    Text, UniqueConstraint, func, select,
+    JSON, BigInteger, Boolean, Column, Date, DateTime, ForeignKey, Index, Integer, Numeric,
+    String, Text, UniqueConstraint, func, select,
 )
 from sqlalchemy.orm import column_property, relationship
 
@@ -9,6 +9,40 @@ from app.core.database import Base
 from app.shared.models.base import (
     BigIntPortable, created_at_col, pk, soft_fk, updated_at_col,
 )
+
+
+class Organization(Base):
+    """A company from the organisation directory feed (`platform/org_directory`).
+
+    A read-only copy: the feed's own id is the primary key, the same way an hcm_ mirror
+    keys on HCM's id, and only the sync writes it. Separate from Settings > Company,
+    which stays the letterhead. A row that leaves the feed goes inactive, never away —
+    documents hold a snapshot and a soft id to it.
+    """
+    __tablename__ = "mst_organizations"
+    id = Column(BigIntPortable, primary_key=True, autoincrement=False)
+    code = Column(String(50), nullable=True, index=True)
+    name = Column(String(200), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    raw = Column(JSON, nullable=True)
+    synced_at = Column(DateTime, nullable=False)
+
+
+class OrgDepartment(Base):
+    """A department from the same feed. Deliberately unrelated to two other things:
+
+    - `hcm_departments`, the 2,118 office-scoped rows HCM owns, which keep their own
+      tab and every existing reader;
+    - `Organization` above. The feed states no link between the two lists, and equal
+      ids across them mean nothing, so no column pretends one exists.
+    """
+    __tablename__ = "mst_org_departments"
+    id = Column(BigIntPortable, primary_key=True, autoincrement=False)
+    code = Column(String(50), nullable=True, index=True)
+    name = Column(String(200), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    raw = Column(JSON, nullable=True)
+    synced_at = Column(DateTime, nullable=False)
 
 
 class Uom(Base):
@@ -21,6 +55,9 @@ class Uom(Base):
     code = Column(String(20), unique=True, nullable=False)
     name = Column(String(100), nullable=False)
     uom_class = Column(String(30), nullable=True)
+    # May a document carry a fraction of this unit (2026-11-04). Off = whole units
+    # only, which is also what makes its stock coded one code per unit at putaway.
+    allows_decimal = Column(Boolean, nullable=False, default=False, server_default="0")
     is_active = Column(Boolean, nullable=False, default=True)
 
 
@@ -92,7 +129,9 @@ class VendorCategoryMember(Base):
 
 
 class UomClassRow(Base):
-    """`mst_uom_classes` — the kinds of unit (Count, Weight, Volume ...).
+    """`mst_uom_classes` — RETIRED 2026-11-04: no screen, no API, nothing reads it.
+    The kinds of unit are `enums.UomClass` again and "Allows decimal" is on
+    `mst_uom` itself. Kept mapped so bootstrap still creates the table old scripts name.
 
     `mst_uom.uom_class` holds this row's CODE, as it always held the enum's value,
     so every query already reading the code keeps working.
@@ -1067,3 +1106,16 @@ class ItemEligibility(Base):
 # its own if a column ever becomes nullable.
 Index("uq_item_eligibility", ItemEligibility.item_id,
       ItemEligibility.scope_type, ItemEligibility.scope_id, unique=True)
+
+
+class OrgScopeColumns:
+    """Whose paper a document is on and which year it is numbered in: copied from the
+    document before it, or selected on this one (`platform/doc_numbering/scope.py`). Soft
+    ids and snapshots, like every other master a document names (rule 10). All NULL on a
+    document raised before organisations."""
+    organization_id = soft_fk()
+    organization_code = Column(String(50), nullable=True)   # snapshot
+    organization_name = Column(String(200), nullable=True)  # snapshot
+    org_department_id = soft_fk()
+    org_department_name = Column(String(200), nullable=True)  # snapshot
+    fiscal_year = Column(String(10), nullable=True)

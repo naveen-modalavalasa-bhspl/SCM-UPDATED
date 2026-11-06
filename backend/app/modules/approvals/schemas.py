@@ -196,6 +196,7 @@ class ApprovalIndentOut(BaseModel):
     position_name: str | None = None
     department_name: str | None = None
     office_name: str | None = None
+    indent_type: str | None = None
     current_stage_name: str | None = None
     current_approver_name: str | None = None
     can_return_for_correction: bool = False
@@ -478,3 +479,12 @@ class IssueFromStockIn(BaseModel):
     # approved quantities are untouched — only the remainder travels — so the next
     # approver sees exactly what is still owed and nothing is re-decided.
     forward_remainder: bool = False
+
+
+class StrAllocateIn(BaseModel):
+    """Approve an STR at this rung and allocate it from a point in the approver's
+    scope (2026-11-04). `source_warehouse_id` empty = the STR's own source; another
+    point moves the source there, and then `reason` is required."""
+    source_warehouse_id: int | None = Field(default=None, gt=0)
+    reason: str = Field(default="", max_length=500)
+    items: list[ApprovalQuantityIn] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)

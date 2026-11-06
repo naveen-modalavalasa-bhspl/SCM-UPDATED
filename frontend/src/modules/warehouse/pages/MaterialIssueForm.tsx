@@ -5,7 +5,6 @@ import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Accordion, AccordionItem } from "@heroui/react";
 import { ArrowLeft, Info, Lock, MapPin, FileText, ChevronRight, ChevronDown, Tag } from "lucide-react";
-import { LiveStockPanel } from "../components/LiveStockPanel";
 import { SplitFamilyCard } from "../components/SplitFamilyCard";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { Lookup } from "../components/Lookup";
@@ -304,6 +303,9 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   const [issuedTo, setIssuedTo] = useState<IssueEmployeeOption | null>(null);
   // The employee list follows the destination's office unless the store asks for all.
   const [everyone, setEveryone] = useState(false);
+  // The office an STR's indent is bound for, from its issue source — a NEW issue has
+  // no saved document to read it off yet.
+  const [indentOffice, setIndentOffice] = useState<number | null>(null);
   const [departmentName, setDepartmentName] = useState<string | null>(null);
   const [projectName, setProjectName] = useState<string | null>(null);
   // Some of the reserved stock was received for another project, or for none.
@@ -532,8 +534,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     [form.items],
   );
   const {
-    data: sources = [], isSuccess: sourcesReady, dataUpdatedAt: sourcesAt,
-    isFetching: sourcesFetching, refetch: refetchSources,
+    data: sources = [], isSuccess: sourcesReady,
   } = useQuery({
     queryKey: ["wh-issue-sources", form.warehouse_id, form.indent_id ?? 0,
       form.project_id ?? 0, (editing ? Number(id) : (doc?.id ?? 0)), itemIds],
@@ -869,6 +870,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     onSuccess: (source) => {
       setDestination(source.destination_office_name ?? "");
       setDestinationSac(source.destination_office_sac ?? null);
+      setIndentOffice(source.destination_office_id ?? null);
       setMixedProjects(!!source.mixed_projects);
       if (source.issued_to_id) setIssuedToName(source.issued_to_name ?? null);
       if (source.department_id) setDepartmentName((source as any).department_name ?? null);
@@ -985,7 +987,67 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   // no indent behind it, these two are the only record of it. The server refuses the
   // same (`_build_issue`); this says it on the field before the press.
   const missingDestination = direct && !stoIssue && !form.destination_warehouse_id;
-  const missingIssuedTo = direct && !stoIssue && !form.issued_to_id;
+  // A stock transfer — an STO's issue, or one serving an STR — is issued TO somebody
+  // at the destination, exactly as a direct issue is (2026-11-02): the people offered
+  // are the destination office's ("Show everyone" widens it), and naming one is
+  // required. The server refuses the submit without it (`submit_issue`).
+  const strIssue = mode === "STR" || doc?.indent_type === "STR";
+  const transferIssue = direction === "OUT" && (stoIssue || strIssue);
+  const transferOffice = destPoint?.office_id ?? doc?.destination_office_id ?? indentOffice ?? null;
+  const transferPeopleOffice = !everyone ? transferOffice : null;
+  const missingIssuedTo = !form.issued_to_id
+    && ((direct && !stoIssue) || transferIssue);
+
+  /** On a transfer the destination is fixed by the order / request, so naming the
+   *  person never re-points it — unlike a direct issue, where the person's office
+   *  answers where the goods go. */
+  const chooseTransferPerson = (person: IssueEmployeeOption | null) => {
+    setIssuedTo(person);
+    setIssuedToName(person?.name ?? null);
+    set("issued_to_id", person?.id ?? null);
+  };
+
+  const transferDestinationName = doc?.sto_to_warehouse_name ?? doc?.destination_warehouse_name
+    ?? destPoint?.name ?? destination ?? null;
+
+  const transferPicker = (
+    <SearchPicker<IssueEmployeeOption>
+      label="Issued to"
+      required
+      error={touched && missingIssuedTo
+        ? "Pick who carries or receives this transfer — a stock transfer names a person." : null}
+      hint={transferPeopleOffice
+        ? "People at the destination — who carries or receives the goods."
+        : "Search every employee by name, code, office or department."}
+      placeholder="Search name, employee or position code"
+      value={issuedTo ? personRow(issuedTo) : (form.issued_to_id
+        ? { id: form.issued_to_id, title: issuedToName ?? String(form.issued_to_id) }
+        : null)}
+      onChange={chooseTransferPerson}
+      queryKey={["issue-employees", transferPeopleOffice]}
+      load={(q) => searchIssueEmployees(q, transferPeopleOffice)}
+      toRow={personRow}
+      emptyText={transferPeopleOffice ? "Nobody is recorded at the destination's office." : "No active employees."}
+      filterNote={transferOffice ? (everyone ? (
+        <span>
+          Showing everyone.{" "}
+          <button type="button" className="font-semibold text-brand hover:underline"
+                  onClick={() => setEveryone(false)}>
+            Only people at the destination
+          </button>
+        </span>
+      ) : (
+        <span>
+          Showing people at <b className="text-ink">{transferDestinationName ?? "the destination"}</b>.{" "}
+          <button type="button" className="font-semibold text-brand hover:underline"
+                  onClick={() => setEveryone(true)}>
+            Show everyone
+          </button>
+        </span>
+      )) : undefined}
+      disabled={locked}
+    />
+  );
 
   // A new issue seeded with an indent from elsewhere (a fulfilment pick, a deep link)
   // is an indent issue, whichever tile was showing.
@@ -1343,7 +1405,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
               </Can>
             )}
             {editing && doc?.status === "DRAFT" && (
-              <Can do="issue.create">
+              <Can do="issue.submit">
                 <Button
                   className={TONE_SUBMIT}
                   onClick={() => setConfirming("submit")}
@@ -1478,7 +1540,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
       {touched && !form.warehouse_id && <ErrorBanner error="Pick the issuing warehouse." />}
       {touched && form.items.length === 0 && <ErrorBanner error="Add at least one line." />}
       {touched && (missingDestination || missingIssuedTo) && (
-        <ErrorBanner error={`A direct issue needs ${[
+        <ErrorBanner error={`${transferIssue ? "A stock transfer" : "A direct issue"} needs ${[
           missingDestination && "a destination", missingIssuedTo && "the person it is issued to",
         ].filter(Boolean).join(" and ")} — pick ${missingDestination && missingIssuedTo ? "them" : "it"} under Issue details.`} />
       )}
@@ -1498,12 +1560,17 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         <MetaCard title="Document">
           <MetaRow label="Number" value={<span className="font-mono">{doc.issue_no}</span>} />
           <MetaRow label="Status" value={<StatusPill status={doc.status} />} />
-          <MetaRow
-            label="Currently with"
-            value={doc.currently_with
-              ? `${doc.currently_with}${awaitingIssue ? " — to issue from stock" : ""}`
-              : "—"}
-          />
+          {/* Only while the issue is still waiting on somebody's decision. Once it is
+            * approved or issued the row said nothing useful ("—", or the approver who
+            * had already signed). */}
+          {(doc.status === "DRAFT" || doc.status === "PENDING_APPROVAL") && (
+            <MetaRow
+              label="Currently with"
+              value={doc.currently_with
+                ? `${doc.currently_with}${awaitingIssue ? " — to issue from stock" : ""}`
+                : "—"}
+            />
+          )}
           <MetaRow label="Stock" value={doc.is_stock_posted ? `Posted ${fmtDateTime(doc.posted_at)}` : "Not posted"} />
           {doc.sto_no && !doc.indent_id ? (
             <MetaRow label="Against STO" value={<span className="font-mono">{doc.sto_no}</span>} />
@@ -1522,7 +1589,10 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
             <MetaRow label="Submitted by"
                      value={doc.submitted_by_name || doc.created_by_name || "—"} />
           )}
-          <MetaRow label="Acknowledged by" value={doc.acknowledged_by_name || "—"} />
+          {/* Only once the receiver has actually acknowledged it. */}
+          {doc.acknowledged_by_name && (
+            <MetaRow label="Acknowledged by" value={doc.acknowledged_by_name} />
+          )}
           {doc.parent_issue_id && (
             <MetaRow
               label="Split of"
@@ -1698,22 +1768,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                 <Input value={form.vehicle_number ?? ""} disabled={locked}
                        onChange={(e) => set("vehicle_number", e.target.value)} placeholder="Vehicle number" />
               </Field>
-              <div className="sm:col-span-2">
-                <SearchPicker<IssueEmployeeOption>
-                  label="Issued to"
-                  hint="Optional — the order is the request. Name who carries or receives it."
-                  placeholder="Search name, employee or position code"
-                  value={issuedTo ? personRow(issuedTo) : (form.issued_to_id
-                    ? { id: form.issued_to_id, title: issuedToName ?? String(form.issued_to_id) }
-                    : null)}
-                  onChange={chooseEmployee}
-                  queryKey={["issue-employees", null]}
-                  load={(q) => searchIssueEmployees(q, null)}
-                  toRow={personRow}
-                  emptyText="No active employees."
-                  disabled={locked}
-                />
-              </div>
+              <div className="sm:col-span-2">{transferPicker}</div>
             </>
           ) : direct ? (
             <>
@@ -1806,6 +1861,9 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
             </>
           ) : (
             <>
+          {transferIssue ? (
+            <div className="sm:col-span-2">{transferPicker}</div>
+          ) : (
           <Field label="Issued to">
             <Lookup name="employees" load={employeeOptions} value={form.issued_to_id ?? ""} isDisabled={locked}
                     // The list is the first page of employees, so a person outside it
@@ -1822,6 +1880,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                       else if (!form.indent_id) { setDestination(""); setDestinationSac(null); }
                     }} placeholder="Person" />
           </Field>
+          )}
           <Field label="Vehicle">
             <Input value={form.vehicle_number ?? ""} disabled={locked}
                    onChange={(e) => set("vehicle_number", e.target.value)} placeholder="Vehicle number" />
@@ -1867,10 +1926,6 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         )}
 
 
-        {direction === "OUT" && !doc?.is_stock_posted && !!form.warehouse_id && (
-          <LiveStockPanel lines={form.items} sources={sources} updatedAt={sourcesAt}
-                          fetching={sourcesFetching} onRefresh={() => void refetchSources()} />
-        )}
 
         {/* A direct issue has no allocation behind it, so it holds its own stock. */}
         {direction === "OUT" && !form.indent_id && !doc?.is_stock_posted

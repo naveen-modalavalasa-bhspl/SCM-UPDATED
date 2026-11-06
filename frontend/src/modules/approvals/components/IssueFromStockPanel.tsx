@@ -223,6 +223,7 @@ function LineRow({ line, field, quantity, source, onQuantity, onSource }: {
           <QuantityInput
             className={field}
             decimals={uomDecimals(line.uom_code)}
+            data-uom={line.uom_code ?? ""}
             min={0}
             max={ceiling}
             aria-label={`Issue quantity for ${line.item_name ?? line.item_code}`}

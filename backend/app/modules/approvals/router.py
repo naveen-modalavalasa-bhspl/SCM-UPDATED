@@ -15,7 +15,7 @@ from .schemas import (
     ApprovalReportOut, BulkActionIn, BulkActionOut,
     ConsolidationApprovalIn, ConsolidationApprovalOut,
     ConsolidationFilters, ConsolidationOut, IndentApprovalActionIn,
-    IndentRejectionIn, IndentReturnIn, IssueFromStockIn, ReminderOut,
+    IndentRejectionIn, IndentReturnIn, IssueFromStockIn, ReminderOut, StrAllocateIn,
 )
 
 
@@ -196,6 +196,29 @@ async def indent_availability(indent_id: int, db: AsyncSession = Depends(get_db)
                               user=Depends(require_permission(perms.INDENT_APPROVE))):
     """What is still owed per line, and what this approver holds against it."""
     return await fulfilment.availability_for_indent(db, indent_id, user)
+
+
+@router.get("/indents/{indent_id}/str-source")
+async def str_source_review(indent_id: int, db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(perms.INDENT_APPROVE))):
+    """An STR's source point, and whether it sits in this approver's scope."""
+    return await fulfilment.str_source_review(db, indent_id, user)
+
+
+@router.post("/indents/{indent_id}/str-allocate")
+async def str_allocate(indent_id: int, body: StrAllocateIn,
+                       db: AsyncSession = Depends(get_db),
+                       user=Depends(require_permission(perms.INDENT_APPROVE))):
+    """Approve this rung and allocate the STR from a point in the approver's scope."""
+    return await fulfilment.str_allocate(db, indent_id, body, user)
+
+
+@router.post("/indents/{indent_id}/str-forward", response_model=ApprovalIndentOut)
+async def str_forward(indent_id: int, body: StrAllocateIn,
+                      db: AsyncSession = Depends(get_db),
+                      user=Depends(require_permission(perms.INDENT_APPROVE))):
+    """Move the STR's source to the approver's point and forward it, allocating nothing."""
+    return await fulfilment.str_forward(db, indent_id, body, user)
 
 
 @router.post("/indents/{indent_id}/issue-from-stock")

@@ -729,11 +729,13 @@ export function TransportFormPage() {
                   nobody packed. */}
               <Field label="Qty" required={!fromPackingList}>
                 <Input type="number" min={0} value={line.quantity?.toString() ?? ""}
+                  data-uom={line.uom_code ?? ""}
                   readOnly={fromPackingList} disabled={fromPackingList}
                   onChange={(e) => setLine(index, { quantity: Number(e.target.value) })} />
               </Field>
               <Field label="Packages">
                 <Input type="number" min={0} value={line.package_count?.toString() ?? ""}
+                  data-decimals={0}
                   readOnly={fromPackingList} disabled={fromPackingList}
                   onChange={(e) => setLine(index, { package_count: Number(e.target.value) })} />
               </Field>

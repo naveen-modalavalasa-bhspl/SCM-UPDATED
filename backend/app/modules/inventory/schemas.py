@@ -211,6 +211,8 @@ class MRItemOut(CombinationOut):
     item_name: str | None = None
     uom_code: str | None = None
     quantity: float
+    # The ceiling: what the line asked for when raised (2026-11-03).
+    requested_quantity: float | None = None
     ordered_quantity: float
     indent_item_id: int | None = None
     remarks: str | None = None

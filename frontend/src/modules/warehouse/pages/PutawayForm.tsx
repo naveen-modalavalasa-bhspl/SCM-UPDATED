@@ -360,6 +360,7 @@ export default function PutawayForm() {
             <Field label="Quantity" hint="Less than the task quantity leaves the rest outstanding.">
               <Input
                 type="number"
+                data-uom={task.uom_code ?? ""}
                 value={String(qty)}
                 onChange={(e) => changeQty(Number(e.target.value))}
               />

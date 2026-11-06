@@ -12,6 +12,48 @@ export type BarFormat = "CODE128" | "CODE39";
 export type Layout = "ROLL" | "SHEET";
 export type FontSize = "S" | "M" | "L";
 export type PackScope = "ALL" | "TOP" | "NEW" | "NONE";
+/** What a sticker's QR carries (2026-11-02): the details themselves as text — any
+ *  phone camera shows them on scan, no login, no network — or the live-details link. */
+export type QrContent = "DETAILS" | "LINK";
+
+/** The QR text: the code, then one "Label: value" line per known fact. Empty values
+ *  are dropped so a scan never reads "Batch: —". Kept plain (no markup) because every
+ *  scanner app shows text as-is. */
+export function qrDetailsText(code: string, facts: [string, string | number | null | undefined][]): string {
+  const lines = [code];
+  for (const [label, value] of facts) {
+    const v = value == null ? "" : String(value).trim();
+    if (v && v !== code) lines.push(`${label}: ${v}`);
+  }
+  return lines.join("\n");
+}
+
+/** The live-details page a `qr_token` opens (`/c/<token>`). */
+export const qrLink = (token: string) => `${window.location.origin}/c/${encodeURIComponent(token)}`;
+
+/** Every fact a document label knows, for the QR (independent of which fields the
+ *  sticker prints — the scan is where the rest of the detail lives). */
+export function docLabelFacts(r: DocLabelRow, doc?: {
+  document_type?: string; document_no?: string | null; to_name?: string | null; document_date?: string | null;
+} | null): [string, string | number | null | undefined][] {
+  const combo = [r.brand_name, r.variant_name, r.model_name].filter(Boolean).join(" / ");
+  const qty = r.kind === "UNIT" ? null
+    : `${r.qty}${r.part ? ` of ${r.pack_size}` : ""} ${r.uom_code ?? ""}`.trim();
+  return [
+    ["Type", r.kind === "UNIT" ? r.pack_name : r.pack_name ? `${r.pack_name}${qty ? ` (${qty})` : ""}` : qty],
+    ["Item", [r.item_code, r.item_name].filter(Boolean).join(" - ")],
+    ["Serial", r.serial_number],
+    ["IMEI", r.imei],
+    ["Brand", combo],
+    ["Batch", r.batch_no],
+    ["Expiry", r.expiry_date],
+    ["Holds", r.packs_inside],
+    ["Inside", (r.path ?? []).map((p) => `${p.name ?? "Pack"} ${p.code}`).join(" > ")],
+    [doc?.document_type === "RECEIPT" ? "Received on" : "Issue", doc?.document_no],
+    ["To", doc?.to_name],
+    ["Date", doc?.document_date],
+  ];
+}
 
 export const FIELDS = [
   ["item_name", "Item name"],
@@ -43,6 +85,8 @@ export interface LabelSettings {
   fields: Record<FieldKey, boolean>;
   /** Print the carton (and an opened box) as a parent label on top (2026-10-28). */
   parents: boolean;
+  /** What the QR carries — the details as text (default) or the live link. */
+  qr: QrContent;
 }
 
 export interface SizePreset { id: string; label: string; w: number; h: number; layout: Layout; group: string }
@@ -65,6 +109,7 @@ export const DEFAULT_SETTINGS: LabelSettings = {
   font: "M", copies: 1, margin: 8, gap: 2,
   fields: { ...ALL_FIELDS_ON, to: false, date: false, parent: false },
   parents: true,
+  qr: "DETAILS",
 };
 
 export const A4 = { w: 210, h: 297 };

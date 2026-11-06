@@ -64,9 +64,11 @@ export function SplitFamilyCard({
             </div>
             {sentence && <p className="mt-0.5 text-xs text-muted">{sentence}</p>}
           </div>
-          <span className="rounded-full bg-content2 px-2.5 py-1 text-xs font-semibold tabular-nums text-ink">
-            {posted}/{live.length} posted
-          </span>
+          {members.length > 1 && (
+            <span className="rounded-full bg-content2 px-2.5 py-1 text-xs font-semibold tabular-nums text-ink">
+              {posted}/{live.length} posted
+            </span>
+          )}
           {onDismiss && (
             <button type="button" onClick={onDismiss} aria-label="Dismiss"
                     className="flex h-11 w-11 items-center justify-center rounded-lg text-muted hover:bg-content2">
@@ -115,12 +117,12 @@ export function SplitFamilyCard({
           })}
         </ul>
 
-        <p className="mt-3 flex items-start gap-1.5 text-[11px] leading-relaxed text-muted">
+        {members.length > 1 && <p className="mt-3 flex items-start gap-1.5 text-[11px] leading-relaxed text-muted">
           <ShieldCheck className="mt-px h-3.5 w-3.5 shrink-0 text-ok" />
           Each floor issue carries its own share — together they add up to {parentNo}.
           An indent line issued through any one of them can never be issued again by the
           parent, a sibling, or a fresh issue.
-        </p>
+        </p>}
 
         {!!unfulfilled?.length && (
           <div className="mt-3 rounded-xl border border-bad/30 bg-bad-bg px-3 py-2 text-sm text-bad">

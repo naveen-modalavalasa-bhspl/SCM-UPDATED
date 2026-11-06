@@ -13,7 +13,7 @@ import type {
   MasterItemPackaging, MasterItemSpec, MasterPackHierarchy, MasterPackaging, MasterSpec,
   MasterUom, MasterUomConversion, MasterVendor, MasterVendorItem, PackagingBreakdown,
   MasterWarehouse, Project, RefRow, UomClass, UomSuggestion,
-  MasterBrandManufacturer, MasterGeneralName, MasterItemSubClass, MasterUomClass, NamedMaster,
+  MasterBrandManufacturer, MasterGeneralName, MasterItemSubClass, NamedMaster,
   MasterBrandModel, MasterBrandVariant,
   MasterBrandItemMapping, BrandItemMappingSources, MasterItemCombination,
 } from "./types";
@@ -240,7 +240,6 @@ export const mastersApi = {
   generalNames: crud<MasterGeneralName>("/api/general-names"),
   dosageForms: crud<NamedMaster>("/api/dosage-forms"),
   /** What a unit measures (Count, Weight ...). A master since 2026-10-01. */
-  uomClasses: crud<MasterUomClass>("/api/uom-classes"),
   /** How suppliers are grouped (Glassware, Reagents ...). */
   vendorCategories: crud<MasterVendorCategory>("/api/vendor-categories"),
   paymentTerms: crud<MasterPaymentTerm>("/api/payment-terms"),
@@ -389,6 +388,16 @@ export const mastersApi = {
   },
 
   departments: () => all<RefRow>("/api/departments"),
+  /** The organisation directory: read-only, written only by its own sync. */
+  organisations: () => all<RefRow>("/api/organisations", { include_inactive: true }),
+  orgDepartments: () => all<RefRow>("/api/org-departments", { include_inactive: true }),
+  orgSyncStatus: () => api.get<{
+    configured: boolean; last_status?: string | null; last_error?: string | null;
+    last_success_at?: string | null;
+  }>("/api/organisations/sync-status").then((r) => r.data),
+  orgSyncNow: () =>
+    api.post<{ organisations: number; departments: number }>("/api/organisations/sync")
+      .then((r) => r.data),
   ownershipDepartments: () => all<RefRow>("/api/departments/ownership-options"),
   facilities: () => all<RefRow>("/api/facilities"),
 

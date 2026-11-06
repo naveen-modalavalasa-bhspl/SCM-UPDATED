@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Card, ErrorBanner, Field, Input, PageHeader, ResponsiveList, StatCard, StatusPill, useAction, type Column } from "@/shared/components";
+import { Card, DocumentNumberCard, ErrorBanner, Field, Input, PageHeader, ResponsiveList, StatCard, StatusPill, useAction, type Column } from "@/shared/components";
+import type { DocNumberValue } from "@/shared/documentNumber";
 import { Button } from "../components/ActionButton";
 import { fmtDate } from "@/shared/datetime";
 import { consolidationApi } from "../api";
@@ -29,6 +30,11 @@ export function PurchaseConsolidationFormPage() {
     title: "", period_label: "", remarks: "",
   });
   const [page, setPage] = useState(1);
+  // Selected here only for requisitions older than organisations. Anything newer carries
+  // its own, and those are what the card shows the moment one is ticked.
+  const [selection, setSelection] = useState<DocNumberValue>({
+    organizationId: "", projectId: "", orgDepartmentId: "", fiscalYear: "",
+  });
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["consolidation-candidates", page],
@@ -50,6 +56,9 @@ export function PurchaseConsolidationFormPage() {
       title: header.title || null,
       period_label: header.period_label || null,
       remarks: header.remarks || null,
+      organization_id: selection.organizationId || null,
+      org_department_id: selection.orgDepartmentId || null,
+      fiscal_year: selection.fiscalYear || null,
     }),
     success: "Consolidated sheet created",
     invalidates: [["consolidations"], ["consolidation-candidates"]],
@@ -60,6 +69,17 @@ export function PurchaseConsolidationFormPage() {
   const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / SIZE));
   const picked = rows.filter((r) => chosen.includes(r.id));
   const pickedValue = picked.reduce((sum, r) => sum + Number(r.estimated_value ?? 0), 0);
+  // The sheet takes the organisation of the requisitions on it, and the project of the
+  // first. Read off the ticked rows on this page: the save checks the whole selection.
+  const carriedFrom = picked.find((r) => r.organization_id);
+  const scope: DocNumberValue = {
+    ...selection,
+    organizationId: carriedFrom?.organization_id ?? selection.organizationId,
+    organizationName: carriedFrom?.organization_name ?? "",
+    orgDepartmentId: carriedFrom?.org_department_id ?? selection.orgDepartmentId,
+    departmentName: carriedFrom?.org_department_name ?? "",
+    projectName: picked[0]?.project_name ?? "",
+  };
 
   const toggle = (id: number) =>
     setChosen((all) => (all.includes(id) ? all.filter((x) => x !== id) : [...all, id]));
@@ -88,6 +108,7 @@ export function PurchaseConsolidationFormPage() {
         </div>
       ),
     },
+    { key: "organisation", header: "Organisation", hideOnNarrow: true, render: (r) => r.organization_name ?? "—" },
     { key: "project", header: "Project", hideOnNarrow: true, render: (r) => r.project_name ?? "—" },
     { key: "status", header: "Status", render: (r) => <StatusPill status={r.status} /> },
     { key: "lines", header: "Lines", className: "text-right", render: (r) => r.total_items },
@@ -140,6 +161,17 @@ export function PurchaseConsolidationFormPage() {
         <StatCard
           label={picked.length < chosen.length ? "Value on this page" : "Selected value"}
           value={money(pickedValue)}
+        />
+      </div>
+
+      <div className="mb-4">
+        <DocumentNumberCard
+          docType="consolidation" value={scope} ready defaultProject={false}
+          locks={{ organisation: Boolean(carriedFrom), project: true }}
+          source={carriedFrom
+            ? { label: carriedFrom.req_no, to: `/procurement/requisitions/${carriedFrom.id}` }
+            : { label: "the requisitions you tick" }}
+          onChange={(patch) => setSelection((current) => ({ ...current, ...patch }))}
         />
       </div>
 

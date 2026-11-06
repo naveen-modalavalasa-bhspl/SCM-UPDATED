@@ -23,7 +23,7 @@ function PoStatus({ row }: { row: VendorPOListRow }) {
   if (row.under_revision) {
     return <StatusPill status="PENDING_APPROVAL" label="Being revised" />;
   }
-  return <StatusPill status={row.status} label={vendorPoLabel(row.status)} />;
+  return <StatusPill status={row.status} label={vendorPoLabel(row.status, row.despatch_status)} />;
 }
 
 const money = (value: number | null | undefined) => new Intl.NumberFormat(undefined, {

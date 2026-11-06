@@ -532,6 +532,8 @@ export interface MaterialRequestItem extends CombinationValue {
   item_name?: string | null;
   uom_code?: string | null;
   quantity: number;
+  /** What the line asked for when raised — the ceiling: it may be lowered, never raised. */
+  requested_quantity?: number | null;
   ordered_quantity: number;
   indent_item_id?: number | null;
   remarks?: string | null;
@@ -656,6 +658,9 @@ export interface AllocationProposal {
   blocked_reason: string | null;
   /** Everything already promising this indent something. */
   allocations: { id: number; allocation_no: string; status: string }[];
+  /** An STR's source point (2026-11-04) — every line opens on it when it is offered. */
+  str_source_warehouse_id?: number | null;
+  str_source_warehouse_name?: string | null;
   lines: AllocationProposalLine[];
 }
 
@@ -1202,6 +1207,8 @@ export interface MyStockingPoints {
   point_type?: string | null;
   point_name?: string | null;
   point_label?: string;
+  /** Only the bottom rung of the chain runs a vehicle and carries an SAC (served). */
+  needs_vehicle_and_sac?: boolean;
 }
 
 /** A position the tagging screen can offer, found by person, code or post name. */
@@ -1417,6 +1424,14 @@ export interface StockEditPage<T> {
 
 /** A queued (or printed) label for one box code — `/api/warehouse/box-labels`
  *  (2026-10-26). Every box code made for an item issued in a container lands here. */
+export interface BoxLabelFacets {
+  items: { item_id: number; item_code: string | null; item_name: string | null; count: number }[];
+  /** batch_id 0 = stock with no batch. */
+  batches: { batch_id: number; batch_no: string | null; expiry_date: string | null; count: number }[];
+  /** bin_id 0 = no storage location. */
+  locations: { bin_id: number; bin_code: string | null; bin_name: string | null; count: number }[];
+}
+
 export interface BoxLabelRow {
   id: number;
   hu_code: string;

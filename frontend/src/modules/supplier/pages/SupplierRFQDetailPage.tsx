@@ -3,7 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, History } from "lucide-react";
 import {
-  Card, ConfirmModal, ErrorBanner, Field, Input, StatusPill, Textarea, useToast,
+  Card, ConfirmModal, DocumentScopeStrip, ErrorBanner, Field, Input, StatusPill, Textarea, useToast,
 } from "@/shared/components";
 import { Button } from "@/modules/procurement/components/ActionButton";
 import { fmtDate, todayIst } from "@/shared/datetime";
@@ -264,6 +264,17 @@ export function SupplierRFQDetailPage() {
   const [decide, setDecide] = useState<"ACCEPT" | "DECLINE" | null>(null);
   const [counterMode, setCounterMode] = useState(false);
   const [counterEdits, setCounterEdits] = useState<Record<number, { qty: string; rate: string; discount: string }>>({});
+  /** What the RFQ asked for on a quotation line — a counter may offer that or less,
+   *  never more (2026-11-03). The server refuses the same. */
+  const rfqAsked = (quotationItemId: number): number | null => {
+    const item = quote?.items.find((row) => row.id === quotationItemId);
+    const asked = item?.requested_quantity;
+    return asked == null ? null : Number(asked);
+  };
+  const counterOver = (quotationItemId: number, qty: string) => {
+    const asked = rfqAsked(quotationItemId);
+    return asked != null && qty.trim() !== "" && Number(qty) > asked;
+  };
   // The brand the supplier answers with (2026-10-26) — the buyer's ask by default.
   const [counterCombos, setCounterCombos] = useState<Record<number, CombinationValue | undefined>>({});
 
@@ -328,6 +339,8 @@ export function SupplierRFQDetailPage() {
       </div>
 
       <ErrorBanner error={rfqError ?? save.error} />
+
+      {quote && <DocumentScopeStrip doc={quote} number={quote.quotation_no} className="mb-4" />}
 
       {rfq && (
         <Card className="mb-6 p-6 border-0 shadow-lg ring-1 ring-black/5 bg-gradient-to-r from-sky-50 to-indigo-50">
@@ -450,12 +463,23 @@ export function SupplierRFQDetailPage() {
                       <div className="mt-2 grid grid-cols-1 sm:grid-cols-3 gap-2">
                         <div>
                           <label className="block text-[11px] text-muted">Counter Quantity</label>
-                          <QuantityInput
-                            decimals={uomDecimals(line.uom_code)} min={0}
-                            value={edit.qty}
-                            onChange={(raw) => setCounterEdits({ ...counterEdits, [line.quotation_item_id]: { ...edit, qty: raw } })}
-                            className="h-9 w-full rounded-md border border-line bg-white px-2 text-xs text-ink outline-none focus:border-brand"
-                          />
+                            <QuantityInput
+                              decimals={uomDecimals(line.uom_code)} min={0}
+                              value={edit.qty}
+                              data-uom={line.uom_code ?? ""}
+                              max={rfqAsked(line.quotation_item_id) ?? undefined}
+                              onChange={(raw) => setCounterEdits({ ...counterEdits, [line.quotation_item_id]: { ...edit, qty: raw } })}
+                              className={`h-9 w-full rounded-md border bg-white px-2 text-xs text-ink outline-none ${
+                                counterOver(line.quotation_item_id, edit.qty)
+                                  ? "border-danger focus:border-danger" : "border-line focus:border-brand"}`}
+                            />
+                          {rfqAsked(line.quotation_item_id) != null && (
+                            <p className={`mt-1 text-[10px] ${counterOver(line.quotation_item_id, edit.qty) ? "font-semibold text-danger" : "text-muted"}`}>
+                              {counterOver(line.quotation_item_id, edit.qty)
+                                ? `The RFQ asked for ${rfqAsked(line.quotation_item_id)} — offer that or less`
+                                : `Up to ${rfqAsked(line.quotation_item_id)} (the RFQ's quantity)`}
+                            </p>
+                          )}
                         </div>
                         <div>
                           <label className="block text-[11px] text-muted">Counter Rate (₹)</label>
@@ -502,7 +526,9 @@ export function SupplierRFQDetailPage() {
                 </div>
                 <Button
                   className="bg-brand text-white hover:bg-brand/90"
-                  disabled={answerCr.isPending || otpCode.trim().length < 5}
+                  disabled={answerCr.isPending || otpCode.trim().length < 5
+                    || openCr.lines.some((l) => counterOver(l.quotation_item_id,
+                      counterEdits[l.quotation_item_id]?.qty ?? String(l.proposed_quantity)))}
                   onClick={() => {
                     const counterLinesPayload = openCr.lines.map((l) => {
                       const ed = counterEdits[l.quotation_item_id];
@@ -788,6 +814,7 @@ export function SupplierRFQDetailPage() {
                     <Input
                       type="number" min="0" step="0.001" max={line.requested}
                       value={line.quantity} disabled={!open}
+                      data-uom={line.uom_code ?? ""}
                       onChange={(e) => set(index, { quantity: e.target.value })}
                     />
                   </Field>

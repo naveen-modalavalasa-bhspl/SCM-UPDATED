@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Copy } from "lucide-react";
-import { Card, ErrorBanner, Field, FormActions, Input, PageHeader, Select, useToast } from "@/shared/components";
+import { Card, DocumentNumberCard, ErrorBanner, Field, FormActions, Input, PageHeader, Select, useToast } from "@/shared/components";
 import { Button } from "../components/ActionButton";
 import { api } from "@/shared/api/client";
 import { fmtDate, todayIst } from "@/shared/datetime";
@@ -19,7 +19,12 @@ import { comboFrom, comboPayload } from "@/shared/combination";
 /** A copy template in the shape this form edits. */
 function headerFromCopy(t: POCopyTemplate): POHeaderValue {
   return {
+    organizationId: t.organization_id ?? "",
+    orgDepartmentId: t.project_id ? "" : (t.org_department_id ?? ""),
+    // A copy is a new document: it takes today's year, not the source's.
+    fiscalYear: "",
     projectId: t.project_id ?? "",
+    departmentId: "",
     remarks: t.remarks ?? "",
     paymentTermId: t.payment_term_id ?? "",
     payment_terms: t.payment_terms ?? "",
@@ -76,6 +81,7 @@ export function POFormPage() {
   const [expectedDate, setExpectedDate] = useState("");
   const [lines, setLines] = useState<DraftLine[]>([blankLine()]);
   const [problem, setProblem] = useState<string | null>(null);
+  const [triedBooking, setTriedBooking] = useState(false);
   // Project, remarks, the four terms, the two addresses and the document money. One
   // block, shared with the draft-order editor so both screens ask the same questions.
   const [header, setHeader] = useState<POHeaderValue>(blankPOHeader());
@@ -181,6 +187,16 @@ export function POFormPage() {
       setProblem("Choose the vendor this order goes to.");
       return;
     }
+    if (header.organizationId === "") {
+      setTriedBooking(true);
+      setProblem("Select the organisation this order belongs to.");
+      return;
+    }
+    if (header.projectId === "" && header.orgDepartmentId === "") {
+      setTriedBooking(true);
+      setProblem("Choose the project or the department this order is booked to — one of them.");
+      return;
+    }
     if (!lines.some((line) => line.item_id !== "" && Number(line.quantity) > 0)) {
       setProblem("Add at least one line with an item and a quantity.");
       return;
@@ -219,6 +235,12 @@ export function POFormPage() {
       {copyFrom && copy.isLoading ? (
         <Card className="p-8 text-center text-sm text-muted">Copying the order…</Card>
       ) : copyFrom && copy.error ? null : (
+      <div className="space-y-4">
+      <DocumentNumberCard
+        docType="po" value={header} exclusive showInvalid={triedBooking}
+        ready={!copyFrom || Boolean(copied)}
+        onChange={(patch) => setHeader((current) => ({ ...current, ...patch }))}
+      />
       <Card className="space-y-5 p-5">
         {copied ? (
           <div className="space-y-2 rounded-lg border border-brand/30 bg-brand-050 px-3 py-2 text-sm text-body">
@@ -277,8 +299,10 @@ export function POFormPage() {
         <div className="border-t border-line pt-4">
           <POHeaderFields
             value={header}
+            requireOne
+            showInvalid={triedBooking}
             orderTotal={totals.grand}
-            onChange={(patch) => setHeader({ ...header, ...patch })}
+            onChange={(patch) => setHeader((current) => ({ ...current, ...patch }))}
           />
         </div>
 
@@ -317,6 +341,7 @@ export function POFormPage() {
           </Button>
         </FormActions>
       </Card>
+      </div>
       )}
     </div>
   );

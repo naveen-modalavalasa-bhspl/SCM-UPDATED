@@ -10,6 +10,8 @@
  * still comes from the real status, and nothing here is sent back to the server — a
  * vendor filtering by "Completed" posts CLOSED, the status the API knows.
  */
+import { despatchLabel } from "@/modules/procurement/poStatus";
+
 export const VENDOR_PO_STATUS_LABEL: Record<string, string> = {
   SENT_TO_VENDOR: "New order",
   ACCEPTED_BY_SUPPLIER: "Accepted",
@@ -19,8 +21,12 @@ export const VENDOR_PO_STATUS_LABEL: Record<string, string> = {
   CANCELLED: "Cancelled",
 };
 
-export const vendorPoLabel = (status: string) =>
-  VENDOR_PO_STATUS_LABEL[status] ?? status.replace(/_/g, " ");
+/** `despatchStatus` is the order's derived despatch stage (enums.DespatchStatus): once
+ *  the supplier has submitted a despatch note against an accepted order, the pill
+ *  reads "Dispatched" / "Partially dispatched" instead of "Accepted". */
+export const vendorPoLabel = (status: string, despatchStatus?: string | null) =>
+  despatchLabel(status, despatchStatus)
+  ?? VENDOR_PO_STATUS_LABEL[status] ?? status.replace(/_/g, " ");
 
 /** The filter options, in the order an order actually travels. */
 export const VENDOR_PO_STATUS_OPTIONS = [

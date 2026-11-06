@@ -7,7 +7,7 @@ import {
 } from "lucide-react";
 import { Accordion, AccordionItem } from "@heroui/react";
 import {
-  Button, Card, ErrorBanner, Field, Input, PageHeader, StatusPill, useToast,
+  Button, Card, DocumentScopeStrip, ErrorBanner, Field, Input, PageHeader, StatusPill, useToast,
 } from "@/shared/components";
 import { Stepper, type Step } from "@/shared/components/Stepper";
 import { fmtDate, todayIst } from "@/shared/datetime";
@@ -422,6 +422,7 @@ export function SupplierPODetailPage() {
     const baseSteps: Step[] = [
       { id: "sent", label: "Sent to you", status: "complete" },
       { id: "accepted", label: "Accepted", status: "upcoming" },
+      { id: "dispatched", label: "Dispatched", status: "upcoming" },
       { id: "fulfilled", label: "Fulfilled", status: "upcoming" },
     ];
     if (vs === "PENDING") {
@@ -430,13 +431,24 @@ export function SupplierPODetailPage() {
       baseSteps[1] = { id: "accepted", label: "Rejected", status: "error" };
     } else if (vs === "ACCEPTED") {
       baseSteps[1].status = "complete";
+      // Dispatched is DERIVED off the despatch notes this vendor submitted; a receipt
+      // landing implies the goods were sent.
+      const ds = po.despatch_status;
+      const partlySent = ds === "PARTIALLY_DISPATCHED";
       if (s === "RECEIVED" || s === "CLOSED") {
         baseSteps[2].status = "complete";
+        baseSteps[3].status = "complete";
       } else if (s === "PARTIALLY_RECEIVED") {
-        baseSteps[2].status = "current";
-        baseSteps[2].description = "Partially received";
+        baseSteps[2].status = partlySent ? "current" : "complete";
+        if (partlySent) baseSteps[2].description = "Partially dispatched";
+        baseSteps[3].status = "current";
+        baseSteps[3].description = "Partially received";
+      } else if (ds === "DISPATCHED") {
+        baseSteps[2].status = "complete";
+        baseSteps[3].status = "current";
       } else {
         baseSteps[2].status = "current";
+        if (partlySent) baseSteps[2].description = "Partially dispatched";
       }
     }
     return baseSteps;
@@ -453,7 +465,7 @@ export function SupplierPODetailPage() {
         actions={
           <div className="flex flex-wrap items-center gap-2">
             {/* Vendor-facing wording; the status itself is untouched. */}
-            <StatusPill status={po.status} label={vendorPoLabel(po.status)} />
+            <StatusPill status={po.status} label={vendorPoLabel(po.status, po.despatch_status)} />
             {/* ACCEPTED is left off: it says the same word as the order's own pill
               * beside it, and where the two DO diverge — a vendor who accepted at a
               * changed rate leaves the order at PENDING_APPROVAL — the answer is
@@ -473,7 +485,9 @@ export function SupplierPODetailPage() {
           </div>
         }
       />
-      
+
+      <DocumentScopeStrip doc={po} className="mb-4" />
+
       <div className="mb-6 -mx-2 sm:mx-0">
         <Stepper steps={steps} className="bg-surface-2/50 rounded-xl" />
       </div>
@@ -969,6 +983,7 @@ export function SupplierPODetailPage() {
                     <td className="p-2 text-right align-top w-36">
                       <Input
                         type="number"
+                        data-uom={line.uom_code ?? ""}
                         min={0}
                         className="text-right font-semibold"
                         value={line.despatched_qty === 0 ? "" : String(line.despatched_qty)}

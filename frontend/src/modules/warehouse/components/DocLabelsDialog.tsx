@@ -12,8 +12,8 @@ import type { DocLabelRow, DocLabels } from "../types";
 import { fmtDate, fmtQty } from "../format";
 import {
   FIELDS, SIZE_PRESETS, deletePreset, loadLast, loadPresets, pageCss, printSummary,
-  saveLast, savePreset, selectLabels, sheetGrid,
-  type CodeKind, type FieldKey, type LabelSettings, type PackScope,
+  saveLast, savePreset, selectLabels, sheetGrid, docLabelFacts, qrDetailsText, qrLink,
+  type CodeKind, type FieldKey, type LabelSettings, type PackScope, type QrContent,
 } from "../docLabels";
 import { LabelSticker } from "./LabelSticker";
 import { shortCode } from "../packPick";
@@ -25,8 +25,9 @@ import { guardNumberKeys } from "@/shared/quantity";
  * items, as a barcode, a QR or both, at any size, on a thermal roll or an A4 sheet.
  *
  * The rows are served (`issue_labels.py`), so what can be printed is decided by the
- * server: never before posting, never a serial or an IMEI, and at a receiving site
- * only what arrived. This screen decides only how they look. Settings are the
+ * server: never before posting, a serial / IMEI only for an item tracked by it, and at
+ * a receiving site only what arrived. The QR carries the details as text by default,
+ * so a plain phone camera shows them (2026-11-02). This screen decides only how they look. Settings are the
  * viewer's own and live in the browser (`docLabels.ts`).
  */
 export function DocLabelsDialog({ open, onClose, doc, initialLineIds }: {
@@ -114,6 +115,10 @@ export function DocLabelsDialog({ open, onClose, doc, initialLineIds }: {
     const combo = [r.brand_name, r.variant_name, r.model_name].filter(Boolean).join(" · ");
     const out: [string, string | null | undefined][] = [];
     if (f.item_code) out.push(["Item", r.item_code]);
+    if (r.kind === "UNIT") {
+      if (r.serial_number && r.serial_number !== r.code) out.push(["Serial", r.serial_number]);
+      if (r.imei && r.imei !== r.code) out.push(["IMEI", r.imei]);
+    }
     if (f.pack) {
       out.push(r.kind === "UNIT" ? ["Type", r.pack_name]
         : [r.pack_name ?? "Pack", `${fmtQty(r.qty)}${r.part ? ` of ${fmtQty(r.pack_size)}` : ""} ${r.uom_code ?? ""}`]);
@@ -133,7 +138,8 @@ export function DocLabelsDialog({ open, onClose, doc, initialLineIds }: {
   };
   const sticker = (r: DocLabelRow, key: string) => (
     <LabelSticker key={key} code={r.code}
-                  qrValue={r.qr_token ? `${window.location.origin}/c/${encodeURIComponent(r.qr_token)}` : r.code}
+                  qrValue={s.qr === "LINK" && r.qr_token ? qrLink(r.qr_token)
+                    : qrDetailsText(r.code, docLabelFacts(r, body))}
                   title={s.fields.item_name ? r.item_name : null} rows={rowsFor(r)}
                   w={s.w} h={s.h} kind={s.code} barFormat={s.barFormat} font={s.font} />
   );
@@ -206,7 +212,7 @@ export function DocLabelsDialog({ open, onClose, doc, initialLineIds }: {
                   {hasUnits && (
                     <label className="mt-2 flex min-h-11 cursor-pointer items-center gap-2.5 text-xs text-ink">
                       <input type="checkbox" className="h-4 w-4" checked={units} onChange={(e) => setUnits(e.target.checked)} />
-                      Asset / consumable codes, one label each
+                      Unit codes (asset / consumable, serial, IMEI), one label each
                     </label>
                   )}
                 </Group>
@@ -222,6 +228,13 @@ export function DocLabelsDialog({ open, onClose, doc, initialLineIds }: {
                       <option value="CODE128">Code 128 (any code)</option>
                       <option value="CODE39">Code 39 (older scanners)</option>
                     </select>
+                  )}
+                  {s.code !== "BARCODE" && (
+                    <div className="mt-2">
+                      <p className="mb-1 text-[11px] font-medium text-muted">QR shows when scanned</p>
+                      <Segmented value={s.qr} onChange={(v) => set("qr", v as QrContent)}
+                                 options={[["DETAILS", "All details"], ["LINK", "Live link"]]} />
+                    </div>
                   )}
                 </Group>
 

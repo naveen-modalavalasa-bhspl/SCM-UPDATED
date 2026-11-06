@@ -24,6 +24,16 @@ class POLineIn(CombinationIn):
     pack_breakdown: Annotated[list[PackEntryIn], PACK_ENTRIES] | None = None
 
 
+class OrgScopeOut(BaseModel):
+    """Whose paper a document is on. All null on one raised before organisations."""
+    organization_id: int | None = None
+    organization_code: str | None = None
+    organization_name: str | None = None
+    org_department_id: int | None = None
+    org_department_name: str | None = None
+    fiscal_year: str | None = None
+
+
 class POHeaderIn(BaseModel):
     """What the order says beyond its lines — the same on every way of raising one.
 
@@ -35,6 +45,12 @@ class POHeaderIn(BaseModel):
     spread across lines, because spreading them would rewrite rates a vendor quoted.
     """
     project_id: int | None = None
+    # The alternative to a project (2026-11-04): an order is booked to ONE of the two.
+    # `department_id` is HCM's, read only for an order raised before organisations.
+    department_id: int | None = None
+    organization_id: int | None = None
+    org_department_id: int | None = None
+    fiscal_year: str | None = None
     remarks: str | None = None
     payment_terms: str | None = None
     # The payment-term master (2026-10-06). Picking one copies its milestones onto the
@@ -298,7 +314,7 @@ class POMilestoneOut(BaseModel):
     due_days: int = 0
 
 
-class POOut(BaseModel):
+class POOut(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     po_no: str
@@ -330,6 +346,8 @@ class POOut(BaseModel):
     facility_name: str | None = None
     project_id: int | None = None
     project_name: str | None = None
+    department_id: int | None = None
+    department_name: str | None = None
     status: str
     sub_total: float
     discount_amount: float = 0
@@ -371,6 +389,9 @@ class POOut(BaseModel):
     vendor_status: str | None = None
     vendor_responded_at: datetime | None = None
     vendor_response_note: str | None = None
+    # enums.DespatchStatus, DERIVED from the vendor's submitted despatch notes (null =
+    # nothing sent yet). See service._despatch_status_by_po.
+    despatch_status: str | None = None
     # Calculated at read time from the accepted/dispatch state.
     amendment_allowed: bool = False
     revision_no: int = 0
@@ -380,7 +401,7 @@ class POOut(BaseModel):
     items: list[POItemOut] = []
 
 
-class POListRow(BaseModel):
+class POListRow(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     po_no: str
@@ -390,6 +411,8 @@ class POListRow(BaseModel):
     # Two orders can both read SENT_TO_VENDOR while one is agreed and the other has
     # been sitting unanswered for a week. The register has to be able to say which.
     vendor_status: str | None = None
+    # enums.DespatchStatus, derived — see POOut.despatch_status.
+    despatch_status: str | None = None
     revision_no: int = 0
     total_amount: float
     # Who the approval engine is ACTUALLY waiting on right now, read live at request
@@ -455,6 +478,9 @@ class ReqCreate(BaseModel):
     # which is only right until somebody raises on another department's behalf.
     department_id: int | None = None
     company_name: str | None = None
+    organization_id: int | None = None
+    org_department_id: int | None = None
+    fiscal_year: str | None = None
     # One date for the document. A line may still override it (`ReqLineIn`), but the
     # form no longer asks for the same date once per item.
     required_date: date | None = None
@@ -474,6 +500,9 @@ class ReqFromMRsIn(BaseModel):
     project_id: int | None = None
     department_id: int | None = None
     company_name: str | None = None
+    organization_id: int | None = None
+    org_department_id: int | None = None
+    fiscal_year: str | None = None
     required_date: date | None = None
     priority: str | None = None
     remarks: str | None = None
@@ -501,6 +530,8 @@ class ReqItemOut(CombinationOut):
     item_name: str | None = None
     uom_code: str | None = None
     quantity: float
+    # The ceiling (2026-11-03): NULL on a hand-made draft its author may still change.
+    requested_quantity: float | None = None
     ordered_qty: float
     estimated_rate: float
     estimated_amount: float
@@ -509,7 +540,7 @@ class ReqItemOut(CombinationOut):
     indent_no: str | None = None
 
 
-class ReqListRow(BaseModel):
+class ReqListRow(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     req_no: str
@@ -589,6 +620,9 @@ class RFQCreate(BaseModel):
     # document's own values win and these are left empty.
     department_id: int | None = None
     company_name: str | None = None
+    organization_id: int | None = None
+    org_department_id: int | None = None
+    fiscal_year: str | None = None
     due_date: date | None = None
     terms: str | None = None
     # None means "use the default" — see shared/evaluation.method_of. Validated in the
@@ -632,6 +666,9 @@ class RFQUpdate(BaseModel):
     project_id: int | None = None
     department_id: int | None = None
     company_name: str | None = None
+    organization_id: int | None = None
+    org_department_id: int | None = None
+    fiscal_year: str | None = None
     evaluation_method: str | None = None
     freight_required: bool | None = None
     vendor_ids: Annotated[list[int], BatchIds] | None = None
@@ -677,7 +714,7 @@ class RFQVendorOut(BaseModel):
     live_allocated_quantities: dict[str, float] | None = None
 
 
-class RFQListRow(BaseModel):
+class RFQListRow(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     rfq_no: str
@@ -772,6 +809,10 @@ class RFQOut(RFQListRow):
 # --------------------------------------------------------------------------- #
 
 class ConsolidationCreate(BaseModel):
+    # Only asked for when the requisitions on the sheet predate organisations.
+    organization_id: int | None = None
+    org_department_id: int | None = None
+    fiscal_year: str | None = None
     requisition_ids: list[int] = Field(min_length=1, max_length=MAX_BATCH_IDS)
     title: str | None = None
     period_label: str | None = None
@@ -828,7 +869,7 @@ class ConsolidationSourceOut(BaseModel):
     estimated_value: float
 
 
-class ConsolidationListRow(BaseModel):
+class ConsolidationListRow(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     cons_no: str
@@ -960,8 +1001,9 @@ class QuoteItemOut(CombinationOut):
     brand_changed: bool = False
 
 
-class QuoteListRow(BaseModel):
+class QuoteListRow(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
+    project_name: str | None = None
     id: int
     quotation_no: str
     rfq_id: int
@@ -1069,8 +1111,9 @@ class QuoteChangeLineOut(BaseModel):
     proposed_combination: str | None = None
 
 
-class QuoteChangeRequestOut(BaseModel):
+class QuoteChangeRequestOut(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
+    project_name: str | None = None
     id: int
     quotation_id: int
     rfq_id: int
@@ -1265,8 +1308,9 @@ class DespatchItemOut(CombinationOut):
     pack_change_by_name: str | None = None
 
 
-class DespatchNoteOut(BaseModel):
+class DespatchNoteOut(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
+    project_name: str | None = None
     id: int
     dn_no: str
     dn_date: date | None = None
@@ -1324,7 +1368,7 @@ class VendorPOLineOut(CombinationOut):
     pack_options: list[dict] = []
 
 
-class VendorPOOut(BaseModel):
+class VendorPOOut(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     po_no: str
@@ -1338,6 +1382,8 @@ class VendorPOOut(BaseModel):
     vendor_status: str | None = None
     vendor_responded_at: datetime | None = None
     vendor_response_note: str | None = None
+    # enums.DespatchStatus, derived — see POOut.despatch_status.
+    despatch_status: str | None = None
     revision_no: int = 0
     amendment_reason: str | None = None
     # Derived, never stored: the order was issued to this vendor once and has since
@@ -1354,7 +1400,7 @@ class VendorPOOut(BaseModel):
     despatch_notes: list[DespatchNoteOut] = []
 
 
-class VendorPOListRow(BaseModel):
+class VendorPOListRow(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     po_no: str
@@ -1365,6 +1411,8 @@ class VendorPOListRow(BaseModel):
     status: str
     total_amount: float
     despatch_note_count: int = 0
+    # enums.DespatchStatus, derived — see POOut.despatch_status.
+    despatch_status: str | None = None
     under_revision: bool = False
 
 

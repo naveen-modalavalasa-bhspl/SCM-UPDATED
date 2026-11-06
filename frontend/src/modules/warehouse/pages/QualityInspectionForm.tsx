@@ -511,6 +511,7 @@ export default function QualityInspectionForm({
       width: "w-28",
       render: (l, i) => (
         <QtyInput
+          uom={savedLine(i)?.uom_code ?? deliveryMeta.get(l.receipt_item_id ?? 0)?.uom}
           ariaLabel={`Inspected quantity, line ${i + 1}`}
           uom={savedLine(i)?.uom_code ?? deliveryMeta.get(l.receipt_item_id ?? 0)?.uom}
           value={l.inspected_qty}
@@ -531,6 +532,7 @@ export default function QualityInspectionForm({
         return (
           <div className="space-y-1">
             <QtyInput
+              uom={savedLine(i)?.uom_code ?? deliveryMeta.get(l.receipt_item_id ?? 0)?.uom}
               ariaLabel={`Accepted quantity, line ${i + 1}`}
               uom={savedLine(i)?.uom_code ?? deliveryMeta.get(l.receipt_item_id ?? 0)?.uom}
               value={l.accepted_qty}
@@ -564,6 +566,7 @@ export default function QualityInspectionForm({
       width: "w-28",
       render: (l, i) => (
         <QtyInput
+          uom={savedLine(i)?.uom_code ?? deliveryMeta.get(l.receipt_item_id ?? 0)?.uom}
           ariaLabel={`Rejected quantity, line ${i + 1}`}
           uom={savedLine(i)?.uom_code ?? deliveryMeta.get(l.receipt_item_id ?? 0)?.uom}
           value={l.rejected_qty}

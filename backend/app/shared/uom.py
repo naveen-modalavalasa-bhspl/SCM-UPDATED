@@ -1,5 +1,9 @@
 """How finely a unit may be divided, and the one split rule that respects it.
 
+2026-11-04: the answer is `mst_uom.allows_decimal`, set per unit on Masters > UOM.
+The notes below on classes describe `decimals_for`, kept for callers that only hold
+a class name.
+
 `mst_uom.decimal_places` is 3 on every live row — the column default, never set by
 anyone — so it says nothing about the unit and is deliberately not read here. What the
 unit MEASURES does say something: nobody issues 5.7 gloves, while 5.7 grams is
@@ -25,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import ValidationError
-from app.shared.models.master import Uom, UomClassRow
+from app.shared.models.master import Uom
 
 #: Classes whose quantities only exist in whole units, in every spelling the live
 #: mst_uom carries. Compared case-folded.
@@ -81,8 +85,7 @@ async def decimals_by_code(db: AsyncSession, codes: Iterable[str | None]) -> dic
         return {}
     # Every unit, not a filtered set: the table is ~33 rows, and the fallbacks below
     # cannot be expressed as one IN clause across two columns.
-    rows = _with_flags((await db.execute(_UNITS)).all(),
-                       (await db.execute(_CLASS_FLAGS)).all())
+    rows = _with_flags((await db.execute(_UNITS)).all())
     return {code: d for code in wanted
             if (d := _resolve(_unit_maps(rows), code)) is not None}
 
@@ -95,32 +98,36 @@ async def decimals_map(db: AsyncSession) -> dict[str, int]:
     looks a unit up as `map[code] ?? map[code.toLowerCase()]` and gets the answer the
     server will enforce, without every API having to ship `uom_decimals` per line.
     """
-    rows = _with_flags((await db.execute(_UNITS)).all(),
-                       (await db.execute(_CLASS_FLAGS)).all())
+    rows = _with_flags((await db.execute(_UNITS)).all())
     by_code, folded, by_name = _unit_maps(rows)
     return {**by_name, **folded, **by_code}
 
 
-# Two reads, matched in Python: mst_uom and mst_uom_classes carry different
-# collations on the live server, so joining uom_class = code raises MySQL 1267.
-_UNITS = select(Uom.code, Uom.name, Uom.uom_class)
-_CLASS_FLAGS = select(UomClassRow.code, UomClassRow.allows_decimal)
+async def decimals_table(db: AsyncSession) -> list[dict]:
+    """Every unit with the decimals a document may carry in it (2026-11-03): served to
+    the screens so a whole-unit quantity box refuses the "." as it is typed. The same
+    answer the flush guard below enforces. Code AND name, because documents snapshot
+    either and the screen resolves them exactly as `_resolve` does."""
+    rows = _with_flags((await db.execute(_UNITS)).all())
+    return [{"code": r.code, "name": r.name, "decimals": _unit_decimals(r)}
+            for r in rows if r.code]
 
 
-def _with_flags(units, flags) -> list[SimpleNamespace]:
-    """Each unit with its type's "Allows decimal" flag (None when the type has no row)."""
-    by_class = {(c.code or "").strip().upper(): c.allows_decimal for c in flags}
+_UNITS = select(Uom.code, Uom.name, Uom.uom_class, Uom.allows_decimal)
+
+
+def _with_flags(units, _flags=None) -> list[SimpleNamespace]:
+    """Each unit with its own "Allows decimal" flag (2026-11-04: on the UOM itself)."""
     return [SimpleNamespace(code=u.code, name=u.name, uom_class=u.uom_class,
-                            allows_decimal=by_class.get((u.uom_class or "").strip().upper()))
+                            allows_decimal=bool(u.allows_decimal))
             for u in units]
 
 
 def _unit_decimals(row) -> int:
-    """The type's own flag decides; a unit whose type has no row falls back to the
-    built-in whole-unit classes."""
-    if row.allows_decimal is not None:
-        return MAX_DECIMALS if row.allows_decimal else 0
-    return decimals_for(row.uom_class)
+    """The unit's own flag decides, and ONLY the flag: a unit may carry a fraction only
+    when "Allows decimal" is switched on for it on Masters > UOM. Its type (COUNT,
+    WEIGHT ...) says what it measures, never how finely it may be split."""
+    return MAX_DECIMALS if row.allows_decimal else 0
 
 
 def _unit_maps(rows) -> tuple[dict, dict, dict]:
@@ -192,14 +199,13 @@ def _refuse_fractions_of_whole_units(session, _ctx, _instances) -> None:
     if not found:
         return
     with session.no_autoflush:
-        maps = _unit_maps(_with_flags(session.execute(_UNITS).all(),
-                                      session.execute(_CLASS_FLAGS).all()))
+        maps = _unit_maps(_with_flags(session.execute(_UNITS).all()))
     for code, col, value in found:
         if _resolve(maps, code) == 0:
             label = col.replace("_", " ").replace("qty", "quantity").strip().capitalize()
             raise ValidationError(
                 f"{label} {value.normalize()} {code}: {code} is counted in whole units "
-                f"(its UOM type does not allow decimals). Enter a whole number.")
+                f"(the unit does not allow decimals). Enter a whole number.")
 
 
 def share_out(

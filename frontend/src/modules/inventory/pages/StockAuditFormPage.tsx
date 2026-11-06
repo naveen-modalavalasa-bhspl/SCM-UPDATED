@@ -348,6 +348,7 @@ export default function StockAuditFormPage() {
                             <div>
                               <span className="text-[10px] font-semibold uppercase text-muted md:hidden">Counted</span>
                               <Input type="number" min={0} max={line.lot.system_qty}
+                                data-uom={line.item.uom_code ?? ""}
                                      step={line.lot.mode === "QUANTITY" ? "any" : 1}
                                      value={line.counted} isInvalid={over || invalid}
                                      aria-label={`Counted ${line.item.item_code}`}

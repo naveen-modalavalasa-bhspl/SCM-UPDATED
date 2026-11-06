@@ -360,6 +360,7 @@ export function ConsolidationItemPage() {
                         // The unit's own places: a countable item cannot be typed as
                         // 5.7 here any more than it can be split into 5.7 below.
                         decimals={item.uom_decimals ?? 3}
+                        data-decimals={item.uom_decimals ?? undefined}
                         min={0}
                         max={resolved.ceiling}
                         aria-label={`Approved quantity for ${name}`}

@@ -5,7 +5,7 @@ What these pin is WHICH stickers a document hands the printer:
 - only after posting — a draft's boxes are a claim, and its part packs have no code;
 - the packs the line issued, parent first with the strips inside each under it, and the
   part pack cut at the desk flagged as new — never a box still on the shelf;
-- asset / consumable codes, never a unit known only by a serial or an IMEI;
+- asset / consumable codes; a serial / IMEI only when the item is tracked by it;
 - at the receiving end, only what the acknowledgement said ARRIVED.
 """
 from datetime import date, datetime
@@ -86,7 +86,7 @@ async def test_a_posted_issue_prints_its_packs_parent_first_and_its_asset_codes(
     db.add_all([
         m.SerialNumber(item_id=item.id, serial_number="S-1", asset_code="AST-0001",
                        warehouse_id=wh.id, status="ISSUED", remarks=f"Issued by issue {issue.id}"),
-        # Known only by its serial: the maker's label, never ours.
+        # Known only by its serial, on an item NOT tracked by serial: internal.
         m.SerialNumber(item_id=item.id, serial_number="S-2", warehouse_id=wh.id,
                        status="ISSUED", remarks=f"Issued by issue {issue.id}"),
     ])
@@ -120,6 +120,32 @@ async def test_a_posted_issue_prints_its_packs_parent_first_and_its_asset_codes(
     printed = await client.post(f"/api/warehouse/issues/{issue.id}/labels/printed",
                                 json={"label_ids": [], "printed": 5}, headers=headers)
     assert printed.status_code == 200, printed.text
+
+
+async def test_a_serial_or_imei_tracked_unit_prints_its_own_number(
+    db, client, make_user, login,
+):
+    """2026-11-02: a handset issued by serial gets a sticker of its serial (and IMEI)."""
+    wh, item, issue, _line = await _posted_issue(db)
+    item.is_serial_tracked = True
+    db.add_all([
+        m.SerialNumber(item_id=item.id, serial_number="SN-100", imei="356000000000001",
+                       warehouse_id=wh.id, status="ISSUED", remarks=f"Issued by issue {issue.id}"),
+        m.SerialNumber(item_id=item.id, serial_number="SN-101", warehouse_id=wh.id,
+                       status="ISSUED", remarks=f"Issued by issue {issue.id}"),
+    ])
+    await db.commit()
+
+    await make_user(username="serialdesk", permissions=[ISSUE_VIEW])
+    headers = await login("serialdesk", "pw")
+    got = await client.get(f"/api/warehouse/issues/{issue.id}/labels", headers=headers)
+    assert got.status_code == 200, got.text
+    units = [r for r in got.json()["labels"] if r["kind"] == "UNIT"]
+    assert sorted(r["code"] for r in units) == ["SN-100", "SN-101"]
+    assert all(r["pack_name"] == "Serial no." for r in units)
+    by_code = {r["code"]: r for r in units}
+    assert by_code["SN-100"]["imei"] == "356000000000001"
+    assert by_code["SN-100"]["serial_number"] == "SN-100"
 
 
 async def test_an_issue_not_yet_posted_prints_nothing(db, client, make_user, login):

@@ -207,10 +207,85 @@ export interface ApprovalIndentLine {
   remarks?: string | null;
   is_excluded?: boolean;
   excluded_by_name?: string | null;
+  /** Set by the review screen: what an allocation already covers on this line. The
+   *  field edits only what is left, and the server is sent the two added together. */
+  served_quantity?: number;
+  /** Everything approved on this line is already allocated; nothing is left to edit. */
+  fully_served?: boolean;
+}
+
+/** One rung of an STR's frozen ladder. */
+export interface StrLevel {
+  sequence: number;
+  role_name?: string | null;
+  position_name?: string | null;
+  state: "DONE" | "CURRENT" | "NEXT";
+}
+
+/** A quantity a level below has already allocated. */
+export interface StrAllocatedLine {
+  allocation_no: string;
+  /** Signed, so the stock is reserved; otherwise the allocation awaits its own approver. */
+  signed: boolean;
+  allocated_by_name?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  quantity: number;
+  warehouse_name?: string | null;
+}
+
+/** One end of an STR's route, as the approval screen reads it. */
+export interface StrReviewPoint {
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  warehouse_code?: string | null;
+  tier_label?: string | null;
+  held_by?: string[];
+}
+
+/** A point of the approver's that could take the STR over (2026-11-04). */
+export interface StrReviewOption extends StrReviewPoint {
+  covers_full: number;
+  covers_any: number;
+  lines: { line_id: number; free_quantity: number }[];
+}
+
+/** What the STR approval screen says about the source and the approver's scope. */
+export interface StrSourceReview {
+  indent_id: number;
+  indent_no: string;
+  source?: StrReviewPoint | null;
+  destination?: StrReviewPoint | null;
+  in_scope: boolean;
+  /** True when no rung sits above this one; null when the ladder is not resolved. */
+  is_last_level?: boolean | null;
+  levels: StrLevel[];
+  next_level?: StrLevel | null;
+  /** Allocations cover everything approved: this level is signing off, not serving. */
+  fully_served: boolean;
+  allocated: StrAllocatedLine[];
+  stage_name?: string | null;
+  lines_owing: number;
+  source_lines: { line_id: number; owed_quantity: number; free_quantity: number }[];
+  my_points: StrReviewOption[];
+  changes: {
+    id: number;
+    from_warehouse_id?: number | null;
+    from_warehouse_name?: string | null;
+    to_warehouse_id: number;
+    to_warehouse_name?: string | null;
+    stage_name?: string | null;
+    reason?: string | null;
+    changed_by_name?: string | null;
+    position_name?: string | null;
+    created_at: string;
+  }[];
 }
 
 export interface ApprovalIndent {
   id: number;
+  /** REGULAR / MONTHLY / STR — an STR carries a source point. */
+  indent_type?: string | null;
   indent_no: string;
   status: string;
   priority: string;
@@ -433,6 +508,8 @@ export interface IndentAvailabilityLine {
   requested_quantity: number;
   approved_quantity: number;
   allocated_quantity: number;
+  /** Promised by an allocation nobody has signed yet; not in `allocated_quantity`. */
+  committed_quantity: number;
   /** approved − allocated: what still has to come from somewhere. */
   remainder: number;
   available_at_my_points: number;

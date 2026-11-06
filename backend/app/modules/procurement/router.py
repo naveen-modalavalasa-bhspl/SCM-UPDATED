@@ -420,6 +420,13 @@ async def requisition_sources(req_id: int, db: AsyncSession = Depends(get_db),
     return await service.requisition_sources(db, req_id, user)
 
 
+@requisitions.get("/{req_id}/quantity-changes")
+async def requisition_quantity_changes(req_id: int, db: AsyncSession = Depends(get_db),
+                                       user=Depends(require_permission(perms.REQUISITION_VIEW))):
+    """Every recorded quantity change on the requisition, oldest first (2026-11-03)."""
+    return {"items": await service.requisition_quantity_changes(db, req_id, user)}
+
+
 @requisitions.get("/{req_id}", response_model=ReqOut)
 async def get_requisition(req_id: int, db: AsyncSession = Depends(get_db),
                           user=Depends(require_permission(perms.REQUISITION_VIEW))):
@@ -800,6 +807,16 @@ async def vendor_me(db: AsyncSession = Depends(get_db),
 
 # The packing of the vendor's own mapped items (2026-10-11), for the portal's
 # Profile > Packing tab. Vendor id from the token, like every route here.
+# The vendor's own door to the unit-decimals table (2026-11-03): the portal's
+# quantity boxes refuse a "." in a whole unit, and an employee route would 401 the
+# vendor out of the portal.
+@supplier.get("/uom/decimals")
+async def vendor_uom_decimals(db: AsyncSession = Depends(get_db),
+                              account=Depends(get_current_vendor)):
+    from app.shared import uom as uom_rules
+    return {"items": await uom_rules.decimals_table(db)}
+
+
 @supplier.get("/items/packing")
 async def vendor_item_packing(db: AsyncSession = Depends(get_db),
                               account=Depends(get_current_vendor)):

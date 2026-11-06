@@ -111,6 +111,15 @@ class Indent(Base):
     vehicle_id = Column(BigIntPortable, nullable=True)
     vehicle_number = Column(String(50), nullable=True)
 
+    # Where a Stock Transfer Request asks the stock to come FROM (2026-11-04). Chosen
+    # by the raiser among the points held at their own rank (OE -> OE, DM -> DM, ...),
+    # and moved by an approver only through `change_str_source`, which records the move
+    # in `ind_str_source_changes`. Soft FK + snapshot: the point's name survives a
+    # re-sync. NULL on every ordinary indent and on STRs raised before the field.
+    source_warehouse_id = soft_fk()
+    source_warehouse_name = Column(String(200), nullable=True)
+    source_warehouse_code = Column(String(50), nullable=True)
+
     bom_id = Column(BigIntPortable, nullable=True)            # not written yet
     bom_name = Column(String(200), nullable=True)
 
@@ -167,6 +176,31 @@ Index("ix_ind_bom", Indent.bom_id)
 # Region is a list/statistics/ledger filter, and the monthly grouping reads it with a
 # status alongside, so the composite is the shape every one of those queries wants.
 Index("ix_ind_region_status", Indent.region_id, Indent.status)
+
+
+class StrSourceChange(Base):
+    """Every time an approver moved an STR's source point (2026-11-04). Append-only.
+
+    An approver whose scope does not hold the chosen source may pull the request onto
+    one of their own points and allocate it there; the raiser asked for X and is served
+    from Y, so who moved it, from where, to where, at which rung and why is recorded
+    here and shown on the STR beside its route.
+    """
+
+    __tablename__ = "ind_str_source_changes"
+    id = pk()
+    indent_id = Column(ForeignKey("ind_indents.id", ondelete="CASCADE"), index=True,
+                       nullable=False)
+    from_warehouse_id = Column(BigIntPortable, nullable=True)
+    from_warehouse_name = Column(String(200), nullable=True)
+    to_warehouse_id = Column(BigIntPortable, nullable=False)
+    to_warehouse_name = Column(String(200), nullable=True)
+    stage_name = Column(String(200), nullable=True)
+    reason = Column(String(500), nullable=True)
+    changed_by_id = soft_fk()
+    changed_by_name = Column(String(200), nullable=True)
+    position_name = Column(String(200), nullable=True)
+    created_at = created_at_col()
 
 
 class IndentItem(CombinationMixin, Base):

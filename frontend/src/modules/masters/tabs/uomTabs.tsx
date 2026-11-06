@@ -1,13 +1,14 @@
 import { mastersApi } from "../api";
 import { MasterCrud } from "../components/MasterCrud";
 import type { Option } from "../components/MasterCrud";
-import type { MasterUom, MasterUomClass, MasterUomConversion, UomClass } from "../types";
+import type { MasterUom, MasterUomConversion, UomClass } from "../types";
 import { Button, Can, Card, Field, Select } from "@/shared/components";
 import type { Column } from "@/shared/components";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Active, Code } from "./common";
 import { UOM_CLASS_OPTS } from "./constants";
+import { resetUomDecimals } from "@/shared/numberGuard";
 
 
 
@@ -83,23 +84,16 @@ export function UomSuggestions() {
   );
 }
 
-/** The UOM types master as dropdown options, falling back to the built-in list
- *  while it loads or if it is empty. */
-function useUomClassOptions(): Option[] {
-  const q = useQuery({
-    queryKey: ["masters", "uom-classes", "options"],
-    queryFn: () => mastersApi.uomClasses.list({ size: 200 }).then((p) => p.items),
-  });
-  const rows = (q.data ?? []).filter((r) => r.is_active);
-  return rows.length ? rows.map((r) => ({ value: r.code, label: r.name })) : UOM_CLASS_OPTS;
-}
-
 export function UomTab() {
-  const classOpts = useUomClassOptions();
+  // The quantity guard caches every unit's decimals per page: drop it on save so the
+  // switch bites at once.
+  const saved = resetUomDecimals;
   const columns: Column<MasterUom>[] = [
     { key: "code", header: "Code", render: (r) => <Code>{r.code}</Code> },
     { key: "name", header: "Name", render: (r) => r.name },
     { key: "class", header: "Measures", render: (r) => r.uom_class },
+    { key: "decimal", header: "Allows decimal",
+      render: (r) => (r.allows_decimal ? "Yes" : "No — whole units") },
     { key: "active", header: "Status", render: (r) => <Active on={r.is_active} /> },
   ];
   return (
@@ -113,7 +107,9 @@ export function UomTab() {
             <div>
               <Code>{r.code}</Code>
               <span className="ml-2 text-sm text-body">{r.name}</span>
-              <div className="text-xs text-muted">{r.uom_class}</div>
+              <div className="text-xs text-muted">
+                {r.uom_class} · {r.allows_decimal ? "Allows decimal" : "Whole units only"}
+              </div>
             </div>
             <Active on={r.is_active} />
           </div>
@@ -121,20 +117,22 @@ export function UomTab() {
         fetchList={() => mastersApi.uom.listAll()}
         fields={[
           { key: "uom_class", label: "What it measures", type: "select",
-            options: classOpts, required: true,
-            hint: "Add more under Masters › UOM Types." },
+            options: UOM_CLASS_OPTS, required: true },
           { key: "code", label: "Code", required: true, maxLength: 20,
             pattern: /^[A-Za-z0-9/]+$/,
             patternMessage: "Use letters, numbers or a slash" },
           { key: "name", label: "Name", required: true, maxLength: 100 },
+          { key: "allows_decimal", label: "Allows decimal", type: "switch",
+            hint: "Off: whole units only on every document, and putaway gives each unit its own code. On: fractions like 2.5 are allowed, and the stock is coded per lot and per pack." },
           { key: "is_active", label: "Active", type: "switch" },
         ]}
-        emptyForm={{ uom_class: "COUNT", code: "", name: "", is_active: true }}
+        emptyForm={{ uom_class: "COUNT", code: "", name: "", allows_decimal: false,
+          is_active: true }}
         toForm={(r) => ({ uom_class: r.uom_class, code: r.code, name: r.name,
-          is_active: r.is_active })}
+          allows_decimal: r.allows_decimal ?? false, is_active: r.is_active })}
         bulk={mastersApi.uom} usage={mastersApi.uom.usage}
-        onCreate={(v) => mastersApi.uom.create(v as Partial<MasterUom>)}
-        onUpdate={(id, v) => mastersApi.uom.update(id, v as Partial<MasterUom>)}
+        onCreate={(v) => mastersApi.uom.create(v as Partial<MasterUom>).then((r) => { saved(); return r; })}
+        onUpdate={(id, v) => mastersApi.uom.update(id, v as Partial<MasterUom>).then((r) => { saved(); return r; })}
         onDeactivate={mastersApi.uom.deactivate}
       />
     </>
@@ -176,36 +174,3 @@ export function ConversionsTab({ uoms }: { uoms: Option[] }) {
 /** The rung above BrandsTab: which brands sell this general name. Kept here rather
  *  than on a mapping screen for the same reason brands carry their manufacturers —
  *  a mapping you have to remember to go and make somewhere else does not get made. */
-
-/** UOM types, with the one rule a type carries for all its units: may a document
- *  hold a fraction of them. Enforced on save by the server on every document line. */
-export function UomClassesTab() {
-  const api = mastersApi.uomClasses;
-  return <MasterCrud<MasterUomClass>
-    title="UOM type" queryKey="uom-classes" searchable managePerm="master.uom.manage"
-    columns={[
-      { key: "code", header: "Code", render: (r) => <Code>{r.code}</Code> },
-      { key: "name", header: "Name", render: (r) => r.name },
-      { key: "allows_decimal", header: "Allows decimal",
-        render: (r) => (r.allows_decimal ? "Yes" : "No — whole units") },
-      { key: "active", header: "Status", render: (r) => <Active on={r.is_active} /> },
-    ]}
-    renderCard={(r) => <div><Code>{r.code}</Code><div>{r.name}</div>
-      <div className="text-xs text-muted">{r.allows_decimal ? "Allows decimal" : "Whole units only"}</div></div>}
-    fetchList={(search) => api.list({ search, size: 300 }).then((r) => r.items)}
-    fields={[
-      { key: "code", label: "Code", required: true, maxLength: 30, pattern: /^[A-Za-z0-9_]+$/,
-        patternMessage: "Use letters, numbers or an underscore, e.g. COUNT" },
-      { key: "name", label: "Name", required: true, maxLength: 200 },
-      { key: "description", label: "Description", maxLength: 300 },
-      { key: "allows_decimal", label: "Allows decimal", type: "switch" },
-      { key: "is_active", label: "Active", type: "switch" }]}
-    emptyForm={{ code: "", name: "", description: "", allows_decimal: true, is_active: true }}
-    toForm={(r) => ({ code: r.code, name: r.name, description: r.description ?? "",
-                      allows_decimal: r.allows_decimal ?? true, is_active: r.is_active })}
-    bulk={api} usage={api.usage}
-    onCreate={(v) => api.create(v as Partial<MasterUomClass>)}
-    onUpdate={(id, v) => api.update(id, v as Partial<MasterUomClass>)}
-    onDeactivate={api.deactivate}
-  />;
-}

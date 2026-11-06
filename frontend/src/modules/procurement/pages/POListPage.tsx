@@ -10,6 +10,7 @@ import { formatPONo } from "@/shared/format";
 import { useDebouncedValue } from "@/shared/hooks/useDebouncedValue";
 import { POKpis } from "../components/ProcurementKpis";
 import { useUrlFilters } from "../urlFilters";
+import { despatchLabel } from "../poStatus";
 import { TONE_BLUE } from "@/shared/components/tones";
 
 /** POStatus, as the backend enum spells it. */
@@ -133,7 +134,8 @@ export function POListPage() {
       ),
     },
     { key: "vendor", header: "Vendor", render: (r) => r.vendor_name ?? "—" },
-    { key: "status", header: "Status", render: (r) => <StatusPill status={r.status} /> },
+    { key: "organisation", header: "Organisation", hideOnNarrow: true, render: (r) => r.organization_name ?? "—" },
+    { key: "status", header: "Status", render: (r) => <StatusPill status={r.status} label={despatchLabel(r.status, r.despatch_status) ?? undefined} /> },
     {
       key: "with",
       header: "Pending with",
@@ -249,7 +251,7 @@ export function POListPage() {
             <div className="space-y-1.5">
               <div className="flex items-start justify-between gap-2">
                 <span className="font-mono text-xs font-semibold text-ink">{formatPONo(r.po_no, r.revision_no)}</span>
-                <StatusPill status={r.status} />
+                <StatusPill status={r.status} label={despatchLabel(r.status, r.despatch_status) ?? undefined} />
               </div>
               <div className="text-sm text-body">{r.vendor_name ?? "—"}</div>
               <div className="flex items-center justify-between gap-2 text-xs text-muted">

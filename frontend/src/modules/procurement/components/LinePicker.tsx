@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Trash2 } from "lucide-react";
+import { ArrowDown, Lock, Trash2 } from "lucide-react";
 import { Field, Input } from "@/shared/components";
 import { Button } from "./ActionButton";
 import { useToast } from "@/shared/components/Toast";
@@ -225,6 +225,7 @@ export function LinePicker({
             <Field label={index === 0 ? "Quantity" : ""} required={index === 0}>
               <Input
                 type="number"
+                data-uom={line.uom_code ?? ""}
                 min="0"
                 max={capQuantityAtOriginal ? line.original_quantity : undefined}
                 step="0.001"
@@ -232,8 +233,10 @@ export function LinePicker({
                 // The quantity is always the person's; on a packed line the packs
                 // below follow it (2026-10-11).
                 disabled={disabled}
+                isInvalid={overCap(line)}
                 onChange={(e) => setQuantity(index, e.target.value)}
               />
+              <CapHint line={line} on={capQuantityAtOriginal} />
             </Field>
           </div>
           {showRate && (
@@ -362,5 +365,35 @@ export function LinePicker({
         </Button>
       )}
     </div>
+  );
+}
+
+
+/** A line with a ceiling (2026-11-03): what it asked for, which a later edit may
+ *  lower or leave, never raise. True when the typed quantity goes past it. */
+export function overCap(line: DraftLine, on = true): boolean {
+  if (!on || line.original_quantity == null || line.original_quantity === "") return false;
+  return Number(line.quantity) > Number(line.original_quantity);
+}
+
+function CapHint({ line, on }: { line: DraftLine; on: boolean }) {
+  if (!on || line.original_quantity == null || line.original_quantity === "") return null;
+  const cap = Number(line.original_quantity);
+  const now = Number(line.quantity);
+  const fmt = (v: number) => v.toLocaleString("en-IN", { maximumFractionDigits: 3 });
+  if (now > cap) {
+    return <p className="mt-1 text-[11px] text-danger">Only {fmt(cap)} {line.uom_code ?? ""} was asked for — lower it or leave it.</p>;
+  }
+  if (line.quantity !== "" && now < cap) {
+    return (
+      <p className="mt-1 inline-flex items-center gap-1 rounded-full bg-warn-bg px-2 py-0.5 text-[11px] font-semibold text-warn">
+        <ArrowDown className="h-3 w-3" /> {fmt(Math.round((cap - now) * 1000) / 1000)} less than asked
+      </p>
+    );
+  }
+  return (
+    <p className="mt-1 inline-flex items-center gap-1 text-[11px] text-muted">
+      <Lock className="h-3 w-3" /> Up to {fmt(cap)} · can only be lowered
+    </p>
   );
 }

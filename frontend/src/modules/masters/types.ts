@@ -81,11 +81,6 @@ export interface NamedMaster {
   is_active: boolean;
 }
 
-/** A UOM type. `allows_decimal` off → every unit of the type is whole-only on documents. */
-export interface MasterUomClass extends NamedMaster {
-  allows_decimal: boolean;
-}
-
 export interface MasterBrandManufacturer {
   id: number;
   brand_id: number;
@@ -207,6 +202,9 @@ export interface MasterUom {
   /** What the unit measures. Required: a conversion across classes is meaningless,
    *  and the item form offers only the units of the class being measured. */
   uom_class: UomClass;
+  /** Off → whole units only on every document, and putaway gives each unit its own
+   *  code. On → fractions allowed; the stock is coded per lot and per pack. */
+  allows_decimal: boolean;
   is_active: boolean;
 }
 
@@ -280,6 +278,7 @@ export interface RefRow {
   code?: string;
   name: string;
   is_stock_location?: boolean;
+  is_active?: boolean;
 }
 
 // --------------------------------------------------------------------------- //

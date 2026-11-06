@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type WheelEvent } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { LibraryBig, Plus, Trash2 } from "lucide-react";
+import { ArrowRightLeft, LibraryBig, Plus, Trash2 } from "lucide-react";
 import { CardBody, Skeleton } from "@heroui/react";
 import { PageHeader, Button, Card, Field, Input, Select, useToast } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
@@ -139,6 +139,8 @@ export function IndentFormPage() {
   const docLabel = isStr ? "request" : "indent";
   const detailPath = (id: number) => `${indentBase(indentType)}/${id}`;
   const [vehicleId, setVehicleId] = useState<number | "">("");
+  // Where an STR asks the stock to come FROM (2026-11-04). Required on an STR.
+  const [sourceId, setSourceId] = useState<number | "">("");
   const [requiredDate, setRequiredDate] = useState("");
   const [remarks, setRemarks] = useState("");
   const [deliveryOfficeId, setDeliveryOfficeId] = useState<number | "">(
@@ -221,6 +223,15 @@ export function IndentFormPage() {
   });
   const pointType = (myPoint?.point_type ?? "").toUpperCase();
 
+  // The points this STR may name as its source: the same rank on the same tier,
+  // network-wide, less the raiser's own — served, never worked out here.
+  const { data: strSources = [], isLoading: isSourcesLoading } = useQuery({
+    queryKey: indentKeys.strSources(accountScope),
+    queryFn: () => indentApi.strSources(),
+    enabled: isStr,
+    staleTime: 5 * 60_000,
+  });
+
   const { data: vehicles = [], isLoading: isVehiclesLoading } = useQuery({
     queryKey: indentKeys.vehicles(accountScope),
     queryFn: () => indentApi.vehicles(),
@@ -258,6 +269,7 @@ export function IndentFormPage() {
     setPriority(draft.priority || "NORMAL");
     setIndentType((draft.indent_type as IndentType) || INDENT_TYPE.REGULAR);
     setVehicleId(draft.vehicle_id ?? "");
+    setSourceId(draft.source_warehouse_id ?? "");
     setRequiredDate(draft.required_date ?? "");
     setRemarks(draft.remarks ?? "");
     setDeliveryOfficeId(draft.office_id ?? "");
@@ -300,6 +312,7 @@ export function IndentFormPage() {
     priority,
     indent_type: indentType,
     vehicle_id: hideVehicleAndSac || resolvedVehicleId === "" ? null : Number(resolvedVehicleId),
+    ...(isStr ? { source_warehouse_id: sourceId === "" ? null : Number(sourceId) } : {}),
     required_date: requiredDate || null,
     remarks: remarks || null,
     items: lines
@@ -450,7 +463,31 @@ export function IndentFormPage() {
   /** A Warehouse / MDP delivery point asks for neither a vehicle nor a SAC. A draft
    *  that already carries a vehicle keeps showing it — hiding a value that is saved on
    *  the document would be hiding the document. */
-  const hideVehicleAndSac = !!pointType && pointType !== "LIP" && !draft?.vehicle_number;
+  // The tier is served (2026-11-04): the draft's own delivery point when there is one,
+  // else the raiser's point. No point type is compared by name here.
+  const needsVehicleAndSac = draft?.needs_vehicle_and_sac ?? myPoint?.needs_vehicle_and_sac;
+  const hideVehicleAndSac = needsVehicleAndSac === false && !draft?.vehicle_number;
+  const pointLabel = myPoint?.point_label ?? (pointType || "Warehouse");
+  const sourceMissing = isStr && sourceId === "";
+  const showSourceError = hasAttemptedSubmit && sourceMissing;
+  const sourceOptions = strSources.map((point) => {
+    const held = (point.held_by ?? []).filter(Boolean);
+    return {
+      value: point.warehouse_id,
+      label: [
+        point.warehouse_name ?? `Point ${point.warehouse_id}`,
+        point.warehouse_code ? `· ${point.warehouse_code}` : "",
+        held.length ? `— ${held.slice(0, 2).join(", ")}${held.length > 2 ? ` +${held.length - 2}` : ""}` : "",
+      ].filter(Boolean).join(" "),
+    };
+  });
+  // A draft whose saved source is no longer offered still shows it, rather than a
+  // blank box that reads as "nothing chosen".
+  if (isStr && sourceId !== "" && !sourceOptions.some((o) => o.value === sourceId)
+      && draft?.source_warehouse_name) {
+    sourceOptions.unshift({ value: sourceId, label: draft.source_warehouse_name });
+  }
+  const chosenSource = strSources.find((point) => point.warehouse_id === sourceId);
   const officeSac = draft?.office_sac?.trim()
     || (deliveryOfficeId === ""
       ? null
@@ -558,6 +595,7 @@ export function IndentFormPage() {
                       <Field label={i === 0 ? "Qty" : ""} required={i === 0}>
                         <Input
                           type="number"
+                          data-uom={uom ?? ""}
                           min={0}
                           step="0.001"
                           aria-label={quantityLabel}
@@ -612,6 +650,7 @@ export function IndentFormPage() {
                           <Field label={`No. of ${level.name}`}>
                             <Input
                               type="number" min={0} step="1"
+                              data-decimals={0}
                               aria-label={`Number of ${level.name}`}
                               className={NO_SPINNER}
                               value={String(count)}
@@ -723,16 +762,54 @@ export function IndentFormPage() {
                 raiser's position — it is not theirs to choose, and letting them pick
                 meant an indent could be delivered to an office they do not work at.
                 The id is still submitted; only the choosing is gone. */}
-            <Field label="Delivery location">
+            <Field label={isStr ? "Destination" : "Delivery location"}>
               <Input value={delivery.officeName} disabled />
             </Field>
+            {isStr && (
+              <div className={`rounded-2xl border p-3 transition-colors ${
+                showSourceError ? "border-bad/50 bg-bad-bg/40" : "border-brand/25 bg-brand-050/40"}`}>
+                <Field label="Source" required>
+                  <Select
+                    ariaLabel="Source point"
+                    value={sourceId}
+                    isInvalid={showSourceError}
+                    isDisabled={isSourcesLoading}
+                    placeholder={isSourcesLoading ? "Finding points at your level…"
+                      : sourceOptions.length ? "Select the point to transfer from"
+                        : "No point at your level to transfer from"}
+                    options={sourceOptions}
+                    onChange={(v) => setSourceId(v === "" ? "" : Number(v))}
+                  />
+                </Field>
+                {showSourceError ? (
+                  <p id="str-source-error" className="mt-1.5 text-xs font-medium text-bad">
+                    Choose where this stock should come from.
+                  </p>
+                ) : chosenSource ? (
+                  <p className="mt-2 flex items-start gap-1.5 text-xs text-body">
+                    <ArrowRightLeft className="mt-px h-3.5 w-3.5 shrink-0 text-brand" aria-hidden />
+                    <span>
+                      <b className="font-semibold text-ink">{chosenSource.warehouse_name}</b>
+                      {chosenSource.tier_label ? ` · ${chosenSource.tier_label}` : ""}
+                      {" "}→ <b className="font-semibold text-ink">{delivery.officeName}</b>
+                    </span>
+                  </p>
+                ) : (
+                  <p className="mt-1.5 text-xs text-muted">
+                    {strSources.length
+                      ? `${strSources.length} point${strSources.length === 1 ? "" : "s"} at your level. Each approver sees whether it is in their scope.`
+                      : "Points held at your own level, across the network."}
+                  </p>
+                )}
+              </div>
+            )}
             {hideVehicleAndSac ? (
               <div className="flex items-start gap-2 rounded-lg border border-dashed border-line bg-content2/50 px-3 py-2.5 text-xs text-muted">
                 <span className="mt-0.5 rounded bg-brand/10 px-1.5 py-px text-[10px] font-bold uppercase text-brand">
-                  {pointType === "MDP" ? "MDP" : "Warehouse"}
+                  {pointLabel}
                 </span>
                 <span>
-                  Delivered to {pointType === "MDP" ? "an MDP" : "a warehouse"} — no vehicle or
+                  Delivered to {myPoint?.point_name ?? `this ${pointLabel}`} — no vehicle or
                   service area code is needed. The sending point arranges the transport.
                 </span>
               </div>
@@ -786,6 +863,10 @@ export function IndentFormPage() {
               return;
             }
             if (hasMissingQtyError) return;
+            if (sourceMissing) {
+              toast.warning({ title: "Source is missing", message: "Choose where this stock should come from." });
+              return;
+            }
             const duplicates = duplicateItemRows(lines);
             if (duplicates.size) {
               setLines((current) => current.map((line, index) => {

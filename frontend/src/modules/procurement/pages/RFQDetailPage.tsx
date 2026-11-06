@@ -1,3 +1,4 @@
+import { departmentOf } from "../orgScope";
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -286,6 +287,7 @@ export function RFQDetailPage() {
           <QuantityInput
             decimals={uomDecimals(r.uom_code)}
             className="h-11 w-28 rounded-md border border-line bg-content1 px-3 text-sm text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
+            data-uom={r.uom_code ?? ""}
             value={qtyEdits[r.id] ?? String(r.quantity)}
             onChange={(raw) => setQtyEdits((current) => ({ ...current, [r.id]: raw }))}
             aria-invalid={Boolean(qtyProblem(r))}
@@ -499,10 +501,11 @@ export function RFQDetailPage() {
                         : <DocRef no={rfq.consolidation_no} />,
                     },
                     { label: "Priority", value: rfq.priority ?? "Normal" },
-                    { label: "Department", value: rfq.department_name ?? "\u2014" },
+                    { label: "Department", value: departmentOf(rfq) ?? "\u2014" },
                     { label: "Shipment Address", value: rfq.warehouse_name ?? "\u2014" },
                     { label: "Project", value: rfq.project_name ?? "\u2014" },
-                    { label: "Company", value: rfq.company_name ?? "\u2014" },
+                    { label: rfq.organization_name ? "Organisation" : "Company",
+                      value: rfq.organization_name ?? rfq.company_name ?? "\u2014" },
                   ]}
                 />
 
@@ -557,6 +560,7 @@ export function RFQDetailPage() {
                             <QuantityInput
                               decimals={uomDecimals(r.uom_code)}
                               className="h-11 w-28 rounded-md border border-line bg-content1 px-3 text-sm text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
+                              data-uom={r.uom_code ?? ""}
                               value={qtyEdits[r.id] ?? String(r.quantity)}
                               onChange={(raw) => setQtyEdits((current) => ({ ...current, [r.id]: raw }))}
                               aria-invalid={Boolean(qtyProblem(r))}

@@ -12,7 +12,7 @@ from app.platform.settings.models import DocSeries
 from app.platform.settings.service import write_audit
 from app.shared.enums import AuditAction, DocType, ResetPolicy
 from app.shared.numbering import (
-    DEFAULT_PATTERN, current_period, normalise_pattern, render, tokens_in,
+    DEFAULT_PATTERN, _fiscal_year, current_period, normalise_pattern, render, tokens_in,
 )
 
 # What each token stands for, shown on the screen so an admin can compose a pattern
@@ -20,9 +20,9 @@ from app.shared.numbering import (
 TOKENS = (
     ("{PREFIX}", "the prefix on this row, e.g. IND"),
     ("{SEQ:5}", "the running number, padded to 5 digits"),
-    ("{FY}", "financial year, e.g. 2026-27"),
-    ("{COMPANY}", "company name from Settings > Company"),
-    ("{PROJECT}", "the project the document belongs to"),
+    ("{FY}", "financial year, worked out from today and changing by itself on 1 April"),
+    ("{COMPANY}", "the document's organisation (procurement); elsewhere, Settings > Company"),
+    ("{PROJECT}", "the document's project, or its department when it has no project"),
     ("{YYYY}", "calendar year, e.g. 2026"),
     ("{YY}", "2-digit year, e.g. 26"),
     ("{MM}", "month number, 01-12"),
@@ -62,7 +62,7 @@ def preview(s: DocSeries) -> str:
         )
     except (KeyError, ValueError, IndexError):
         return "invalid pattern"
-    return render(s.pattern or DEFAULT_PATTERN, s.prefix, s.fiscal_year,
+    return render(s.pattern or DEFAULT_PATTERN, s.prefix, _fiscal_year(),
                   (s.last_number or 0) + 1, **SAMPLE)
 
 

@@ -564,6 +564,7 @@ export default function OutboundQualityInspectionForm({
         </div>
       ) : (
         <QtyInput
+          uom={savedLine(i)?.uom_code ?? (delivery?.items ?? []).find((x) => x.id === l.issue_item_id)?.uom_code}
           ariaLabel={`Inspected quantity, line ${i + 1}`}
           uom={savedLine(i)?.uom_code ?? (delivery?.items ?? []).find((x) => x.id === l.issue_item_id)?.uom_code}
           value={l.inspected_qty}
@@ -586,6 +587,7 @@ export default function OutboundQualityInspectionForm({
         </div>
       ) : (
         <QtyInput
+          uom={savedLine(i)?.uom_code ?? (delivery?.items ?? []).find((x) => x.id === l.issue_item_id)?.uom_code}
           ariaLabel={`Accepted quantity, line ${i + 1}`}
           uom={savedLine(i)?.uom_code ?? (delivery?.items ?? []).find((x) => x.id === l.issue_item_id)?.uom_code}
           value={l.accepted_qty}
@@ -604,6 +606,7 @@ export default function OutboundQualityInspectionForm({
         // Rejected in BASE units; every one of them is then placed in a package.
         <div>
           <QtyInput
+            uom={savedLine(i)?.uom_code ?? (delivery?.items ?? []).find((x) => x.id === l.issue_item_id)?.uom_code}
             ariaLabel={`Rejected quantity, line ${i + 1}`}
             uom={savedLine(i)?.uom_code ?? (delivery?.items ?? []).find((x) => x.id === l.issue_item_id)?.uom_code}
             value={l.rejected_qty}
@@ -624,6 +627,7 @@ export default function OutboundQualityInspectionForm({
         </div>
       ) : (
         <QtyInput
+          uom={savedLine(i)?.uom_code ?? (delivery?.items ?? []).find((x) => x.id === l.issue_item_id)?.uom_code}
           ariaLabel={`Rejected quantity, line ${i + 1}`}
           uom={savedLine(i)?.uom_code ?? (delivery?.items ?? []).find((x) => x.id === l.issue_item_id)?.uom_code}
           value={l.rejected_qty}

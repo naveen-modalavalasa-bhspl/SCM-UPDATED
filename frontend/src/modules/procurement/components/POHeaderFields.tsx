@@ -27,7 +27,22 @@ interface NamedRow { id: number; code?: string | null; name: string }
 type PaymentTermRow = MasterPaymentTerm;
 
 export interface POHeaderValue {
+  fiscalYear: string;
+  organizationName?: string;
+  projectName?: string;
+  departmentName?: string;
+  organizationId: number | "";
+  /** Booked to an organisation department instead of a project: exactly one of the two. */
+  orgDepartmentId: number | "";
   projectId: number | "";
+  /** HCM's department, only on an order raised before organisations (`legacy`). */
+  departmentId: number | "";
+  /** Raised before organisations: keeps its old fields and is asked for nothing new. */
+  legacy?: boolean;
+  /** Written off an RFQ: the organisation came from there. */
+  orgLocked?: boolean;
+  /** Past a draft: organisation, department and project are all fixed. */
+  bookingLocked?: boolean;
   remarks: string;
   /** The payment-term master picked, or "" for none. */
   paymentTermId: number | "";
@@ -42,7 +57,8 @@ export interface POHeaderValue {
 }
 
 export const blankPOHeader = (): POHeaderValue => ({
-  projectId: "", remarks: "", paymentTermId: "",
+  organizationId: "", orgDepartmentId: "", fiscalYear: "",
+  projectId: "", departmentId: "", remarks: "", paymentTermId: "",
   payment_terms: "", delivery_terms: "", material_terms: "", logistics_terms: "",
   billing_address: "", shipping_address: "",
   discount: "", freight: "",
@@ -50,7 +66,17 @@ export const blankPOHeader = (): POHeaderValue => ({
 
 /** The header of an order already on the server, in the shape the form edits. */
 export const poHeaderFrom = (po: PurchaseOrder): POHeaderValue => ({
+  organizationId: po.organization_id ?? "",
+  orgDepartmentId: po.org_department_id ?? "",
+  fiscalYear: po.fiscal_year ?? "",
+  organizationName: po.organization_name ?? "",
+  projectName: po.project_name ?? "",
+  departmentName: po.org_department_name ?? "",
+  legacy: !po.organization_id,
+  orgLocked: Boolean(po.rfq_id),
+  bookingLocked: Boolean(po.organization_id) && po.status !== "DRAFT",
   projectId: po.project_id ?? "",
+  departmentId: po.department_id ?? "",
   remarks: po.remarks ?? "",
   paymentTermId: po.payment_term_id ?? "",
   payment_terms: po.payment_terms ?? "",
@@ -78,6 +104,13 @@ export const poHeaderFrom = (po: PurchaseOrder): POHeaderValue => ({
  */
 export const poHeaderPayload = (v: POHeaderValue): POHeader => ({
   project_id: v.projectId === "" ? null : Number(v.projectId),
+  ...(v.legacy
+    ? { department_id: v.projectId !== "" || v.departmentId === "" ? null : Number(v.departmentId) }
+    : {
+      organization_id: v.organizationId === "" ? null : Number(v.organizationId),
+      org_department_id: v.projectId !== "" || v.orgDepartmentId === "" ? null : Number(v.orgDepartmentId),
+      fiscal_year: v.fiscalYear || null,
+    }),
   remarks: v.remarks || null,
   payment_term_id: v.paymentTermId === "" ? null : Number(v.paymentTermId),
   payment_terms: v.payment_terms ?? "",
@@ -372,8 +405,13 @@ export function AddressesTermsCards({
 
 export function POHeaderFields({
   value, onChange, disabled = false, showProject = true, orderTotal,
+  requireOne = false, showInvalid = false,
 }: {
   value: POHeaderValue;
+  /** Project OR department is mandatory here (a hand-raised order). */
+  requireOne?: boolean;
+  /** Mark both boxes once a save was refused for having neither. */
+  showInvalid?: boolean;
   onChange: (patch: Partial<POHeaderValue>) => void;
   disabled?: boolean;
   showProject?: boolean;
@@ -388,21 +426,57 @@ export function POHeaderFields({
       }).then((r) => r.data.items),
   });
 
+  const legacy = Boolean(value.legacy);
+  const { data: departments = [] } = useQuery({
+    queryKey: ["po-departments"],
+    enabled: legacy,
+    queryFn: () =>
+      api.get<{ items: NamedRow[] }>("/api/departments").then((r) => {
+        // The HCM mirror repeats a name across offices; one option per name.
+        const seen = new Map<string, NamedRow>();
+        for (const row of r.data.items) if (!seen.has(row.name)) seen.set(row.name, row);
+        return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name));
+      }),
+  });
+
   const set = (key: keyof POHeaderValue) => (v: string) => onChange({ [key]: v });
+  const chosenDepartment = value.departmentId;
+  const neither = value.projectId === "" && chosenDepartment === "";
+  const bookingDisabled = disabled || Boolean(value.bookingLocked);
 
   return (
     <div className="space-y-5">
-      {showProject && (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-          <Field label="Project" hint="What the spend is booked against.">
+      {/* An organised order states all of this on the DocumentNumberCard. */}
+      {showProject && legacy && (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          {/* A project OR a department — exactly one (2026-11-04). Picking one
+            * clears the other; the server refuses both, and a new order with neither. */}
+          <Field label={requireOne ? "Project *" : "Project"}
+                 hint={chosenDepartment !== "" ? "Booked to a department instead."
+                   : "What the spend is booked against — or pick a department."}>
             <Select
               value={value.projectId === "" ? "" : String(value.projectId)}
               placeholder="Not stated"
-              isDisabled={disabled}
+              isDisabled={bookingDisabled}
+              isInvalid={requireOne && showInvalid && neither}
               options={projects.map((p) => ({
                 value: String(p.id), label: p.code ? `${p.code} — ${p.name}` : p.name,
               }))}
-              onChange={(v) => onChange({ projectId: v ? Number(v) : "" })}
+              onChange={(v) => onChange(v ? { projectId: Number(v), departmentId: "" }
+                                          : { projectId: "" })}
+            />
+          </Field>
+          <Field label={requireOne ? "Department *" : "Department"}
+                 hint={value.projectId !== "" ? "Booked to a project instead."
+                   : "Or book it to a department — one of the two."}>
+            <Select
+              value={chosenDepartment === "" ? "" : String(chosenDepartment)}
+              placeholder="Not stated"
+              isDisabled={bookingDisabled}
+              isInvalid={requireOne && showInvalid && neither}
+              options={departments.map((d) => ({ value: String(d.id), label: d.name }))}
+              onChange={(v) => onChange(v ? { departmentId: Number(v), projectId: "" }
+                                          : { departmentId: "" })}
             />
           </Field>
         </div>

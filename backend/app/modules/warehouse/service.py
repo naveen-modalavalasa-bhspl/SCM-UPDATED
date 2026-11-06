@@ -87,7 +87,7 @@ from app.shared.enums import (
     ApprovalAction, AuditAction, DespatchNoteStatus, DocType, IndentStatus,
     InstanceStatus, MRStatus, POStatus,
     ProjectHoldStatus, ReservationStatus,
-    RefType as InventoryRefType, StockDirection, UomClass,
+    RefType as InventoryRefType, StockDirection,
 )
 from app.shared.models.base import utcnow
 from app.shared.models.master import Item, Uom, Vendor
@@ -108,10 +108,6 @@ logger = logging.getLogger(__name__)
 
 ZERO = Decimal("0")
 
-# The unit classes whose stock is made of separable things. Everything else UomClass
-# names — WEIGHT, VOLUME, LENGTH, AREA, TEMPERATURE, TIME, PRESSURE, ENERGY — measures
-# a continuous quantity, which has no "one unit" to hang an identity on.
-_COUNTABLE_UOM_CLASSES = {UomClass.COUNT.value, UomClass.PACKAGING.value}
 
 
 def _d(value) -> Decimal:
@@ -5510,22 +5506,22 @@ async def _place_serials(
 async def _is_countable(db: AsyncSession, item) -> bool:
     """Whether this item's stock is made of units that can each carry a code.
 
-    Grams of cotton and litres of spirit cannot: a code names ONE physical thing and
-    there is no "one" in a continuous measure. 30 grams is a single lot, not 30 things
-    to label. Those get one code on the LOT instead — see `_code_lot`.
+    Decided by the UOM's own "Allows decimal" switch (2026-11-04), never by its type.
+    A whole-units-only unit — NOS, BOX, and equally a KG, MTR or LTR the business counts
+    in whole units — gets one code per unit of its quantity at putaway. A unit that
+    allows fractions has no "one" to label (2.5 litres is not 2.5 things), so its stock
+    is coded per LOT (`_code_lot`) and per PACK (the pack codes `wh_packing.shelve`
+    mints). It used to compare the type's code with COUNT / PACKAGING, so a site-defined
+    type and every WEIGHT / LENGTH / VOLUME unit fell to a single lot code.
 
-    This is the same rule `scripts/inventory_reconcile.py` applies when it strips
-    `is_serial_tracked` off measured items and deactivates the per-unit rows that flag
-    produced. Enforcing it here is what stops those rows being minted again.
-
-    An item with no unit reads as countable, which is what this did before the check
-    existed — an unset field must not silently stop goods being coded.
+    An item with no unit reads as countable — an unset field must not silently stop
+    goods being coded.
     """
     uom_id = getattr(item, "uom_id", None)
     if not uom_id:
         return True
     uom = await db.get(Uom, uom_id)
-    return (getattr(uom, "uom_class", None) or "").upper() in _COUNTABLE_UOM_CLASSES
+    return uom is None or not bool(getattr(uom, "allows_decimal", False))
 
 
 async def _code_lot(
@@ -10645,30 +10641,44 @@ async def list_issues(db: AsyncSession, params: PageParams, *, direction: str | 
                       search: str | None = None, user=None) -> dict:
     stmt = select(m.MaterialIssue)
     if user is not None:
-        stmt = stmt.where(await scope_condition(
-            db, user,
-            warehouse_col=m.MaterialIssue.warehouse_id,
-            warehouse_ids=await warehouse_ids_for_user(db, user),
-            owner_col=m.MaterialIssue.created_by_id,
-            project_col=m.MaterialIssue.project_id,
-        ))
-        # A floor in-charge sees issues addressed to their assigned floors,
-        # issues they created or submitted themselves, and unsplit issues containing
-        # items drawn from their floors.
         floors = await floor_scope_ids(db, user)
-        if floors is not None:
-            if not floors:
-                stmt = stmt.where(false())
-            else:
-                has_items_in_floors = select(1).select_from(m.MaterialIssueLine).where(
-                    m.MaterialIssueLine.issue_id == m.MaterialIssue.id,
-                    m.MaterialIssueLine.bin_id.in_(floors),
-                ).exists()
-                stmt = stmt.where(or_(
-                    m.MaterialIssue.floor_location_id.in_(floors),
-                    m.MaterialIssue.created_by_id == user.id,
-                    and_(m.MaterialIssue.floor_location_id.is_(None), has_items_in_floors),
-                ))
+        if floors is None:
+            # Warehouse-wide: the profile's rung decides, parents and children alike.
+            stmt = stmt.where(await scope_condition(
+                db, user,
+                warehouse_col=m.MaterialIssue.warehouse_id,
+                warehouse_ids=await warehouse_ids_for_user(db, user),
+                owner_col=m.MaterialIssue.created_by_id,
+                project_col=m.MaterialIssue.project_id,
+            ))
+        elif not floors:
+            # A floor in-charge with no floor assigned sees only what they raised.
+            stmt = stmt.where(m.MaterialIssue.created_by_id == user.id)
+        else:
+            # A floor in-charge (2026-11-04): the FLOOR is the scope, and it replaces the
+            # profile rung rather than being ANDed onto it. Floor issues are cut by the
+            # warehouse-wide user who split the parent, so at a SELF rung (no warehouse
+            # bound) every child was filtered out as "not mine" before the floor rule
+            # ever ran. The floors are locations of one warehouse, so this is narrower
+            # than the rung, never wider.
+            #
+            # What they see: the floor issues tagged to their floors, what they raised
+            # themselves, and an unsplit issue drawing from their floors. Never a split
+            # PARENT (any issue with floor children) — its work is on the children, and
+            # the other floors' pieces are not theirs.
+            child = aliased(m.MaterialIssue)
+            is_split_parent = select(1).select_from(child).where(
+                child.parent_issue_id == m.MaterialIssue.id).exists()
+            has_items_in_floors = select(1).select_from(m.MaterialIssueLine).where(
+                m.MaterialIssueLine.issue_id == m.MaterialIssue.id,
+                m.MaterialIssueLine.bin_id.in_(floors),
+            ).exists()
+            stmt = stmt.where(or_(
+                m.MaterialIssue.floor_location_id.in_(floors),
+                and_(m.MaterialIssue.created_by_id == user.id, ~is_split_parent),
+                and_(m.MaterialIssue.floor_location_id.is_(None), ~is_split_parent,
+                     has_items_in_floors),
+            ))
     if direction:
         stmt = stmt.where(m.MaterialIssue.direction == direction)
     if status:
@@ -10698,6 +10708,21 @@ async def _decorate_indent_types(db: AsyncSession, issues: list) -> None:
     )).all()) if ids else {}
     for issue in issues:
         setattr(issue, "indent_type", types.get(issue.indent_id))
+    # A split parent whose floor issues have posted is stored CLOSED — that is what
+    # keeps it out of the indent caps (DEAD_ISSUE_STATUSES) — but to a person its goods
+    # WERE issued. Served as `display_status` ISSUED; a parent closed having served
+    # nothing (every child cancelled) still reads CLOSED.
+    closed_ids = [i.id for i in issues
+                  if getattr(i, "id", None) and i.status == IssueStatus.CLOSED.value]
+    served = set((await db.execute(
+        select(m.MaterialIssue.parent_issue_id).where(
+            m.MaterialIssue.parent_issue_id.in_(closed_ids),
+            m.MaterialIssue.is_stock_posted.is_(True),
+        ).distinct()
+    )).scalars().all()) if closed_ids else set()
+    for issue in issues:
+        setattr(issue, "display_status",
+                IssueStatus.ISSUED.value if issue.id in served else issue.status)
     # The Stock Transfer Order each issue executes (2026-10-29): a direct STO names it
     # on `inv_sto.issue_id`, and so does the order an STR's allocation produced. The
     # screen shows the number and freezes the destination on it.
@@ -10795,6 +10820,12 @@ async def get_issue(db: AsyncSession, issue_id: int, user=None) -> m.MaterialIss
         .where(m.MaterialIssue.parent_issue_id == (issue.parent_issue_id or issue.id))
         .order_by(m.MaterialIssue.id)
     )).all()
+    # A floor in-charge sees only their own floor's piece (2026-11-04): the other
+    # floors' issues are not theirs, so the family is narrowed to their floors.
+    if family and user is not None:
+        floors = await floor_scope_ids(db, user)
+        if floors is not None:
+            family = [row for row in family if row.floor_location_id in floors]
     in_charge = await stock_locations.floor_incharge_names(
         db, {row.floor_location_id for row in family if row.floor_location_id})         if family else {}
     setattr(issue, "child_issues", [
@@ -12257,6 +12288,16 @@ async def submit_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue
     _guard(issue.status, {IssueStatus.DRAFT.value}, "submit", "issue")
     if not issue.items:
         raise ValidationError("An issue with no lines has nothing to approve")
+    # A stock transfer (an STO's issue, or one serving an STR) names who carries or
+    # receives it, exactly as a direct issue does (2026-11-02). Checked at submit, not
+    # on save: the STO's own draft is written by its approval hook with nobody named.
+    if (issue.direction == IssueDirection.OUT.value and not issue.issued_to_id
+            and await is_stock_transfer_issue(db, issue.id)):
+        raise ValidationError(
+            f"{issue.issue_no} moves stock to "
+            f"{issue.destination_warehouse_name or 'another point'}. Name who it is "
+            "issued to — the person there who carries or receives it — before "
+            "submitting.")
     await _assert_sources_picked(db, issue)
     # Checked HERE, while the batch is still editable. It used to be checked only at
     # post_issue, which runs after approval has frozen the batch and the bin, so a

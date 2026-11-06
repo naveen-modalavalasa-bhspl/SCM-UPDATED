@@ -598,6 +598,19 @@ class DespatchNoteStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 
+class DespatchStatus(str, Enum):
+    """How much of a PURCHASE ORDER the vendor says they have sent. DERIVED, never stored.
+
+    Summed off the order's SUBMITTED despatch notes against its ordered quantity and
+    served beside `POStatus` (`despatch_status` on the PO payloads), so an accepted
+    order the goods have already left for reads "Dispatched" on both the buyer's and the
+    supplier's screens. Not a PO status: the receipt guards, filters and reports keep
+    reading ACCEPTED_BY_SUPPLIER until a receipt moves the order.
+    """
+    PARTIALLY_DISPATCHED = "PARTIALLY_DISPATCHED"
+    DISPATCHED = "DISPATCHED"
+
+
 class QuotationStatus(str, Enum):
     """pro_quotations.status — the vendor's side of an RFQ."""
     # Created for the vendor when the RFQ publishes, so the portal has a form to open.

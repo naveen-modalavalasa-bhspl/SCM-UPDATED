@@ -165,6 +165,15 @@ export interface IssueGroup {
   /** What THIS document could take of it altogether, summed over the locations it is
    *  allowed to draw on. Never larger than `warehouseTotal`. */
   warehouseDrawable: number | null;
+  /** Of `warehouseTotal`, what nobody has reserved (`item_available_qty`). */
+  warehouseFree: number | null;
+  /** Of `warehouseTotal`, what is held for THIS document — its indent's reservation
+   *  plus a direct issue's own hold. */
+  heldForThis: number | null;
+  /** Of `warehouseTotal`, what other documents have reserved: the rest. */
+  heldByOthers: number | null;
+  /** Every source row of the item here (expired excluded), for the per-batch view. */
+  stockRows: IssueStockSource[];
 
   /** Where INVENTORY put the hold for this ask — the sources carrying a reservation
    *  belonging to this document's own indent. */
@@ -245,6 +254,10 @@ export function groupIssueLines(
         spare: [],
         warehouseTotal: null,
         warehouseDrawable: null,
+        warehouseFree: null,
+        heldForThis: null,
+        heldByOthers: null,
+        stockRows: [],
         allocated: [],
         releasing: [],
         codedSwap: new Set<number>(),
@@ -322,6 +335,21 @@ export function groupIssueLines(
     group.warehouseDrawable = all.length
       ? round(all.reduce((sum, row) => sum + num(row.drawable_qty), 0))
       : null;
+    // The three parts of the shelf, item-wise (2026-11-03): free to anybody, held for
+    // this document, held by other documents. Free and total are served per item;
+    // what this document holds is a sum over its rows; the rest is everybody else's.
+    group.stockRows = all;
+    if (all.length) {
+      const total = num(all[0].item_total_qty);
+      const free = Math.min(num(all[0].item_available_qty), total);
+      const mine = round(all.reduce(
+        (sum, row) => sum + num(row.own_reserved_qty) + num(row.issue_hold_qty ?? 0), 0));
+      group.warehouseFree = free;
+      group.heldForThis = Math.min(mine, round(total - free));
+      group.heldByOthers = Math.max(round(total - free - group.heldForThis), 0);
+    } else {
+      group.warehouseFree = group.heldForThis = group.heldByOthers = null;
+    }
     const taken = new Set(group.splits.map((s) => sourceKey(s.line.batch_id, s.line.bin_id)));
     const rows = all;
     // Where inventory put the hold. `own_reserved_qty` is this document's own indent's

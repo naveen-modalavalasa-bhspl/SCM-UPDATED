@@ -1963,10 +1963,13 @@ class BoxLabelPrintedIn(BaseModel):
 class DocLabelRow(BaseModel):
     """One sticker for a posted issue or an acknowledged receipt (2026-10-28):
     a PACK (carton, box, strip — parent first, `depth` under it) or a UNIT (an asset /
-    consumable code). Never a serial or an IMEI: the maker's label is on the goods."""
+    consumable code, or — for a serial / IMEI tracked item — its serial or IMEI,
+    2026-11-02)."""
     key: str
     kind: str
     code: str
+    serial_number: str | None = None
+    imei: str | None = None
     line_id: int
     item_id: int
     item_code: str | None = None
@@ -2137,6 +2140,9 @@ class IssueRead(_Read):
     # Who holds that floor — the floor in-charge(s) this piece was handed to.
     floor_in_charge_names: list[str] = []
     status: str
+    #: What the status pill says. Same as `status` except a split parent CLOSED after
+    #: its floor issues posted, which reads ISSUED (`_decorate_indent_types`).
+    display_status: str | None = None
     total_items: int
     total_qty: Decimal
     total_value: Decimal

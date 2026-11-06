@@ -2344,7 +2344,7 @@ function PackageLineRow({
             <span className="text-[11px] text-muted">{qty(current)} of {qty(max)} {line.uom_code ?? ""} received</span>
           </div>
         ) : max > 0 ? (
-          <QuantityStepper value={value} max={max} onChange={onChange} label={label} />
+          <QuantityStepper value={value} max={max} onChange={onChange} label={label} uom={line.uom_code} />
         ) : (
           <span className="text-xs text-muted">
             {line.pending_with || "Nothing to confirm here"}
@@ -2627,11 +2627,13 @@ function SerialPanel({
 
 /** Often a phone, often one hand: 44px of button beats a keyboard at a pallet, and
  *  the box is still there for 37 of something. */
-function QuantityStepper({ value, max, onChange, label }: {
+function QuantityStepper({ value, max, onChange, label, uom }: {
   value: string;
   max: number;
   onChange: (value: string) => void;
   label: string;
+  /** The line's unit: a whole unit refuses the "." as it is typed (2026-11-03). */
+  uom?: string | null;
 }) {
   const current = receivedNumber(value);
   const set = (next: number) =>
@@ -2655,6 +2657,7 @@ function QuantityStepper({ value, max, onChange, label }: {
             max={max}
             step="any"
             aria-label={`How many arrived for ${label}`}
+            data-uom={uom ?? ""}
             value={value}
             onChange={(event) => onChange(event.target.value)}
           />

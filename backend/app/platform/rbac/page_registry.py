@@ -555,6 +555,54 @@ async def sync_permission_labels(db: AsyncSession) -> list[str]:
     return changed
 
 
+async def retire_permissions(db: AsyncSession) -> list[str]:
+    """Delete every code in `perms.RETIRED_PERMISSIONS`: its grants, then its row.
+
+    The other half of `sync_permission_labels`, which never deletes — so a code taken
+    out of the catalogue would otherwise stay on the Job Profiles screen and stay
+    granted, and any screen still reading it would keep honouring it.
+
+    Before deleting, says which roles held the retired code WITHOUT the Warehouse code
+    that now covers it: those people lose the button on this deploy and need the
+    Warehouse permission given by hand. Idempotent — a second run finds no rows.
+    """
+    retired = perms.RETIRED_PERMISSIONS
+    if not retired:
+        return []
+    rows = (await db.execute(
+        select(Permission).where(Permission.code.in_(list(retired) + list(retired.values())))
+    )).scalars().all()
+    by_code = {row.code: row for row in rows}
+    changed: list[str] = []
+    for code, covered_by in retired.items():
+        row = by_code.get(code)
+        if row is None:
+            continue
+        holders = set((await db.execute(
+            select(RolePermission.role_id).where(RolePermission.permission_id == row.id)
+        )).scalars().all())
+        replacement = by_code.get(covered_by)
+        covered = set() if replacement is None else set((await db.execute(
+            select(RolePermission.role_id)
+            .where(RolePermission.permission_id == replacement.id)
+        )).scalars().all())
+        short = sorted(holders - covered)
+        if short:
+            names = (await db.execute(
+                select(Role.code).where(Role.id.in_(short)))).scalars().all()
+            changed.append(f"{code}: roles {', '.join(sorted(names))} held it without "
+                           f"{covered_by} — grant {covered_by} by hand")
+        for grant in (await db.execute(
+            select(RolePermission).where(RolePermission.permission_id == row.id)
+        )).scalars().all():
+            await db.delete(grant)
+        await db.delete(row)
+        changed.append(f"{code}: retired ({len(holders)} grants removed)")
+    if changed:
+        await db.commit()
+    return changed
+
+
 # Screens that have been REPLACED and must stop appearing in the menu.
 #
 # `sync_pages` deliberately never deletes and never forces `is_active` back on, so a
@@ -613,6 +661,11 @@ RETIRED_PAGES: list[str] = [
     # superset of whoever held `page.ind_notifications.view`, so nothing is lost by
     # retiring rather than inheriting. The old route redirects (App.tsx).
     "ind_notifications",
+    # RETIRED 2026-11-04 — Picklists leave the UI. Material Issue already names the
+    # batch, bay and codes of every pick, so a second document for the same walk to
+    # the shelf was a step nobody needed. Parked like every row above (grants kept);
+    # the old paths redirect to Material Issues (modules/warehouse/index.tsx, App.tsx).
+    "wh_picklist",
 ]
 
 

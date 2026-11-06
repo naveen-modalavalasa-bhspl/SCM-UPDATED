@@ -3,12 +3,13 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Switch } from "@heroui/react";
 import { Truck } from "lucide-react";
-import { Card, ErrorBanner, Field, FormActions, Input, Textarea, PageHeader, Select, useToast } from "@/shared/components";
+import { Card, DocumentNumberCard, ErrorBanner, Field, FormActions, Input, Textarea, PageHeader, Select, useToast } from "@/shared/components";
 import { Button } from "../components/ActionButton";
 import { api } from "@/shared/api/client";
 import { consolidationApi, requisitionApi, rfqApi } from "../api";
 import { blankLine, LinePicker, type DraftLine } from "../components/LinePicker";
-import { OrgFields, type OrgValue } from "../components/OrgFields";
+import { emptyOrgValue, OrgFields, orgMissing, orgPayload, orgValueCarried, orgValueFrom, type OrgValue } from "../components/OrgFields";
+import { departmentOf, isOlderDocument } from "../orgScope";
 import { todayIst } from "@/shared/datetime";
 import { comboFrom, comboPayload } from "@/shared/combination";
 
@@ -47,9 +48,11 @@ export function RFQFormPage() {
   // Carried from the source document where there is one, and typed where there is not:
   // an RFQ raised cold still has to say who is buying, for where, on whose budget and
   // on whose paper. Same four fields the requisition form asks for.
-  const [org, setOrg] = useState<OrgValue>({
-    departmentId: "", warehouseId: "", projectId: "", companyName: "",
-  });
+  const [org, setOrg] = useState<OrgValue>(emptyOrgValue());
+  const [triedOrg, setTriedOrg] = useState(false);
+  // Set in the same update that copies the source, so the card's defaults only ever see
+  // what the source left empty.
+  const [seeded, setSeeded] = useState(!editing && !fromRequisition && !fromConsolidation);
   const [chosenVendors, setChosenVendors] = useState<number[]>([]);
   const [vendorSearch, setVendorSearch] = useState("");
   const [lines, setLines] = useState<DraftLine[]>([blankLine()]);
@@ -117,13 +120,7 @@ export function RFQFormPage() {
     setTerms(existing.terms ?? "");
     setEvaluationMethod(existing.evaluation_method ?? "");
     setFreightRequired(Boolean(existing.freight_required));
-    setOrg({
-      departmentId: existing.department_id ?? "",
-      warehouseId: existing.warehouse_id ?? "",
-      warehouseName: existing.warehouse_name ?? "",
-      projectId: existing.project_id ?? "",
-      companyName: existing.company_name ?? "",
-    });
+    setOrg(orgValueFrom(existing));
     // Who was invited, which is now the whole of what this form holds about vendors.
     // An RFQ saved before allocation moved to the comparison may still carry old
     // per-supplier invitation quantities. Re-saving a draft intentionally normalizes
@@ -148,13 +145,8 @@ export function RFQFormPage() {
   useEffect(() => {
     if (!source) return;
     setTitle(`Quotation for ${source.req_no}`);
-    setOrg({
-      departmentId: source.department_id ?? "",
-      warehouseId: source.warehouse_id ?? "",
-      warehouseName: source.warehouse_name ?? "",
-      projectId: source.project_id ?? "",
-      companyName: source.company_name ?? "",
-    });
+    setOrg(orgValueCarried(source));
+    setSeeded(true);
     setTerms((current) => current || source.remarks || "");
     setLines(source.items.map((item) => ({
       item_id: item.item_id,
@@ -171,13 +163,8 @@ export function RFQFormPage() {
   useEffect(() => {
     if (!sourceConsolidation) return;
     setTitle(`Quotation for ${sourceConsolidation.cons_no}`);
-    setOrg({
-      departmentId: "",
-      warehouseId: sourceConsolidation.warehouse_id ?? "",
-      warehouseName: sourceConsolidation.warehouse_name ?? "",
-      projectId: sourceConsolidation.project_id ?? "",
-      companyName: "",
-    });
+    setOrg(orgValueCarried(sourceConsolidation));
+    setSeeded(true);
     setTerms((current) => current || sourceConsolidation.remarks || "");
     setLines(sourceConsolidation.items.map((item) => ({
       item_id: item.item_id,
@@ -212,6 +199,15 @@ export function RFQFormPage() {
     return [...byId.values()].sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
   }, [vendorsByItem]);
 
+  // Raised before organisations: keeps its old fields, and is asked for nothing new.
+  const legacy = isOlderDocument(existing, existing?.rfq_no);
+  // Past a draft all of it is fixed; on a linked tender the organisation always is.
+  const bookingLocked = Boolean(existing && !legacy && existing.status !== "DRAFT");
+  const orgLocked = Boolean(
+    source?.organization_id || sourceConsolidation?.organization_id
+    || (existing?.organization_id && (existing.requisition_id || existing.consolidation_id)),
+  );
+
   const save = useMutation({
     mutationFn: () => {
       const usable = lines.filter((l) => l.item_id !== "" && Number(l.quantity) > 0);
@@ -221,10 +217,7 @@ export function RFQFormPage() {
         terms: terms || null,
         evaluation_method: evaluationMethod || null,
         freight_required: freightRequired,
-        warehouse_id: org.warehouseId === "" ? null : org.warehouseId,
-        project_id: org.projectId === "" ? null : org.projectId,
-        department_id: org.departmentId === "" ? null : org.departmentId,
-        company_name: org.companyName || null,
+        ...orgPayload(org, legacy),
         // Suppliers only. Splitting a line between them is a decision taken against
         // PRICES, and at this point nobody has any — see the note on the section
         // below. `vendor_allocations` is deliberately not sent: the service reads
@@ -270,6 +263,12 @@ export function RFQFormPage() {
       setProblem("Pick at least one supplier to send this RFQ to.");
       return;
     }
+    const missing = legacy ? null : orgMissing(org);
+    if (missing) {
+      setTriedOrg(true);
+      setProblem(missing);
+      return;
+    }
     setProblem(null);
     save.mutate();
   };
@@ -299,10 +298,10 @@ export function RFQFormPage() {
           </p>
           <dl className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-5">
             {[
-              ["Department", source.department_name],
+              ["Organisation", source.organization_name ?? source.company_name],
+              ["Department", departmentOf(source)],
               ["Shipment Address", source.warehouse_name],
               ["Project", source.project_name],
-              ["Company", source.company_name],
               ["Priority", source.priority ?? "Normal"],
             ].map(([label, value]) => (
               <div key={label}>
@@ -329,6 +328,8 @@ export function RFQFormPage() {
           </p>
           <dl className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-5">
             {[
+              ["Organisation", sourceConsolidation.organization_name],
+              ["Department", sourceConsolidation.org_department_name],
               ["Project", sourceConsolidation.project_name],
               ["Status", sourceConsolidation.status],
               ["Approved By", sourceConsolidation.approved_by_name],
@@ -348,10 +349,23 @@ export function RFQFormPage() {
         </Card>
       )}
 
+      {!legacy && (
+        <div className="mb-4">
+          <DocumentNumberCard
+            docType="RFQ" value={org} ready={seeded} showInvalid={triedOrg}
+            locks={{ all: bookingLocked, organisation: orgLocked }}
+            savedNumber={existing?.rfq_no}
+            source={source ? { label: source.req_no, to: `/procurement/requisitions/${source.id}` }
+              : sourceConsolidation ? { label: sourceConsolidation.cons_no, to: `/procurement/consolidations/${sourceConsolidation.id}` }
+                : null}
+            onChange={(patch) => setOrg((current) => ({ ...current, ...patch }))}
+          />
+        </div>
+      )}
+
       <Card className="space-y-5 p-5">
-        {/* Editable either way: a requisition pre-fills them, and an RFQ raised cold
-          * has nowhere else to get them from. */}
-        <OrgFields value={org} onChange={(patch) => setOrg({ ...org, ...patch })} />
+        <OrgFields value={org} legacy={legacy} disabled={bookingLocked}
+                   onChange={(patch) => setOrg((current) => ({ ...current, ...patch }))} />
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
           <Field label="Title">

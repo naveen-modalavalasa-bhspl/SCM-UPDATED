@@ -16,7 +16,7 @@ import {
   PaymentTermsTab, VendorCategoriesTab, VendorItemsTab, VendorsTab,
 } from "../tabs/vendorTabs";
 import { VendorMappingPanel } from "../components/VendorMappingPanel";
-import { ConversionsTab, UomClassesTab, UomTab } from "../tabs/uomTabs";
+import { ConversionsTab, UomTab } from "../tabs/uomTabs";
 import { BrandFamilyTab } from "../tabs/brandFamilyTabs";
 import {
   AttributesTab, CategoryTaggingTab, FeaturesTab, PackagingTab, SpecsTab,
@@ -24,15 +24,17 @@ import {
 import { BomGroupsTab, BomsTab, ItemGroupsTab } from "../tabs/bomTabs";
 import { ContainerUsageTab, ItemPackagingVariantsTab } from "../tabs/packagingTabs";
 import { ItemEligibilityTab } from "../tabs/eligibilityTabs";
+import { OrgDirectoryTab } from "../tabs/orgDirectoryTabs";
 const TABS = [
   "items", "categories", "general-names", "item-classes", "item-sub-classes",
   "brands", "manufacturers", "dosage-forms", "hsn-codes",
   "brand-item-mapping",
   "features", "packaging", "pack-variants", "container-usage", "item-groups",
   "attributes", "specs", "category-tags",
-  "uom", "uom-classes", "conversions", "warehouses",
+  "uom", "conversions", "warehouses",
   "projects", "vendors", "vendor-categories", "vendor-items", "boms", "bom-groups",
   "departments", "facilities", "item-eligibility", "payment-terms",
+  "organisations", "org-departments",
 ] as const;
 
 /** The masters, grouped the way somebody looking for one thinks about them.
@@ -53,7 +55,7 @@ const GROUPS: MasterGroup[] = [
   { label: "Classification", tabs: ["brands", "manufacturers", "dosage-forms", "hsn-codes", "brand-item-mapping"] },
   { label: "Attributes", tabs: ["attributes", "specs", "features", "category-tags"] },
   { label: "Packaging", tabs: ["packaging", "pack-variants", "container-usage"] },
-  { label: "Units", tabs: ["uom", "uom-classes", "conversions"] },
+  { label: "Units", tabs: ["uom", "conversions"] },
   { label: "Vendors", tabs: ["vendors", "vendor-categories", "vendor-items", "payment-terms"] },
   { label: "BOM", tabs: ["boms", "bom-groups"] },
   { label: "Locations", tabs: ["warehouses", "facilities", "projects", "departments"] },
@@ -81,7 +83,7 @@ export const INVENTORY_MASTER_GROUPS: MasterGroup[] = [
   { label: "Classification", tabs: ["brands", "manufacturers", "dosage-forms", "brand-item-mapping"] },
   { label: "Attributes", tabs: ["attributes", "specs", "features", "category-tags"] },
   { label: "Packaging", tabs: ["packaging", "pack-variants", "container-usage"] },
-  { label: "Units", tabs: ["uom", "uom-classes", "conversions"] },
+  { label: "Units", tabs: ["uom", "conversions"] },
 ];
 
 /** Tax lives on the HSN code and is read at PO/GRN time, never copied onto an item —
@@ -104,7 +106,7 @@ export const INDENT_MASTER_GROUPS: MasterGroup[] = [
  *  not even registered — which is why they sit under Settings rather than in a module
  *  that would imply somebody here can change them. */
 export const ORG_MASTER_GROUPS: MasterGroup[] = [
-  { label: "Organisation", tabs: ["projects", "facilities", "departments"] },
+  { label: "Organisation", tabs: ["projects", "facilities", "departments", "organisations", "org-departments"] },
 ];
 
 const TAB_LABELS: Record<(typeof TABS)[number], string> = {
@@ -117,10 +119,11 @@ const TAB_LABELS: Record<(typeof TABS)[number], string> = {
   "pack-variants": "Item Packaging Variants", "container-usage": "Container Usage",
   "item-groups": "Item Groups",
   attributes: "Attributes", specs: "Specifications", "category-tags": "Category Tagging",
-  uom: "UOM", "uom-classes": "UOM Types", conversions: "Conversions", warehouses: "Warehouses",
+  uom: "UOM", conversions: "Conversions", warehouses: "Warehouses",
   projects: "Projects", vendors: "Vendors", "vendor-categories": "Vendor Categories", "vendor-items": "Vendor Material Mapping",
   boms: "BOM", "bom-groups": "BOM Groups",
   departments: "Departments", facilities: "Facilities",
+  organisations: "Organisations", "org-departments": "Organisation Depts",
   "item-eligibility": "Item Eligibility",
   "payment-terms": "Payment Terms",
 };
@@ -322,7 +325,6 @@ export function MastersShell({
           fetches them itself rather than joining the shared NEEDS sources above. */}
       {tab === "bom-groups" && <BomGroupsTab />}
       {tab === "uom" && <UomTab />}
-      {tab === "uom-classes" && <UomClassesTab />}
       {tab === "conversions" && <ConversionsTab uoms={uomOpts} />}
       {tab === "warehouses" && <WarehousesTab facilities={facOpts} />}
       {tab === "projects" && <ProjectsTab />}
@@ -344,6 +346,12 @@ export function MastersShell({
           ]}
           renderCard={(r) => <div className="text-sm text-body">{r.name}</div>}
         />
+      )}
+      {tab === "organisations" && (
+        <OrgDirectoryTab title="Organisations" fetchList={mastersApi.organisations} />
+      )}
+      {tab === "org-departments" && (
+        <OrgDirectoryTab title="Organisation Depts" fetchList={mastersApi.orgDepartments} />
       )}
       {tab === "facilities" && (
         <ReadOnlyTab<RefRow>

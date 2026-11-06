@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  DEFAULT_SETTINGS, fontScale, pageCss, printSummary, selectLabels, sheetGrid, withDefaults,
+  DEFAULT_SETTINGS, docLabelFacts, fontScale, pageCss, printSummary, qrDetailsText, selectLabels,
+  sheetGrid, withDefaults,
 } from "../docLabels";
 import type { DocLabelRow } from "../types";
 
@@ -97,5 +98,28 @@ describe("parent labels and issued packs (2026-10-28)", () => {
   it("issued packs only, and a parent with nothing printed under it is dropped", () => {
     expect(selectLabels(tree, { lineIds: [1], packs: "TOP", units: false, parents: true }).map((r) => r.code))
       .toEqual(["CAR-1", "BOX-1"]);
+  });
+});
+
+describe("QR details (2026-11-02)", () => {
+  it("is the code, then one line per known fact, empties dropped", () => {
+    expect(qrDetailsText("SN-1", [["Item", "PHN - Phone"], ["Batch", null], ["IMEI", "3560"], ["Code", "SN-1"]]))
+      .toBe("SN-1\nItem: PHN - Phone\nIMEI: 3560");
+  });
+
+  it("carries a serial unit's serial, IMEI and the document", () => {
+    const r = row({ kind: "UNIT", code: "SN-9", pack_name: "Serial no.", serial_number: "SN-9",
+                    imei: "356000000000009", item_code: "PHN-1", item_name: "Phone", batch_no: "B1" });
+    const text = qrDetailsText(r.code, docLabelFacts(r, { document_type: "ISSUE", document_no: "WHI0001" }));
+    expect(text.split("\n")[0]).toBe("SN-9");
+    expect(text).toContain("IMEI: 356000000000009");
+    expect(text).toContain("Item: PHN-1 - Phone");
+    expect(text).toContain("Issue: WHI0001");
+    expect(text).not.toContain("Serial: SN-9");
+  });
+
+  it("defaults to details, and an older stored copy reads back with it", () => {
+    expect(DEFAULT_SETTINGS.qr).toBe("DETAILS");
+    expect(withDefaults({ copies: 2 }).qr).toBe("DETAILS");
   });
 });

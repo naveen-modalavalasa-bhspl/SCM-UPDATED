@@ -39,6 +39,9 @@ class IndentCreate(BaseModel):
     # lands on exactly the value the database would have given it anyway.
     indent_type: IndentType = IndentType.REGULAR
     vehicle_id: int | None = None
+    #: A Stock Transfer Request's source point (2026-11-04) — required on an STR,
+    #: ignored on an indent.
+    source_warehouse_id: int | None = None
     remarks: str | None = None
     items: Annotated[list[IndentItemIn], DocumentLines]
 
@@ -49,6 +52,7 @@ class IndentUpdate(BaseModel):
     indent_type: IndentType | None = None
     vehicle_id: int | None = None
     office_id: int | None = None
+    source_warehouse_id: int | None = None
     remarks: str | None = None
     items: Annotated[list[IndentItemIn], DocumentLines] | None = None
 
@@ -101,6 +105,45 @@ class IndentItemOut(CombinationOut):
     remarks: str | None = None
 
 
+class StrPointOut(BaseModel):
+    """One end of a Stock Transfer Request's route."""
+    warehouse_id: int | None = None
+    warehouse_code: str | None = None
+    warehouse_name: str | None = None
+    warehouse_type: str | None = None
+    tier_label: str | None = None
+    held_by: list[str] = Field(default_factory=list)
+
+
+class StrSourceChangeOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    from_warehouse_id: int | None = None
+    from_warehouse_name: str | None = None
+    to_warehouse_id: int
+    to_warehouse_name: str | None = None
+    stage_name: str | None = None
+    reason: str | None = None
+    changed_by_name: str | None = None
+    position_name: str | None = None
+    created_at: datetime
+
+    @field_serializer("created_at", when_used="json")
+    def serialize_datetime(self, value: datetime):
+        return _utc_iso(value)
+
+
+class StrSourceOption(BaseModel):
+    """A point an STR may name as its source: held at the raiser's own rank."""
+    warehouse_id: int
+    warehouse_code: str | None = None
+    warehouse_name: str | None = None
+    warehouse_type: str | None = None
+    tier: int | None = None
+    tier_label: str | None = None
+    held_by: list[str] = Field(default_factory=list)
+
+
 class IndentOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -110,6 +153,16 @@ class IndentOut(BaseModel):
     required_date: date | None = None
     vehicle_id: int | None = None
     vehicle_number: str | None = None
+    source_warehouse_id: int | None = None
+    source_warehouse_name: str | None = None
+    source_warehouse_code: str | None = None
+    #: An STR's route, decorated on single-document reads (2026-11-04).
+    str_source: StrPointOut | None = None
+    str_destination: StrPointOut | None = None
+    str_source_changes: list[StrSourceChangeOut] = Field(default_factory=list)
+    #: False when the delivery point is not the bottom rung of the chain (a warehouse
+    #: or an MDP): no vehicle and no service area code belong on it. None = unknown.
+    needs_vehicle_and_sac: bool | None = None
     requested_by_id: int | None = None
     requested_by_name: str | None = None
     position_id: int | None = None
@@ -160,6 +213,8 @@ class IndentListRow(BaseModel):
     department_name: str | None = None
     region_id: int | None = None
     region_name: str | None = None
+    source_warehouse_id: int | None = None
+    source_warehouse_name: str | None = None
     status: str
     priority: str
     total_items: int

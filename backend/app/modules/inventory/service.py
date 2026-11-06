@@ -20,11 +20,12 @@ from app.modules.inventory import allocation, availability, hooks, locations
 from app.modules.inventory.enums import AdjustmentStatus, CycleCountStatus, STOStatus
 from app.modules.inventory.models import (
     NO_BATCH, NO_BIN, NO_PROJECT, Allocation, AllocationItem, MaterialRequest,
-    MaterialRequestItem, Reservation, Stock,
+    MaterialRequestItem, MRQtyChange, Reservation, Stock,
     StockMovement, StockAdjustment, StockAdjustmentItem, StockTransferOrder,
     StockTransferOrderItem, CycleCount, CycleCountItem, Reservation, STO_KIND_TRANSFER,
 )
-from app.platform.hcm.models import HcmEmployee, HcmFacility, HcmOffice
+from app.platform.hcm.models import HcmEmployee, HcmFacility, HcmOffice, HcmPosition
+from app.shared import ceiling
 from app.platform.rbac import permissions as perms
 from app.platform.rbac.models import Role, UserRole
 from app.platform.rbac.service import get_user_permissions
@@ -1768,6 +1769,9 @@ async def _raise_mr(db: AsyncSession, indent_id: int | None, indent_no: str | No
             mr_id=mr.id, line_no=line_no, item_id=line["item_id"],
             item_code=line.get("item_code"), item_name=line.get("item_name"),
             uom_code=line.get("uom_code"), quantity=_d(line["quantity"]),
+            # The ceiling (2026-11-03): an MR is submitted the moment it is raised, so
+            # what it asks for now is the most any later change may leave it at.
+            requested_quantity=_d(line["quantity"]),
             project_id=line.get("project_id") or NO_PROJECT,
             indent_item_id=line.get("indent_item_id"),
             **combo,
@@ -2063,9 +2067,13 @@ async def _mr_correction_state(db: AsyncSession, mr: MaterialRequest, user) -> d
 
 
 async def correct_mr(db: AsyncSession, mr_id: int, data: dict, user) -> MaterialRequest:
-    """The raiser's full edit of an MR sent back to them - the same fields the create
-    form asks: items and quantities (add, change, remove), priority, required-by and
-    remarks. Only once it is back with the raiser (the first rung)."""
+    """The raiser's edit of an MR sent back to them: lower or remove lines, priority,
+    required-by and remarks. Only once it is back with the raiser (the first rung).
+
+    Since 2026-11-03 a line may come DOWN or stay, never go up, and no item the
+    request never asked for may be added (`shared.ceiling`) — the request was signed
+    as far as it got for what it asked; more is a new request. Every change is kept
+    in `inv_mr_qty_changes`."""
     mr = await get_mr(db, mr_id)
     state = await _mr_correction_state(db, mr, user)
     if int(state.get("returned_from_sequence") or 0) > 1:
@@ -2082,6 +2090,12 @@ async def correct_mr(db: AsyncSession, mr_id: int, data: dict, user) -> Material
         select(Item).where(Item.id.in_(item_ids)))).scalars().all()}
     by_id = {line.id: line for line in mr.items}
     kept: set[int] = set()
+    # What each item was asked for when the request was raised (2026-11-03). A
+    # correction may lower a line or take it off; it may not raise one, and it may not
+    # bring an item the request never asked for — that is a new material request.
+    asked_for = {line.item_id: ceiling.ceiling_of(line.requested_quantity, line.quantity)
+                 for line in mr.items}
+    position = await _position_name(db, user)
     for line_no, incoming in enumerate(lines, start=1):
         item = items.get(int(incoming["item_id"]))
         if item is None:
@@ -2089,28 +2103,44 @@ async def correct_mr(db: AsyncSession, mr_id: int, data: dict, user) -> Material
         quantity = _d(incoming["quantity"])
         if quantity <= 0:
             raise ValidationError(f"{item.code}: quantity must be more than zero")
+        if item.id not in asked_for:
+            raise ValidationError(
+                f"{item.code}: {mr.mr_no} never asked for this item. A sent-back request "
+                "can lower or remove its lines; new demand is a new material request.")
+        ceiling.assert_not_raised(quantity, asked_for[item.id],
+                                  label=item.code or item.name or "Line",
+                                  uom=getattr(item, "uom_code", None))
         line_id = incoming.get("id")
         existing = by_id.get(line_id) if line_id else None
         if line_id and existing is None:
             raise ValidationError(f"Unknown line id {line_id}")
+        if existing is not None and existing.item_id != item.id:
+            raise ValidationError(
+                f"Line {line_no}: the item on a sent-back request cannot be swapped for "
+                "another — lower or remove the line, and raise a new request for the other.")
         if existing is not None:
             kept.add(existing.id)
             existing.line_no = line_no
-            if existing.item_id != item.id:
-                existing.item_id = item.id
-                existing.item_code = item.code
-                existing.item_name = item.name
-                existing.uom_code = getattr(item, "uom_code", None)
-                existing.indent_item_id = None
+            if existing.requested_quantity is None:
+                existing.requested_quantity = _d(existing.quantity)
+            if quantity != _d(existing.quantity):
+                db.add(_mr_change(mr, existing, existing.quantity, quantity,
+                                  stage="CORRECTION", comments=data.get("remarks"),
+                                  user=user, position=position))
             existing.quantity = quantity
         else:
+            # The same item put back after its line was taken off: held to what the
+            # request first asked for it.
             db.add(MaterialRequestItem(
                 mr_id=mr.id, line_no=line_no, item_id=item.id, item_code=item.code,
                 item_name=item.name, uom_code=getattr(item, "uom_code", None),
-                quantity=quantity, project_id=mr.project_id or NO_PROJECT,
+                quantity=quantity, requested_quantity=asked_for[item.id],
+                project_id=mr.project_id or NO_PROJECT,
             ))
     for line in list(mr.items):
         if line.id not in kept:
+            db.add(_mr_change(mr, line, line.quantity, 0, stage="CORRECTION",
+                              comments="Line removed", user=user, position=position))
             await db.delete(line)
     if data.get("priority"):
         mr.priority = data["priority"]
@@ -2226,6 +2256,45 @@ async def resubmit_mr_correction(db: AsyncSession, mr_id: int, user,
     return await get_mr(db, mr.id)
 
 
+async def _position_name(db: AsyncSession, user) -> str | None:
+    """The post the change was made in — snapshotted onto the change record."""
+    position_id = getattr(user, "active_position_id", None)
+    if not position_id:
+        return None
+    position = await db.get(HcmPosition, position_id)
+    return getattr(position, "name", None)
+
+
+def _mr_change(mr, row, before, after, *, stage: str, comments: str | None, user,
+               position: str | None) -> MRQtyChange:
+    return MRQtyChange(
+        mr_id=mr.id, mr_item_id=row.id, item_id=row.item_id, item_code=row.item_code,
+        item_name=row.item_name, uom_code=row.uom_code,
+        from_qty=_d(before), to_qty=_d(after),
+        ceiling_qty=ceiling.ceiling_of(row.requested_quantity, before),
+        stage=stage, comments=(comments or "").strip()[:500] or None,
+        changed_by_id=getattr(user, "id", None),
+        changed_by_name=getattr(user, "full_name", None),
+        changed_by_position=position,
+    )
+
+
+async def mr_quantity_changes(db: AsyncSession, mr_id: int, user) -> list[dict]:
+    """Every quantity change made on a material request after it was raised, oldest
+    first — the approval trail's numbers, which the workflow history does not hold."""
+    await get_mr(db, mr_id, user=user)   # its visibility rule, not a second one
+    rows = (await db.execute(
+        select(MRQtyChange).where(MRQtyChange.mr_id == mr_id).order_by(MRQtyChange.id)
+    )).scalars().all()
+    return [{
+        "id": r.id, "item_id": r.item_id, "item_code": r.item_code, "item_name": r.item_name,
+        "uom_code": r.uom_code, "from_qty": float(r.from_qty), "to_qty": float(r.to_qty),
+        "ceiling_qty": None if r.ceiling_qty is None else float(r.ceiling_qty),
+        "stage": r.stage, "comments": r.comments, "changed_by_name": r.changed_by_name,
+        "changed_by_position": r.changed_by_position, "changed_at": r.changed_at,
+    } for r in rows]
+
+
 async def revise_mr_items(db: AsyncSession, mr_id: int, lines: list[dict], user,
                           comments: str = "") -> MaterialRequest:
     """Change how much an MR asks for, before it is signed.
@@ -2267,10 +2336,20 @@ async def revise_mr_items(db: AsyncSession, mr_id: int, lines: list[dict], user,
             raise ValidationError(
                 f"{row.item_code or 'Line'}: {row.ordered_quantity} already ordered, "
                 f"so it cannot be cut to {quantity}.")
+        # Down or left, never up (2026-11-03): more than was asked for is new demand,
+        # which is a new request with its own approval — not a number changed here.
+        ceiling.assert_not_raised(
+            quantity, ceiling.ceiling_of(row.requested_quantity, row.quantity),
+            label=row.item_code or row.item_name or "Line", uom=row.uom_code)
         if quantity == _d(row.quantity):
             continue
         changed.append({"line_id": row.id, "item_code": row.item_code,
                         "from": float(_d(row.quantity)), "to": float(quantity)})
+        if row.requested_quantity is None:
+            row.requested_quantity = _d(row.quantity)
+        db.add(_mr_change(mr, row, row.quantity, quantity, stage="APPROVAL",
+                          comments=comments, user=user,
+                          position=await _position_name(db, user)))
         row.quantity = quantity
 
     if not changed:

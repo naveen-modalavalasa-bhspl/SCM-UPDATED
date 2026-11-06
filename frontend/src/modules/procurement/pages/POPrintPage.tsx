@@ -86,7 +86,11 @@ export function POPrintPage() {
       metadata={[
         { label: "Vendor", value: order.vendor_name ?? "—", fullWidth: true },
         { label: "Vendor GSTIN", value: order.vendor_gstin || "—", mono: true },
-        { label: "Project", value: order.project_name || "—" },
+        ...(order.organization_name
+          ? [{ label: "Organisation", value: order.organization_name }] : []),
+        order.org_department_name && !order.project_name
+          ? { label: "Department", value: order.org_department_name }
+          : { label: "Project", value: order.project_name || "—" },
         { label: "RFQ", value: order.rfq_no || "—", mono: true },
         { label: "Quotation", value: order.quotation_no || "—", mono: true },
       ]}

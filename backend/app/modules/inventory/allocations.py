@@ -1167,6 +1167,32 @@ async def act(db: AsyncSession, allocation_id: int, action: str, user,
     return alloc
 
 
+async def withdraw_for_indent(db: AsyncSession, indent_id: int, user, reason: str) -> int:
+    """Cancel what a request allocated while it was still in approval, and hand the
+    stock back. For a request turned down or returned part-way up its ladder: nothing
+    has left the shelf (an STR's issue is only drafted once its last level approves),
+    so its holds and promises must not outlive the decision. A pending allocation's own
+    approval task goes with it. Does not commit. Returns how many were withdrawn."""
+    rows = (await db.execute(select(Allocation).where(
+        Allocation.indent_id == indent_id,
+        Allocation.status.in_(ACTIVE_ALLOCATION_STATUSES),
+    ))).scalars().all()
+    for alloc in rows:
+        before = alloc.status
+        if before == AllocationStatus.PENDING_APPROVAL.value:
+            await engine.abandon(db, await doc_type_for(db, alloc.id), alloc.id, user, reason)
+        alloc.status = AllocationStatus.CANCELLED.value
+        alloc.current_approver_name = None
+        await write_audit(
+            db, entity="inv_allocations", entity_id=alloc.id,
+            entity_no=alloc.allocation_no, action=AuditAction.UPDATE, actor=user,
+            before={"status": before}, after={"status": alloc.status},
+            summary=f"Stock allocation withdrawn — {reason}",
+        )
+    await allocation.release(db, RefType.RESERVATION.value, indent_id)
+    return len(rows)
+
+
 async def apply_to_stock(db: AsyncSession, alloc: Allocation, user,
                          ctx: dict | None = None) -> str:
     """Turn an approved decision into reservations, then one MR for the remainder.

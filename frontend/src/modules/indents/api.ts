@@ -8,6 +8,7 @@ import type {
   Acknowledgement, AcknowledgeLine, ActivityRow, DirectIssueAck, StockTransferAck,
   BomChoice, BomChoiceItem, FulfilmentStep, Indent, IndentCreate, IndentListRow, IndentJourney,
   IndentNotification, IndentStats, IndentUpdate, RaiserTracking, ReceiptAttachment,
+  StrSourceOption,
 } from "./types";
 
 export interface IndentQueryParams {
@@ -70,6 +71,8 @@ export const indentKeys = {
     [...indentKeys.all(scope), "regions"] as const,
   vehicles: (scope: IndentAccountScope, search: string = "") =>
     [...indentKeys.all(scope), "vehicles", search] as const,
+  strSources: (scope: IndentAccountScope) =>
+    [...indentKeys.all(scope), "str-sources"] as const,
   journey: (scope: IndentAccountScope, id: number) =>
     [...indentKeys.all(scope), "journey", INDENT_JOURNEY_CONTRACT_VERSION, id] as const,
   shipments: (scope: IndentAccountScope, id: number) =>
@@ -232,6 +235,10 @@ export const indentApi = {
     api.get<Option[]>("/api/indents/options/vehicles", {
       params: toSearchParams({ search }),
     }).then((r) => r.data),
+  /** Where an STR may ask stock to come from: the points held at the raiser's rank,
+   *  on the raiser's own tier, network-wide, less the raiser's own (2026-11-04). */
+  strSources: () =>
+    api.get<StrSourceOption[]>("/api/indents/options/str-sources").then((r) => r.data),
   get: (id: number, signal?: AbortSignal) =>
     api.get<Indent>(`/api/indents/${id}`, { signal }).then((r) => r.data),
   journey: (id: number, signal?: AbortSignal) =>

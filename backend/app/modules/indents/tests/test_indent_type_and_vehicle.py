@@ -36,6 +36,9 @@ EXPECTED_INDENT_COLUMNS = {
     "region_id", "region_name",
     "warehouse_id", "warehouse_name",
     "project_id", "project_name", "vehicle_id", "vehicle_number",
+    # A Stock Transfer Request's source point (2026-11-04).
+    "source_warehouse_id", "source_warehouse_name", "source_warehouse_code",
+    "consolidation_id",
     "bom_id", "bom_name", "status", "priority", "total_items", "total_qty",
     "approved_qty", "issued_qty", "ordered_qty", "estimated_value",
     "remarks", "rejected_reason", "current_stage_name", "current_approver_name",
@@ -53,7 +56,7 @@ def test_indent_type_keeps_regular_as_a_member():
     """296 live indents carry REGULAR. Dropping it from the enum would make every one
     of them unfilterable and unserialisable."""
     assert IndentType.REGULAR.value == "REGULAR"
-    assert {t.value for t in IndentType} == {"REGULAR", "MONTHLY"}
+    assert {t.value for t in IndentType} == {"REGULAR", "MONTHLY", "STR"}
 
 
 def test_validate_indent_type_rejects_anything_else():

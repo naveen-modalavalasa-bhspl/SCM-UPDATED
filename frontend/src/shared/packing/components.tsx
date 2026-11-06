@@ -640,6 +640,7 @@ export function PackBreakdownEditor({
                   </StepButton>
                   <input
                     type="number" onKeyDown={guardNumberKeys} inputMode={lv.level === 0 ? "decimal" : "numeric"}
+                    data-decimals={lv.level === 0 ? undefined : 0}
                     min={0} step={lv.level === 0 ? "any" : 1}
                     aria-label={`${lv.level === 0 ? "Loose" : lv.name} count`}
                     disabled={disabled}
@@ -704,6 +705,7 @@ export function PackBreakdownEditor({
                 ) : (
                   <>
                     <input type="number" onKeyDown={guardNumberKeys} min={1} step={1} aria-label="How many part packs"
+                      data-decimals={0}
                            value={num(e.qty) || ""}
                            onChange={(ev) => setPart(index, { qty: Math.max(0, Math.floor(num(ev.target.value))) })}
                            className="h-10 w-16 rounded-lg border border-line bg-content1 px-1 text-center font-semibold tabular" />

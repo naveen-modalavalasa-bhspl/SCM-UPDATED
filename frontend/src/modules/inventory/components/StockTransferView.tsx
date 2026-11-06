@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowRight, Calendar, Clock, MapPin, PackageCheck, Plus, Trash2, Truck } from "lucide-react";
+import { ArrowRight, ArrowRightLeft, Calendar, Clock, MapPin, PackageCheck, Plus, Trash2, Truck } from "lucide-react";
 import {
   Button, Can, Card, Field, Input, KpiTiles, PageHeader, ResponsiveList, Select,
   StatusPill, useToast, type Column, type KpiTileSpec,
@@ -17,7 +17,7 @@ import { ErrorNote } from "./PageStates";
 import { FulfillmentQueuePage } from "../pages/FulfillmentQueuePage";
 import QualityInspection from "@/modules/warehouse/pages/QualityInspection";
 import {
-  approveSTO, createSTO, getSTO, getStockBalances, getStoDestinations, getWarehouses, listSTOs, listSTRs,
+  approveSTO, createSTO, getSTO, getStockBalances, getStoDestinations, getWarehouses, listSTOs, listSTRs, strSourcesInUse,
   rejectSTO,
 } from "../api";
 
@@ -186,20 +186,35 @@ function RequestsTab() {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
   const [raised, setRaised] = useState("");
+  const [source, setSource] = useState("");
   const [page, setPage] = useState(1);
   const { data, isLoading, error } = useQuery({
-    queryKey: ["stock-transfer", "strs", search, status, raised, page],
+    queryKey: ["stock-transfer", "strs", search, status, raised, source, page],
     queryFn: () => listSTRs({
       search: search.trim() || undefined, status: status || undefined,
       created_date_from: sinceDate(raised), page,
+      source_warehouse_id: source ? Number(source) : undefined,
     }),
   });
+  // Only the points the visible STRs actually name, so every option narrows to rows.
+  const { data: sourceOptions = [] } = useQuery({
+    queryKey: ["stock-transfer", "str-sources"],
+    queryFn: strSourcesInUse,
+    staleTime: 60_000,
+  });
   const reset = (fn: (v: string) => void) => (v: string) => { fn(v); setPage(1); };
-  const filtersOn = [search, status, raised].filter(Boolean).length;
+  const filtersOn = [search, status, raised, source].filter(Boolean).length;
 
   const columns: Column<Row>[] = [
     { key: "indent_no", header: "STR No",
       render: (r) => <span className="font-mono text-xs font-semibold text-ink">{r.indent_no}</span> },
+    { key: "source_warehouse_name", header: "Source",
+      render: (r) => r.source_warehouse_name
+        ? <span className="inline-flex items-center gap-1.5 text-body">
+            <ArrowRightLeft className="h-3.5 w-3.5 shrink-0 text-brand" aria-hidden />
+            {r.source_warehouse_name}
+          </span>
+        : <span className="text-muted">—</span> },
     { key: "office_name", header: "For", render: (r) => r.office_name ?? r.requested_by_name ?? "—" },
     { key: "status", header: "Status", render: (r) => <StatusPill status={r.status} /> },
     { key: "current_approver_name", header: "With", hideOnNarrow: true,
@@ -216,11 +231,16 @@ function RequestsTab() {
         search={search}
         onSearch={(v) => { setSearch(v); setPage(1); }}
         searchPlaceholder="Search STR no., item or project…"
-        onClear={() => { setSearch(""); setStatus(""); setRaised(""); setPage(1); }}
+        onClear={() => { setSearch(""); setStatus(""); setRaised(""); setSource(""); setPage(1); }}
         active={filtersOn}
       >
         <FilterMenu label="Status" value={status} onChange={reset(setStatus)}
                     options={INDENT_STATUS_OPTIONS} />
+        {sourceOptions.length > 0 && (
+          <FilterMenu label="Source" value={source} onChange={reset(setSource)}
+                      options={sourceOptions.map((o) => ({ value: String(o.value), label: o.label }))}
+                      icon={<ArrowRightLeft className="h-4 w-4 opacity-70" />} />
+        )}
         <FilterMenu label="Raised" value={raised} onChange={reset(setRaised)}
                     options={DATE_OPTIONS} icon={<Calendar className="h-4 w-4 opacity-70" />} />
         <Can do="stock.transfer.request">
@@ -247,6 +267,12 @@ function RequestsTab() {
                 <StatusPill status={r.status} />
               </div>
               <div className="text-sm text-body">{r.office_name ?? "—"}</div>
+              {r.source_warehouse_name && (
+                <div className="flex items-center gap-1.5 text-xs text-body">
+                  <ArrowRightLeft className="h-3.5 w-3.5 shrink-0 text-brand" aria-hidden />
+                  From {r.source_warehouse_name}
+                </div>
+              )}
               <div className="text-xs text-muted">{r.requested_by_name ?? "—"} · {fmtDate(r.created_at)}</div>
             </div>
           )}
@@ -264,6 +290,8 @@ function RequestsTab() {
 function OrdersTab() {
   const nav = useNavigate();
   const { can } = useAuth();
+  // Opening a transfer's material issue needs BOTH Warehouse issue codes.
+  const canWorkIssue = can("issue.view") && can("issue.create");
   const qc = useQueryClient();
   const toast = useToast();
   const [params, setParams] = useSearchParams();
@@ -353,12 +381,14 @@ function OrdersTab() {
     { key: "stage", header: "Stage",
       render: (r) => <StatusPill status={r.stage ?? r.status} label={STAGE_LABEL[r.stage ?? r.status]} /> },
     { key: "issue_no", header: "Material issue", hideOnNarrow: true,
-      render: (r) => r.issue_id ? (
+      // A link only for whoever can both read and work a material issue — the same
+      // gate as the panel's "Open material issue" button. Everyone else reads the number.
+      render: (r) => !r.issue_id ? "—" : canWorkIssue ? (
         <button type="button" className="font-mono text-xs text-brand hover:underline"
                 onClick={(e) => { e.stopPropagation(); nav(`/inventory/transfers/issues/${r.issue_id}`); }}>
           {r.issue_no}
         </button>
-      ) : "—" },
+      ) : <span className="font-mono text-xs text-body">{r.issue_no}</span> },
     { key: "requested_by_name", header: "Raised by", hideOnNarrow: true,
       render: (r) => r.requested_by_name ?? "—" },
     { key: "created_at", header: "Raised on", hideOnNarrow: true, render: (r) => fmtDate(r.created_at) },
@@ -462,7 +492,10 @@ function OrdersTab() {
                 </Button>
               </Can>
             )}
-            {selected?.issue_id && (
+            {/* Warehouse > Material Issues' own codes, BOTH of them: the issue page
+              * is a working page (picks, batches, bays), so reading it alone is not
+              * enough to be sent there. The server checks the same codes. */}
+            {selected?.issue_id && canWorkIssue && (
               <Button variant="secondary"
                       onClick={() => nav(`/inventory/transfers/issues/${selected.issue_id}`)}>
                 Open material issue
@@ -580,7 +613,7 @@ function NewStoSheet({ onClose, onCreated }: { onClose: () => void; onCreated: (
   const whOptions = (warehouses as any[]).map((w) => ({ value: String(w.id), label: w.name }));
   const toOptions = (destinations.data?.items ?? []).map((d) => ({
     value: String(d.id),
-    label: d.parent_known ? d.name : `${d.name} · parent not on record`,
+    label: d.name,
   }));
   const fromName: string | undefined = (warehouses as any[]).find((w) => String(w.id) === fromId)?.name;
   const toRow = destinations.data?.items.find((d) => String(d.id) === toId);
@@ -610,15 +643,15 @@ function NewStoSheet({ onClose, onCreated }: { onClose: () => void; onCreated: (
     setLines((cur) => cur.map((l, j) => (j === i ? { ...l, ...patch } : l)));
 
   const toPlaceholder = !fromId ? "Pick the source first"
-    : destinations.isLoading ? "Finding sibling points…"
-    : toOptions.length ? "Choose a destination" : "No sibling point in your scope";
+    : destinations.isLoading ? "Finding destinations…"
+    : toOptions.length ? "Choose a destination" : "No destination available";
 
   return (
     <DetailSheet
       open
       onClose={onClose}
       title="New stock transfer order"
-      subtitle="Send stock sideways to a sibling point. Approval follows the STO ladder."
+      subtitle="Send stock from a source point to a destination. Approval follows the STO ladder."
       footer={
         <div className="flex gap-2">
           <Button variant="primary" disabled={!valid || create.isPending} onClick={() => create.mutate()}>
@@ -631,11 +664,11 @@ function NewStoSheet({ onClose, onCreated }: { onClose: () => void; onCreated: (
       {error && <div className="mb-3"><ErrorNote message={error} /></div>}
       <SheetSection title="Route">
         <div className="space-y-3">
-          <Field label="From (your point)">
+          <Field label="Select source">
             <Select ariaLabel="From" value={fromId} options={whOptions}
                     onChange={(v) => { setFromId(v || ""); setToId(""); setLines([{ item_id: "", qty: "" }]); }} />
           </Field>
-          <Field label="To (a sibling under the same parent)">
+          <Field label="Destination">
             <Select ariaLabel="To" value={toId} options={toOptions} placeholder={toPlaceholder}
                     onChange={(v) => setToId(v || "")} />
           </Field>
@@ -646,7 +679,7 @@ function NewStoSheet({ onClose, onCreated }: { onClose: () => void; onCreated: (
                 <span className="min-w-0 truncate">
                   {destinations.data.parent_name
                     ? <>Under <span className="text-ink">{destinations.data.parent_name}</span></>
-                    : "Parent not on record — every same-level point in scope is offered"}
+                    : "Route"}
                 </span>
                 <span className="ml-auto shrink-0 rounded-full bg-brand/10 px-2 py-0.5 text-brand">
                   {destinations.data.tier_label}
@@ -656,7 +689,7 @@ function NewStoSheet({ onClose, onCreated }: { onClose: () => void; onCreated: (
                 <span className="min-w-0 flex-1 truncate font-semibold text-ink">{fromName}</span>
                 <ArrowRight className="h-4 w-4 shrink-0 text-brand" aria-hidden />
                 <span className={`min-w-0 flex-1 truncate text-right font-semibold ${toRow ? "text-ink" : "text-muted"}`}>
-                  {toRow?.name ?? `${toOptions.length} sibling${toOptions.length === 1 ? "" : "s"} to choose from`}
+                  {toRow?.name ?? `${toOptions.length} destination${toOptions.length === 1 ? "" : "s"} to choose from`}
                 </span>
               </div>
             </div>
@@ -695,6 +728,7 @@ function NewStoSheet({ onClose, onCreated }: { onClose: () => void; onCreated: (
                     <div className="w-28">
                       <Field label={info?.uom ? `Qty (${info.uom})` : "Qty"}>
                         <Input type="number" min={0} value={l.qty}
+                          data-uom={info?.uom ?? ""}
                                isInvalid={!!l.item_id && Number(l.qty) > free}
                                onChange={(e: any) => setLine(i, { qty: e.target?.value ?? e })} />
                       </Field>

@@ -146,6 +146,7 @@ function LineCard({ line, value, onChange }: {
           <div className="ml-auto w-24">
             <Input
               type="number"
+              data-uom={line.uom_code ?? ""}
               min={0}
               max={max}
               step="any"

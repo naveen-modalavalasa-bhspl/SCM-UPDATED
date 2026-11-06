@@ -7,7 +7,7 @@ vi.mock("@/shared/api/client", () => ({
   api: { get: vi.fn(), post: vi.fn() },
 }));
 
-const heldPermissions = new Set<string>(["issue.view", "issue.create"]);
+const heldPermissions = new Set<string>(["issue.view", "issue.create", "issue.submit"]);
 vi.mock("@/shared/auth/AuthContext", () => ({
   useAuth: () => ({ can: (code: string) => heldPermissions.has(code) }),
 }));

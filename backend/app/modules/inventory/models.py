@@ -375,6 +375,11 @@ class MaterialRequestItem(CombinationMixin, Base):
     item_name = Column(String(300), nullable=True)    # snapshot
     uom_code = Column(String(20), nullable=True)      # snapshot
     quantity = Column(Numeric(16, 3), nullable=False)
+    # What the line asked for when it was raised (2026-11-03) — the CEILING. Every
+    # later change (an approver's revision, the raiser's correction) may lower the
+    # quantity or leave it, never raise it past this. Set when the request is raised:
+    # an MR is submitted the moment it exists, from the shortfall or by hand.
+    requested_quantity = Column(Numeric(16, 3), nullable=True)
     ordered_quantity = Column(Numeric(16, 3), nullable=False, default=0)
     # How much of THIS line has reached stock, set (never added to) by
     # `mark_mrs_received` from the cumulative receipts. "On order" is
@@ -388,6 +393,35 @@ class MaterialRequestItem(CombinationMixin, Base):
     remarks = Column(String(500), nullable=True)
 
     mr = relationship("MaterialRequest", back_populates="items")
+
+
+class MRQtyChange(Base):
+    """One quantity change on a material request line, after it was raised
+    (2026-11-03): an approver's revision or the raiser's correction. Append-only —
+    the record of who took the request down, from what, to what, and why. A change
+    can only ever LOWER the line (`requested_quantity` is the ceiling), so `to_qty`
+    is never above `ceiling_qty`."""
+
+    __tablename__ = "inv_mr_qty_changes"
+
+    id = pk()
+    mr_id = Column(BigInteger, ForeignKey("inv_material_requests.id", ondelete="CASCADE"),
+                   index=True, nullable=False)
+    mr_item_id = Column(BigInteger, nullable=True)
+    item_id = Column(BigInteger, nullable=False)
+    item_code = Column(String(100), nullable=True)
+    item_name = Column(String(300), nullable=True)
+    uom_code = Column(String(30), nullable=True)
+    from_qty = Column(Numeric(16, 3), nullable=False)
+    to_qty = Column(Numeric(16, 3), nullable=False)
+    ceiling_qty = Column(Numeric(16, 3), nullable=True)
+    # APPROVAL (an approver revised it) | CORRECTION (the raiser, after a send-back)
+    stage = Column(String(20), nullable=False)
+    comments = Column(String(500), nullable=True)
+    changed_by_id = Column(BigInteger, nullable=True)
+    changed_by_name = Column(String(200), nullable=True)
+    changed_by_position = Column(String(200), nullable=True)
+    changed_at = created_at_col()
 
 
 class StockAdjustment(Base):

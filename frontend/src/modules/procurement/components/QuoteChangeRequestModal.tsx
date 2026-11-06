@@ -127,8 +127,14 @@ export function QuoteChangeRequestModal({ quote, onClose }: {
     || Number(d.discount_percent) !== Number(d.item.discount_percent ?? 0)
     || comboChanged(d);
 
+  /** The RFQ's quantity is the ceiling (2026-11-03): an amendment may ask for it or
+   *  less, never more. The server refuses the same; this says it before Send. */
+  const qtyCap = (d: DraftLine) => d.item.requested_quantity ?? null;
+  const qtyAbove = (d: DraftLine) =>
+    d.included && qtyCap(d) != null && Number(d.quantity) > Number(qtyCap(d));
+
   // Any included line with a rate increase blocks the send.
-  const hasRateViolation = touched.some(rateIncreased);
+  const hasRateViolation = touched.some(rateIncreased) || touched.some(qtyAbove);
   const hasUnchanged = touched.some((d) => !changed(d));
 
   const canSend = !propose.isPending && !quantityInvalid
@@ -282,6 +288,7 @@ export function QuoteChangeRequestModal({ quote, onClose }: {
                                 decimals={uomDecimals(quote.items.find((i) => i.id === d.quotation_item_id)?.uom_code)}
                                 className="mt-0.5 h-9 w-full rounded-md border border-line bg-content1 px-2 text-sm text-ink outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
                                 value={d.quantity}
+                                data-uom={d.item?.uom_code ?? ""}
                                 onChange={(raw) => update(d.quotation_item_id, { quantity: raw })}
                                 aria-label="Proposed quantity"
                               />
@@ -312,6 +319,19 @@ export function QuoteChangeRequestModal({ quote, onClose }: {
                               />
                             </label>
                           </div>
+
+                          {/* Quantity above the RFQ */}
+                          {qtyAbove(d) && (
+                            <div className="mt-2 flex items-center gap-1.5 rounded-lg bg-danger/10 px-2.5 py-1.5">
+                              <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-danger" />
+                              <span className="text-[11px] font-semibold text-danger">
+                                The RFQ asked for {qtyCap(d)} {d.item.uom_code ?? ""} — ask for that or less, never more
+                              </span>
+                            </div>
+                          )}
+                          {d.included && !qtyAbove(d) && qtyCap(d) != null && (
+                            <p className="mt-1 text-[10px] text-muted">Qty up to {qtyCap(d)} (the RFQ's) · can only be lowered</p>
+                          )}
 
                           {/* Rate-increase error */}
                           {rateUp && (
