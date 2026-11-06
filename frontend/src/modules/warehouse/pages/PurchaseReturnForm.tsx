@@ -1058,7 +1058,7 @@ export default function PurchaseReturnForm() {
                         <QuantityInput
                           decimals={uomDecimals(line.uom_code)}
                           data-uom={line.uom_code ?? ""}
-                          min="0"
+                          min={0}
                           value={line.quantity}
                           onChange={(raw) => setManualLine(line.key, "quantity", raw)}
                           placeholder="0"
