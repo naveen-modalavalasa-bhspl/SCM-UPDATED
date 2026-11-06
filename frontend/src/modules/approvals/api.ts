@@ -5,7 +5,7 @@ import type {
   ConsolidationApprovalInput, ConsolidationApprovalResult,
   IndentAvailability, IssueFromStockLine, IssueFromStockResult,
   ConsolidationFilterOptions, ConsolidationQuery, ConsolidationWorkspace,
-  CorrectionIndent, PendingApproval,
+  CorrectionIndent, PendingApproval, ReturnTarget,
   PendingSummary, AllocationCycleRow, DecisionLedger, CycleLedger,
 } from "./types";
 import type { Paginated } from "@/shared/types";
@@ -195,9 +195,14 @@ export const approvalsApi = {
   rejectIndent: (id: number, comments = "") =>
     api.post<ApprovalIndent>(`/api/approvals/indents/${id}/reject`, { comments })
       .then((r) => r.data),
-  returnIndent: (id: number, comments: string) =>
-    api.post<ApprovalIndent>(`/api/indents/${id}/return-for-correction`, { comments })
-      .then((r) => r.data),
+  returnIndent: (id: number, comments: string, targetSequence?: number) =>
+    api.post<ApprovalIndent>(`/api/indents/${id}/return-for-correction`, {
+      comments,
+      // 0 is the requester, so "not chosen" has to be undefined, never falsy.
+      ...(targetSequence === undefined ? {} : { target_sequence: targetSequence }),
+    }).then((r) => r.data),
+  returnTargets: (id: number) =>
+    api.get<ReturnTarget[]>(`/api/indents/${id}/return-targets`).then((r) => r.data),
   approveDocument: (docType: string, id: number, comments = "") =>
     api.post(`/api/approvals/documents/${docType}/${id}/approve`, { comments })
       .then((r) => r.data),

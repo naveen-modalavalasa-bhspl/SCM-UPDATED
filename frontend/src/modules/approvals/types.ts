@@ -232,6 +232,17 @@ export interface ApprovalQuantityInput {
   approved_quantity: number;
 }
 
+/** A step an approver can send an indent back to. `sequence` 0 is the requester. */
+export interface ReturnTarget {
+  sequence: number;
+  stage_name: string | null;
+  owner_name: string | null;
+  owner_position_id: number | null;
+  is_requester: boolean;
+  /** The step just below the current one: what a plain return has always done. */
+  is_default: boolean;
+}
+
 export interface ApprovalHistoryRow {
   id: number;
   stage_sequence: number;

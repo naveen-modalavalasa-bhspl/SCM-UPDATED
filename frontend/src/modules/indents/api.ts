@@ -251,8 +251,11 @@ export const indentApi = {
     api.put<Indent>(`/api/indents/${id}`, data).then((r) => r.data),
   delete: (id: number) => api.delete<void>(`/api/indents/${id}`).then((r) => r.data),
   submit: (id: number) => api.post<Indent>(`/api/indents/${id}/submit`).then((r) => r.data),
-  returnForCorrection: (id: number, comments: string) =>
-    api.post<Indent>(`/api/indents/${id}/return-for-correction`, { comments })
+  returnForCorrection: (id: number, comments: string, targetSequence?: number) =>
+    api.post<Indent>(`/api/indents/${id}/return-for-correction`, {
+      comments,
+      ...(targetSequence === undefined ? {} : { target_sequence: targetSequence }),
+    })
       .then((r) => r.data),
   resubmitCorrection: (id: number) =>
     api.post<Indent>(`/api/indents/${id}/resubmit-correction`).then((r) => r.data),

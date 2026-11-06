@@ -698,3 +698,121 @@ async def test_a_login_with_no_active_position_keeps_its_whole_queue(db):
 
     assert not await engine.instances_for_other_hats(db, oe)
     assert [row["doc_id"] for row in await engine.pending_for_user(db, oe)] == [72]
+
+
+# ---------------- sending back to an earlier step ----------------
+#
+# Chain from the pilot (606), every rung on: OE 605 (seq 1), DM 604 (seq 2),
+# RM 603 (seq 3), SPH 602 (seq 4), COO 601 (seq 5).
+
+async def _at_third_rung(db, doc_id: int):
+    """OE and DM have signed; the indent now sits with the Regional Manager."""
+    holders = await _org(db)
+    await _save(db, holders[601])
+    instance = await engine.start(db, "INDENT", doc_id,
+                                  {"requester_position_id": 606}, holders[606])
+    await engine.act(db, "INDENT", doc_id, "APPROVE", holders[605])
+    await engine.act(db, "INDENT", doc_id, "APPROVE", holders[604])
+    return holders, instance
+
+
+async def test_return_targets_offer_the_requester_and_every_signed_step(db):
+    holders, _instance = await _at_third_rung(db, 71)
+
+    targets = await engine.get_return_targets(
+        db, "INDENT", 71, {"requester_position_id": 606})
+
+    assert [t["sequence"] for t in targets] == [0, 1, 2]
+    assert [t["is_requester"] for t in targets] == [True, False, False]
+    assert [t["owner_name"] for t in targets] == ["Pilot", "OE", "DM"]
+    # The default is the step just below the current one: what a plain return always did.
+    assert [t["is_default"] for t in targets] == [False, False, True]
+
+
+async def test_return_to_an_earlier_step_hands_it_to_that_signer(db):
+    holders, instance = await _at_third_rung(db, 72)
+
+    returned = await engine.return_for_correction(
+        db, "INDENT", 72, holders[603], "oe to fix",
+        context={"requester_position_id": 606}, target_sequence=1,
+    )
+
+    state = await engine.get_correction_state(db, "INDENT", 72)
+    assert returned.id == instance.id
+    assert state["correction_owner_employee_id"] == holders[605].id
+    assert state["correction_owner_position_id"] == 605
+    assert state["returned_from_sequence"] == 3
+    assert state["sent_back_to_sequence"] == 1
+    # DM (seq 2) signs again, so the document resumes there.
+    assert state["resubmit_target_sequence"] == 2
+    assert returned.current_sequence == 2
+    assert not (await db.execute(
+        select(Pending).where(Pending.instance_id == instance.id)
+    )).scalars().all()
+
+
+async def test_resubmit_after_an_earlier_step_reopens_the_next_rung(db):
+    holders, instance = await _at_third_rung(db, 73)
+    await engine.return_for_correction(
+        db, "INDENT", 73, holders[603], "oe to fix",
+        context={"requester_position_id": 606}, target_sequence=1,
+    )
+
+    resubmitted = await engine.resubmit_correction(
+        db, "INDENT", 73, holders[605], context={"requester_position_id": 606})
+
+    assert resubmitted.id == instance.id
+    assert resubmitted.status == InstanceStatus.IN_PROGRESS.value
+    assert resubmitted.current_sequence == 2
+    assert await engine.get_correction_state(db, "INDENT", 73) is None
+    pending = (await db.execute(
+        select(Pending).where(Pending.instance_id == instance.id)
+    )).scalars().all()
+    assert [row.approver_id for row in pending] == [holders[604].id]
+
+
+async def test_return_to_the_requester_from_a_later_step(db):
+    holders, instance = await _at_third_rung(db, 74)
+
+    await engine.return_for_correction(
+        db, "INDENT", 74, holders[603], "start again",
+        context={"requester_position_id": 606}, target_sequence=0,
+    )
+
+    state = await engine.get_correction_state(db, "INDENT", 74)
+    assert state["correction_owner_employee_id"] == holders[606].id
+    assert state["resubmit_target_sequence"] == 1
+
+    resubmitted = await engine.resubmit_correction(
+        db, "INDENT", 74, holders[606], context={"requester_position_id": 606})
+    assert resubmitted.current_sequence == 1
+    pending = (await db.execute(
+        select(Pending).where(Pending.instance_id == instance.id)
+    )).scalars().all()
+    assert [row.approver_id for row in pending] == [holders[605].id]
+
+
+async def test_return_refuses_a_step_that_is_not_offered(db):
+    holders, _instance = await _at_third_rung(db, 75)
+
+    for bad in (3, 4, 99):  # the current step, a later step, a step that does not exist
+        with pytest.raises(ValidationError):
+            await engine.return_for_correction(
+                db, "INDENT", 75, holders[603], "no",
+                context={"requester_position_id": 606}, target_sequence=bad,
+            )
+    # Nothing was written by the refusals.
+    assert await engine.get_correction_state(db, "INDENT", 75) is None
+
+
+async def test_plain_return_without_a_target_still_goes_one_step_back(db):
+    holders, _instance = await _at_third_rung(db, 76)
+
+    await engine.return_for_correction(
+        db, "INDENT", 76, holders[603], "dm to fix",
+        context={"requester_position_id": 606},
+    )
+
+    state = await engine.get_correction_state(db, "INDENT", 76)
+    assert state["correction_owner_employee_id"] == holders[604].id
+    assert state["resubmit_target_sequence"] == 3

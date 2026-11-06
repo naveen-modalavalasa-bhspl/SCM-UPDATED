@@ -2228,8 +2228,21 @@ async def act_on_indent(db: AsyncSession, indent_id: int, action: ApprovalAction
     return await _attach_capabilities(db, indent, user)
 
 
+async def get_indent_return_targets(
+    db: AsyncSession, indent_id: int, user,
+) -> list[dict]:
+    """The steps this approver may send the indent back to (empty when they may not
+    return it at all). The one just below the current step is marked as the default."""
+    indent = await get_indent(db, indent_id, user)
+    if not await can_return_indent_for_correction(db, indent, user):
+        return []
+    return await engine.get_return_targets(
+        db, DocType.INDENT.value, indent.id, _workflow_context_for_indent(indent))
+
+
 async def return_indent_for_correction(
     db: AsyncSession, indent_id: int, comments: str, user,
+    target_sequence: int | None = None,
 ) -> Indent:
     indent = await get_indent(db, indent_id, user)
     if indent.status != IndentStatus.PENDING_APPROVAL.value:
@@ -2239,13 +2252,23 @@ async def return_indent_for_correction(
     await _assert_active_workflow_task(db, indent.id, user.id)
 
     before_status = indent.status
+    context = _workflow_context_for_indent(indent)
+    if target_sequence is None:
+        # No step chosen: the nearest earlier step, which is where a return has always
+        # gone. Resolved here, against the signed steps, so a rung nobody signed can no
+        # longer leave the indent with nowhere to go.
+        offered = await engine.get_return_targets(
+            db, DocType.INDENT.value, indent.id, context)
+        target_sequence = next(
+            (row["sequence"] for row in offered if row["is_default"]), None)
     await engine.return_for_correction(
         db,
         DocType.INDENT.value,
         indent.id,
         user,
         comments,
-        context=_workflow_context_for_indent(indent),
+        context=context,
+        target_sequence=target_sequence,
     )
     indent.status = IndentStatus.RETURNED_FOR_CORRECTION.value
     indent.current_approver_name = None
