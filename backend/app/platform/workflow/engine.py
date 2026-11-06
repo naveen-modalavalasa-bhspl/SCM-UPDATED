@@ -695,6 +695,11 @@ async def _resolve_ladder_chain(db, wf, stages, context: dict, user,
     # the post the project nominated — and if none was nominated, to the reporting line
     # and then the admin safety net. Recorded loudly either way; never silent.
     independent_fallback = ""
+    # Rule 4: a raiser who is at the end of the chain (or the top of the hierarchy) has
+    # no one above them — the document is theirs, so it is NOT sent to a stand-in.
+    if (not chain and policy == ladder.POLICY_INDEPENDENT
+            and await ladder.raiser_is_final(db, stages, requester_position_id)):
+        return chain, independent_fallback
     if not chain and policy == ladder.POLICY_INDEPENDENT:
         chain = await ladder.fallback_chain(db, fallback_position_id, user.id)
         independent_fallback = fallback.REASON_INDEPENDENT_FALLBACK if chain else ""
@@ -783,6 +788,7 @@ async def start_resolved_chain(db, doc_type: str, doc_id: int, chain: list[dict]
     """`_start_resolved_chain`, then forward past the raiser's own steps (2026-10-26)."""
     instance = await _start_resolved_chain(db, doc_type, doc_id, chain, context, user,
                                            project_id)
+    instance = await _skip_stages_below_raiser(db, instance, context or {})
     return await _auto_advance(db, instance, context or {})
 
 
@@ -837,6 +843,81 @@ async def _start_resolved(db, doc_type: str, doc_id: int, chain: list[dict],
                           context: dict, user, project_id: int | None) -> Instance:
     return await _start_resolved_chain(db, doc_type, doc_id, chain, context, user,
                                        project_id)
+
+
+SKIPPED_BELOW_RAISER_REASON = ("the person who raised this document holds a later "
+                               "step in this chain")
+
+
+def _skipped_row_fields(link: dict, raiser_name: str | None,
+                        raiser_role: str | None) -> dict:
+    """What a SKIPPED trail row says: WHO was skipped, and who skipped them.
+
+    The timeline draws `actor_name` beside the SKIPPED pill, so that is the person who
+    was passed over and their role ("MURALI KRISHNA (MANAGER-SCM)"); the comment opens
+    with who skipped them ("Skipped by Rajendra Pinniti (CPO) — ..."). The row itself
+    is still written by the system (no actor id) — see `_skip_stages_below_raiser`.
+    """
+    role = link.get("position_name") or link.get("role_name")
+    names = ", ".join(n for n in (link.get("approver_names") or []) if n)
+    skipped = f"{names} ({role})" if names and role else (names or role or "System")
+    by = (f"{raiser_name} ({raiser_role})" if raiser_name and raiser_role
+          else raiser_name or "the raiser")
+    return {
+        "actor_name": skipped[:200],
+        "actor_position": "Automatic routing",
+        "comments": f"Skipped by {by} — {SKIPPED_BELOW_RAISER_REASON}",
+    }
+
+
+async def _skip_stages_below_raiser(db, instance: Instance | None,
+                                    context: dict) -> Instance | None:
+    """Open the document at the raiser's own step instead of at step 1.
+
+    A document raised by someone who sits at a LATER step of its chain does not wait on
+    the steps below them: those are skipped (with a SKIPPED row on the trail) and the
+    document opens at the raiser's own step, which `_auto_advance` then signs for them.
+
+    Only runs on a freshly submitted instance (still on its first step, nothing acted
+    on) and only moves FORWARD. If the raiser is an approver of no step, or of step 1
+    itself, nothing changes. If they hold several steps the FIRST one wins; any steps
+    after it are handled by `_auto_advance` exactly as before.
+    """
+    if (instance is None
+            or instance.status != InstanceStatus.IN_PROGRESS.value
+            or not instance.started_by_id):
+        return instance
+    links = _chain_links(instance)
+    first_sequence = links[0]["sequence"] if links else None
+    if first_sequence is None or instance.current_sequence != first_sequence:
+        return instance
+    target = next((link for link in links
+                   if instance.started_by_id in (link.get("approver_ids") or [])), None)
+    if target is None or target["sequence"] <= first_sequence:
+        return instance
+
+    skipped = [link for link in links if link["sequence"] < target["sequence"]]
+    raiser_role = context.get("requester_position_name")
+    if not raiser_role:
+        position_ids = await _requester_position_ids(db, instance, context)
+        raiser_role = await _position_name(db, position_ids[0] if position_ids else None)
+    await _clear_pending(db, instance.id)
+    for link in skipped:
+        # Recorded as the SYSTEM, never as the raiser. The indent ledger treats every
+        # row a person authored (bar SUBMITTED) as a decision of theirs and stops that
+        # person's reading of the trail there, so a skip written in the raiser's name
+        # would hide everything that happens after it from their own document. Same shape
+        # as the FALLBACK rows `fallback.record` writes.
+        db.add(Action(
+            instance_id=instance.id, stage_sequence=link["sequence"],
+            stage_name=link["role_name"], actor_id=None,
+            action=ApprovalAction.SKIPPED.value,
+            **_skipped_row_fields(link, instance.started_by_name, raiser_role),
+        ))
+    await db.flush()
+    await _open_ladder_link(db, instance, target, context)
+    await db.flush()
+    return instance
 
 
 #: The trail's words for a step approved because its approver raised the document.
@@ -1243,6 +1324,7 @@ async def start(db, doc_type: str, doc_id: int, context: dict, user) -> Instance
     """Open the approval, then move forward past every step the raiser holds
     (2026-10-26) — see `_auto_advance`."""
     instance = await _start(db, doc_type, doc_id, context, user)
+    instance = await _skip_stages_below_raiser(db, instance, context or {})
     return await _auto_advance(db, instance, context or {})
 
 
@@ -1319,6 +1401,25 @@ async def _start(db, doc_type: str, doc_id: int, context: dict, user) -> Instanc
         await fallback.record(db, instance, fallback.REASON_NO_WORKFLOW, [],
                               wf.name)
     await db.flush()
+    # Rule 4 for plain reporting-manager workflows: a raiser at the root of the hierarchy
+    # has no manager to ask, so the document is approved by them rather than handed to
+    # the administrator safety net.
+    if (applicable
+            and all(s.approver_type == ApproverType.REPORTING_MANAGER.value
+                    for s in applicable)
+            and await ladder.is_hierarchy_root(db, requester_position_id)):
+        db.add(Action(
+            instance_id=instance.id, stage_sequence=0,
+            stage_name=ladder.DOC_TYPE_LABEL.get(doc_type, doc_type),
+            actor_id=user.id, actor_name=user.full_name,
+            actor_position=context.get("requester_position_name"),
+            action=ApprovalAction.APPROVED.value, comments=SELF_APPROVED_COMMENT,
+        ))
+        instance.status = InstanceStatus.APPROVED.value
+        instance.completed_at = utcnow()
+        instance.current_stage_name = None
+        await db.flush()
+        return instance
     if applicable:
         await _materialize_pending(db, instance, applicable[0], context)
     return instance

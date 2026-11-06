@@ -341,9 +341,37 @@ async def resolve_fixed_chain(db: AsyncSession, stages: list[Stage],
     matching hat to be active before it will accept a decision.
     """
     exclude_id = None if policy == ladder.POLICY_CREATOR_ALLOWED else requester_id
+
+    # A raiser who holds a rank that is IN this ladder does not wait on the rungs at or
+    # below it: the document goes to the next rung up. A raiser whose rank is not in the
+    # ladder at all follows every rung, in the order the admin built it.
+    skip_through: int | None = None
+    if requester_position_id is not None:
+        raiser_post = await db.get(HcmPosition, requester_position_id)
+        held = [s.sequence for s in stages if s.is_enabled and (
+            s.position_id == requester_position_id
+            or (raiser_post is not None and raiser_post.role_id is not None
+                and s.position_role_id == raiser_post.role_id))]
+        skip_through = min(held) if held else None
+
+    # A company-wide ladder saved with a desk rank as ROLE (older saves, and any save
+    # made before `_rank_approver_type` knew better) is read as the chair it is, so the
+    # rule holds for every document type without every ladder being re-saved.
+    #
+    # Not for a raiser with no position (the Administrator account): such a raiser has
+    # never been routed up a ladder and stays approval-free, exactly as before.
+    company_wide = False
+    if (requester_position_id is not None
+            and stages and stages[0].workflow_id is not None):
+        wf_row = await db.get(Workflow, stages[0].workflow_id)
+        company_wide = wf_row is not None and wf_row.project_id is None
+
     chain: list[dict] = []
     for stage in sorted(stages, key=lambda s: s.sequence):
         if not stage.is_enabled:
+            continue
+        if skip_through is not None and stage.sequence <= skip_through:
+            logger.info("Rung %r skipped: at or below the raiser's own rung", stage.name)
             continue
 
         # A locally-owned chair: HCM has no position for this step at all.
@@ -357,7 +385,10 @@ async def resolve_fixed_chain(db: AsyncSession, stages: list[Stage],
         # straight off its holders — climbing to it is impossible by construction, and
         # that is exactly why these rungs were being invented as local posts before HCM
         # created the real ones.
-        if stage.approver_type == ApproverType.ROLE_ANY.value and stage.position_role_id:
+        if stage.position_role_id and (
+                stage.approver_type == ApproverType.ROLE_ANY.value
+                or (company_wide and stage.approver_type == ApproverType.ROLE.value
+                    and await _is_desk_rank(db, stage.position_role_id))):
             people = await ladder.rank_any_holders(
                 db, stage.position_role_id, exclude_id)
             # FIXED 2026-08-20 — see `ladder.positions_of_rank`. The rung is gated on
@@ -369,6 +400,9 @@ async def resolve_fixed_chain(db: AsyncSession, stages: list[Stage],
             if not people:
                 logger.info("Rung %r skipped: nobody holds rank %s",
                             stage.name, stage.position_role_id)
+                continue
+            if await _all_below(db, allowed, requester_position_id):
+                logger.info("Rung %r skipped: sits beneath the raiser", stage.name)
                 continue
             chain.append({
                 "sequence": len(chain) + 1,
@@ -429,6 +463,48 @@ async def resolve_fixed_chain(db: AsyncSession, stages: list[Stage],
 
 # ---------------- saving ----------------
 
+async def _all_below(db: AsyncSession, position_ids: list[int],
+                      raiser_position_id: int | None) -> bool:
+    """True when EVERY one of these posts reports (at any depth) to the raiser's post.
+
+    A rung that sits wholly beneath the raiser is not an approval, it is a subordinate
+    signing off their superior's work — so it is skipped, the document moving on to the
+    next rung up. A rank carried by posts both below and elsewhere is kept.
+    """
+    if raiser_position_id is None or not position_ids:
+        return False
+    for position_id in position_ids:
+        seen: set[int] = set()
+        position = await db.get(HcmPosition, position_id)
+        below = False
+        while position is not None and position.parent_position_id and len(seen) < ladder.MAX_CLIMB:
+            if position.parent_position_id == raiser_position_id:
+                below = True
+                break
+            if position.parent_position_id in seen:
+                break
+            seen.add(position.parent_position_id)
+            position = await db.get(HcmPosition, position.parent_position_id)
+        if not below:
+            return False
+    return True
+
+
+async def _is_desk_rank(db: AsyncSession, role_id: int) -> bool:
+    """True for a rank held by only a handful of posts (Manager-SCM, CPO, Director).
+
+    Such a chair is not anyone's ancestor, so climbing to it from a peer finds nothing;
+    its holders are read directly instead. A field rank (OE, Store Keeper, Driver...) is
+    held by hundreds or thousands of posts and keeps climbing. Same threshold the
+    offline-rung resolution already uses.
+    """
+    held = (await db.execute(
+        select(func.count()).select_from(HcmPosition).where(
+            HcmPosition.role_id == role_id, HcmPosition.is_active.is_(True))
+    )).scalar() or 0
+    return 0 < held <= ladder.MAX_OFFLINE_RANK_POSITIONS
+
+
 async def _rank_approver_type(db: AsyncSession, role_id: int,
                               project_id: int | None) -> str:
     """ROLE if the rank is climbable from this project, ROLE_ANY if it is a chair.
@@ -438,9 +514,13 @@ async def _rank_approver_type(db: AsyncSession, role_id: int,
     rank held by this project's own people is climbed to exactly as before; one held
     only elsewhere — SCM HEAD, INDENT TEAM, the PO desk — is a shared chair, and
     climbing to it would resolve to nobody every time.
+
+    A company-wide ladder has no project to climb through, so a desk rank is a chair
+    and a field rank is climbed (see `_is_desk_rank`).
     """
     if project_id is None:
-        return ApproverType.ROLE.value
+        return (ApproverType.ROLE_ANY.value if await _is_desk_rank(db, role_id)
+                else ApproverType.ROLE.value)
     mine = {rank["role_id"] for rank in await ladder.project_ranks(db, project_id)}
     return (ApproverType.ROLE.value if role_id in mine
             else ApproverType.ROLE_ANY.value)
