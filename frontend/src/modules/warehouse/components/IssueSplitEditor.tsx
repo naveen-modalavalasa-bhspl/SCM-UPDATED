@@ -1110,7 +1110,6 @@ function PickRow(props: PickProps) {
                 * exactly, never rounded up to a whole package. */}
               <CellLabel>Issue qty ({packWord(2).split(" ")[1]})</CellLabel>
               <QtyInput
-                decimals={0}
                 ariaLabel={`Packages to issue from pick ${position + 1}`}
                 decimals={0}
                 value={packsHeld}

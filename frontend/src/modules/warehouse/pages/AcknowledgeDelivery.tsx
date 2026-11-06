@@ -211,7 +211,6 @@ export default function AcknowledgeDelivery() {
       width: "w-28",
       render: (g) => (
         <QtyInput
-          uom={g.lines[0].uom_code}
           ariaLabel={`Received quantity for ${g.lines[0].item_code ?? g.lines[0].item_id}`}
           uom={g.lines[0].uom_code}
           value={receivedOf(g.lines)}
@@ -274,7 +273,6 @@ export default function AcknowledgeDelivery() {
       width: "w-28",
       render: (l) => (
         <QtyInput
-          uom={l.uom_code}
           ariaLabel={`Received quantity for ${l.item_code ?? l.item_id}`}
           uom={l.uom_code}
           value={delivered[l.id] ?? num(l.quantity)}
