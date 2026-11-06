@@ -2,6 +2,7 @@ from datetime import date, datetime, timezone
 
 from pydantic import (
     BaseModel, ConfigDict, Field, computed_field, field_serializer, field_validator,
+    model_validator,
 )
 
 from app.modules.indents.enums import IndentType
@@ -156,6 +157,9 @@ class IndentOut(BaseModel):
     can_edit_correction: bool = False
     can_resubmit_correction: bool = False
     can_send_correction_back: bool = False
+    #: The returns an acknowledgement just raised for goods it did not accept (2026-11-06).
+    #: Only set on the response to that acknowledgement; empty everywhere else.
+    receipt_returns: list[dict] = Field(default_factory=list)
     correction_owner: CorrectionOwnerOut | None = None
     returned_from_stage: str | None = None
     resubmit_target_stage: str | None = None
@@ -283,14 +287,72 @@ class FulfilmentStep(BaseModel):
     caption: str | None = None
 
 
+#: Why a delivered quantity was not accepted (2026-11-06), with the words the screen
+#: shows. The VALUES are the Returns module's own reasons, one for one, because each
+#: rejection is raised there as a return of that reason; `returns/tests` asserts every one
+#: is a real `ReturnReason`, so the two cannot drift apart. Indents may not import returns
+#: (rule 5), hence a copy that is checked rather than a shared import.
+ACK_REJECTION_LABELS: dict[str, str] = {
+    "DAMAGED": "Damaged",
+    "EXPIRED": "Expired",
+    "NEAR_EXPIRY": "Near expiry",
+    "LEAKED_SPILLED": "Leakage",
+    "PACKAGING_DAMAGED": "Broken package",
+    "OTHER": "Other",
+}
+
+#: The reasons that mean the goods were harmed in transit, so the carrier is claimed
+#: against as well. Expired / near-expiry / other are the supplier's or the shelf's
+#: problem, not the carrier's.
+ACK_DAMAGE_REASONS = frozenset({"DAMAGED", "PACKAGING_DAMAGED", "LEAKED_SPILLED"})
+
+
+class ReceiptRejectionIn(BaseModel):
+    """Part of a line that reached the requester and is NOT being accepted, and why."""
+    reason: str
+    quantity: float = Field(gt=0, allow_inf_nan=False)
+    comment: str | None = Field(default=None, max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def _known_reason(cls, value: str) -> str:
+        reason = (value or "").strip().upper()
+        if reason not in ACK_REJECTION_LABELS:
+            raise ValueError(
+                "Pick a reason: " + ", ".join(ACK_REJECTION_LABELS.values()))
+        return reason
+
+    @field_validator("comment")
+    @classmethod
+    def _trim(cls, value: str | None) -> str | None:
+        return (value or "").strip() or None
+
+    @model_validator(mode="after")
+    def _other_says_what(self):
+        # "Other" on its own tells whoever handles the return nothing.
+        if self.reason == "OTHER" and not self.comment:
+            raise ValueError("Say what the problem is when the reason is Other")
+        return self
+
+
 class AcknowledgeLineIn(BaseModel):
     indent_item_id: int
-    # What arrived in THIS delivery, not the running total. The service adds it to what
-    # was already acknowledged, so the caller never has to know the previous figure.
-    received_quantity: float = Field(gt=0)
+    # What arrived in THIS delivery AND WAS ACCEPTED, not the running total. The service
+    # adds it to what was already acknowledged, so the caller never has to know the
+    # previous figure. Zero is allowed when the whole line is being rejected.
+    received_quantity: float = Field(ge=0)
+    #: What reached the requester and is NOT being accepted, by reason (2026-11-06).
+    #: Accepted + rejected + still missing is what was sent.
+    rejections: list[ReceiptRejectionIn] = Field(default_factory=list, max_length=12)
     #: A line issued in PACKAGES (2026-10-26): how much arrived in each package that
     #: came SHORT or MISSING (0), by code. Packages not named arrived whole.
     package_receipts: dict[str, float] | None = None
+
+    @model_validator(mode="after")
+    def _something_is_confirmed(self):
+        if self.received_quantity + sum(r.quantity for r in self.rejections) <= 0:
+            raise ValueError("Enter what you received, or what you are not accepting")
+        return self
 
 
 class AcknowledgeIn(BaseModel):
@@ -357,6 +419,10 @@ class AcknowledgementLineRow(CombinationOut):
     box_codes: list[dict] = Field(default_factory=list)
     dispatched_quantity: float
     received_quantity: float
+    #: Reached the requester and was not accepted (2026-11-06). Counted as arrived, so it
+    #: is not offered for acknowledgement again, but it is not received: the line is
+    #: still owed.
+    rejected_quantity: float = 0
     is_serial_tracked: bool = False
     #: WHICH kind of identifier the labels below are — SERIAL, IMEI, ASSET,
     #: CONSUMABLE or NONE (`warehouse.enums.TRACKING_META`). Served rather than
@@ -427,6 +493,8 @@ class AcknowledgementRow(BaseModel):
     priority: str | None = None
     project_name: str | None = None
     can_acknowledge: bool = False
+    #: Returns raised by the acknowledgement that produced this row (2026-11-06).
+    receipt_returns: list[dict] = Field(default_factory=list)
     lines: list[AcknowledgementLineRow] = []
     shipments: list[ShipmentTrackRow] = []
 

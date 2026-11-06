@@ -56,7 +56,9 @@ from app.modules.indents.enums import (
 )
 from app.modules.indents import eligibility
 from app.modules.indents.models import Consolidation, Indent, IndentItem
-from app.modules.indents.schemas import IndentCreate, IndentItemIn, IndentUpdate
+from app.modules.indents.schemas import (
+    ACK_DAMAGE_REASONS, ACK_REJECTION_LABELS, IndentCreate, IndentItemIn, IndentUpdate,
+)
 from app.shared.time import now as ist_now, today as ist_today
 from app.shared.time import to_ist
 from app.shared import uom
@@ -2022,6 +2024,58 @@ def _delivery_condition(condition: str | None, remarks: str | None) -> str:
     return value
 
 
+def rejection_groups(by_id: dict, rejections: dict[int, list[dict]] | None) -> list[dict]:
+    """The rejections of one acknowledgement, grouped BY REASON across its lines.
+
+    One group per reason because a return carries one reason: "Expired 2" and "Damaged 10"
+    are two returns, however many lines they came from. Within a group the same item is
+    merged into one line (its quantities added, its comments joined), so a return never
+    lists an item twice. `by_id` maps a line id to anything with `item_id`; it serves an
+    indent's lines and a direct issue's alike.
+    """
+    groups: dict[str, dict] = {}
+    for line_id, rows in (rejections or {}).items():
+        line = by_id.get(line_id)
+        if line is None:
+            continue
+        for row in rows:
+            reason = str(row["reason"]).upper()
+            group = groups.setdefault(reason, {
+                "reason": reason, "total": 0.0, "notes": [], "lines": {}})
+            quantity = float(row["quantity"])
+            group["total"] += quantity
+            comment = (row.get("comment") or "").strip() or None
+            if comment and comment not in group["notes"]:
+                group["notes"].append(comment)
+            merged = group["lines"].setdefault(line.item_id, {
+                "item_id": line.item_id, "line_id": line_id, "quantity": 0.0, "remarks": None})
+            merged["quantity"] += quantity
+            if comment:
+                merged["remarks"] = " · ".join(
+                    p for p in (merged["remarks"], comment) if p)[:500]
+    return [{**group, "lines": list(group["lines"].values())} for group in groups.values()]
+
+
+def rejection_remark(groups: list[dict]) -> str:
+    """"Not accepted: Damaged 10 (two cartons crushed), Expired 2" — what the receipt, the
+    carrier claim and the audit row say about the goods that were turned away."""
+    parts = []
+    for group in groups:
+        text = f"{ACK_REJECTION_LABELS.get(group['reason'], group['reason'])} {group['total']:g}"
+        notes = "; ".join(group["notes"])
+        parts.append(f"{text} ({notes})" if notes else text)
+    return "Not accepted: " + ", ".join(parts)
+
+
+async def _raise_rejection_returns(db: AsyncSession, user, source: dict,
+                                   groups: list[dict]) -> list[dict]:
+    """Hand the rejected goods to whoever raises returns. Inside the caller's transaction."""
+    if not groups:
+        return []
+    from app.modules.indents import hooks
+    return await hooks.raise_returns(db, user, source, groups)
+
+
 async def _package_receipt_notes(db: AsyncSession, indent,
                                  receipts: dict[int, dict]) -> list[str]:
     """"…450-STRIP: 3 of 10 arrived", "…454-STRIP missing" — per package that came
@@ -2057,8 +2111,13 @@ async def acknowledge_receipt(db: AsyncSession, indent_id: int,
                               lines: dict[int, Decimal], user, *,
                               condition: str | None = None,
                               remarks: str | None = None,
-                              package_receipts: dict[int, dict] | None = None) -> Indent:
+                              package_receipts: dict[int, dict] | None = None,
+                              rejections: dict[int, list[dict]] | None = None) -> Indent:
     """The requester confirms what physically reached them.
+
+    `lines` is what was ACCEPTED. `rejections` is what reached them and was not, by reason
+    (2026-11-06): it counts as arrived — the goods are on the receiving shelf and a return
+    is raised for them — but not as received, so the line stays owed.
 
     This is the only thing that closes an indent. The warehouse issuing and dispatching
     stock says the goods left; only the person who asked for them can say they arrived,
@@ -2119,16 +2178,37 @@ async def acknowledge_receipt(db: AsyncSession, indent_id: int,
         raise ValidationError(
             "Take a photo of each item you are confirming. Still without one: "
             f"{named}{f' and {more} more' if more > 0 else ''}.")
+    rejections = {k: v for k, v in (rejections or {}).items() if v}
+    for line_id in rejections:
+        if line_id not in by_id:
+            raise ValidationError(f"Line {line_id} is not on {indent.indent_no}")
+    delivered: dict[int, Decimal] = {}
+    if rejections:
+        # Imported here, not at module load: warehouse sits after indents in the chain.
+        from app.modules.warehouse import service as _warehouse
+        delivered = await _warehouse.delivered_by_indent_item(db, list(rejections))
     before = {str(i.id): float(_d(i.received_quantity)) for i in indent.items}
     for line_id, quantity in lines.items():
         item = by_id.get(line_id)
         if item is None:
             raise ValidationError(f"Line {line_id} is not on {indent.indent_no}")
         received = _d(quantity)
-        if received <= 0:
+        rejected_now = sum((_d(r["quantity"]) for r in rejections.get(line_id, [])), ZERO)
+        if received < 0 or (received == 0 and rejected_now <= 0):
             raise ValidationError(
                 f"{item.item_name or item.item_code}: received quantity must be more "
                 "than zero")
+        if rejected_now > 0:
+            # Accepted + rejected can be no more than reached the requester and is not yet
+            # accounted for. Only checked where something is rejected, so a plain
+            # acknowledgement behaves exactly as it always did.
+            unaccounted = (delivered.get(line_id, ZERO) - _d(item.received_quantity)
+                           - _d(item.rejected_quantity))
+            if received + rejected_now > unaccounted:
+                raise ValidationError(
+                    f"{item.item_name or item.item_code}: {received + rejected_now:g} "
+                    f"accepted and rejected is more than the {max(unaccounted, ZERO):g} "
+                    "that reached you and is not yet accounted for.")
         running = _d(item.received_quantity) + received
         owed = owed_quantity(item)
         if running > owed:
@@ -2136,6 +2216,8 @@ async def acknowledge_receipt(db: AsyncSession, indent_id: int,
                 f"{item.item_name or item.item_code}: {running} received is more than "
                 f"the {owed} approved. Acknowledge only what you were given.")
         item.received_quantity = running
+        if rejected_now > 0:
+            item.rejected_quantity = _d(item.rejected_quantity) + rejected_now
         if running >= owed:
             item.status = IndentItemStatus.ISSUED.value
 
@@ -2146,6 +2228,13 @@ async def acknowledge_receipt(db: AsyncSession, indent_id: int,
     package_notes = await _package_receipt_notes(db, indent, package_receipts or {})
     if package_notes:
         remarks = " · ".join(p for p in ((remarks or "").strip(), "; ".join(package_notes)) if p)
+    groups = rejection_groups(by_id, rejections)
+    if groups:
+        # Said on the receipt, and — where the goods were harmed — a claim on the carrier
+        # too, which needs a description (`_delivery_condition`): this supplies it.
+        remarks = " · ".join(p for p in ((remarks or "").strip(), rejection_remark(groups)) if p)
+        if condition is None and any(g["reason"] in ACK_DAMAGE_REASONS for g in groups):
+            condition = ACK_CONDITION_DAMAGED
     ack_condition = _delivery_condition(condition, remarks)
 
     # Imported here, not at module load: warehouse sits after indents in the import
@@ -2168,6 +2257,15 @@ async def acknowledge_receipt(db: AsyncSession, indent_id: int,
         # every line has now arrived. See `_sign_transport_for_indent`.
         fully_received=indent.status == IndentStatus.CLOSED.value)
 
+    # The rejected goods are on the requester's shelf now (the confirmation above counts
+    # them as arrived), so a return can be raised from it — one per reason, in this same
+    # transaction. If one cannot be raised the whole acknowledgement fails with the reason,
+    # rather than closing the delivery and losing track of the goods turned away.
+    receipt_returns = await _raise_rejection_returns(db, user, {
+        "kind": "INDENT", "number": indent.indent_no, "indent_id": indent.id,
+        "issue_id": None,
+    }, groups)
+
     await write_audit(
         db, entity="ind_indents", entity_id=indent.id, entity_no=indent.indent_no,
         action=AuditAction.UPDATE, actor=user,
@@ -2175,11 +2273,16 @@ async def acknowledge_receipt(db: AsyncSession, indent_id: int,
         after={"status": indent.status,
                **({"acknowledged_issues": ", ".join(signed)} if signed else {}),
                **({"package_receipts": "; ".join(package_notes)} if package_notes else {}),
+               **({"rejected": rejection_remark(groups),
+                   "returns": ", ".join(r["return_no"] for r in receipt_returns)}
+                  if groups else {}),
                **{str(i.id): float(_d(i.received_quantity)) for i in indent.items}},
     )
     await db.commit()
     await db.refresh(indent)
-    return await _attach_capabilities(db, indent, user)
+    result = await _attach_capabilities(db, indent, user)
+    result.receipt_returns = receipt_returns
+    return result
 
 
 async def act_on_indent(db: AsyncSession, indent_id: int, action: ApprovalAction,

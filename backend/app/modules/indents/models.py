@@ -182,6 +182,12 @@ class IndentItem(CombinationMixin, Base):
     approved_quantity = Column("approved_qty", Numeric(16, 3), nullable=False, default=0)
     ordered_quantity = Column("ordered_qty", Numeric(16, 3), nullable=False, default=0)
     received_quantity = Column("received_qty", Numeric(16, 3), nullable=False, default=0)
+    # Goods that reached the requester and were NOT accepted: damaged, expired, near
+    # expiry, leaked, a broken package, other (2026-11-06). They are on the receiving
+    # shelf, and are raised as returns from it, but they are not "received": the line is
+    # still owed, so `received_quantity` and every "what is still owed" reader are
+    # untouched. Only the two "has it ARRIVED" checks in the warehouse add this in.
+    rejected_quantity = Column("rejected_qty", Numeric(16, 3), nullable=False, default=0)
     # Set by inventory allocation after approval: how much of this line came out of
     # stock. The remainder becomes an MR line. Flow doc §3 steps 3-5.
     allocated_quantity = Column("allocated_qty", Numeric(16, 3), nullable=False, default=0)

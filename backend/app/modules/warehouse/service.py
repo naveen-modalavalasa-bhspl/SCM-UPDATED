@@ -10863,8 +10863,12 @@ async def _receiver_confirmed(db: AsyncSession, issue: m.MaterialIssue) -> bool:
 
     from app.modules.indents.models import IndentItem
 
+    # ARRIVED, not accepted: goods turned away at the door (`rejected_quantity`) are on the
+    # receiving shelf all the same, and they have to be credited there for a return to be
+    # raised from it. `received_quantity` alone is still what "owed" is measured by.
     confirmed = dict((await db.execute(
-        select(IndentItem.id, IndentItem.received_quantity)
+        select(IndentItem.id,
+               IndentItem.received_quantity + func.coalesce(IndentItem.rejected_quantity, 0))
         .where(IndentItem.id.in_([line.indent_item_id for line in lines]))
     )).all())
 
@@ -10913,6 +10917,32 @@ async def _dispatch_confirmation_caps(db: AsyncSession,
     return dict(total)
 
 
+async def delivered_by_indent_item(db: AsyncSession,
+                                    indent_item_ids: list[int]) -> dict[int, Decimal]:
+    """What has actually gone out against each indent line, net of returns.
+
+    The same running total `_receiver_confirmed` measures a confirmation against: issues
+    that left (`_GONE_OUT_STATUSES`), with the relay legs the requester never sees left
+    out. `indents.acknowledge_receipt` asks it before accepting a rejection, so a line
+    cannot be turned away for more than reached the requester.
+    """
+    if not indent_item_ids:
+        return {}
+    rows = (await db.execute(
+        select(m.MaterialIssueLine.indent_item_id,
+               func.sum(m.MaterialIssueLine.issued_qty
+                        - func.coalesce(m.MaterialIssueLine.returned_qty, 0)))
+        .join(m.MaterialIssue, m.MaterialIssue.id == m.MaterialIssueLine.issue_id)
+        .where(m.MaterialIssueLine.indent_item_id.in_(list(indent_item_ids)),
+               m.MaterialIssue.direction == IssueDirection.OUT.value,
+               m.MaterialIssue.is_stock_posted.is_(True),
+               m.MaterialIssue.status.in_(_GONE_OUT_STATUSES),
+               ~_relayed_onward())
+        .group_by(m.MaterialIssueLine.indent_item_id)
+    )).all()
+    return {int(line_id): _d(total) for line_id, total in rows}
+
+
 async def _issue_confirmation_caps(db: AsyncSession, issue: m.MaterialIssue) -> dict[int, Decimal]:
     """How much of THIS issue's quantities the requester has confirmed, per item.
 
@@ -10939,8 +10969,12 @@ async def _issue_confirmation_caps(db: AsyncSession, issue: m.MaterialIssue) -> 
 
     from app.modules.indents.models import IndentItem
 
+    # ARRIVED, not accepted: goods turned away at the door (`rejected_quantity`) are on the
+    # receiving shelf all the same, and they have to be credited there for a return to be
+    # raised from it. `received_quantity` alone is still what "owed" is measured by.
     confirmed = dict((await db.execute(
-        select(IndentItem.id, IndentItem.received_quantity)
+        select(IndentItem.id,
+               IndentItem.received_quantity + func.coalesce(IndentItem.rejected_quantity, 0))
         .where(IndentItem.id.in_([line.indent_item_id for line in lines]))
     )).all())
 
@@ -14997,8 +15031,14 @@ async def acknowledge_direct_issue(db: AsyncSession, issue_id: int,
                                    lines: dict[int, Decimal], user, *,
                                    condition: str | None = None,
                                    remarks: str | None = None,
-                                   package_receipts: dict[int, dict] | None = None) -> dict:
+                                   package_receipts: dict[int, dict] | None = None,
+                                   rejections: dict[int, list[dict]] | None = None) -> dict:
     """The recipient of a direct issue confirms what reached them.
+
+    `lines` is what was ACCEPTED; `rejections` is what reached them and was not, by reason
+    (2026-11-06). The rejected goods are booked onto the recipient's shelf with the rest,
+    and a return is raised for each reason — so the "shortfall is a return to raise" below
+    is now done for them rather than left to be remembered.
 
     Held to the indent receipt's proof rules: a consignment photo and a photo of every
     item being confirmed. The issue has no received column, so what was counted goes on
@@ -15029,18 +15069,27 @@ async def acknowledge_direct_issue(db: AsyncSession, issue_id: int,
             f"{named}{f' and {more} more' if more > 0 else ''}.")
     counted: dict[str, float] = {}
     short: list[str] = []
+    rejections = {k: v for k, v in (rejections or {}).items() if v}
+    for line_id in rejections:
+        if line_id not in by_id:
+            raise ValidationError(f"Line {line_id} is not on {issue.issue_no}")
+    rejected_by_line = {k: sum((_d(r["quantity"]) for r in rows), ZERO)
+                        for k, rows in rejections.items()}
     for line_id, got in lines.items():
         line = by_id.get(line_id)
         if line is None:
             raise ValidationError(f"Line {line_id} is not on {issue.issue_no}")
         sent = _d(line.issued_qty) - _d(line.returned_qty)
         got = _d(got)
-        if got <= 0 or got > sent:
+        turned_away = rejected_by_line.get(line_id, ZERO)
+        if got < 0 or (got == 0 and turned_away <= 0) or got + turned_away > sent:
             raise ValidationError(
-                f"{line.item_name or line.item_code}: enter between 1 and {sent:g}")
+                f"{line.item_name or line.item_code}: accepted and rejected together "
+                f"must be between 1 and {sent:g}")
         counted[str(line.id)] = float(got)
-        if got < sent:
-            short.append(f"{line.item_name or line.item_code} {got:g} of {sent:g}")
+        if got + turned_away < sent:
+            short.append(
+                f"{line.item_name or line.item_code} {got + turned_away:g} of {sent:g}")
     for line in issue.items:
         sent = _d(line.issued_qty) - _d(line.returned_qty)
         if line.id not in lines and sent > 0:
@@ -15064,6 +15113,11 @@ async def acknowledge_direct_issue(db: AsyncSession, issue_id: int,
             package_notes.append(f"{code} missing" if got == 0 else
                                  f"{code}: {shared_packing.fmt(got)} of "
                                  f"{shared_packing.fmt(sent_in[code])} arrived")
+    groups = ind.rejection_groups(by_id, rejections)
+    if groups:
+        remarks = " · ".join(p for p in ((remarks or "").strip(), ind.rejection_remark(groups)) if p)
+        if condition is None and any(g["reason"] in ind.ACK_DAMAGE_REASONS for g in groups):
+            condition = ind.ACK_CONDITION_DAMAGED
     ack_condition = ind._delivery_condition(condition, remarks)
     note = "; ".join(filter(None, [
         f"Condition {ack_condition}" if ack_condition != ind.ACK_CONDITION_GOOD else None,
@@ -15074,20 +15128,31 @@ async def acknowledge_direct_issue(db: AsyncSession, issue_id: int,
 
     received_by_item: dict[int, Decimal] = defaultdict(Decimal)
     for line_id, got in lines.items():
-        received_by_item[by_id[line_id].item_id] += _d(got)
+        # What ARRIVED, accepted or not: both sit on the recipient's shelf.
+        received_by_item[by_id[line_id].item_id] += _d(got) + rejected_by_line.get(line_id, ZERO)
     before_status = issue.status
     box_received = {code: _d(got) for by_code in (package_receipts or {}).values()
                     for code, got in (by_code or {}).items()}
     await _apply_issue_acknowledgement(db, issue, _name(user), note, user,
                                        received_by_item=received_by_item,
                                        box_received=box_received)
+    # The turned-away goods are on the recipient's shelf now, so a return can be raised
+    # from it — one per reason, in this same transaction.
+    receipt_returns = await ind._raise_rejection_returns(db, user, {
+        "kind": "DIRECT_ISSUE", "number": issue.issue_no, "indent_id": None,
+        "issue_id": issue.id,
+    }, groups)
     await write_audit(db, entity="out_issues", entity_id=issue.id, entity_no=issue.issue_no,
                       action=AuditAction.UPDATE, actor=user,
                       before={"status": before_status},
                       after={"status": issue.status, "received": counted,
-                             "condition": ack_condition, "remarks": note})
+                             "condition": ack_condition, "remarks": note,
+                             **({"returns": ", ".join(r["return_no"] for r in receipt_returns)}
+                                if receipt_returns else {})})
     await db.commit()
-    return await direct_issue_receipt(db, issue.id, user)
+    result = await direct_issue_receipt(db, issue.id, user)
+    result["receipt_returns"] = receipt_returns
+    return result
 
 
 async def cancel_issue(db: AsyncSession, issue_id: int, reason: str | None, user) -> m.MaterialIssue:
@@ -24636,6 +24701,7 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
         for item in sorted(indent.items, key=lambda i: i.line_no or 0):
             approved = owed_quantity(item)
             received = _d(item.received_quantity)
+            rejected = _d(item.rejected_quantity)
             issued = issued_by_line.get(item.id, ZERO)
             dispatched = dispatched_by_line.get(item.id, ZERO)
             on_order = on_order_by_line.get(item.id, ZERO)
@@ -24660,6 +24726,7 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
                 "issued_quantity": float(issued),
                 "dispatched_quantity": float(dispatched),
                 "received_quantity": float(received),
+                "rejected_quantity": float(rejected),
                 "is_serial_tracked": bool(getattr(
                     item_rows.get(item.item_id), "is_serial_tracked", False)),
                 # Served, never inferred in a screen (same rule as the issue picker):
@@ -24679,8 +24746,10 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
                 # The packs it was sent in, merged over its issue lines (2026-10-22).
                 **(wh_packing.merge_breakdowns(packs_by_indent_line.get(item.id, []),
                                                item.uom_code) or {}),
-                "pending_with": None if is_excluded else _pending_with(approved, issued, dispatched, received,
-                                              indent.status, on_order),
+                # Goods turned away at the door have arrived: they are not "on the way".
+                "pending_with": None if is_excluded else _pending_with(
+                    approved, issued, dispatched, received + rejected,
+                    indent.status, on_order),
             })
         out.append({
             "indent_id": indent.id,
@@ -24693,8 +24762,9 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
             "project_name": indent.project_name,
             # Nothing has reached the requester yet, so there is nothing to confirm. The
             # row still shows, because "where is my stuff" is the other half of the job.
-            "can_acknowledge": any(line["dispatched_quantity"] > line["received_quantity"]
-                                   for line in lines),
+            "can_acknowledge": any(
+                line["dispatched_quantity"] > line["received_quantity"] + line["rejected_quantity"]
+                for line in lines),
             "lines": lines,
             # "Where is it and how do I follow it" — the courier docket and the
             # tracking link, on the same row as the confirm button. Without this the

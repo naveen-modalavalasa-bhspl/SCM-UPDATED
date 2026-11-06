@@ -1874,7 +1874,9 @@ def _indent_payload(indent: Indent | None) -> dict | None:
     }
 
 
-async def create_return(db: AsyncSession, data, user) -> dict:
+async def create_return(db: AsyncSession, data, user, *, commit: bool = True) -> dict:
+    """`commit=False` lets a caller that owns the transaction (an acknowledgement raising
+    returns for the goods it turned away) write the return alongside its own changes."""
     _assert_reason_stated(data)
     indent = await _resolve_indent(db, getattr(data, "indent_id", None), user)
     context = await _raiser_context(db, user)
@@ -1919,7 +1921,8 @@ async def create_return(db: AsyncSession, data, user) -> dict:
     await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.sto_no,
                       action=AuditAction.CREATE, actor=user,
                       after={"status": doc.status, "reason": data.reason.value})
-    await db.commit()
+    if commit:
+        await db.commit()
     return await get_return(db, doc.id, user)
 
 
@@ -3739,6 +3742,64 @@ def _register_transport_hooks() -> None:
 
 
 _register_transport_hooks()
+
+
+# ---------------------------------------------------------------------------
+# Goods turned away at delivery
+# ---------------------------------------------------------------------------
+
+async def _receipt_rejected(db: AsyncSession, user, source: dict,
+                            groups: list[dict]) -> list[dict]:
+    """Raise one return per reason for goods a requester would not accept (2026-11-06).
+
+    Registered on `indents.hooks.ON_RECEIPT_REJECTIONS` and run inside the acknowledgement's
+    own transaction. The goods have already been credited to the requester's shelf, which
+    is what lets `create_return` find them there. Each return is a DRAFT: nothing moves
+    and no approval starts until its raiser attaches the photo and submits it, exactly as
+    for any other return. A reason that is also a PHYSICAL problem (damaged, leaked, broken
+    package) is the reason the carrier was claimed against on the receipt itself.
+    """
+    from app.modules.returns.schemas import ReturnLineIn, ReturnWrite
+
+    indent_id = source.get("indent_id")
+    if indent_id:
+        # Name the indent only where a return may be raised against it (the requester's
+        # own, past approval). Otherwise the return is raised on its own, which is also
+        # valid — it must never be the thing that stops goods being acknowledged.
+        indent = await db.get(Indent, int(indent_id))
+        if (indent is None or indent.requested_by_id != getattr(user, "id", None)
+                or indent.status not in RETURNABLE_INDENT_STATUSES):
+            indent_id = None
+
+    raised: list[dict] = []
+    for group in groups:
+        note = f"Not accepted on delivery of {source.get('number')}"
+        if group["notes"]:
+            note = f"{note}: {'; '.join(group['notes'])}"
+        write = ReturnWrite(
+            reason=ReturnReason(group["reason"]),
+            reason_note=note[:500],
+            indent_id=indent_id,
+            items=[ReturnLineIn(item_id=line["item_id"],
+                                quantity=Decimal(str(line["quantity"])).quantize(Decimal("0.001")),
+                                remarks=line.get("remarks"))
+                   for line in group["lines"]],
+        )
+        doc = await create_return(db, write, user, commit=False)
+        raised.append({"id": doc["id"], "return_no": doc["return_no"],
+                       "reason": group["reason"], "quantity": group["total"]})
+    return raised
+
+
+def _register_receipt_hooks() -> None:
+    """Wire returns onto the acknowledgement, once, at import (indents may not import it)."""
+    from app.modules.indents import hooks as indent_hooks
+
+    if _receipt_rejected not in indent_hooks.ON_RECEIPT_REJECTIONS:
+        indent_hooks.ON_RECEIPT_REJECTIONS.append(_receipt_rejected)
+
+
+_register_receipt_hooks()
 
 
 # ---------------------------------------------------------------------------
