@@ -91,6 +91,7 @@ export interface Indent {
   can_return_for_correction?: boolean;
   can_edit_correction?: boolean;
   can_resubmit_correction?: boolean;
+  can_send_correction_back?: boolean;
   correction_owner?: {
     employee_id: number;
     employee_name?: string | null;

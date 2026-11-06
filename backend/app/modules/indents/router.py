@@ -19,6 +19,7 @@ from app.modules.indents.enums import (
 )
 from app.modules.indents.schemas import (
     AcknowledgeIn, AcknowledgmentRow, ActionIn, ActivityRow, IndentCreate, IndentListRow,
+    ReturnForCorrectionIn, ReturnTargetOut,
     IndentJourneyOut, IndentNotificationRow, IndentOut, IndentStatsOut, IndentUpdate,
     MonthlyCopyIn, MonthlySubmitIn, StrSourceOption,
 )
@@ -337,13 +338,35 @@ async def submit(indent_id: int, db: AsyncSession = Depends(get_db),
     return await service.submit_indent(db, indent_id, user)
 
 
+@indent_router.get("/{indent_id}/return-targets", response_model=list[ReturnTargetOut])
+async def return_targets(indent_id: int, db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission_or(
+        perms.INDENT_APPROVE,
+        (perms.INDENT_VIEW, perms.STOCK_TRANSFER_STR_APPROVE, perms.STOCK_TRANSFER_REQUEST),
+        service.anywhere_in_reach))):
+    """The earlier steps this person may send the indent back to: an approver returning
+    it, or the correction owner passing it further back. The service decides which, and
+    answers with nothing for anybody who may do neither."""
+    return await service.get_indent_return_targets(db, indent_id, user)
+
+
 @indent_router.post("/{indent_id}/return-for-correction", response_model=IndentOut)
-async def return_for_correction(indent_id: int, body: ActionIn,
+async def return_for_correction(indent_id: int, body: ReturnForCorrectionIn,
                                 db: AsyncSession = Depends(get_db),
                                 user=Depends(require_permission_or(
         perms.INDENT_APPROVE, perms.STOCK_TRANSFER_STR_APPROVE, service.str_in_reach))):
     return await service.return_indent_for_correction(
-        db, indent_id, body.comments, user,
+        db, indent_id, body.comments, user, target_sequence=body.target_sequence,
+    )
+
+
+@indent_router.post("/{indent_id}/send-correction-back", response_model=IndentOut)
+async def send_correction_back(indent_id: int, body: ReturnForCorrectionIn,
+                               db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission_or(
+        perms.INDENT_VIEW, perms.STOCK_TRANSFER_REQUEST, service.str_in_reach))):
+    return await service.send_indent_correction_back(
+        db, indent_id, body.comments, user, target_sequence=body.target_sequence,
     )
 
 

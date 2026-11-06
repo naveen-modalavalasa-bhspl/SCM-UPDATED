@@ -236,6 +236,39 @@ def is_ladder(stages: list[Stage]) -> bool:
     return any(s.position_role_id is not None for s in stages)
 
 
+async def is_hierarchy_root(db: AsyncSession, position_id: int | None) -> bool:
+    """True when the post has nobody above it in the reporting tree."""
+    if position_id is None:
+        return False
+    position = await db.get(HcmPosition, position_id)
+    return position is not None and not position.parent_position_id
+
+
+async def raiser_is_final(db: AsyncSession, stages: list[Stage],
+                          requester_position_id: int | None) -> bool:
+    """Is the raiser at the END of this approval — so there is no one left to ask?
+
+    Two ways to be at the end, and either is enough:
+      * the raiser holds a rung of the ladder and no enabled rung comes after it; or
+      * the raiser sits at the root of the reporting tree (nobody above to climb to).
+
+    Only consulted when the chain came out EMPTY. It is what separates "the raiser is
+    the top, so the document is theirs to approve" from "something is misconfigured",
+    which still goes to the independent-approver fallback.
+    """
+    if requester_position_id is None:
+        return False
+    position = await db.get(HcmPosition, requester_position_id)
+    if position is None:
+        return False
+    enabled = [s for s in stages if s.is_enabled]
+    held = [s.sequence for s in enabled if s.position_id == position.id or (
+        position.role_id is not None and s.position_role_id == position.role_id)]
+    if held and not any(s.sequence > min(held) for s in enabled):
+        return True
+    return not position.parent_position_id
+
+
 def is_custom_ladder(wf: Workflow) -> bool:
     """A hand-built ladder: its stages name posts, and nothing is climbed."""
     return (wf.code or "").startswith(f"{CUSTOM_CODE_PREFIX}-")

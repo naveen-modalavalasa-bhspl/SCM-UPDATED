@@ -695,6 +695,11 @@ async def _resolve_ladder_chain(db, wf, stages, context: dict, user,
     # the post the project nominated — and if none was nominated, to the reporting line
     # and then the admin safety net. Recorded loudly either way; never silent.
     independent_fallback = ""
+    # Rule 4: a raiser who is at the end of the chain (or the top of the hierarchy) has
+    # no one above them — the document is theirs, so it is NOT sent to a stand-in.
+    if (not chain and policy == ladder.POLICY_INDEPENDENT
+            and await ladder.raiser_is_final(db, stages, requester_position_id)):
+        return chain, independent_fallback
     if not chain and policy == ladder.POLICY_INDEPENDENT:
         chain = await ladder.fallback_chain(db, fallback_position_id, user.id)
         independent_fallback = fallback.REASON_INDEPENDENT_FALLBACK if chain else ""
@@ -783,6 +788,7 @@ async def start_resolved_chain(db, doc_type: str, doc_id: int, chain: list[dict]
     """`_start_resolved_chain`, then forward past the raiser's own steps (2026-10-26)."""
     instance = await _start_resolved_chain(db, doc_type, doc_id, chain, context, user,
                                            project_id)
+    instance = await _skip_stages_below_raiser(db, instance, context or {})
     return await _auto_advance(db, instance, context or {})
 
 
@@ -837,6 +843,81 @@ async def _start_resolved(db, doc_type: str, doc_id: int, chain: list[dict],
                           context: dict, user, project_id: int | None) -> Instance:
     return await _start_resolved_chain(db, doc_type, doc_id, chain, context, user,
                                        project_id)
+
+
+SKIPPED_BELOW_RAISER_REASON = ("the person who raised this document holds a later "
+                               "step in this chain")
+
+
+def _skipped_row_fields(link: dict, raiser_name: str | None,
+                        raiser_role: str | None) -> dict:
+    """What a SKIPPED trail row says: WHO was skipped, and who skipped them.
+
+    The timeline draws `actor_name` beside the SKIPPED pill, so that is the person who
+    was passed over and their role ("MURALI KRISHNA (MANAGER-SCM)"); the comment opens
+    with who skipped them ("Skipped by Rajendra Pinniti (CPO) — ..."). The row itself
+    is still written by the system (no actor id) — see `_skip_stages_below_raiser`.
+    """
+    role = link.get("position_name") or link.get("role_name")
+    names = ", ".join(n for n in (link.get("approver_names") or []) if n)
+    skipped = f"{names} ({role})" if names and role else (names or role or "System")
+    by = (f"{raiser_name} ({raiser_role})" if raiser_name and raiser_role
+          else raiser_name or "the raiser")
+    return {
+        "actor_name": skipped[:200],
+        "actor_position": "Automatic routing",
+        "comments": f"Skipped by {by} — {SKIPPED_BELOW_RAISER_REASON}",
+    }
+
+
+async def _skip_stages_below_raiser(db, instance: Instance | None,
+                                    context: dict) -> Instance | None:
+    """Open the document at the raiser's own step instead of at step 1.
+
+    A document raised by someone who sits at a LATER step of its chain does not wait on
+    the steps below them: those are skipped (with a SKIPPED row on the trail) and the
+    document opens at the raiser's own step, which `_auto_advance` then signs for them.
+
+    Only runs on a freshly submitted instance (still on its first step, nothing acted
+    on) and only moves FORWARD. If the raiser is an approver of no step, or of step 1
+    itself, nothing changes. If they hold several steps the FIRST one wins; any steps
+    after it are handled by `_auto_advance` exactly as before.
+    """
+    if (instance is None
+            or instance.status != InstanceStatus.IN_PROGRESS.value
+            or not instance.started_by_id):
+        return instance
+    links = _chain_links(instance)
+    first_sequence = links[0]["sequence"] if links else None
+    if first_sequence is None or instance.current_sequence != first_sequence:
+        return instance
+    target = next((link for link in links
+                   if instance.started_by_id in (link.get("approver_ids") or [])), None)
+    if target is None or target["sequence"] <= first_sequence:
+        return instance
+
+    skipped = [link for link in links if link["sequence"] < target["sequence"]]
+    raiser_role = context.get("requester_position_name")
+    if not raiser_role:
+        position_ids = await _requester_position_ids(db, instance, context)
+        raiser_role = await _position_name(db, position_ids[0] if position_ids else None)
+    await _clear_pending(db, instance.id)
+    for link in skipped:
+        # Recorded as the SYSTEM, never as the raiser. The indent ledger treats every
+        # row a person authored (bar SUBMITTED) as a decision of theirs and stops that
+        # person's reading of the trail there, so a skip written in the raiser's name
+        # would hide everything that happens after it from their own document. Same shape
+        # as the FALLBACK rows `fallback.record` writes.
+        db.add(Action(
+            instance_id=instance.id, stage_sequence=link["sequence"],
+            stage_name=link["role_name"], actor_id=None,
+            action=ApprovalAction.SKIPPED.value,
+            **_skipped_row_fields(link, instance.started_by_name, raiser_role),
+        ))
+    await db.flush()
+    await _open_ladder_link(db, instance, target, context)
+    await db.flush()
+    return instance
 
 
 #: The trail's words for a step approved because its approver raised the document.
@@ -985,6 +1066,114 @@ async def _act_ladder(db, instance: Instance, action: str, user, comments: str,
     return instance
 
 
+# ---------------- sending a document back to an EARLIER step ----------------
+#
+# `return_for_correction` used to hand the correction to one fixed person: the approver
+# of the rung just below. These helpers let the approver choose ANY earlier step — the
+# requester, or any rung somebody has actually signed. Nothing here changes who may
+# press the button; it only decides who the correction goes to and where the document
+# resumes.
+
+async def _chain_epoch_floor(db: AsyncSession, instance: Instance) -> int:
+    """Id of the last MOVED row. Approvals written before it belong to a chain that no
+    longer governs the document, so they can never be a place to send it back to."""
+    return (await db.execute(
+        select(func.max(Action.id)).where(
+            Action.instance_id == instance.id,
+            Action.action == ApprovalAction.MOVED.value,
+        )
+    )).scalar() or 0
+
+
+async def _return_targets(db: AsyncSession, instance: Instance,
+                          context: dict | None, below: int | None = None) -> list[dict]:
+    """Earlier steps the document can go back to, lowest first.
+
+    Always the requester (sequence 0), then every rung below the current one that a
+    person signed. A rung nobody signed — one the raiser's own position let the document
+    skip — is not offered, and neither is a rung the raiser signed for themselves: that
+    one is the requester again.
+    """
+    context = context or {}
+    floor = await _chain_epoch_floor(db, instance)
+    current = int(below) if below is not None else int(instance.current_sequence or 0)
+    targets: list[dict] = []
+    if instance.started_by_id is not None:
+        requester_position_id = context.get("requester_position_id")
+        targets.append({
+            "sequence": 0,
+            "stage_name": "Requester",
+            "is_requester": True,
+            "owner_employee_id": int(instance.started_by_id),
+            "owner_name": instance.started_by_name,
+            "owner_position_id": (
+                int(requester_position_id) if requester_position_id else None),
+        })
+    for link in _chain_links(instance):
+        sequence = int(link.get("sequence", 0))
+        if sequence < 1 or sequence >= current:
+            continue
+        action = await _latest_approved_action(db, instance, sequence)
+        if action is None or action.actor_id is None or action.id <= floor:
+            continue
+        if instance.started_by_id is not None and action.actor_id == instance.started_by_id:
+            continue
+        targets.append({
+            "sequence": sequence,
+            "stage_name": link.get("role_name"),
+            "is_requester": False,
+            "owner_employee_id": int(action.actor_id),
+            "owner_name": action.actor_name,
+            "owner_position_id": _reliable_actor_position(link, action.actor_id),
+        })
+    targets.sort(key=lambda target: target["sequence"])
+    return targets
+
+
+async def _resume_sequence_after(db: AsyncSession, instance: Instance,
+                                 target_sequence: int) -> int:
+    """The rung that opens again once the correction owner resubmits.
+
+    The first rung after the target that was really in play. A rung the raiser's own
+    position let the document skip was never asked, so it is not asked now either.
+    """
+    floor = await _chain_epoch_floor(db, instance)
+    skipped = set((await db.execute(
+        select(Action.stage_sequence).where(
+            Action.instance_id == instance.id,
+            Action.action == ApprovalAction.SKIPPED.value,
+            Action.id > floor,
+        )
+    )).scalars().all())
+    for link in sorted(_chain_links(instance), key=lambda row: int(row["sequence"])):
+        sequence = int(link["sequence"])
+        if sequence > target_sequence and sequence not in skipped:
+            return sequence
+    return int(instance.current_sequence)
+
+
+async def get_return_targets(db, doc_type: str, doc_id: int,
+                             context: dict | None = None) -> list[dict]:
+    """What a 'Send back to' picker offers: earlier steps, lowest first, with the one
+    just below the current step marked as the default (what a plain return always did).
+
+    Empty when the document is not in a ladder approval or is already returned."""
+    instance = await _load_instance(db, doc_type, doc_id)
+    if (instance is None or instance.status != InstanceStatus.IN_PROGRESS.value
+            or not instance.resolved_chain or _correction_from_instance(instance)):
+        return []
+    targets = await _return_targets(db, instance, context)
+    default_sequence = targets[-1]["sequence"] if targets else None
+    return [{
+        "sequence": target["sequence"],
+        "stage_name": target["stage_name"],
+        "owner_name": target["owner_name"],
+        "owner_position_id": target["owner_position_id"],
+        "is_requester": target["is_requester"],
+        "is_default": target["sequence"] == default_sequence,
+    } for target in targets]
+
+
 # ---------------- return for correction (ladder only) ----------------
 #
 # Not `act()`: a return for correction is a pause, not a decision that ends the
@@ -994,9 +1183,15 @@ async def _act_ladder(db, instance: Instance, action: str, user, comments: str,
 
 async def return_for_correction(
     db, doc_type: str, doc_id: int, user, comments: str = "",
-    context: dict | None = None,
+    context: dict | None = None, target_sequence: int | None = None,
 ) -> Instance:
-    """Pause a ladder approval on the same instance and hand correction to one owner."""
+    """Pause a ladder approval on the same instance and hand correction to one owner.
+
+    Without `target_sequence` the correction goes back one rung, as it always has. With
+    one (0 = the requester, otherwise a rung below the current one that somebody signed)
+    it goes to whoever signed that step, and the document resumes on the next step that
+    was in play — so every approver after the target signs the corrected version again.
+    """
     context = context or {}
     instance = await _load_active_instance_for_update(db, doc_type, doc_id)
     if not instance.resolved_chain:
@@ -1031,9 +1226,25 @@ async def return_for_correction(
             and active_position_id not in allowed_positions):
         raise PermissionError_("Switch to the approval position before acting")
 
-    # The correction goes back one rung, not to the raiser every time: at the first
-    # rung that is the requester, above it the person who approved just below.
-    if int(instance.current_sequence or 0) <= 1:
+    # An explicit target (the approver chose a step): the owner is whoever signed it, or
+    # the requester, and the document resumes after it. Otherwise the correction goes
+    # back one rung, not to the raiser every time: at the first rung that is the
+    # requester, above it the person who approved just below.
+    resume_sequence = int(instance.current_sequence)
+    target_info: dict | None = None
+    if target_sequence is not None:
+        available = await _return_targets(db, instance, context)
+        target_info = next(
+            (row for row in available if row["sequence"] == int(target_sequence)), None)
+        if target_info is None:
+            raise ValidationError(
+                "That step is not available to send this document back to")
+        correction_owner_employee_id = target_info["owner_employee_id"]
+        correction_owner_position_id = target_info["owner_position_id"]
+        correction_owner_name = target_info["owner_name"]
+        resume_sequence = await _resume_sequence_after(
+            db, instance, int(target_sequence))
+    elif int(instance.current_sequence or 0) <= 1:
         correction_owner_employee_id = instance.started_by_id
         correction_owner_position_id = context.get("requester_position_id")
         correction_owner_name = instance.started_by_name
@@ -1082,15 +1293,160 @@ async def return_for_correction(
         "correction_owner_name": correction_owner_name,
         "returned_from_sequence": int(instance.current_sequence),
         "returned_from_stage": link.get("role_name"),
-        "resubmit_target_sequence": int(instance.current_sequence),
-        "resubmit_target_stage": link.get("role_name"),
+        "resubmit_target_sequence": resume_sequence,
+        "resubmit_target_stage": (
+            _link_by_sequence(instance, resume_sequence) or link).get("role_name"),
         "returned_by_employee_id": user.id,
         "returned_by_position_id": active_position_id,
         "returned_by_name": user.full_name,
         "return_action_id": int(action_row.id),
         "returned_at": returned_at,
     }
-    _with_correction(instance, int(instance.current_sequence), correction)
+    if target_info is not None:
+        correction["sent_back_to_sequence"] = target_info["sequence"]
+        correction["sent_back_to_stage"] = target_info["stage_name"]
+    # The correction lives on the rung the document resumes at, because that is the rung
+    # `resubmit_correction` clears it from. Same convention as `pass_correction_down`.
+    _with_correction(instance, resume_sequence, correction)
+    if resume_sequence != int(instance.current_sequence):
+        resume_link = _link_by_sequence(instance, resume_sequence) or {}
+        instance.current_sequence = resume_sequence
+        instance.current_stage_name = resume_link.get("role_name")
+    await _clear_pending(db, instance.id)
+    await db.flush()
+    return instance
+
+
+def _correction_owner_sequence(correction: dict) -> int:
+    """The step whose signer owns the correction right now (0 = the requester).
+
+    A correction sent to a chosen step records it. Older ones — a plain return, or one
+    passed down a rung — belong to whoever signed the rung under the one that returned
+    it."""
+    if correction.get("sent_back_to_sequence") is not None:
+        return int(correction["sent_back_to_sequence"])
+    return max(int(correction.get("returned_from_sequence") or 1) - 1, 0)
+
+
+def _owns_correction(correction: dict, user) -> bool:
+    if int(correction.get("correction_owner_employee_id") or 0) != int(user.id):
+        return False
+    position_id = correction.get("correction_owner_position_id")
+    return position_id is None or getattr(user, "active_position_id", None) == int(position_id)
+
+
+async def get_correction_send_back_targets(
+    db, doc_type: str, doc_id: int, user, context: dict | None = None,
+) -> list[dict]:
+    """Where the CURRENT correction owner may send a returned document next: the
+    requester, or any earlier step somebody signed, lowest first, the nearest marked as
+    the default. Empty for anybody who is not the owner, and for an owner who already
+    is the requester — there is nobody earlier."""
+    instance = await _load_instance(db, doc_type, doc_id)
+    if instance is None or instance.status != InstanceStatus.IN_PROGRESS.value:
+        return []
+    correction = _correction_from_instance(instance)
+    if not correction or not _owns_correction(correction, user):
+        return []
+    owner_sequence = _correction_owner_sequence(correction)
+    if owner_sequence < 1:
+        return []
+    targets = await _return_targets(db, instance, context, below=owner_sequence)
+    default_sequence = targets[-1]["sequence"] if targets else None
+    return [{
+        "sequence": target["sequence"],
+        "stage_name": target["stage_name"],
+        "owner_name": target["owner_name"],
+        "owner_position_id": target["owner_position_id"],
+        "is_requester": target["is_requester"],
+        "is_default": target["sequence"] == default_sequence,
+    } for target in targets]
+
+
+async def send_correction_back(
+    db, doc_type: str, doc_id: int, user, comments: str = "",
+    context: dict | None = None, target_sequence: int | None = None,
+) -> Instance:
+    """The correction owner passes a returned document further back — to the requester,
+    or to any earlier step somebody signed — instead of correcting it themselves.
+
+    Ownership moves to whoever signed that step, and the document will resume at the
+    next step in play once they resubmit, so every approver from there up (the person
+    sending it back included) signs the corrected version again. Repeating this walks
+    a document all the way back to its requester."""
+    context = context or {}
+    instance = await _load_active_instance_for_update(db, doc_type, doc_id)
+    correction = _correction_from_instance(instance)
+    if not correction:
+        raise ValidationError("This document is not returned for correction")
+    if int(correction.get("correction_owner_employee_id") or 0) != int(user.id):
+        raise PermissionError_("Only the correction owner can send this document back")
+    owner_position_id = correction.get("correction_owner_position_id")
+    if (owner_position_id is not None
+            and getattr(user, "active_position_id", None) != int(owner_position_id)):
+        raise PermissionError_(
+            "Switch to the correction owner position before sending it back")
+
+    owner_sequence = _correction_owner_sequence(correction)
+    if owner_sequence < 1:
+        raise ValidationError(
+            "This document is already with its requester; there is nobody earlier to "
+            "send it back to")
+    owner_link = _link_by_sequence(instance, owner_sequence)
+    if owner_link is None:
+        raise ValidationError("Approval stage not found")
+
+    targets = await _return_targets(db, instance, context, below=owner_sequence)
+    if target_sequence is None:
+        target_info = targets[-1] if targets else None
+    else:
+        target_info = next(
+            (row for row in targets if row["sequence"] == int(target_sequence)), None)
+    if target_info is None:
+        raise ValidationError("That step is not available to send this document back to")
+    resume_sequence = await _resume_sequence_after(
+        db, instance, int(target_info["sequence"]))
+    resume_link = _link_by_sequence(instance, resume_sequence) or owner_link
+
+    active_position_id = getattr(user, "active_position_id", None)
+    active_position = await hcm_service.get_position(
+        db, active_position_id) if active_position_id else None
+    action_row = Action(
+        instance_id=instance.id,
+        stage_sequence=owner_sequence,
+        stage_name=owner_link["role_name"],
+        actor_id=user.id,
+        actor_name=user.full_name,
+        actor_position=active_position.name if active_position else None,
+        action=ApprovalAction.RETURNED.value,
+        comments=comments,
+    )
+    db.add(action_row)
+    await db.flush()
+
+    # The old correction lived on the rung it would have resumed at; clear it there and
+    # anchor the new one where the document resumes now.
+    _with_correction(instance, int(correction["resubmit_target_sequence"]), None)
+    _with_correction(instance, resume_sequence, {
+        "correction_owner_employee_id": int(target_info["owner_employee_id"]),
+        "correction_owner_position_id": (
+            int(target_info["owner_position_id"])
+            if target_info["owner_position_id"] is not None else None),
+        "correction_owner_name": target_info["owner_name"],
+        "returned_from_sequence": owner_sequence,
+        "returned_from_stage": owner_link.get("role_name"),
+        "resubmit_target_sequence": resume_sequence,
+        "resubmit_target_stage": resume_link.get("role_name"),
+        "sent_back_to_sequence": int(target_info["sequence"]),
+        "sent_back_to_stage": target_info["stage_name"],
+        "returned_by_employee_id": user.id,
+        "returned_by_position_id": active_position_id,
+        "returned_by_name": user.full_name,
+        "return_action_id": int(action_row.id),
+        "returned_at": action_row.acted_at.isoformat() if action_row.acted_at else None,
+    })
+    instance.current_sequence = resume_sequence
+    instance.current_stage_name = resume_link.get("role_name")
     await _clear_pending(db, instance.id)
     await db.flush()
     return instance
@@ -1234,7 +1590,9 @@ async def resubmit_correction(
     await _clear_pending(db, instance.id)
     await _open_ladder_link(db, instance, target, context)
     await db.flush()
-    return instance
+    # A step sent back to the requester can reopen on a rung the requester themselves
+    # holds; that rung is signed for them, exactly as at submit (`_auto_advance`).
+    return await _auto_advance(db, instance, context)
 
 
 # ---------------- public API (the only five) ----------------
@@ -1243,6 +1601,7 @@ async def start(db, doc_type: str, doc_id: int, context: dict, user) -> Instance
     """Open the approval, then move forward past every step the raiser holds
     (2026-10-26) — see `_auto_advance`."""
     instance = await _start(db, doc_type, doc_id, context, user)
+    instance = await _skip_stages_below_raiser(db, instance, context or {})
     return await _auto_advance(db, instance, context or {})
 
 
@@ -1319,6 +1678,25 @@ async def _start(db, doc_type: str, doc_id: int, context: dict, user) -> Instanc
         await fallback.record(db, instance, fallback.REASON_NO_WORKFLOW, [],
                               wf.name)
     await db.flush()
+    # Rule 4 for plain reporting-manager workflows: a raiser at the root of the hierarchy
+    # has no manager to ask, so the document is approved by them rather than handed to
+    # the administrator safety net.
+    if (applicable
+            and all(s.approver_type == ApproverType.REPORTING_MANAGER.value
+                    for s in applicable)
+            and await ladder.is_hierarchy_root(db, requester_position_id)):
+        db.add(Action(
+            instance_id=instance.id, stage_sequence=0,
+            stage_name=ladder.DOC_TYPE_LABEL.get(doc_type, doc_type),
+            actor_id=user.id, actor_name=user.full_name,
+            actor_position=context.get("requester_position_name"),
+            action=ApprovalAction.APPROVED.value, comments=SELF_APPROVED_COMMENT,
+        ))
+        instance.status = InstanceStatus.APPROVED.value
+        instance.completed_at = utcnow()
+        instance.current_stage_name = None
+        await db.flush()
+        return instance
     if applicable:
         await _materialize_pending(db, instance, applicable[0], context)
     return instance

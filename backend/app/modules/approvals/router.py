@@ -188,7 +188,8 @@ async def reject_indent(indent_id: int, body: IndentRejectionIn,
 async def return_indent(indent_id: int, body: IndentReturnIn,
                         db: AsyncSession = Depends(get_db),
                         user=Depends(require_permission(perms.INDENT_APPROVE))):
-    return await service.return_indent(db, indent_id, body.comments, user)
+    return await service.return_indent(
+        db, indent_id, body.comments, user, target_sequence=body.target_sequence)
 
 
 @router.get("/indents/{indent_id}/availability")

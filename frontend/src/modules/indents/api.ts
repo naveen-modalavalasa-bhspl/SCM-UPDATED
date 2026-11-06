@@ -4,6 +4,7 @@ import { useQueryClient, type Query } from "@tanstack/react-query";
 import { useAuth } from "@/shared/auth/AuthContext";
 import type { CompanyProfile } from "./companyProfile";
 import type { Paginated, Option } from "@/shared/types";
+import type { ReturnTarget } from "@/modules/approvals/types";
 import type {
   Acknowledgement, AcknowledgeLine, ActivityRow, DirectIssueAck, StockTransferAck,
   BomChoice, BomChoiceItem, FulfilmentStep, Indent, IndentCreate, IndentListRow, IndentJourney,
@@ -258,11 +259,24 @@ export const indentApi = {
     api.put<Indent>(`/api/indents/${id}`, data).then((r) => r.data),
   delete: (id: number) => api.delete<void>(`/api/indents/${id}`).then((r) => r.data),
   submit: (id: number) => api.post<Indent>(`/api/indents/${id}/submit`).then((r) => r.data),
-  returnForCorrection: (id: number, comments: string) =>
-    api.post<Indent>(`/api/indents/${id}/return-for-correction`, { comments })
+  returnForCorrection: (id: number, comments: string, targetSequence?: number) =>
+    api.post<Indent>(`/api/indents/${id}/return-for-correction`, {
+      comments,
+      ...(targetSequence === undefined ? {} : { target_sequence: targetSequence }),
+    })
       .then((r) => r.data),
   resubmitCorrection: (id: number) =>
     api.post<Indent>(`/api/indents/${id}/resubmit-correction`).then((r) => r.data),
+  /** Earlier steps this person may send the indent back to: an approver returning it,
+   *  or the correction owner passing it further back. */
+  returnTargets: (id: number) =>
+    api.get<ReturnTarget[]>(`/api/indents/${id}/return-targets`).then((r) => r.data),
+  /** The correction owner sends a returned indent further back, down to the requester. */
+  sendCorrectionBack: (id: number, comments: string, targetSequence?: number) =>
+    api.post<Indent>(`/api/indents/${id}/send-correction-back`, {
+      comments,
+      ...(targetSequence === undefined ? {} : { target_sequence: targetSequence }),
+    }).then((r) => r.data),
   approve: (id: number, comments: string) =>
     api.post<Indent>(`/api/indents/${id}/approve`, { comments }).then((r) => r.data),
   reject: (id: number, comments: string) =>

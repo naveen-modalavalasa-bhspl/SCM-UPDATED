@@ -107,6 +107,9 @@ class ApprovalAction(str, Enum):
     # ladder (or a different version of the same one) and the chain was re-resolved.
     # Not a decision either — see workflow.engine.move_to_workflow().
     MOVED = "MOVED"
+    # Written for each step a document did NOT wait on because its raiser holds a later
+    # step of the chain (workflow.engine._skip_stages_below_raiser). Not a decision.
+    SKIPPED = "SKIPPED"
 
 
 class StockDirection(str, Enum):

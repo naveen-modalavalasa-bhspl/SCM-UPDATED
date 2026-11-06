@@ -12,6 +12,7 @@ import { useAuth } from "@/shared/auth/AuthContext";
 import { fmtDate } from "@/shared/datetime";
 import { QuantityInput } from "@/shared/components/QuantityInput";
 import { approvalsApi } from "../api";
+import { ReturnTargetSelect, targetLabel } from "@/modules/indents/components/ReturnTargetSelect";
 import { IssueFromStockPanel } from "../components/IssueFromStockPanel";
 import { StrSourcePanel } from "../components/StrSourcePanel";
 import { HistoryTimeline } from "../components/HistoryTimeline";
@@ -267,6 +268,8 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
   const [reason, setReason] = useState("");
   const [checks, setChecks] = useState([false, false, false]);
   const [confirming, setConfirming] = useState<Decision>(null);
+  // Which earlier step a return goes to. Null means "the default": the step just below.
+  const [targetSequence, setTargetSequence] = useState<number | null>(null);
   // Closed to start: opening it is what fetches the approver's own stock, so the
   // review screen costs one request until they ask to serve.
   const [serving, setServing] = useState(false);
@@ -276,6 +279,16 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
     queryFn: () => approvalsApi.getIndent(indentId),
     enabled: Number.isFinite(indentId) && indentId > 0,
   });
+  // Fetched only once the approver opens the Return dialog.
+  const returnTargets = useQuery({
+    queryKey: ["approvals", "return-targets", indentId],
+    queryFn: () => approvalsApi.returnTargets(indentId),
+    enabled: confirming === "return" && Number.isFinite(indentId) && indentId > 0,
+  });
+  const targetOptions = returnTargets.data ?? [];
+  const defaultTarget = targetOptions.find((target) => target.is_default)?.sequence ?? null;
+  const chosenTarget = targetSequence ?? defaultTarget;
+  const chosenOption = targetOptions.find((target) => target.sequence === chosenTarget);
   const availability = useQuery({
     queryKey: ["approvals", "availability", indentId],
     queryFn: () => approvalsApi.indentAvailability(indentId),
@@ -395,7 +408,8 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
     onSuccess: finish("reject"),
   });
   const returnForCorrection = useMutation({
-    mutationFn: () => approvalsApi.returnIndent(indentId, reason.trim()),
+    mutationFn: () => approvalsApi.returnIndent(
+      indentId, reason.trim(), chosenTarget === null ? undefined : chosenTarget),
     onSuccess: finish("return"),
   });
   const busy = approve.isPending || reject.isPending || returnForCorrection.isPending;
@@ -407,6 +421,7 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
     // Forwarding an STR whose source is not yours says why, for the next rung.
     if (confirming === "approve" && !allZero && (!decision.canApprove || (decision.needsReason && !comments.trim()))) return;
     if (confirming === "return" && !canReturnForCorrection) return;
+    if (confirming === "return" && returnTargets.isLoading) return;
     if (busy) return;
     if (confirming === "approve") approve.mutate();
     if (confirming === "reject") reject.mutate();
@@ -876,7 +891,7 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
         </p>
         <div className="flex flex-wrap items-center gap-2">
           {canReturnForCorrection && (
-            <Button variant="ghost" disabled={busy} onClick={() => { setReason(""); setConfirming("return"); }}>
+            <Button variant="ghost" disabled={busy} onClick={() => { setReason(""); setTargetSequence(null); setConfirming("return"); }}>
               <RotateCcw className="h-4 w-4" /> Return for correction
             </Button>
           )}
@@ -914,15 +929,27 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
               : decision.message)
           : confirming === "reject"
             ? "The request will stop and the requester will see your reason."
-            : "Your correction instructions will be recorded in approval history."}
+            : chosenOption
+              ? `It goes back to ${targetLabel(chosenOption)}, `
+                + "who corrects it and resubmits. Every approval after that step is asked again. "
+                + "Your instructions are recorded in approval history."
+              : "Your correction instructions will be recorded in approval history."}
       confirmLabel={allZero && confirming === "approve" ? "Reject Request" : confirming === "approve" ? decision.label : confirming === "reject" ? "Reject" : "Return for correction"}
       danger={confirming === "reject" || (allZero && confirming === "approve")}
-      busy={busy || ((confirming === "reject" || confirming === "return") && !reason.trim())}
+      busy={busy || ((confirming === "reject" || confirming === "return") && !reason.trim())
+        || (confirming === "return" && returnTargets.isLoading)}
       confirmDisabled={confirming === "approve" && decision.needsReason && !allZero && !comments.trim()}
       error={actionError}
       onClose={() => !busy && setConfirming(null)}
       onConfirm={confirm}
     >
+      {confirming === "return" && targetOptions.length > 0 && (
+        <ReturnTargetSelect
+          targets={targetOptions}
+          value={chosenTarget}
+          onChange={setTargetSequence}
+        />
+      )}
       {confirming === "approve" && decision.needsReason && !allZero && (
         <label className="block text-sm font-semibold text-ink">
           Why are you forwarding it?

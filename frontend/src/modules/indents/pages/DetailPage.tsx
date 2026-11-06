@@ -3,13 +3,14 @@ import { CombinationTag } from "@/shared/combination";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowLeft, ChevronRight, FileText, Loader2, Pencil, RefreshCw, Repeat2, Send, Trash2,
+  ArrowLeft, ChevronRight, FileText, Loader2, Pencil, RefreshCw, Repeat2, Send, Trash2, Undo2,
 } from "lucide-react";
 import {
   CardBody, Skeleton,
   Table, TableBody, TableCell, TableColumn, TableHeader, TableRow,
 } from "@heroui/react";
-import { PageHeader, Button, Can, Card, ErrorBanner, useToast } from "@/shared/components";
+import { PageHeader, Button, Can, Card, ConfirmModal, ErrorBanner, useToast } from "@/shared/components";
+import { ReturnTargetSelect, targetLabel } from "../components/ReturnTargetSelect";
 import { alerts } from "@/modules/alerts";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { FlowStepper } from "../components/FlowStepper";
@@ -189,6 +190,33 @@ export function IndentDetailPage() {
     },
     onError: onErr,
   });
+  // The correction owner passing a returned indent further back, down to the requester.
+  const [sendBackOpen, setSendBackOpen] = useState(false);
+  const [sendBackReason, setSendBackReason] = useState("");
+  const [sendBackTarget, setSendBackTarget] = useState<number | null>(null);
+  const sendBackTargets = useQuery({
+    queryKey: ["indents", "return-targets", indentId],
+    queryFn: () => indentApi.returnTargets(indentId),
+    enabled: sendBackOpen && Number.isFinite(indentId) && indentId > 0,
+  });
+  const sendBackOptions = sendBackTargets.data ?? [];
+  const sendBackDefault = sendBackOptions.find((target) => target.is_default)?.sequence ?? null;
+  const sendBackChosen = sendBackTarget ?? sendBackDefault;
+  const sendBackOption = sendBackOptions.find((target) => target.sequence === sendBackChosen);
+  const sendCorrectionBack = useMutation({
+    mutationFn: () => indentApi.sendCorrectionBack(
+      indentId, sendBackReason.trim(), sendBackChosen === null ? undefined : sendBackChosen),
+    onSuccess: (updated) => {
+      setSendBackOpen(false);
+      refreshAfterAction(updated, true);
+      qc.invalidateQueries({ queryKey: ["approvals"], refetchType: "all" });
+      toast.success({
+        title: "Sent further back",
+        message: `${updated.indent_no} has gone back for correction.`,
+      });
+    },
+    onError: onErr,
+  });
   const resubmitCorrection = useMutation({
     mutationFn: () => indentApi.resubmitCorrection(indentId),
     onSuccess: (updated) => {
@@ -260,7 +288,8 @@ export function IndentDetailPage() {
     && indent.can_resubmit_correction;
   // Approve/Reject live in the Approvals module only — this page is read-only for approvers.
   const showActions = !decisionView && !isReturnedForCorrection && indent.can_submit;
-  const actionPending = submit.isPending || deleteDraft.isPending || resubmitCorrection.isPending;
+  const actionPending = submit.isPending || deleteDraft.isPending || resubmitCorrection.isPending
+    || sendCorrectionBack.isPending;
   const delivery = splitDeliveryOffice(indent.office_name, indent.vehicle_number);
   const officeSac = nonEmptyText(indent.office_sac)
     ?? (indent.office_id === me?.active_position?.office_id
@@ -519,6 +548,21 @@ export function IndentDetailPage() {
 
       {showCorrectionActions && (
         <div className="fixed inset-x-0 bottom-0 z-10 flex gap-3 border-t border-line bg-content1 p-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] md:static md:mt-6 md:justify-end md:border-0 md:bg-transparent md:p-0">
+          {indent.can_send_correction_back && (
+            <Button
+              variant="ghost"
+              className="flex-1 md:flex-none"
+              disabled={actionPending}
+              onClick={() => {
+                setError(null);
+                setSendBackReason("");
+                setSendBackTarget(null);
+                setSendBackOpen(true);
+              }}
+            >
+              <Undo2 className="h-4 w-4" /> Send further back
+            </Button>
+          )}
           {indent.can_resubmit_correction && (
             <Button
               className="flex-1 md:flex-none"
@@ -535,6 +579,40 @@ export function IndentDetailPage() {
           )}
         </div>
       )}
+
+      <ConfirmModal
+        isOpen={sendBackOpen}
+        title="Send further back?"
+        message={sendBackOption
+          ? `It goes back to ${targetLabel(sendBackOption)}, who corrects it and resubmits. `
+            + "Every approval after that step is asked again, yours included."
+          : "Say what must be corrected. It is recorded in approval history."}
+        confirmLabel="Send further back"
+        busy={sendCorrectionBack.isPending || sendBackTargets.isLoading || !sendBackReason.trim()}
+        error={sendCorrectionBack.error}
+        onClose={() => !sendCorrectionBack.isPending && setSendBackOpen(false)}
+        onConfirm={() => {
+          if (sendCorrectionBack.isPending || sendBackTargets.isLoading || !sendBackReason.trim()) return;
+          sendCorrectionBack.mutate();
+        }}
+      >
+        <ReturnTargetSelect
+          targets={sendBackOptions}
+          value={sendBackChosen}
+          onChange={setSendBackTarget}
+        />
+        <label className="block text-sm font-semibold text-ink">
+          What must be corrected?
+          <textarea
+            autoFocus
+            value={sendBackReason}
+            onChange={(event) => setSendBackReason(event.target.value)}
+            className="mt-2 min-h-24 w-full rounded-xl border border-line bg-content1 p-3 text-sm font-normal text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/25"
+            placeholder="Required"
+          />
+          {!sendBackReason.trim() && <p className="mt-1 text-xs font-normal text-danger">A reason is required.</p>}
+        </label>
+      </ConfirmModal>
 
     </>
   );
