@@ -1144,6 +1144,13 @@ async def _attach_capabilities(db: AsyncSession, indent: Indent, user) -> Indent
         indent.status == IndentStatus.RETURNED_FOR_CORRECTION.value
         and is_correction_owner
     )
+    # An owner who is not already the requester can pass it further back.
+    indent.can_send_correction_back = bool(
+        indent.status == IndentStatus.RETURNED_FOR_CORRECTION.value
+        and is_correction_owner
+        and await engine.get_correction_send_back_targets(
+            db, DocType.INDENT.value, indent.id, user, _workflow_context_for_indent(indent))
+    )
     indent.correction_owner = _correction_owner_payload(correction_state)
     indent.returned_from_stage = (
         correction_state or {}
@@ -2234,6 +2241,11 @@ async def get_indent_return_targets(
     """The steps this approver may send the indent back to (empty when they may not
     return it at all). The one just below the current step is marked as the default."""
     indent = await get_indent(db, indent_id, user)
+    if indent.status == IndentStatus.RETURNED_FOR_CORRECTION.value:
+        # Already returned: the only person who can move it is the correction owner, and
+        # what they may pick are the steps earlier than their own.
+        return await engine.get_correction_send_back_targets(
+            db, DocType.INDENT.value, indent.id, user, _workflow_context_for_indent(indent))
     if not await can_return_indent_for_correction(db, indent, user):
         return []
     return await engine.get_return_targets(
@@ -2309,6 +2321,42 @@ async def resubmit_indent_correction(
         action=AuditAction.UPDATE, actor=user,
         before={"status": before_status}, after={"status": indent.status},
         summary="Resubmitted indent correction",
+    )
+    await db.commit()
+    await db.refresh(indent)
+    return await _attach_capabilities(db, indent, user)
+
+
+async def send_indent_correction_back(
+    db: AsyncSession, indent_id: int, comments: str, user,
+    target_sequence: int | None = None,
+) -> Indent:
+    """The correction owner sends a returned indent further back, to the requester or
+    any earlier signer, rather than correcting it themselves."""
+    indent = await get_indent(db, indent_id, user)
+    if indent.status != IndentStatus.RETURNED_FOR_CORRECTION.value:
+        raise ValidationError(f"Indent is not returned for correction (status {indent.status})")
+    comments = (comments or "").strip()
+    if not comments:
+        raise ValidationError("Say what must be corrected before sending it back")
+
+    before_status = indent.status
+    await engine.send_correction_back(
+        db,
+        DocType.INDENT.value,
+        indent.id,
+        user,
+        comments,
+        context=_workflow_context_for_indent(indent),
+        target_sequence=target_sequence,
+    )
+    indent.current_approver_name = None
+    await notify_indent_followers(db, indent, indent.status)
+    await write_audit(
+        db, entity="ind_indents", entity_id=indent.id, entity_no=indent.indent_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": before_status}, after={"status": indent.status},
+        summary="Sent indent correction further back",
     )
     await db.commit()
     await db.refresh(indent)

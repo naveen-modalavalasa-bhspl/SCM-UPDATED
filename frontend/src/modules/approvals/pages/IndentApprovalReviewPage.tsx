@@ -12,6 +12,7 @@ import { useAuth } from "@/shared/auth/AuthContext";
 import { fmtDate } from "@/shared/datetime";
 import { QuantityInput } from "@/shared/components/QuantityInput";
 import { approvalsApi } from "../api";
+import { ReturnTargetSelect, targetLabel } from "@/modules/indents/components/ReturnTargetSelect";
 import { IssueFromStockPanel } from "../components/IssueFromStockPanel";
 import { HistoryTimeline } from "../components/HistoryTimeline";
 import {
@@ -851,8 +852,7 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
           : confirming === "reject"
             ? "The request will stop and the requester will see your reason."
             : chosenOption
-              ? `It goes back to ${chosenOption.owner_name ?? chosenOption.stage_name}`
-                + `${chosenOption.is_requester ? " (the requester)" : ` (${chosenOption.stage_name})`}, `
+              ? `It goes back to ${targetLabel(chosenOption)}, `
                 + "who corrects it and resubmits. Every approval after that step is asked again. "
                 + "Your instructions are recorded in approval history."
               : "Your correction instructions will be recorded in approval history."}
@@ -864,42 +864,12 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
       onClose={() => !busy && setConfirming(null)}
       onConfirm={confirm}
     >
-      {confirming === "return" && targetOptions.length > 1 && (
-        <fieldset className="mb-4">
-          <legend className="text-sm font-semibold text-ink">Send back to</legend>
-          <div className="mt-2 space-y-2" role="radiogroup" aria-label="Send back to">
-            {/* Nearest step first: it is the default, and the one most returns want. */}
-            {[...targetOptions].reverse().map((target) => (
-              <label
-                key={target.sequence}
-                className={`flex cursor-pointer items-start gap-3 rounded-xl border p-3 text-sm transition ${
-                  chosenTarget === target.sequence
-                    ? "border-brand bg-brand/5"
-                    : "border-line bg-content1 hover:border-brand/50"
-                }`}
-              >
-                <input
-                  type="radio"
-                  name="return-target"
-                  className="mt-1"
-                  checked={chosenTarget === target.sequence}
-                  onChange={() => setTargetSequence(target.sequence)}
-                />
-                <span className="min-w-0">
-                  <span className="block font-semibold text-ink">
-                    {target.is_requester ? "Requester" : target.stage_name}
-                    {target.is_default && (
-                      <span className="ml-2 rounded-full bg-content2 px-2 py-0.5 text-[11px] font-semibold text-muted">
-                        Previous step
-                      </span>
-                    )}
-                  </span>
-                  <span className="block text-muted">{target.owner_name ?? "—"}</span>
-                </span>
-              </label>
-            ))}
-          </div>
-        </fieldset>
+      {confirming === "return" && targetOptions.length > 0 && (
+        <ReturnTargetSelect
+          targets={targetOptions}
+          value={chosenTarget}
+          onChange={setTargetSequence}
+        />
       )}
       {(confirming === "reject" || confirming === "return") && (
         <label className="block text-sm font-semibold text-ink">

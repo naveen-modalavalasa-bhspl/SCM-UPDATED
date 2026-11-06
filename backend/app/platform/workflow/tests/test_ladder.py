@@ -816,3 +816,94 @@ async def test_plain_return_without_a_target_still_goes_one_step_back(db):
     state = await engine.get_correction_state(db, "INDENT", 76)
     assert state["correction_owner_employee_id"] == holders[604].id
     assert state["resubmit_target_sequence"] == 3
+
+
+# ---------------- the correction owner sends it further back ----------------
+
+async def _returned_to_dm(db, doc_id: int):
+    """OE and DM signed; the RM returned it to the DM, who now owns the correction."""
+    holders, instance = await _at_third_rung(db, doc_id)
+    await engine.return_for_correction(
+        db, "INDENT", doc_id, holders[603], "dm to fix",
+        context={"requester_position_id": 606}, target_sequence=2,
+    )
+    return holders, instance
+
+
+async def test_owner_can_see_only_the_steps_earlier_than_their_own(db):
+    holders, _instance = await _returned_to_dm(db, 81)
+
+    ctx = {"requester_position_id": 606}
+    mine = await engine.get_correction_send_back_targets(db, "INDENT", 81, holders[604], ctx)
+    others = await engine.get_correction_send_back_targets(db, "INDENT", 81, holders[605], ctx)
+
+    # The DM signed step 2, so earlier than that: the OE (1) and the requester (0).
+    assert [t["sequence"] for t in mine] == [0, 1]
+    assert [t["is_default"] for t in mine] == [False, True]
+    assert others == []   # not the owner
+
+
+async def test_owner_sends_it_further_back_and_it_resumes_one_step_up(db):
+    holders, instance = await _returned_to_dm(db, 82)
+
+    sent = await engine.send_correction_back(
+        db, "INDENT", 82, holders[604], "oe, recheck",
+        context={"requester_position_id": 606}, target_sequence=1,
+    )
+
+    state = await engine.get_correction_state(db, "INDENT", 82)
+    assert sent.id == instance.id
+    assert state["correction_owner_employee_id"] == holders[605].id
+    assert state["sent_back_to_sequence"] == 1
+    assert state["returned_from_sequence"] == 2
+    assert state["resubmit_target_sequence"] == 2      # the DM signs again
+    assert state["correction_comment"] == "oe, recheck"
+    assert sent.current_sequence == 2
+    # Exactly one live correction: the old one was cleared, not left behind.
+    assert sum(1 for link in (sent.resolved_chain or []) if link.get("_correction")) == 1
+
+    resubmitted = await engine.resubmit_correction(
+        db, "INDENT", 82, holders[605], context={"requester_position_id": 606})
+    assert resubmitted.current_sequence == 2
+    pending = (await db.execute(
+        select(Pending).where(Pending.instance_id == instance.id)
+    )).scalars().all()
+    assert [row.approver_id for row in pending] == [holders[604].id]
+
+
+async def test_it_can_be_walked_all_the_way_back_to_the_requester(db):
+    holders, instance = await _returned_to_dm(db, 83)
+    ctx = {"requester_position_id": 606}
+
+    await engine.send_correction_back(db, "INDENT", 83, holders[604], "to oe", context=ctx)
+    state = await engine.get_correction_state(db, "INDENT", 83)
+    assert state["correction_owner_employee_id"] == holders[605].id   # default = nearest
+
+    await engine.send_correction_back(db, "INDENT", 83, holders[605], "to raiser", context=ctx)
+    state = await engine.get_correction_state(db, "INDENT", 83)
+    assert state["correction_owner_employee_id"] == holders[606].id
+    assert state["resubmit_target_sequence"] == 1
+
+    # The requester is the end of the line: nobody earlier, and no targets to offer.
+    assert await engine.get_correction_send_back_targets(db, "INDENT", 83, holders[606], ctx) == []
+    with pytest.raises(ValidationError):
+        await engine.send_correction_back(db, "INDENT", 83, holders[606], "nowhere", context=ctx)
+
+    resubmitted = await engine.resubmit_correction(db, "INDENT", 83, holders[606], context=ctx)
+    assert resubmitted.current_sequence == 1
+    assert await engine.get_correction_state(db, "INDENT", 83) is None
+
+
+async def test_only_the_owner_can_send_it_back_and_only_to_an_offered_step(db):
+    holders, _instance = await _returned_to_dm(db, 84)
+    ctx = {"requester_position_id": 606}
+
+    with pytest.raises(PermissionError_):
+        await engine.send_correction_back(db, "INDENT", 84, holders[605], "not mine", context=ctx)
+    for bad in (2, 3, 99):   # their own step, a later one, one that does not exist
+        with pytest.raises(ValidationError):
+            await engine.send_correction_back(
+                db, "INDENT", 84, holders[604], "no", context=ctx, target_sequence=bad)
+    state = await engine.get_correction_state(db, "INDENT", 84)
+    assert state["correction_owner_employee_id"] == holders[604].id   # unchanged
+

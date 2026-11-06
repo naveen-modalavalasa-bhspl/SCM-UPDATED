@@ -1086,7 +1086,7 @@ async def _chain_epoch_floor(db: AsyncSession, instance: Instance) -> int:
 
 
 async def _return_targets(db: AsyncSession, instance: Instance,
-                          context: dict | None) -> list[dict]:
+                          context: dict | None, below: int | None = None) -> list[dict]:
     """Earlier steps the document can go back to, lowest first.
 
     Always the requester (sequence 0), then every rung below the current one that a
@@ -1096,7 +1096,7 @@ async def _return_targets(db: AsyncSession, instance: Instance,
     """
     context = context or {}
     floor = await _chain_epoch_floor(db, instance)
-    current = int(instance.current_sequence or 0)
+    current = int(below) if below is not None else int(instance.current_sequence or 0)
     targets: list[dict] = []
     if instance.started_by_id is not None:
         requester_position_id = context.get("requester_position_id")
@@ -1312,6 +1312,141 @@ async def return_for_correction(
         resume_link = _link_by_sequence(instance, resume_sequence) or {}
         instance.current_sequence = resume_sequence
         instance.current_stage_name = resume_link.get("role_name")
+    await _clear_pending(db, instance.id)
+    await db.flush()
+    return instance
+
+
+def _correction_owner_sequence(correction: dict) -> int:
+    """The step whose signer owns the correction right now (0 = the requester).
+
+    A correction sent to a chosen step records it. Older ones — a plain return, or one
+    passed down a rung — belong to whoever signed the rung under the one that returned
+    it."""
+    if correction.get("sent_back_to_sequence") is not None:
+        return int(correction["sent_back_to_sequence"])
+    return max(int(correction.get("returned_from_sequence") or 1) - 1, 0)
+
+
+def _owns_correction(correction: dict, user) -> bool:
+    if int(correction.get("correction_owner_employee_id") or 0) != int(user.id):
+        return False
+    position_id = correction.get("correction_owner_position_id")
+    return position_id is None or getattr(user, "active_position_id", None) == int(position_id)
+
+
+async def get_correction_send_back_targets(
+    db, doc_type: str, doc_id: int, user, context: dict | None = None,
+) -> list[dict]:
+    """Where the CURRENT correction owner may send a returned document next: the
+    requester, or any earlier step somebody signed, lowest first, the nearest marked as
+    the default. Empty for anybody who is not the owner, and for an owner who already
+    is the requester — there is nobody earlier."""
+    instance = await _load_instance(db, doc_type, doc_id)
+    if instance is None or instance.status != InstanceStatus.IN_PROGRESS.value:
+        return []
+    correction = _correction_from_instance(instance)
+    if not correction or not _owns_correction(correction, user):
+        return []
+    owner_sequence = _correction_owner_sequence(correction)
+    if owner_sequence < 1:
+        return []
+    targets = await _return_targets(db, instance, context, below=owner_sequence)
+    default_sequence = targets[-1]["sequence"] if targets else None
+    return [{
+        "sequence": target["sequence"],
+        "stage_name": target["stage_name"],
+        "owner_name": target["owner_name"],
+        "owner_position_id": target["owner_position_id"],
+        "is_requester": target["is_requester"],
+        "is_default": target["sequence"] == default_sequence,
+    } for target in targets]
+
+
+async def send_correction_back(
+    db, doc_type: str, doc_id: int, user, comments: str = "",
+    context: dict | None = None, target_sequence: int | None = None,
+) -> Instance:
+    """The correction owner passes a returned document further back — to the requester,
+    or to any earlier step somebody signed — instead of correcting it themselves.
+
+    Ownership moves to whoever signed that step, and the document will resume at the
+    next step in play once they resubmit, so every approver from there up (the person
+    sending it back included) signs the corrected version again. Repeating this walks
+    a document all the way back to its requester."""
+    context = context or {}
+    instance = await _load_active_instance_for_update(db, doc_type, doc_id)
+    correction = _correction_from_instance(instance)
+    if not correction:
+        raise ValidationError("This document is not returned for correction")
+    if int(correction.get("correction_owner_employee_id") or 0) != int(user.id):
+        raise PermissionError_("Only the correction owner can send this document back")
+    owner_position_id = correction.get("correction_owner_position_id")
+    if (owner_position_id is not None
+            and getattr(user, "active_position_id", None) != int(owner_position_id)):
+        raise PermissionError_(
+            "Switch to the correction owner position before sending it back")
+
+    owner_sequence = _correction_owner_sequence(correction)
+    if owner_sequence < 1:
+        raise ValidationError(
+            "This document is already with its requester; there is nobody earlier to "
+            "send it back to")
+    owner_link = _link_by_sequence(instance, owner_sequence)
+    if owner_link is None:
+        raise ValidationError("Approval stage not found")
+
+    targets = await _return_targets(db, instance, context, below=owner_sequence)
+    if target_sequence is None:
+        target_info = targets[-1] if targets else None
+    else:
+        target_info = next(
+            (row for row in targets if row["sequence"] == int(target_sequence)), None)
+    if target_info is None:
+        raise ValidationError("That step is not available to send this document back to")
+    resume_sequence = await _resume_sequence_after(
+        db, instance, int(target_info["sequence"]))
+    resume_link = _link_by_sequence(instance, resume_sequence) or owner_link
+
+    active_position_id = getattr(user, "active_position_id", None)
+    active_position = await hcm_service.get_position(
+        db, active_position_id) if active_position_id else None
+    action_row = Action(
+        instance_id=instance.id,
+        stage_sequence=owner_sequence,
+        stage_name=owner_link["role_name"],
+        actor_id=user.id,
+        actor_name=user.full_name,
+        actor_position=active_position.name if active_position else None,
+        action=ApprovalAction.RETURNED.value,
+        comments=comments,
+    )
+    db.add(action_row)
+    await db.flush()
+
+    # The old correction lived on the rung it would have resumed at; clear it there and
+    # anchor the new one where the document resumes now.
+    _with_correction(instance, int(correction["resubmit_target_sequence"]), None)
+    _with_correction(instance, resume_sequence, {
+        "correction_owner_employee_id": int(target_info["owner_employee_id"]),
+        "correction_owner_position_id": (
+            int(target_info["owner_position_id"])
+            if target_info["owner_position_id"] is not None else None),
+        "correction_owner_name": target_info["owner_name"],
+        "returned_from_sequence": owner_sequence,
+        "returned_from_stage": owner_link.get("role_name"),
+        "resubmit_target_sequence": resume_sequence,
+        "resubmit_target_stage": resume_link.get("role_name"),
+        "sent_back_to_sequence": int(target_info["sequence"]),
+        "sent_back_to_stage": target_info["stage_name"],
+        "returned_by_employee_id": user.id,
+        "returned_by_position_id": active_position_id,
+        "returned_by_name": user.full_name,
+        "return_action_id": int(action_row.id),
+        "returned_at": action_row.acted_at.isoformat() if action_row.acted_at else None,
+    })
+    instance.current_sequence = resume_sequence
+    instance.current_stage_name = resume_link.get("role_name")
     await _clear_pending(db, instance.id)
     await db.flush()
     return instance

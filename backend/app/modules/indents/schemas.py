@@ -155,6 +155,7 @@ class IndentOut(BaseModel):
     can_return_for_correction: bool = False
     can_edit_correction: bool = False
     can_resubmit_correction: bool = False
+    can_send_correction_back: bool = False
     correction_owner: CorrectionOwnerOut | None = None
     returned_from_stage: str | None = None
     resubmit_target_stage: str | None = None
