@@ -70,6 +70,22 @@ class ActionIn(BaseModel):
     comments: str = ""
 
 
+class ReturnForCorrectionIn(BaseModel):
+    """`target_sequence`: 0 sends the indent back to the requester, a positive number to
+    whoever signed that step. Left out, it goes to the nearest earlier step."""
+    comments: str = ""
+    target_sequence: int | None = Field(default=None, ge=0)
+
+
+class ReturnTargetOut(BaseModel):
+    sequence: int
+    stage_name: str | None = None
+    owner_name: str | None = None
+    owner_position_id: int | None = None
+    is_requester: bool = False
+    is_default: bool = False
+
+
 class CorrectionOwnerOut(BaseModel):
     employee_id: int
     employee_name: str | None = None
@@ -139,6 +155,7 @@ class IndentOut(BaseModel):
     can_return_for_correction: bool = False
     can_edit_correction: bool = False
     can_resubmit_correction: bool = False
+    can_send_correction_back: bool = False
     correction_owner: CorrectionOwnerOut | None = None
     returned_from_stage: str | None = None
     resubmit_target_stage: str | None = None

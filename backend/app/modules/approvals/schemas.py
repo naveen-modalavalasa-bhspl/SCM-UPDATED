@@ -86,6 +86,7 @@ class IndentRejectionIn(BaseModel):
 
 class IndentReturnIn(BaseModel):
     comments: str = Field(min_length=1, max_length=2000)
+    target_sequence: int | None = Field(default=None, ge=0)
 
     @field_validator("comments")
     @classmethod

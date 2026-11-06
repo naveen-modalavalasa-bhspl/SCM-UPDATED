@@ -2690,6 +2690,7 @@ async def reject_indent(
 
 async def return_indent(
     db: AsyncSession, indent_id: int, comments: str, user,
+    target_sequence: int | None = None,
 ) -> ApprovalIndentOut:
     """Return for correction: same engine-backed flow as `/api/indents/{id}/
     return-for-correction` (`indent_service.return_indent_for_correction`), which
@@ -2701,7 +2702,8 @@ async def return_indent(
     behavior regardless of which endpoint a caller uses.
     """
     indent, instance, has_previous = await _load_indent_task(db, indent_id, user)
-    updated = await indent_service.return_indent_for_correction(db, indent_id, comments, user)
+    updated = await indent_service.return_indent_for_correction(
+        db, indent_id, comments, user, target_sequence=target_sequence)
     return _approval_out(updated, instance, has_previous,
                          decimals_by_uom=await _indent_uom_decimals(db, updated))
 
