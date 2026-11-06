@@ -269,8 +269,8 @@ async def test_a_plain_acknowledgement_raises_nothing_and_asks_nothing_extra(stu
 
     assert gloves.received_quantity == Decimal("4")
     assert gloves.rejected_quantity == Decimal("0")
-    ctx.raise_returns.assert_awaited_once()                   # called, with nothing to do
-    assert ctx.raise_returns.await_args.args[3] == []
+    # Nothing was turned away, so the returns hook is not even asked.
+    ctx.raise_returns.assert_not_awaited()
     assert ctx.confirm.await_args.kwargs["condition"] == "GOOD"
 
 
