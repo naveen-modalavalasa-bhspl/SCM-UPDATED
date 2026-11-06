@@ -276,3 +276,18 @@ async def test_a_plain_acknowledgement_raises_nothing_and_asks_nothing_extra(stu
 
 def test_the_damage_reasons_are_exactly_the_ones_that_claim_the_carrier():
     assert ACK_DAMAGE_REASONS == {"DAMAGED", "PACKAGING_DAMAGED", "LEAKED_SPILLED"}
+
+
+def test_serial_numbers_must_match_the_quantity_turned_away():
+    assert ReceiptRejectionIn(reason="DAMAGED", quantity=2, serial_numbers=["A", "B"]).serial_numbers == ["A", "B"]
+    with pytest.raises(ValueError):
+        ReceiptRejectionIn(reason="DAMAGED", quantity=2, serial_numbers=["A"])
+    with pytest.raises(ValueError):
+        ReceiptRejectionIn(reason="DAMAGED", quantity=2, serial_numbers=["A", "A"])
+
+
+def test_the_serials_follow_the_goods_into_the_grouped_lines():
+    by_id = {1: SimpleNamespace(item_id=10)}
+    groups = service.rejection_groups(by_id, {1: [
+        {"reason": "EXPIRED", "quantity": 2, "serial_numbers": ["A", "B"]}]})
+    assert groups[0]["lines"][0]["serial_numbers"] == ["A", "B"]

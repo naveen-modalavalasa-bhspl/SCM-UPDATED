@@ -312,6 +312,17 @@ class ReceiptRejectionIn(BaseModel):
     reason: str
     quantity: float = Field(gt=0, allow_inf_nan=False)
     comment: str | None = Field(default=None, max_length=500)
+    #: WHICH units are turned away, for goods that carry codes (serial, IMEI, asset).
+    #: Empty for bulk goods; otherwise exactly one code per unit.
+    serial_numbers: list[str] = Field(default_factory=list, max_length=500)
+
+    @field_validator("serial_numbers")
+    @classmethod
+    def _clean_codes(cls, value: list[str]) -> list[str]:
+        codes = [str(c).strip() for c in value if str(c).strip()]
+        if len(set(codes)) != len(codes):
+            raise ValueError("A serial number is named twice")
+        return codes
 
     @field_validator("reason")
     @classmethod
@@ -332,6 +343,9 @@ class ReceiptRejectionIn(BaseModel):
         # "Other" on its own tells whoever handles the return nothing.
         if self.reason == "OTHER" and not self.comment:
             raise ValueError("Say what the problem is when the reason is Other")
+        if self.serial_numbers and (
+                self.quantity != int(self.quantity) or len(self.serial_numbers) != int(self.quantity)):
+            raise ValueError("Name one serial number for each unit turned away")
         return self
 
 

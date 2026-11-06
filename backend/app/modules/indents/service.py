@@ -2048,12 +2048,48 @@ def rejection_groups(by_id: dict, rejections: dict[int, list[dict]] | None) -> l
             if comment and comment not in group["notes"]:
                 group["notes"].append(comment)
             merged = group["lines"].setdefault(line.item_id, {
-                "item_id": line.item_id, "line_id": line_id, "quantity": 0.0, "remarks": None})
+                "item_id": line.item_id, "line_id": line_id, "quantity": 0.0, "remarks": None,
+                "serial_numbers": []})
             merged["quantity"] += quantity
+            merged["serial_numbers"].extend(row.get("serial_numbers") or [])
             if comment:
                 merged["remarks"] = " · ".join(
                     p for p in (merged["remarks"], comment) if p)[:500]
     return [{**group, "lines": list(group["lines"].values())} for group in groups.values()]
+
+
+async def resolve_rejection_units(db, by_id: dict, rejections: dict[int, list[dict]] | None):
+    """The units named as turned away, checked (2026-11-06).
+
+    Returns `(rows, prefer)`: the unit rows, and `{item_id: [code, ...]}` for the landing to
+    shelve first. Goods that carry serial numbers or IMEIs MUST name them, one per unit; bulk
+    goods and asset-coded goods may. A code can be named once, across every reason."""
+    from app.modules.warehouse import service as _warehouse
+    from app.shared.models.master import Item
+
+    rows: list = []
+    prefer: dict[int, list[str]] = {}
+    seen: set[str] = set()
+    for line_id, entries in (rejections or {}).items():
+        line = by_id.get(line_id)
+        if line is None:
+            continue
+        codes = [c for entry in entries for c in (entry.get("serial_numbers") or [])]
+        item = await db.get(Item, line.item_id)
+        label = getattr(line, "item_name", None) or getattr(line, "item_code", None) or "Item"
+        if not codes:
+            if item is not None and (getattr(item, "is_serial_tracked", False)
+                                     or getattr(item, "is_imei_tracked", False)):
+                raise ValidationError(
+                    f"{label}: choose which serial numbers are being turned away.")
+            continue
+        if any(c in seen for c in codes):
+            raise ValidationError(f"{label}: a serial number is turned away twice.")
+        seen.update(codes)
+        found = await _warehouse.resolve_rejected_units(db, item_id=line.item_id, codes=codes)
+        rows.extend(found)
+        prefer.setdefault(line.item_id, []).extend(codes)
+    return rows, prefer
 
 
 def rejection_remark(groups: list[dict]) -> str:
@@ -2241,6 +2277,10 @@ async def acknowledge_receipt(db: AsyncSession, indent_id: int,
     # chain, so a top-level import would run it backwards.
     from app.modules.warehouse import service as warehouse_service
 
+    # The units being turned away (2026-11-06): named, checked, and landed first below so
+    # that the return can send those very ones back.
+    turned_units, prefer_units = await resolve_rejection_units(db, by_id, rejections)
+
     # The raiser saying "this reached me" IS the acknowledgement. Asking the warehouse
     # to sign the same delivery again afterwards recorded nothing new and left indents
     # open on a forgotten second click, so the issues settle here instead. Same
@@ -2255,7 +2295,9 @@ async def acknowledge_receipt(db: AsyncSession, indent_id: int,
         # only what has actually left; a complete one may also settle a leg still
         # reading READY, because nothing can be sitting in a yard for an indent whose
         # every line has now arrived. See `_sign_transport_for_indent`.
-        fully_received=indent.status == IndentStatus.CLOSED.value)
+        fully_received=indent.status == IndentStatus.CLOSED.value,
+        prefer_units=prefer_units or None)
+    await warehouse_service.mark_rejected_units(db, turned_units, indent.indent_no)
 
     # The rejected goods are on the requester's shelf now (the confirmation above counts
     # them as arrived), so a return can be raised from it — one per reason, in this same

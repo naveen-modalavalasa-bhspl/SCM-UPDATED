@@ -1841,6 +1841,7 @@ async def _apply_lines(db: AsyncSession, doc: StockTransferOrder, lines,
             uom_code=item.uom_code,
             requested_qty=_d(line.quantity),
             remarks=(line.remarks or None),
+            serial_numbers=(list(getattr(line, "serial_numbers", None) or []) or None),
             # What is going back: the brand / variant / model held (2026-10-23).
             **(await combinations.resolve(db, item.id, line, label=item.code)
                if getattr(line, "brand_id", None) else dict(combinations.NONE)),
@@ -2716,9 +2717,10 @@ async def _carry_out(db: AsyncSession, doc: StockTransferOrder, user) -> None:
             consumed = await allocation.consume_for_issue(
                 db, RESERVE_REF_TYPE, doc.id, ref_line_id=line.id)
             moved = ZERO
+            named = list(line.serial_numbers or [])
             for slice_ in consumed:
                 units = await _ship_return_units(db, doc, line.item_id,
-                                                 slice_.quantity, slice_.batch_id)
+                                                 slice_.quantity, slice_.batch_id, named)
                 await inventory.move_stock(
                     db, line.item_id, slice_.quantity, StockDirection.OUT.value,
                     ref_type, doc.id, doc.sto_no, user,
@@ -3004,7 +3006,7 @@ def _units_marker(doc: StockTransferOrder) -> str:
 
 
 async def _ship_return_units(db: AsyncSession, doc: StockTransferOrder, item_id: int,
-                             quantity, batch_id) -> list[str] | None:
+                             quantity, batch_id, named: list[str] | None = None) -> list[str] | None:
     """Send this slice's coded units out of the source with the quantity (2026-10-05).
 
     A return used to move the QUANTITY only: RET0002 credited 2 units at the main store
@@ -3013,10 +3015,22 @@ async def _ship_return_units(db: AsyncSession, doc: StockTransferOrder, item_id:
     units travel the way a consignment's do (`warehouse._ship_units` / `_land_units`).
     Best effort, as there: bulk stock has no unit rows and must still move.
     """
+    taken: list[str] = []
+    if named:
+        # The units the receiver turned away go back FIRST, and are exactly those named
+        # (2026-11-06); the rest of the quantity, if any, is whichever the shelf gives up.
+        take = named[:int(quantity)]
+        del named[:len(take)]
+        taken = await warehouse.ship_named_units(
+            db, item_id=item_id, warehouse_id=doc.from_warehouse_id, codes=take,
+            marker=_units_marker(doc))
+        quantity = quantity - len(take)
+        if quantity <= 0:
+            return taken or None
     codes = await warehouse._ship_units(
         db, item_id=item_id, warehouse_id=doc.from_warehouse_id, qty=quantity,
         marker=_units_marker(doc), batch_id=batch_id or None)
-    return codes or None
+    return (taken + codes) or None
 
 
 async def _land_return_units(db: AsyncSession, doc: StockTransferOrder, item_id: int,
@@ -3047,9 +3061,10 @@ async def _dispatch_stock(db: AsyncSession, doc: StockTransferOrder, user) -> No
         consumed = await allocation.consume_for_issue(
             db, RESERVE_REF_TYPE, doc.id, ref_line_id=line.id)
         moved = ZERO
+        named = list(line.serial_numbers or [])
         for slice_ in consumed:
             units = await _ship_return_units(db, doc, line.item_id, slice_.quantity,
-                                             slice_.batch_id)
+                                             slice_.batch_id, named)
             await inventory.move_stock(
                 db, line.item_id, slice_.quantity, StockDirection.OUT.value,
                 ref_type, doc.id, doc.sto_no, user,
@@ -3782,7 +3797,8 @@ async def _receipt_rejected(db: AsyncSession, user, source: dict,
             indent_id=indent_id,
             items=[ReturnLineIn(item_id=line["item_id"],
                                 quantity=Decimal(str(line["quantity"])).quantize(Decimal("0.001")),
-                                remarks=line.get("remarks"))
+                                remarks=line.get("remarks"),
+                                serial_numbers=line.get("serial_numbers") or [])
                    for line in group["lines"]],
         )
         doc = await create_return(db, write, user, commit=False)
