@@ -62,6 +62,15 @@ def test_other_has_to_say_what_it_means():
     assert ReceiptRejectionIn(reason="other", quantity=1, comment="wrong colour").reason == "OTHER"
 
 
+def test_the_reason_is_optional_it_is_asked_on_the_returns_page():
+    assert ReceiptRejectionIn(quantity=2).reason is None
+    assert ReceiptRejectionIn(reason="  ", quantity=2).reason is None
+    # Reasonless rows still group (under "") and read as plain "Returned" on the receipt.
+    groups = service.rejection_groups({5: SimpleNamespace(item_id=11)}, {5: [_row(None, 2)]})
+    assert [(g["reason"], g["total"]) for g in groups] == [("", 2.0)]
+    assert service.rejection_remark(groups) == "Not accepted: Returned 2"
+
+
 def test_an_unknown_reason_is_refused():
     with pytest.raises(SchemaError):
         ReceiptRejectionIn(reason="STOLEN", quantity=1)
