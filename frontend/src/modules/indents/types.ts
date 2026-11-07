@@ -401,7 +401,8 @@ export interface Acknowledgement {
 export interface AcknowledgeLine {
   indent_item_id: number;
   received_quantity: number;
-  rejections?: { reason: string; quantity: number; comment?: string; serial_numbers?: string[] }[];
+  /** What goes back. The reason is NOT given here (2026-11-07): the Returns page asks. */
+  rejections?: { reason?: string; quantity: number; comment?: string; serial_numbers?: string[] }[];
   package_receipts?: Record<string, number>;
 }
 

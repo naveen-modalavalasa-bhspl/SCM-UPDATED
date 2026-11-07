@@ -2027,10 +2027,10 @@ def _delivery_condition(condition: str | None, remarks: str | None) -> str:
 def rejection_groups(by_id: dict, rejections: dict[int, list[dict]] | None) -> list[dict]:
     """The rejections of one acknowledgement, grouped BY REASON across its lines.
 
-    One group per reason because a return carries one reason: "Expired 2" and "Damaged 10"
-    are two returns, however many lines they came from. Within a group the same item is
-    merged into one line (its quantities added, its comments joined), so a return never
-    lists an item twice. `by_id` maps a line id to anything with `item_id`; it serves an
+    One group per reason ("" when none was given, which is now the usual case): a return
+    holds several reason rows, so the groups feed ONE return per acknowledgement. Within a
+    group the same item is merged into one line (its quantities added, its comments
+    joined), so a return never lists an item twice. `by_id` maps a line id to anything with `item_id`; it serves an
     indent's lines and a direct issue's alike.
     """
     groups: dict[str, dict] = {}
@@ -2039,7 +2039,7 @@ def rejection_groups(by_id: dict, rejections: dict[int, list[dict]] | None) -> l
         if line is None:
             continue
         for row in rows:
-            reason = str(row["reason"]).upper()
+            reason = str(row.get("reason") or "").upper()
             group = groups.setdefault(reason, {
                 "reason": reason, "total": 0.0, "notes": [], "lines": {}})
             quantity = float(row["quantity"])
@@ -2097,7 +2097,7 @@ def rejection_remark(groups: list[dict]) -> str:
     carrier claim and the audit row say about the goods that were turned away."""
     parts = []
     for group in groups:
-        text = f"{ACK_REJECTION_LABELS.get(group['reason'], group['reason'])} {group['total']:g}"
+        text = f"{ACK_REJECTION_LABELS.get(group['reason']) or 'Returned'} {group['total']:g}"
         notes = "; ".join(group["notes"])
         parts.append(f"{text} ({notes})" if notes else text)
     return "Not accepted: " + ", ".join(parts)

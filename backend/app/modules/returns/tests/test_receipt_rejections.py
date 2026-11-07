@@ -1,4 +1,4 @@
-"""Goods turned away at delivery arrive in Returns as one draft return per reason.
+"""Goods turned away at delivery arrive in Returns as ONE draft return per acknowledgement.
 
 Mock-only: `create_return` is replaced, so these pin down WHAT is asked of it — the reason,
 the lines, the indent it names — and that the reasons the delivery screen offers are real
@@ -49,10 +49,12 @@ def _line(item_id, quantity, remarks=None):
 def ctx(monkeypatch):
     created = []
 
-    async def fake_create(db, data, user, *, commit=True):
+    async def fake_create(db, data, user, *, commit=True, allow_blank_reason=False):
         created.append((data, commit))
+        assert allow_blank_reason is True      # the reasons are asked on the Returns page
         n = len(created)
-        return {"id": n, "return_no": f"RET-{n}"}
+        return {"id": n, "return_no": f"RET-{n}",
+                "reason": data.reasons[0].reason.value if data.reasons else None}
 
     monkeypatch.setattr(service, "create_return", fake_create)
     indent = SimpleNamespace(id=7, requested_by_id=42, status="ALLOCATED")
@@ -61,30 +63,45 @@ def ctx(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_one_draft_return_per_reason_inside_the_callers_transaction(ctx):
+async def test_one_draft_return_for_the_whole_acknowledgement(ctx):
+    raised = await service._receipt_rejected(
+        ctx.db, USER, {"kind": "INDENT", "number": "IND-7", "indent_id": 7},
+        [_group("", [_line(11, 10.0), _line(22, 1.0)])])
+
+    # No reason was asked at the delivery: one return, no reason rows, no main reason.
+    assert [r["return_no"] for r in raised] == ["RET-1"]
+    assert raised[0]["reason"] is None and raised[0]["quantity"] == 11.0
+    (data, commit), = ctx.created
+    assert data.reason is None and data.reasons == []
+    assert [(l.item_id, l.quantity) for l in data.items] == [
+        (11, Decimal("10.000")), (22, Decimal("1.000"))]
+    assert "IND-7" in data.reason_note
+    # Never commits on its own: the acknowledgement owns the transaction.
+    assert commit is False
+
+
+@pytest.mark.asyncio
+async def test_reasons_a_caller_did_name_become_rows_on_the_same_return(ctx):
     raised = await service._receipt_rejected(
         ctx.db, USER, {"kind": "INDENT", "number": "IND-7", "indent_id": 7},
         [_group("EXPIRED", [_line(11, 2.0, "batch A")], ["batch A"]),
          _group("DAMAGED", [_line(11, 10.0), _line(22, 1.0)])])
 
-    assert [r["return_no"] for r in raised] == ["RET-1", "RET-2"]
-    assert [r["reason"] for r in raised] == ["EXPIRED", "DAMAGED"]
-    expired, damaged = (data for data, _ in ctx.created)
-    assert expired.reason == ReturnReason.EXPIRED
-    assert damaged.reason == ReturnReason.DAMAGED
-    assert [(l.item_id, l.quantity) for l in damaged.items] == [
-        (11, Decimal("10.000")), (22, Decimal("1.000"))]
-    assert expired.items[0].remarks == "batch A"
-    assert "IND-7" in expired.reason_note and "batch A" in expired.reason_note
-    # Never commits on its own: the acknowledgement owns the transaction.
-    assert all(commit is False for _, commit in ctx.created)
+    assert len(raised) == 1
+    (data, _), = ctx.created
+    assert [(r.reason, r.quantity) for r in data.reasons] == [
+        (ReturnReason.EXPIRED, Decimal("2.000")), (ReturnReason.DAMAGED, Decimal("11.000"))]
+    # The same item named under two reasons is one line on the return.
+    assert [(l.item_id, l.quantity) for l in data.items] == [
+        (11, Decimal("12.000")), (22, Decimal("1.000"))]
+    assert "batch A" in data.reason_note
 
 
 @pytest.mark.asyncio
 async def test_the_return_names_the_indent_it_answers(ctx):
     await service._receipt_rejected(
         ctx.db, USER, {"kind": "INDENT", "number": "IND-7", "indent_id": 7},
-        [_group("DAMAGED", [_line(11, 1.0)])])
+        [_group("", [_line(11, 1.0)])])
     assert ctx.created[0][0].indent_id == 7
 
 
@@ -114,3 +131,4 @@ async def test_a_direct_issue_has_no_indent_to_name(ctx):
     data = ctx.created[0][0]
     assert data.indent_id is None
     assert "WHI0042" in data.reason_note
+    assert data.reasons[0].note == "wrong colour"

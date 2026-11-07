@@ -289,7 +289,13 @@ export default function ReturnDetailPage() {
   /* The rest, in the order somebody reads a return: why it was raised, what the branch
    * asked for, who raised it, and when each rung of it happened. */
   const details = [
-    { label: "Reason", value: doc.reason_label ?? doc.reason, icon: <MessageSquareWarning className="h-4 w-4" /> },
+    {
+      label: (doc.reasons?.length ?? 0) > 1 ? "Reasons" : "Reason",
+      // "Damaged 10 · Expired 2": several reasons only read with their quantities.
+      value: (doc.reasons?.length ?? 0) > 1
+        ? doc.reasons.map((row) => `${row.reason_label ?? row.reason} ${row.quantity}`).join(" · ")
+        : doc.reason_label ?? doc.reason,
+      icon: <MessageSquareWarning className="h-4 w-4" /> },
     { label: "Description", value: doc.reason_note, icon: <ScrollText className="h-4 w-4" /> },
     { label: "What the branch wants", value: doc.intent_label, icon: <Target className="h-4 w-4" /> },
     {

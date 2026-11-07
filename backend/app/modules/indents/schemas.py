@@ -308,8 +308,11 @@ ACK_DAMAGE_REASONS = frozenset({"DAMAGED", "PACKAGING_DAMAGED", "LEAKED_SPILLED"
 
 
 class ReceiptRejectionIn(BaseModel):
-    """Part of a line that reached the requester and is NOT being accepted, and why."""
-    reason: str
+    """Part of a line that reached the requester and is NOT being accepted.
+
+    The REASON is optional (2026-11-07): the person at the delivery only says how much
+    is going back; why is asked on the Returns page, where the return is raised."""
+    reason: str | None = None
     quantity: float = Field(gt=0, allow_inf_nan=False)
     comment: str | None = Field(default=None, max_length=500)
     #: WHICH units are turned away, for goods that carry codes (serial, IMEI, asset).
@@ -326,8 +329,10 @@ class ReceiptRejectionIn(BaseModel):
 
     @field_validator("reason")
     @classmethod
-    def _known_reason(cls, value: str) -> str:
+    def _known_reason(cls, value: str | None) -> str | None:
         reason = (value or "").strip().upper()
+        if not reason:
+            return None
         if reason not in ACK_REJECTION_LABELS:
             raise ValueError(
                 "Pick a reason: " + ", ".join(ACK_REJECTION_LABELS.values()))

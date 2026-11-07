@@ -5,7 +5,6 @@ import { useAuth } from "@/shared/auth/AuthContext";
 import type { CompanyProfile } from "./companyProfile";
 import type { Paginated, Option } from "@/shared/types";
 import type { ReturnTarget } from "@/modules/approvals/types";
-import type { RejectionReason } from "./receiptRejections";
 import type {
   Acknowledgement, AcknowledgeLine, ActivityRow, DirectIssueAck, StockTransferAck,
   BomChoice, BomChoiceItem, FulfilmentStep, Indent, IndentCreate, IndentListRow, IndentJourney,
@@ -326,11 +325,6 @@ export const indentApi = {
     api.post<Indent>(`/api/indents/${id}/acknowledge`, { lines, ...receipt })
       .then((r) => r.data),
 
-  /** Why a delivered quantity can be turned away, in the words the server validates. */
-  rejectionReasons: () =>
-    api.get<RejectionReason[]>("/api/warehouse/acknowledgements/rejection-reasons")
-      .then((r) => r.data),
-
   receiptAttachments: (id: number) =>
     api.get<ReceiptAttachment[]>(`/api/indents/${id}/receipt-attachments`)
       .then((r) => r.data),
@@ -394,8 +388,9 @@ export function receiptApi(kind: ReceiptKind) {
       upload: indentApi.uploadReceiptAttachment,
       download: indentApi.downloadReceiptAttachment,
       remove: indentApi.deleteReceiptAttachment,
-      acknowledge: (id: number, lines: AcknowledgeLine[]) =>
-        indentApi.acknowledge(id, lines) as Promise<unknown>,
+      acknowledge: (id: number, lines: AcknowledgeLine[],
+        receipt: { condition?: string; remarks?: string } = {}) =>
+        indentApi.acknowledge(id, lines, receipt) as Promise<unknown>,
     };
   }
   return {
@@ -416,8 +411,9 @@ export function receiptApi(kind: ReceiptKind) {
         .then((r) => r.data as Blob),
     remove: (attachmentId: number) =>
       api.delete<void>(`${DIRECT}/attachments/${attachmentId}`).then((r) => r.data),
-    acknowledge: (id: number, lines: AcknowledgeLine[]) =>
-      api.post<Acknowledgement>(`${DIRECT}/${id}/acknowledge`, { lines })
+    acknowledge: (id: number, lines: AcknowledgeLine[],
+      receipt: { condition?: string; remarks?: string } = {}) =>
+      api.post<Acknowledgement>(`${DIRECT}/${id}/acknowledge`, { lines, ...receipt })
         .then((r) => r.data) as Promise<unknown>,
   };
 }

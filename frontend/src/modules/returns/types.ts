@@ -106,8 +106,13 @@ export interface StockReturn {
   kind_label: string | null;
   intent: ReturnIntent | null;
   intent_label: string | null;
+  /** The MAIN reason (the one with the most units). */
   reason: string | null;
+  /** The words for every reason, joined: "Damaged, Expired". */
   reason_label: string | null;
+  /** Every reason with how many units it covers (2026-11-07). Empty on a return raised
+   *  from an acknowledgement until somebody has been asked why. */
+  reasons: ReturnReasonRow[];
   reason_note: string | null;
   /** The indent this return answers. Null on one raised on its own — and that is what
    *  decides which approval chain the return travels. */
@@ -667,8 +672,18 @@ export interface ApprovalFlow {
   note: string | null;
 }
 
-export interface ReturnWrite {
+export interface ReturnReasonRow {
   reason: string;
+  reason_label?: string | null;
+  quantity: string | number;
+  note?: string | null;
+}
+
+export interface ReturnWrite {
+  /** Shorthand for "all of it, for this reason"; the form sends `reasons` instead. */
+  reason?: string | null;
+  /** Why it is going back, by quantity. Must add up to the quantity returned. */
+  reasons?: { reason: string; quantity: string; note: string | null }[];
   reason_note?: string | null;
   to_warehouse_id?: number | null;
   /** The indent this return answers. Sending it resolves the Indent Return approval
