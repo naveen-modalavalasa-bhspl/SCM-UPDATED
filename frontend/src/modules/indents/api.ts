@@ -5,6 +5,7 @@ import { useAuth } from "@/shared/auth/AuthContext";
 import type { CompanyProfile } from "./companyProfile";
 import type { Paginated, Option } from "@/shared/types";
 import type { ReturnTarget } from "@/modules/approvals/types";
+import type { RejectionReason } from "./receiptRejections";
 import type {
   Acknowledgement, AcknowledgeLine, ActivityRow, DirectIssueAck, StockTransferAck,
   BomChoice, BomChoiceItem, FulfilmentStep, Indent, IndentCreate, IndentListRow, IndentJourney,
@@ -323,6 +324,11 @@ export const indentApi = {
   acknowledge: (id: number, lines: AcknowledgeLine[],
     receipt: { condition?: string; remarks?: string } = {}) =>
     api.post<Indent>(`/api/indents/${id}/acknowledge`, { lines, ...receipt })
+      .then((r) => r.data),
+
+  /** Why a delivered quantity can be turned away, in the words the server validates. */
+  rejectionReasons: () =>
+    api.get<RejectionReason[]>("/api/warehouse/acknowledgements/rejection-reasons")
       .then((r) => r.data),
 
   receiptAttachments: (id: number) =>

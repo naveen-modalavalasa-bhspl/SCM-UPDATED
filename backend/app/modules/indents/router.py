@@ -368,7 +368,9 @@ async def acknowledge(indent_id: int, body: AcknowledgeIn,
     return await service.acknowledge_receipt(
         db, indent_id, lines, user, condition=body.condition, remarks=body.remarks,
         package_receipts={line.indent_item_id: line.package_receipts or {}
-                          for line in body.lines})
+                          for line in body.lines},
+        rejections={line.indent_item_id: [r.model_dump() for r in line.rejections]
+                    for line in body.lines if line.rejections})
 
 
 @indent_router.get("/{indent_id}/receipt-attachments", response_model=list[AttachmentRead])

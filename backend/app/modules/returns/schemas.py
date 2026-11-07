@@ -20,6 +20,9 @@ class ReturnLineIn(CombinationIn):
     item_id: int
     quantity: Decimal = Field(gt=0)
     remarks: str | None = None
+    #: The exact units going back, for coded goods (2026-11-06). Empty means "whichever
+    #: the shelf gives up first", as it always was.
+    serial_numbers: list[str] = Field(default_factory=list, max_length=500)
 
     @field_validator("quantity")
     @classmethod

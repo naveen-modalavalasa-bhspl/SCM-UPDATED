@@ -1841,6 +1841,7 @@ async def _apply_lines(db: AsyncSession, doc: StockTransferOrder, lines,
             uom_code=item.uom_code,
             requested_qty=_d(line.quantity),
             remarks=(line.remarks or None),
+            serial_numbers=(list(getattr(line, "serial_numbers", None) or []) or None),
             # What is going back: the brand / variant / model held (2026-10-23).
             **(await combinations.resolve(db, item.id, line, label=item.code)
                if getattr(line, "brand_id", None) else dict(combinations.NONE)),
@@ -1874,7 +1875,9 @@ def _indent_payload(indent: Indent | None) -> dict | None:
     }
 
 
-async def create_return(db: AsyncSession, data, user) -> dict:
+async def create_return(db: AsyncSession, data, user, *, commit: bool = True) -> dict:
+    """`commit=False` lets a caller that owns the transaction (an acknowledgement raising
+    returns for the goods it turned away) write the return alongside its own changes."""
     _assert_reason_stated(data)
     indent = await _resolve_indent(db, getattr(data, "indent_id", None), user)
     context = await _raiser_context(db, user)
@@ -1919,7 +1922,8 @@ async def create_return(db: AsyncSession, data, user) -> dict:
     await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.sto_no,
                       action=AuditAction.CREATE, actor=user,
                       after={"status": doc.status, "reason": data.reason.value})
-    await db.commit()
+    if commit:
+        await db.commit()
     return await get_return(db, doc.id, user)
 
 
@@ -2713,9 +2717,10 @@ async def _carry_out(db: AsyncSession, doc: StockTransferOrder, user) -> None:
             consumed = await allocation.consume_for_issue(
                 db, RESERVE_REF_TYPE, doc.id, ref_line_id=line.id)
             moved = ZERO
+            named = list(line.serial_numbers or [])
             for slice_ in consumed:
                 units = await _ship_return_units(db, doc, line.item_id,
-                                                 slice_.quantity, slice_.batch_id)
+                                                 slice_.quantity, slice_.batch_id, named)
                 await inventory.move_stock(
                     db, line.item_id, slice_.quantity, StockDirection.OUT.value,
                     ref_type, doc.id, doc.sto_no, user,
@@ -3001,7 +3006,7 @@ def _units_marker(doc: StockTransferOrder) -> str:
 
 
 async def _ship_return_units(db: AsyncSession, doc: StockTransferOrder, item_id: int,
-                             quantity, batch_id) -> list[str] | None:
+                             quantity, batch_id, named: list[str] | None = None) -> list[str] | None:
     """Send this slice's coded units out of the source with the quantity (2026-10-05).
 
     A return used to move the QUANTITY only: RET0002 credited 2 units at the main store
@@ -3010,10 +3015,22 @@ async def _ship_return_units(db: AsyncSession, doc: StockTransferOrder, item_id:
     units travel the way a consignment's do (`warehouse._ship_units` / `_land_units`).
     Best effort, as there: bulk stock has no unit rows and must still move.
     """
+    taken: list[str] = []
+    if named:
+        # The units the receiver turned away go back FIRST, and are exactly those named
+        # (2026-11-06); the rest of the quantity, if any, is whichever the shelf gives up.
+        take = named[:int(quantity)]
+        del named[:len(take)]
+        taken = await warehouse.ship_named_units(
+            db, item_id=item_id, warehouse_id=doc.from_warehouse_id, codes=take,
+            marker=_units_marker(doc))
+        quantity = quantity - len(take)
+        if quantity <= 0:
+            return taken or None
     codes = await warehouse._ship_units(
         db, item_id=item_id, warehouse_id=doc.from_warehouse_id, qty=quantity,
         marker=_units_marker(doc), batch_id=batch_id or None)
-    return codes or None
+    return (taken + codes) or None
 
 
 async def _land_return_units(db: AsyncSession, doc: StockTransferOrder, item_id: int,
@@ -3044,9 +3061,10 @@ async def _dispatch_stock(db: AsyncSession, doc: StockTransferOrder, user) -> No
         consumed = await allocation.consume_for_issue(
             db, RESERVE_REF_TYPE, doc.id, ref_line_id=line.id)
         moved = ZERO
+        named = list(line.serial_numbers or [])
         for slice_ in consumed:
             units = await _ship_return_units(db, doc, line.item_id, slice_.quantity,
-                                             slice_.batch_id)
+                                             slice_.batch_id, named)
             await inventory.move_stock(
                 db, line.item_id, slice_.quantity, StockDirection.OUT.value,
                 ref_type, doc.id, doc.sto_no, user,
@@ -3739,6 +3757,65 @@ def _register_transport_hooks() -> None:
 
 
 _register_transport_hooks()
+
+
+# ---------------------------------------------------------------------------
+# Goods turned away at delivery
+# ---------------------------------------------------------------------------
+
+async def _receipt_rejected(db: AsyncSession, user, source: dict,
+                            groups: list[dict]) -> list[dict]:
+    """Raise one return per reason for goods a requester would not accept (2026-11-06).
+
+    Registered on `indents.hooks.ON_RECEIPT_REJECTIONS` and run inside the acknowledgement's
+    own transaction. The goods have already been credited to the requester's shelf, which
+    is what lets `create_return` find them there. Each return is a DRAFT: nothing moves
+    and no approval starts until its raiser attaches the photo and submits it, exactly as
+    for any other return. A reason that is also a PHYSICAL problem (damaged, leaked, broken
+    package) is the reason the carrier was claimed against on the receipt itself.
+    """
+    from app.modules.returns.schemas import ReturnLineIn, ReturnWrite
+
+    indent_id = source.get("indent_id")
+    if indent_id:
+        # Name the indent only where a return may be raised against it (the requester's
+        # own, past approval). Otherwise the return is raised on its own, which is also
+        # valid — it must never be the thing that stops goods being acknowledged.
+        indent = await db.get(Indent, int(indent_id))
+        if (indent is None or indent.requested_by_id != getattr(user, "id", None)
+                or indent.status not in RETURNABLE_INDENT_STATUSES):
+            indent_id = None
+
+    raised: list[dict] = []
+    for group in groups:
+        note = f"Not accepted on delivery of {source.get('number')}"
+        if group["notes"]:
+            note = f"{note}: {'; '.join(group['notes'])}"
+        write = ReturnWrite(
+            reason=ReturnReason(group["reason"]),
+            reason_note=note[:500],
+            indent_id=indent_id,
+            items=[ReturnLineIn(item_id=line["item_id"],
+                                quantity=Decimal(str(line["quantity"])).quantize(Decimal("0.001")),
+                                remarks=line.get("remarks"),
+                                serial_numbers=line.get("serial_numbers") or [])
+                   for line in group["lines"]],
+        )
+        doc = await create_return(db, write, user, commit=False)
+        raised.append({"id": doc["id"], "return_no": doc["return_no"],
+                       "reason": group["reason"], "quantity": group["total"]})
+    return raised
+
+
+def _register_receipt_hooks() -> None:
+    """Wire returns onto the acknowledgement, once, at import (indents may not import it)."""
+    from app.modules.indents import hooks as indent_hooks
+
+    if _receipt_rejected not in indent_hooks.ON_RECEIPT_REJECTIONS:
+        indent_hooks.ON_RECEIPT_REJECTIONS.append(_receipt_rejected)
+
+
+_register_receipt_hooks()
 
 
 # ---------------------------------------------------------------------------
