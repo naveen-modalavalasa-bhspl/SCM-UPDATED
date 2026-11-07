@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  newRejectionRow, rejectedTotal, rejectionPayload, rejectionProblems,
+  newRejectionRow, rejectedSerials, rejectedTotal, rejectionPayload, rejectionProblems,
   type RejectionReason,
 } from "./receiptRejections";
 
@@ -28,5 +28,17 @@ describe("receipt rejections", () => {
   it("sends only complete rows, trimmed", () => {
     expect(rejectionPayload([row("EXPIRED", "2", " old "), row("", "3"), newRejectionRow()]))
       .toEqual([{ reason: "EXPIRED", quantity: 2, comment: "old" }]);
+  });
+  it("asks coded goods for one serial number per unit turned away", () => {
+    const named = { ...row("EXPIRED", "2"), serials: ["A", "B"] };
+    expect(rejectionProblems([row("EXPIRED", "2")], 5, reasons, true)[0]).toMatch(/serial numbers/);
+    expect(rejectionProblems([{ ...row("EXPIRED", "2"), serials: ["A"] }], 5, reasons, true)).toHaveLength(1);
+    expect(rejectionProblems([named], 5, reasons, true)).toEqual([]);
+    expect(rejectionProblems([row("EXPIRED", "2")], 5, reasons, false)).toEqual([]);
+  });
+  it("sends the chosen serial numbers and lists them for the accepted side to skip", () => {
+    const named = { ...row("EXPIRED", "2"), serials: ["A", "B"] };
+    expect(rejectionPayload([named])).toEqual([{ reason: "EXPIRED", quantity: 2, serial_numbers: ["A", "B"] }]);
+    expect(rejectedSerials([named, { ...row("OTHER", "1", "x"), serials: ["C"] }])).toEqual(["A", "B", "C"]);
   });
 });

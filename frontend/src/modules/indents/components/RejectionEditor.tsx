@@ -1,4 +1,6 @@
+import { useState } from "react";
 import { Plus, X } from "lucide-react";
+import { SerialNumbersModal } from "@/modules/warehouse/components/SerialNumbersModal";
 import { Input, Select } from "@/shared/components";
 import { QuantityInput } from "@/shared/components/QuantityInput";
 import {
@@ -16,19 +18,25 @@ import {
  * ("Expired 2, Damaged 10"). What is turned away is taken off what is being accepted by
  * the screen that owns this, so the two never overlap.
  */
-export function RejectionEditor({ rows, reasons, max, uom, label, coded, onChange }: {
+export function RejectionEditor({ rows, reasons, max, uom, label, serials = [], onChange }: {
   rows: RejectionRow[];
   reasons: RejectionReason[];
   /** The most that came in this package: the cap on what can be turned away. */
   max: number;
   uom?: string | null;
   label: string;
-  /** The item carries serial numbers. Which units are turned away is not recorded yet. */
-  coded?: boolean;
+  /** The units that came with this item (empty for bulk goods). Which of them are turned
+   *  away is chosen per reason, so a return sends back those very units. */
+  serials?: string[];
   onChange: (rows: RejectionRow[]) => void;
 }) {
   const options = reasons.map((reason) => ({ value: reason.value, label: reason.label }));
-  const problems = rejectionProblems(rows, max, reasons);
+  const coded = serials.length > 0;
+  const problems = rejectionProblems(rows, max, reasons, coded);
+  const [picking, setPicking] = useState<string | null>(null);
+  const pickingRow = rows.find((row) => row.id === picking);
+  const takenElsewhere = (id: string) =>
+    new Set(rows.filter((row) => row.id !== id).flatMap((row) => row.serials));
   const total = rejectedTotal(rows);
   const patch = (id: string, change: Partial<RejectionRow>) =>
     onChange(rows.map((row) => (row.id === id ? { ...row, ...change } : row)));
@@ -88,6 +96,18 @@ export function RejectionEditor({ rows, reasons, max, uom, label, coded, onChang
               value={row.comment}
               onChange={(event) => patch(row.id, { comment: event.target.value })}
             />
+            {coded && (
+              <button
+                type="button"
+                disabled={!(Number(row.quantity) >= 1)}
+                onClick={() => setPicking(row.id)}
+                className="min-h-9 text-left text-xs font-semibold text-brand hover:underline disabled:cursor-not-allowed disabled:text-muted disabled:no-underline sm:col-span-4"
+              >
+                {row.serials.length > 0
+                  ? `${row.serials.length} serial number${row.serials.length === 1 ? "" : "s"} chosen — change`
+                  : "Choose the serial numbers"}
+              </button>
+            )}
             <button
               type="button"
               aria-label={`Remove reason ${index + 1} for ${label}`}
@@ -108,12 +128,24 @@ export function RejectionEditor({ rows, reasons, max, uom, label, coded, onChang
         >
           <Plus className="h-3.5 w-3.5" aria-hidden /> Add another reason
         </button>
-        {coded && (
-          <span className="text-[11px] text-muted">
-            Which serial numbers are turned away is not recorded yet.
-          </span>
-        )}
       </div>
+
+      {coded && (
+        <SerialNumbersModal
+          isOpen={!!pickingRow}
+          onClose={() => setPicking(null)}
+          itemLabel={label}
+          quantity={Math.floor(Number(pickingRow?.quantity ?? 0))}
+          available={serials.filter((code) => !takenElsewhere(picking ?? "").has(code))}
+          initial={pickingRow?.serials ?? []}
+          pickMode="select"
+          noun="serial"
+          onSave={(chosen) => {
+            if (pickingRow) patch(pickingRow.id, { serials: chosen });
+            setPicking(null);
+          }}
+        />
+      )}
 
       {problems.length > 0 && (
         <ul role="alert" className="mt-2 space-y-0.5 text-xs font-medium text-bad">

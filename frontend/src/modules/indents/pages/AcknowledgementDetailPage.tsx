@@ -36,7 +36,8 @@ import { CombinationTag, combinationKey, combinationLabel } from "@/shared/combi
 import { PackageCheckModal, packGroups, shortPackCode, type PackageCheck } from "@/shared/components";
 import { RejectionEditor } from "../components/RejectionEditor";
 import {
-  rejectedTotal, rejectionPayload, rejectionProblems, type RejectionReason, type RejectionRow,
+  rejectedSerials, rejectedTotal, rejectionPayload, rejectionProblems, type RejectionReason,
+  type RejectionRow,
 } from "../receiptRejections";
 
 /**
@@ -418,7 +419,9 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc, backTo, ba
     // Accepted OR turned away: either way the item reached the requester, and the server
     // wants a photo of it.
     const photographed = count + rejected <= 0 || photosOf(line, packKey).length > 0;
-    const serials = line.serial_numbers?.filter(Boolean) ?? [];
+    // The units turned away are not among those being matched as accepted.
+    const gone = new Set(rejectedSerials(rejections[line.receipt_key]));
+    const serials = (line.serial_numbers?.filter(Boolean) ?? []).filter((c) => !gone.has(c));
     const needSerials = requiredSerialCount(line, value);
     const matched = serialPickForQuantity(
       serials, pickedSerials[line.receipt_key], needSerials).length;
@@ -438,6 +441,7 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc, backTo, ba
       rejections[line.receipt_key],
       Number(line.package_quantity ?? receivable(line)),
       reasonList,
+      (line.serial_numbers?.filter(Boolean).length ?? 0) > 0,
     ));
 
   /** Turning goods away takes them off what is being accepted, so the two never overlap. */
@@ -746,10 +750,12 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc, backTo, ba
         quantity={serialTarget
           ? requiredSerialCount(serialTarget, received[serialTarget.receipt_key] ?? "")
           : 0}
-        available={serialTarget?.serial_numbers?.filter(Boolean) ?? []}
+        available={(serialTarget?.serial_numbers?.filter(Boolean) ?? []).filter(
+          (code) => !rejectedSerials(rejections[serialTarget?.receipt_key ?? ""]).includes(code))}
         initial={serialTarget
           ? serialPickForQuantity(
-            serialTarget.serial_numbers?.filter(Boolean) ?? [],
+            (serialTarget.serial_numbers?.filter(Boolean) ?? []).filter(
+              (code) => !rejectedSerials(rejections[serialTarget.receipt_key]).includes(code)),
             pickedSerials[serialTarget.receipt_key],
             requiredSerialCount(serialTarget, received[serialTarget.receipt_key] ?? ""),
           )
@@ -2470,7 +2476,7 @@ function PackageLineRow({
               max={max}
               uom={line.uom_code}
               label={label}
-              coded={serials.length > 0}
+              serials={serials}
               onChange={onRows}
             />
           )}

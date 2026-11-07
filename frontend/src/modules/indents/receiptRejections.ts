@@ -25,6 +25,8 @@ export interface RejectionRow {
   reason: string;
   quantity: string;
   comment: string;
+  /** Which units, for goods that carry codes (2026-11-06). */
+  serials: string[];
 }
 
 /** What goes to the server for one row. */
@@ -32,13 +34,18 @@ export interface ReceiptRejection {
   reason: string;
   quantity: number;
   comment?: string;
+  serial_numbers?: string[];
 }
 
 let counter = 0;
 
 export const newRejectionRow = (): RejectionRow => ({
-  id: `rejection-${++counter}`, reason: "", quantity: "", comment: "",
+  id: `rejection-${++counter}`, reason: "", quantity: "", comment: "", serials: [],
 });
+
+/** Every unit turned away across the rows, so the accepted ones can leave them out. */
+export const rejectedSerials = (rows: RejectionRow[] | undefined): string[] =>
+  (rows ?? []).flatMap((row) => row.serials);
 
 const positive = (value: string): number => {
   const parsed = Number(value);
@@ -50,7 +57,7 @@ export const rejectedTotal = (rows: RejectionRow[] | undefined): number =>
   Math.round((rows ?? []).reduce((sum, row) => sum + positive(row.quantity), 0) * 1000) / 1000;
 
 const isBlank = (row: RejectionRow) =>
-  !row.reason && !row.quantity.trim() && !row.comment.trim();
+  !row.reason && !row.quantity.trim() && !row.comment.trim() && row.serials.length === 0;
 
 /**
  * Why these rows cannot be sent yet, one sentence each; empty when they can.
@@ -60,7 +67,7 @@ const isBlank = (row: RejectionRow) =>
  * the person would believe it had been recorded.
  */
 export function rejectionProblems(
-  rows: RejectionRow[] | undefined, max: number, reasons: RejectionReason[],
+  rows: RejectionRow[] | undefined, max: number, reasons: RejectionReason[], coded = false,
 ): string[] {
   const problems: string[] = [];
   const byValue = new Map(reasons.map((reason) => [reason.value, reason]));
@@ -70,6 +77,8 @@ export function rejectionProblems(
     else if (positive(row.quantity) <= 0) problems.push("Enter how many you are not accepting.");
     else if (byValue.get(row.reason)?.needs_comment && !row.comment.trim()) {
       problems.push("Say what the problem is when the reason is Other.");
+    } else if (coded && row.serials.length !== Math.floor(positive(row.quantity))) {
+      problems.push("Choose which serial numbers are being turned away, one for each unit.");
     }
   }
   if (rejectedTotal(rows) > max + 1e-9) {
@@ -86,5 +95,6 @@ export function rejectionPayload(rows: RejectionRow[] | undefined): ReceiptRejec
       reason: row.reason,
       quantity: positive(row.quantity),
       ...(row.comment.trim() ? { comment: row.comment.trim() } : {}),
+      ...(row.serials.length ? { serial_numbers: row.serials } : {}),
     }));
 }

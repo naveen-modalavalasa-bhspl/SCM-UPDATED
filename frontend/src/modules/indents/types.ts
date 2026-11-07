@@ -401,7 +401,7 @@ export interface Acknowledgement {
 export interface AcknowledgeLine {
   indent_item_id: number;
   received_quantity: number;
-  rejections?: { reason: string; quantity: number; comment?: string }[];
+  rejections?: { reason: string; quantity: number; comment?: string; serial_numbers?: string[] }[];
   package_receipts?: Record<string, number>;
 }
 
