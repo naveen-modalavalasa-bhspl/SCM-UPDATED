@@ -439,7 +439,9 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc, backTo, ba
   const rejectionIssuesFor = (pack?: ReceiptPackage): string[] =>
     (pack?.lines ?? []).flatMap((line) => rejectionProblems(
       rejections[line.receipt_key],
-      Number(line.package_quantity ?? receivable(line)),
+      (line.package_box_codes?.length ?? 0) > 0
+        ? receivedNumber(received[line.receipt_key])
+        : Number(line.package_quantity ?? receivable(line)),
       reasonList,
       (line.serial_numbers?.filter(Boolean).length ?? 0) > 0,
     ));
@@ -448,6 +450,9 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc, backTo, ba
   const changeRejections = (line: ReceiptPackageLine, rows: RejectionRow[]) => {
     const max = Number(line.package_quantity ?? receivable(line));
     setRejections((current) => ({ ...current, [line.receipt_key]: rows }));
+    // A line counted package by package keeps what ARRIVED in `received`; the part
+    // turned away is taken off it when the payload is built, so nothing to clamp here.
+    if ((line.package_box_codes?.length ?? 0) > 0) return;
     setReceived((current) => {
       const room = Math.max(max - rejectedTotal(rows), 0);
       return receivedNumber(current[line.receipt_key]) > room
@@ -1112,9 +1117,13 @@ export function acknowledgementPayload(
       const turnedAway = parts.length > 0
         ? parts.flatMap((part) => rejectionPayload(rejections[packageLineKey(line, part)]))
         : rejectionPayload(rejections[fallbackLineKey(line)]);
+      // Counted by package, the total is what ARRIVED; what is turned away is part of it.
+      const turnedTotal = turnedAway.reduce((sum, item) => sum + item.quantity, 0);
       const result: AcknowledgeLine = {
         indent_item_id: line.indent_item_id,
-        received_quantity: Math.min(total, receivable(line)),
+        received_quantity: parts.length > 0
+          ? Math.max(Math.min(total, receivable(line)) - turnedTotal, 0)
+          : Math.min(total, receivable(line)),
       };
       if (Object.keys(packageReceipts).length) result.package_receipts = packageReceipts;
       if (turnedAway.length) result.rejections = turnedAway;
@@ -2345,7 +2354,7 @@ function PackageLineRow({
   const current = receivedNumber(value);
   const rejected = rejectedTotal(rows);
   // Accepted and turned away both reached the requester; only the rest is missing.
-  const accounted = current + rejected;
+  const accounted = (line.package_box_codes?.length ?? 0) > 0 ? current : current + rejected;
   const short = max > 0 && accounted < max;
   const label = line.item_name ?? line.item_code ?? "item";
   const finished = max > 0 && accounted > 0 && photos.length > 0
@@ -2423,7 +2432,10 @@ function PackageLineRow({
               <PackageCheckIcon className="h-4 w-4" />
               {check.kept.length}/{packWord(packs.length)} arrived
             </Button>
-            <span className="text-[11px] text-muted">{qty(current)} of {qty(max)} {line.uom_code ?? ""} received</span>
+            <span className="text-[11px] text-muted">
+              {qty(Math.max(current - rejected, 0))} of {qty(max)} {line.uom_code ?? ""} received
+              {rejected > 0 && ` · ${qty(rejected)} not accepted`}
+            </span>
           </div>
         ) : max > 0 ? (
           <QuantityStepper value={value} max={Math.max(max - rejected, 0)} onChange={onChange} label={label} />
@@ -2466,14 +2478,14 @@ function PackageLineRow({
               {...photoProps}
             />
           )}
-          {max > 0 && packs.length === 0 && !signedOff && (
+          {max > 0 && !signedOff && (packs.length === 0 || current > 0) && (
             // Not every delivery is right (2026-11-06): some of it can be turned away, by
-            // reason, and each reason becomes a return. Lines issued in packages are
-            // checked package by package above and are not split by reason yet.
+            // reason, and each reason becomes a return. On a line issued in packages the
+            // packages that ARRIVED are checked first; what is turned away comes out of those.
             <RejectionEditor
               rows={rows}
               reasons={reasons}
-              max={max}
+              max={packs.length > 0 ? current : max}
               uom={line.uom_code}
               label={label}
               serials={serials}
