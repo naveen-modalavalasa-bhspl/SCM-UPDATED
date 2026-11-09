@@ -774,9 +774,10 @@ export function IndentFormPage() {
                     value={sourceId}
                     isInvalid={showSourceError}
                     isDisabled={isSourcesLoading}
-                    placeholder={isSourcesLoading ? "Finding points at your level…"
+                    placeholder={isSourcesLoading ? "Finding points you can transfer from…"
                       : sourceOptions.length ? "Select the point to transfer from"
-                        : "No point at your level to transfer from"}
+                        : !me?.active_position ? "Pick a working position first"
+                          : "No point to transfer from"}
                     options={sourceOptions}
                     onChange={(v) => setSourceId(v === "" ? "" : Number(v))}
                   />
@@ -797,8 +798,10 @@ export function IndentFormPage() {
                 ) : (
                   <p className="mt-1.5 text-xs text-muted">
                     {strSources.length
-                      ? `${strSources.length} point${strSources.length === 1 ? "" : "s"} at your level. Each approver sees whether it is in their scope.`
-                      : "Points held at your own level, across the network."}
+                      ? `${strSources.length} point${strSources.length === 1 ? "" : "s"} you can transfer from. Each approver sees whether it is in their scope.`
+                      : !me?.active_position
+                        ? "An STR is raised as a position. Pick your working position (bottom left) to see where you can transfer from."
+                        : "A warehouse transfers from other warehouses; an MDP or LIP from points held at the same level."}
                   </p>
                 )}
               </div>

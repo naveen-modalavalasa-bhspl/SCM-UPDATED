@@ -11141,6 +11141,14 @@ async def _decorate_issue_destination(
     chosen = getattr(issue, "destination_warehouse_id", None)
     point = await db.get(Warehouse, chosen) if chosen else None
     setattr(issue, "destination_warehouse_type", point.warehouse_type if point else None)
+    # Vehicle and SAC belong to the bottom rung only (an LIP), the same rule the STR
+    # detail serves as `needs_vehicle_and_sac`: a warehouse or an MDP takes neither,
+    # so the issue screen hides both rows for it. None when the point is unknown, which
+    # keeps the rows, as before.
+    target = point or await _requesting_point(db, issue)
+    setattr(issue, "destination_needs_vehicle_and_sac", (
+        None if target is None
+        else stock_locations.tier_of(target.warehouse_type) == max(stock_locations.LocationTier)))
     return issue
 
 
@@ -26601,6 +26609,18 @@ async def sto_issue_options(
     } for order, issue_status in rows]
 
 
+async def _indent_needs_vehicle_and_sac(db: AsyncSession, indent) -> bool | None:
+    """True when the point an indent / STR is delivered into is an LIP. None when no
+    point resolves (the screen then keeps the rows)."""
+    from app.modules.indents import service as indent_service
+
+    point_id = await indent_service.str_destination_point(db, indent)
+    point = await db.get(Warehouse, point_id) if point_id else None
+    if point is None:
+        return None
+    return stock_locations.tier_of(point.warehouse_type) == max(stock_locations.LocationTier)
+
+
 async def indent_issue_source(
     db: AsyncSession, indent_id: int, warehouse_id: int,
 ) -> dict:
@@ -26749,6 +26769,10 @@ async def indent_issue_source(
         # code, never the storekeeper's own.
         "destination_office_sac": await _office_sac(
             db, requested_by.office_id if requested_by else None),
+        # The delivery point's tier: only an LIP runs a vehicle and carries an SAC, so
+        # the form hides both for a warehouse or an MDP. Same answer the indent detail
+        # serves (`indents._attach_str_route`).
+        "destination_needs_vehicle_and_sac": await _indent_needs_vehicle_and_sac(db, indent),
         # One line per indent line, QUANTITY only (2026-10-12): the hold is a quantity
         # that floats between batches, and the storekeeper picks the batch — offered
         # earliest-expiry first — and the location on the issue itself. Per brand /

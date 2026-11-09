@@ -253,7 +253,7 @@ async def test_serving_in_full_ends_the_ladder_and_a_remainder_climbs(db, make_u
         return indent
 
     monkeypatch.setattr(approvals_service.indent_service, "act_on_indent", act)
-    monkeypatch.setattr(approvals_service, "_approval_out", lambda *_args: "ok")
+    monkeypatch.setattr(approvals_service, "_approval_out", lambda *_args, **_kw: "ok")
     instance = SimpleNamespace(current_stage_name="OE", current_sequence=1,
                                resolved_chain=[{"sequence": 1}, {"sequence": 2}])
     quantities = [SimpleNamespace(line_id=line.id, approved_quantity=10, excluded=False)]
@@ -365,9 +365,12 @@ async def test_allocating_follows_the_approvers_scope(db, make_user, monkeypatch
     # Moving it needs a reason.
     with pytest.raises(ValidationError, match="Say why"):
         await fulfilment.str_allocate(db, indent.id, body(pts["LIP-3"].id), approver)
+    # The point the STR is delivered INTO is never its source (SCM_0182).
+    with pytest.raises(ValidationError, match="is where this stock is going"):
+        await fulfilment.str_allocate(db, indent.id, body(pts["LIP-1"].id, "closer"), approver)
     # A point of his with nothing free is refused in words.
     with pytest.raises(ValidationError, match="none of these items free"):
-        await fulfilment.str_allocate(db, indent.id, body(pts["LIP-1"].id, "closer"), approver)
+        await fulfilment.str_allocate(db, indent.id, body(pts["MDP-A"].id, "closer"), approver)
 
     # His LIP-3 has 4 of the 10: the move is recorded, 4 are allocated, 6 travel on.
     await fulfilment.str_allocate(db, indent.id, body(pts["LIP-3"].id, "Closer to site"), approver)

@@ -1195,6 +1195,8 @@ export interface Issue {
   destination_warehouse_id?: number | null;
   destination_warehouse_name?: string | null;
   destination_warehouse_type?: string | null;
+  /** Only an LIP runs a vehicle and carries an SAC; null when the point is unknown. */
+  destination_needs_vehicle_and_sac?: boolean | null;
   /** The Stock Transfer Order this issue executes (2026-10-29). DIRECT = raised on
    *  its own; STR = produced by an STR's allocation. Its destination is frozen. */
   sto_id?: number | null;

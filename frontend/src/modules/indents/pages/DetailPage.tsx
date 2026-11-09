@@ -302,9 +302,10 @@ export function IndentDetailPage() {
     // field, never a blank screen.
     ?? nonEmptyText(me?.positions?.find((position) => position.office_id === indent.office_id)?.office_sac);
   // A warehouse or an MDP takes neither a vehicle nor an SAC (2026-11-04) — the
-  // delivery point's tier is served; unknown keeps both rows, as before. A saved
-  // vehicle is still shown: hiding a value on the document would hide the document.
-  const showVehicleAndSac = indent.needs_vehicle_and_sac !== false || Boolean(indent.vehicle_number);
+  // delivery point's tier is served; unknown keeps both rows, as before. Only an LIP
+  // shows them (2026-11-09): a vehicle saved on an older warehouse / MDP request is
+  // not the delivery point's and is no longer drawn.
+  const showVehicleAndSac = indent.needs_vehicle_and_sac !== false;
   const isStrDoc = isStrType(indent.indent_type);
   const returnedBy = returnedByFromJourney(journey);
   const correctionOwner = nonEmptyText(indent.correction_owner?.employee_name)
