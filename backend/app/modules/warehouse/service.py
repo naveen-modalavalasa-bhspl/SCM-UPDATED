@@ -43,6 +43,7 @@ from app.platform.rbac.permissions import INDENT_VIEW
 from app.modules.indents.enums import IndentType
 from app.modules.inventory import allocation as stock_allocation
 from app.modules.inventory import locations as stock_locations
+from app.platform.doc_numbering import scope as org_scope
 from app.shared import uom as uom_rules
 from app.modules.inventory.service import move_stock, move_stock_out, take_units
 from app.modules.warehouse import capacity
@@ -7787,7 +7788,11 @@ async def _record_sto_for_str_issue(db: AsyncSession, issue: m.MaterialIssue,
     source = await db.get(Warehouse, issue.warehouse_id)
     destination = await _requesting_point(db, issue)
     order = StockTransferOrder(
-        sto_no=await next_number(db, "sto", project=indent.project_name),
+        # Numbered from the STR it serves when that STR carries an organisation, and
+        # its scope copied below (2026-11-09); an older STR numbers it as before.
+        sto_no=(await next_number(db, "sto", **org_scope.number_args(indent, carried=True))
+                if org_scope.uses_org(indent) else
+                await next_number(db, "sto", project=indent.project_name)),
         doc_kind=STO_KIND_TRANSFER,
         from_warehouse_id=issue.warehouse_id,
         from_warehouse_name=getattr(source, "name", None) or issue.warehouse_name,
@@ -7824,6 +7829,8 @@ async def _record_sto_for_str_issue(db: AsyncSession, issue: m.MaterialIssue,
         else:
             row.requested_qty = _d(row.requested_qty) + _d(line.requested_qty)
     order.items = list(by_item.values())
+    if org_scope.uses_org(indent):
+        org_scope.carry(indent, order, project=True)
     db.add(order)
     await db.flush()
     issue.remarks = " · ".join(filter(None, (issue.remarks, f"STO {order.sto_no}")))
@@ -7865,7 +7872,7 @@ async def draft_issue_for_sto(db: AsyncSession, sto, user) -> None:
                                 model_id=line.model_id or None)
                for line in sto.items],
     )
-    issue = await _build_issue(db, data, user, for_sto=True)
+    issue = await _build_issue(db, data, user, for_sto=True, scope_source=sto)
     sto.issue_id = issue.id
     sto.issue_no = issue.issue_no
     await db.commit()
@@ -11528,9 +11535,41 @@ def _assert_direct_issue_parties(data: s.IssueWrite, *, for_sto: bool = False) -
             f"{'them' if len(missing) > 1 else 'it'} under Issue details.")
 
 
+async def _issue_scope(db: AsyncSession, data, source) -> tuple[dict | None, dict | None]:
+    """Whose paper an issue is on, and what its number is drawn from (2026-11-09).
+
+    Against an indent / STR / STO that carries an organisation: COPIED from it and fixed
+    — the year is the issue's own, today's. Against an older one: (None, None), the old
+    numbering exactly. A direct issue: the form's selection, opening on the defaults;
+    one that names no organisation where none is configured also keeps the old
+    numbering. Returns (values to stamp, `next_number` arguments)."""
+    if source is not None:
+        if not org_scope.uses_org(source):
+            return None, None
+        values = {field: getattr(source, field, None) for field in org_scope.SCOPE_FIELDS}
+        # The year is the issue's own: picked on the form, else today's — never the
+        # source's, which may be last year's.
+        values["fiscal_year"] = org_scope.assert_fiscal_year(getattr(data, "fiscal_year", None))
+        args = org_scope.number_args(source, carried=True)
+        args["fiscal_year"] = values["fiscal_year"]
+        return values, args
+    default = await org_scope.default_organisation(db)
+    if not (getattr(data, "organization_id", None) or default):
+        return None, None
+    picked = await org_scope.resolve_selection(
+        db, organization_id=data.organization_id or default.id,
+        org_department_id=data.org_department_id, project_id=data.project_id,
+        fiscal_year=data.fiscal_year)
+    values = {field: picked[field] for field in (*org_scope.SCOPE_FIELDS, "fiscal_year")}
+    return values, {"company": picked["organization_name"],
+                    "project": picked["project_name"] or picked["org_department_name"],
+                    "fiscal_year": picked["fiscal_year"]}
+
+
 async def _build_issue(db: AsyncSession, data: s.IssueWrite, user, *,
                        for_sto: bool = False,
-                       forwarding: bool = False) -> m.MaterialIssue:
+                       forwarding: bool = False,
+                       scope_source=None) -> m.MaterialIssue:
     """Build one material issue draft without committing it.
 
     Same reason as _build_picking: allocation approval creates its warehouse drafts
@@ -11621,6 +11660,8 @@ async def _build_issue(db: AsyncSession, data: s.IssueWrite, user, *,
         vehicle_number=data.vehicle_number,
     )
     destination = await _issue_destination_point(db, data.destination_warehouse_id, wh.id)
+    # Ahead of the number: a refused selection must burn none.
+    scope_values, scope_args = await _issue_scope(db, data, indent or scope_source)
 
     issue = m.MaterialIssue(
         # items=[] is not cosmetic. Without it the collection is unloaded after the
@@ -11629,8 +11670,11 @@ async def _build_issue(db: AsyncSession, data: s.IssueWrite, user, *,
         # create failed before writing a single line. Same reason on every create_* here.
         items=[],
         # From the indent it serves — see the note on the GRN above.
-        issue_no=await next_number(db, WarehouseDocType.WH_ISSUE.value,
-                                   project=getattr(indent, "project_name", None) or snapshots["project_name"]),
+        issue_no=(await next_number(db, WarehouseDocType.WH_ISSUE.value, **scope_args)
+                  if scope_args is not None else
+                  await next_number(db, WarehouseDocType.WH_ISSUE.value,
+                                    project=getattr(indent, "project_name", None)
+                                    or snapshots["project_name"])),
         issue_type=data.issue_type.value,
         issue_date=data.issue_date,
         indent_id=data.indent_id,
@@ -11655,6 +11699,9 @@ async def _build_issue(db: AsyncSession, data: s.IssueWrite, user, *,
         remarks=data.remarks,
         created_by_id=getattr(user, "id", None), created_by_name=_name(user),
     )
+    if scope_values is not None:
+        for field, value in scope_values.items():
+            setattr(issue, field, value)
     db.add(issue)
     await db.flush()
 
@@ -12031,6 +12078,34 @@ async def create_issue(db: AsyncSession, data: s.IssueWrite, user) -> m.Material
     return await get_issue(db, issue.id)
 
 
+async def _apply_direct_issue_scope(db: AsyncSession, issue, data, user) -> None:
+    """A direct issue's draft selection changed on the form: the same rule as at create,
+    and a new number when the selection moved (2026-11-09). An issue against an indent,
+    STR or STO keeps what it copied — those are fixed — and an issue raised before
+    organisations is left exactly as it was."""
+    given = {f for f in ("organization_id", "org_department_id", "project_id", "fiscal_year")
+             if f in data.model_fields_set}
+    if not given or not org_scope.uses_org(issue):
+        return
+    org_scope.remember_number_args(issue)
+    picked = await org_scope.resolve_selection(
+        db,
+        organization_id=(data.organization_id if "organization_id" in given
+                         else issue.organization_id),
+        org_department_id=(data.org_department_id if "org_department_id" in given
+                           else issue.org_department_id),
+        project_id=data.project_id if "project_id" in given else issue.project_id,
+        fiscal_year=data.fiscal_year if "fiscal_year" in given else issue.fiscal_year,
+        keep=issue)
+    org_scope.stamp(issue, {k: v for k, v in picked.items()
+                            if k not in ("project_id", "project_name")})
+    # The issue's own project is written by the save below, from the same id; the
+    # number reads the name now, so set it here too.
+    issue.project_id, issue.project_name = picked["project_id"], picked["project_name"]
+    await org_scope.renumber(db, issue, WarehouseDocType.WH_ISSUE.value, "issue_no",
+                             "out_issues", user)
+
+
 async def update_issue(db: AsyncSession, issue_id: int, data: s.IssueWrite, user) -> m.MaterialIssue:
     issue = await get_issue(db, issue_id)
     _guard(issue.status, {IssueStatus.DRAFT.value}, "edit", "issue")
@@ -12051,6 +12126,8 @@ async def update_issue(db: AsyncSession, issue_id: int, data: s.IssueWrite, user
         data = data.model_copy(update={"destination_warehouse_id": sto_row.to_warehouse_id})
 
     before = {"total_qty": str(issue.total_qty)}
+    if not data.indent_id and not from_sto:
+        await _apply_direct_issue_scope(db, issue, data, user)
     wh = await _warehouse(db, data.warehouse_id)
     if data.indent_id:
         from app.modules.indents.models import Indent
@@ -26773,6 +26850,12 @@ async def indent_issue_source(
         # the form hides both for a warehouse or an MDP. Same answer the indent detail
         # serves (`indents._attach_str_route`).
         "destination_needs_vehicle_and_sac": await _indent_needs_vehicle_and_sac(db, indent),
+        # Whose paper the issue is on: copied from the indent and fixed (2026-11-09).
+        # All null on an indent older than organisations, which numbers as before.
+        "organization_id": getattr(indent, "organization_id", None),
+        "organization_name": getattr(indent, "organization_name", None),
+        "org_department_id": getattr(indent, "org_department_id", None),
+        "org_department_name": getattr(indent, "org_department_name", None),
         # One line per indent line, QUANTITY only (2026-10-12): the hold is a quantity
         # that floats between batches, and the storekeeper picks the batch — offered
         # earliest-expiry first — and the location on the issue itself. Per brand /

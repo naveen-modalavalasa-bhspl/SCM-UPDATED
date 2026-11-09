@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  numberWillChange, openingValues, type DocNumberCardData, type DocNumberValue,
+  docNumberPayload, numberWillChange, openingValues, raiserScope,
+  type DocNumberCardData, type DocNumberValue,
 } from "../documentNumber";
 
 const card = (over: Partial<DocNumberCardData> = {}): DocNumberCardData => ({
@@ -67,5 +68,42 @@ describe("a saved draft's number", () => {
     expect(numberWillChange("DRAFT-37-A1B2C3", "BAV/104/2026-27/REQ####")).toBe(false);
     expect(numberWillChange("BAV/104/2026-27/PO0007", null)).toBe(false);
     expect(numberWillChange(null, "BAV/104/2026-27/PO####")).toBe(false);
+  });
+});
+
+// Indents, STRs and monthly indents (2026-11-09): what HCM fixes for the raiser is filled
+// and locked, the same values `scope.resolve_for_raiser` fixes on save.
+
+describe("what HCM fixes for the person raising", () => {
+  it("locks the configured organisation and the person's project, and keeps the department out", () => {
+    const { locks, patch } = raiserScope(card({
+      organisation_fixed: true, mapped_project_id: 8, mapped_project_name: "108",
+    }));
+    expect(locks.organisation && locks.project && locks.department).toBe(true);
+    expect(patch).toMatchObject({ organizationId: 2, projectId: 8, orgDepartmentId: "" });
+  });
+
+  it("falls back to the department when there is no project", () => {
+    const { locks, patch } = raiserScope(card({
+      mapped_org_department_id: 2, mapped_org_department_name: "HUMAN RESOURCES",
+    }));
+    expect(locks.department && locks.project).toBe(true);
+    expect(patch).toMatchObject({ orgDepartmentId: 2, projectId: "" });
+    expect(locks.organisation).toBeFalsy();   // no default configured: still selectable
+  });
+
+  it("leaves both open when HCM fixes neither", () => {
+    const { locks, patch } = raiserScope(card());
+    expect(locks.project || locks.department).toBeFalsy();
+    expect(patch.projectId).toBeUndefined();
+  });
+});
+
+describe("what goes on the wire", () => {
+  it("sends the project, or the department when there is none, never both", () => {
+    expect(docNumberPayload({ ...empty, organizationId: 2, projectId: 7, orgDepartmentId: 2 }))
+      .toEqual({ organization_id: 2, project_id: 7, org_department_id: null, fiscal_year: null });
+    expect(docNumberPayload({ ...empty, organizationId: 2, orgDepartmentId: 2, fiscalYear: "2026-27" }))
+      .toEqual({ organization_id: 2, project_id: null, org_department_id: 2, fiscal_year: "2026-27" });
   });
 });

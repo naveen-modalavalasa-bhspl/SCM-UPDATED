@@ -46,6 +46,7 @@ from app.shared.models.base import created_at_col, pk, soft_fk, updated_at_col
 # Re-exported so the rest of the module has one import site for its tables.
 from app.shared.models.warehouse import Bin, Warehouse  # noqa: F401
 from app.shared.models.combination import CombinationMixin
+from app.shared.models.master import OrgScopeColumns
 
 # 0 rather than NULL: these columns are NOT NULL in the schema and "no bin" /
 # "no batch" is expressed as 0, matching how inventory's stk_balance already works.
@@ -434,7 +435,7 @@ class PickingItem(CombinationMixin, Base):
     picking = relationship("Picking", back_populates="items")
 
 
-class MaterialIssue(Base):
+class MaterialIssue(OrgScopeColumns, Base):
     """`out_issues`. `direction` pairs an issue with the return that reverses it,
     which is what lets `original_issue_id` point somewhere real."""
     __tablename__ = "out_issues"

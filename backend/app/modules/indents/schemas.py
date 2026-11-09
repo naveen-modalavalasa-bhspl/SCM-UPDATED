@@ -1,5 +1,6 @@
 from datetime import date, datetime, timezone
 
+from app.shared.org_scope_schemas import OrgScopeIn, OrgScopeOut
 from pydantic import (
     BaseModel, ConfigDict, Field, computed_field, field_serializer, field_validator,
     model_validator,
@@ -30,7 +31,7 @@ class IndentItemIn(CombinationIn):
     remarks: str | None = None
 
 
-class IndentCreate(BaseModel):
+class IndentCreate(OrgScopeIn):
     required_date: date | None = None
 
     _no_past_required_date = field_validator("required_date")(
@@ -47,7 +48,7 @@ class IndentCreate(BaseModel):
     items: Annotated[list[IndentItemIn], DocumentLines]
 
 
-class IndentUpdate(BaseModel):
+class IndentUpdate(OrgScopeIn):
     required_date: date | None = None
     priority: str | None = None
     indent_type: IndentType | None = None
@@ -161,7 +162,7 @@ class StrSourceOption(BaseModel):
     held_by: list[str] = Field(default_factory=list)
 
 
-class IndentOut(BaseModel):
+class IndentOut(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     indent_no: str

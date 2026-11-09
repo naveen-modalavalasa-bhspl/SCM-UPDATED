@@ -3757,6 +3757,15 @@ async def sto_destinations(db: AsyncSession, from_warehouse_id: int, user) -> di
     }
 
 
+class _ScopeView:
+    """A resolved selection, read the way `org_scope.number_args` reads a document."""
+
+    def __init__(self, scope: dict):
+        self.department_name = None
+        for key, value in scope.items():
+            setattr(self, key, value)
+
+
 async def create_sto(db: AsyncSession, data, user) -> StockTransferOrder:
     from_wh = await db.get(Warehouse, data.from_warehouse_id)
     to_wh = await db.get(Warehouse, data.to_warehouse_id)
@@ -3810,7 +3819,20 @@ async def create_sto(db: AsyncSession, data, user) -> StockTransferOrder:
         data.from_warehouse_id, data.to_warehouse_id, kind.value, gated,
     )
 
-    sto_no = await next_number(db, "sto")
+    # Whose paper it is on (2026-11-09): a direct STO selects all of it, opening on the
+    # same defaults as everywhere else. No organisation named and none configured keeps
+    # the old numbering, for callers that predate the number card.
+    from app.platform.doc_numbering import scope as org_scope
+    scope = None
+    if getattr(data, "organization_id", None) or await org_scope.default_organisation(db):
+        scope = await org_scope.resolve_selection(
+            db, organization_id=data.organization_id or (
+                await org_scope.default_organisation(db)).id,
+            org_department_id=data.org_department_id, project_id=data.project_id,
+            fiscal_year=data.fiscal_year)
+    sto_no = (await next_number(db, "sto", **org_scope.number_args(
+                  _ScopeView(scope))) if scope is not None
+              else await next_number(db, "sto"))
     sto = StockTransferOrder(
         sto_no=sto_no,
         from_warehouse_id=data.from_warehouse_id,
@@ -3831,6 +3853,8 @@ async def create_sto(db: AsyncSession, data, user) -> StockTransferOrder:
             "Inventory Manager approval required (crosses projects)" if gated else None,
         ))) or None,
     )
+    if scope is not None:
+        org_scope.stamp_with_project(sto, scope)
     db.add(sto)
     await db.flush()
 

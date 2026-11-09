@@ -20,6 +20,7 @@ from app.shared.enums import DocType
 from app.shared.enums import Priority, ProjectHoldStatus, ReservationStatus
 from app.shared.models.base import created_at_col, pk, soft_fk, updated_at_col, utcnow
 from app.shared.models.combination import CombinationMixin
+from app.shared.models.master import OrgScopeColumns
 
 """0 rather than NULL means "not set" for bin, batch and project.
 
@@ -503,7 +504,7 @@ STO_KIND_TRANSFER = "STO"
 STO_KIND_MOVEMENT = "SMO"
 
 
-class StockTransferOrder(Base):
+class StockTransferOrder(OrgScopeColumns, Base):
     """Stock Transfer Order (STO) and Stock Movement Order (SMO).
 
     STO: create -> approval -> dispatch -> receive. Stock moves physically ONLY upon
@@ -518,6 +519,11 @@ class StockTransferOrder(Base):
     __tablename__ = "inv_sto"
     id = pk()
     sto_no = Column(String(30), unique=True, nullable=False)
+    # The project the NUMBER is drawn under (2026-11-09) — selected on a direct STO,
+    # copied from the STR on one that serves an STR. Not `from_project_id` /
+    # `to_project_id`, which say whose STOCK moves.
+    project_id = soft_fk()
+    project_name = Column(String(200), nullable=True)
     #: STO or SMO. Defaulted to STO so every row written before this reads correctly.
     doc_kind = Column(String(10), nullable=False, index=True,
                       default=STO_KIND_TRANSFER, server_default=STO_KIND_TRANSFER)

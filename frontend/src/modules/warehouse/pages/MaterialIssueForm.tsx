@@ -1,4 +1,10 @@
-import { Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, StatusPill } from "@/shared/components";
+import {
+  Button, Can, ConfirmModal, DocumentNumberCard, ErrorBanner, Field, Input, PageHeader, StatusPill,
+} from "@/shared/components";
+import {
+  docNumberPayload, docNumberValueFrom, emptyDocNumberValue, type DocNumberLocks,
+  type DocNumberValue,
+} from "@/shared/documentNumber";
 import { ladderFor, usageLevels, usePackOptions } from "@/shared/packing";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
@@ -296,6 +302,13 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   // Whether the point the goods go INTO runs a vehicle and carries an SAC — an LIP
   // only (served). False hides both rows on an indent / STR / STO issue; null keeps them.
   const [needsVehicleSac, setNeedsVehicleSac] = useState<boolean | null>(null);
+  // Organisation, project / department and year (2026-11-09). Against an indent, STR or
+  // STO they are COPIED from it and locked (`linkedScope` names it); a direct issue
+  // selects them, opening on the card's defaults. `olderScope`: the issue or its source
+  // predates organisations, so no card — it numbers exactly as before.
+  const [scope, setScope] = useState<DocNumberValue>(emptyDocNumberValue);
+  const [linkedScope, setLinkedScope] = useState<string | null>(null);
+  const [olderScope, setOlderScope] = useState(false);
   // The employee dropdown loads one page of names, so the indent raiser this form
   // defaults to is usually not in it. Hold the name that came with the id, or the
   // field shows its placeholder over a person who IS selected.
@@ -337,6 +350,10 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   useEffect(() => {
     if (!doc) return;
     setMode(modeOf(doc));
+    setScope(docNumberValueFrom(doc));
+    setOlderScope(!doc.organization_id);
+    setLinkedScope(doc.indent_id ? (doc.indent_no ?? "the request")
+      : doc.sto_no ? doc.sto_no : null);
     setDestination(doc.destination_office_name ?? "");
     setDestinationSac(doc.destination_office_sac ?? null);
     setNeedsVehicleSac(doc.destination_needs_vehicle_and_sac ?? null);
@@ -818,6 +835,8 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   const [unitsOneByOne, setUnitsOneByOne] = useState(false);
   useEffect(() => { if (serialLine === null) setUnitsOneByOne(false); }, [serialLine]);
   const payload = (): IssueWrite => ({
+    // The card first: the form's own project, kept in step with it, wins below.
+    ...(direction === "OUT" && !olderScope ? docNumberPayload(scope) : {}),
     ...form,
     // `normalizeSplits` first: the splits of one ask share its requested quantity
     // between them, and the server refuses a line requesting nothing or issuing more
@@ -875,6 +894,13 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
       setDestination(source.destination_office_name ?? "");
       setDestinationSac(source.destination_office_sac ?? null);
       setNeedsVehicleSac(source.destination_needs_vehicle_and_sac ?? null);
+      // Copied from the indent / STR and fixed; an older one numbers as before.
+      setOlderScope(!source.organization_id);
+      setLinkedScope(source.indent_no ?? "the request");
+      setScope({
+        ...docNumberValueFrom({ ...source, fiscal_year: null }),
+        projectId: source.project_id ?? "", projectName: source.project_name ?? "",
+      });
       setIndentOffice(source.destination_office_id ?? null);
       setMixedProjects(!!source.mixed_projects);
       if (source.issued_to_id) setIssuedToName(source.issued_to_name ?? null);
@@ -986,6 +1012,8 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   // an indent / STR / STO issue hides them: a direct issue names its own destination
   // and already says "None" for a point without them.
   const hideVehicleSac = needsVehicleSac === false;
+  const scopeLocks: DocNumberLocks = locked ? { all: true }
+    : linkedScope ? { organisation: true, project: true, department: true } : {};
   // The issue executes a Stock Transfer Order whose destination is a real point: the
   // destination is the ORDER's, shown locked (2026-10-29). Like the server
   // (`_assert_direct_issue_parties(for_sto=)`), the order is its request, so neither
@@ -1069,6 +1097,9 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   const chooseMode = (next: IssueMode) => {
     if (next === mode) return;
     setMode(next);
+    setScope(emptyDocNumberValue());
+    setLinkedScope(null);
+    setOlderScope(false);
     setPickedSto(null);
     setDestPoint(null);
     setDestination("");
@@ -1630,6 +1661,26 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
             <MetaRow label="Reverses" value={<span className="font-mono">{doc.original_issue_no}</span>} />
           )}
         </MetaCard>
+      )}
+
+      {direction === "OUT" && !olderScope && (linkedScope || !form.indent_id) && (
+        <div className="mb-5">
+          <DocumentNumberCard
+            docType="wh_issue" value={scope} exclusive
+            ready={!editing && !linkedScope}
+            locks={scopeLocks}
+            source={linkedScope ? { label: linkedScope } : null}
+            savedNumber={editing ? doc?.issue_no ?? null : null}
+            onChange={(patch) => {
+              setScope((current) => ({ ...current, ...patch }));
+              // A direct issue's project IS the form's project: keep the two in step.
+              if (!linkedScope && "projectId" in patch) {
+                set("project_id", patch.projectId === "" ? null : patch.projectId ?? null);
+                setProjectName(null);
+              }
+            }}
+          />
+        </div>
       )}
 
       <Section title={`${direction === "OUT" ? "Issue" : "Return"} details`}>

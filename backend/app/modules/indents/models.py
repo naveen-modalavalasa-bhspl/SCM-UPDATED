@@ -25,6 +25,7 @@ from app.shared.models.base import (
     BigIntPortable, created_at_col, pk, soft_fk, updated_at_col,
 )
 from app.shared.models.combination import CombinationMixin
+from app.shared.models.master import OrgScopeColumns
 
 
 class Consolidation(Base):
@@ -67,7 +68,7 @@ class Consolidation(Base):
 Index("ix_ind_cons_cycle_status", Consolidation.cycle, Consolidation.status)
 
 
-class Indent(Base):
+class Indent(OrgScopeColumns, Base):
     __tablename__ = "ind_indents"
     id = pk()
     indent_no = Column(String(50), unique=True, nullable=False)

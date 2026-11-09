@@ -1121,6 +1121,11 @@ export const getIndentIssueSource = (indent_id: number, warehouse_id: number) =>
     destination_office_name?: string | null;
     destination_office_sac?: string | null;
     destination_needs_vehicle_and_sac?: boolean | null;
+    project_name?: string | null;
+    organization_id?: number | null;
+    organization_name?: string | null;
+    org_department_id?: number | null;
+    org_department_name?: string | null;
     items: IssueWrite["items"];
   }>(`${BASE}/options/indent-issue-source`, { indent_id, warehouse_id });
 

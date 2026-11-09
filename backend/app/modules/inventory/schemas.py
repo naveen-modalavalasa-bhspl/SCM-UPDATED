@@ -8,6 +8,7 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.shared.org_scope_schemas import OrgScopeIn, OrgScopeOut
 from app.shared.time import not_in_past
 from app.shared.limits import (  # request-size guards, see the module
     Annotated, BatchDocuments, BatchIds, DocumentLines, MAX_BATCH_IDS, MAX_DOCUMENT_LINES,
@@ -820,7 +821,7 @@ class STOItemIn(CombinationIn):
     remarks: str | None = None
 
 
-class STOIn(BaseModel):
+class STOIn(OrgScopeIn):
     from_warehouse_id: int
     to_warehouse_id: int
     from_project_id: int = 0
@@ -842,10 +843,13 @@ class STOItemOut(CombinationOut):
     remarks: str | None = None
 
 
-class STOListRow(BaseModel):
+class STOListRow(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     sto_no: str
+    #: The project the number is drawn under (2026-11-09); not whose stock moves.
+    project_id: int | None = None
+    project_name: str | None = None
     from_warehouse_id: int
     from_warehouse_name: str | None = None
     to_warehouse_id: int

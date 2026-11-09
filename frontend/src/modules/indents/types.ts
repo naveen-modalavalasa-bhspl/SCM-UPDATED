@@ -35,6 +35,12 @@ export type IndentType = "REGULAR" | "MONTHLY" | "STR";
 export interface Indent {
   id: number;
   indent_no: string;
+  /** Null on an indent raised before organisations. */
+  organization_id?: number | null;
+  organization_name?: string | null;
+  org_department_id?: number | null;
+  org_department_name?: string | null;
+  fiscal_year?: string | null;
   /**
    * Optional for the same reason ActivityRow carries its compatibility aliases: a
    * deployed backend that predates the field omits it, and the screens must render
@@ -487,6 +493,11 @@ export interface IndentNotification {
 // Delegation is no longer exposed at all — see modules/approvals/__init__.py.
 
 export interface IndentCreate {
+  /** Whose paper it is on (2026-11-09); HCM's project / department win on the server. */
+  organization_id?: number | null;
+  org_department_id?: number | null;
+  project_id?: number | null;
+  fiscal_year?: string | null;
   required_date?: string | null;
   priority: string;
   indent_type?: IndentType;

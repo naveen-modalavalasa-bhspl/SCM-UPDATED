@@ -3,9 +3,12 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowRight, ArrowRightLeft, Calendar, Clock, MapPin, PackageCheck, Plus, Trash2, Truck } from "lucide-react";
 import {
-  Button, Can, Card, Field, Input, KpiTiles, PageHeader, ResponsiveList, Select,
-  StatusPill, useToast, type Column, type KpiTileSpec,
+  Button, Can, Card, DocumentNumberCard, DocumentScopeStrip, Field, Input, KpiTiles,
+  PageHeader, ResponsiveList, Select, StatusPill, useToast, type Column, type KpiTileSpec,
 } from "@/shared/components";
+import {
+  docNumberPayload, emptyDocNumberValue, type DocNumberValue,
+} from "@/shared/documentNumber";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { fmtDate } from "@/shared/datetime";
 import { TransferAcknowledgements } from "./TransferAcknowledgements";
@@ -522,6 +525,8 @@ function OrdersTab() {
       >
         {selected && (
           <>
+            {/* Whose paper it is on; nothing on an STO older than organisations. */}
+            <DocumentScopeStrip doc={selected} className="mb-3" />
             <SheetSection title="Progress">
               <SheetRow label="Against STR" value={selected.str_no ?? "Raised directly"} />
               <SheetRow label="Material issue"
@@ -578,6 +583,10 @@ function NewStoSheet({ onClose, onCreated }: { onClose: () => void; onCreated: (
   const [remarks, setRemarks] = useState("");
   const [lines, setLines] = useState<Line[]>([{ item_id: "", qty: "" }]);
   const [error, setError] = useState("");
+  // A direct STO selects all of it (2026-11-09), opening on the defaults the card fills:
+  // the configured organisation, the person's project, else their last, else the first.
+  const [scope, setScope] = useState<DocNumberValue>(emptyDocNumberValue);
+  const [touched, setTouched] = useState(false);
 
   const { data: warehouses = [] } = useQuery({ queryKey: ["warehouses"], queryFn: getWarehouses });
   const stock = useQuery({
@@ -620,6 +629,7 @@ function NewStoSheet({ onClose, onCreated }: { onClose: () => void; onCreated: (
 
   const create = useMutation({
     mutationFn: () => createSTO({
+      ...docNumberPayload(scope),
       from_warehouse_id: Number(fromId),
       to_warehouse_id: Number(toId),
       remarks: remarks || null,
@@ -627,7 +637,7 @@ function NewStoSheet({ onClose, onCreated }: { onClose: () => void; onCreated: (
         .map((l) => ({ item_id: Number(l.item_id), requested_qty: Number(l.qty) })),
     }),
     onSuccess: onCreated,
-    onError: (e: any) => setError(e?.response?.data?.error ?? "Could not raise the transfer"),
+    onError: (e: any) => { setTouched(true); setError(e?.response?.data?.error ?? "Could not raise the transfer"); },
   });
 
   const freeOf = (itemId: string) => freeByItem.get(itemId)?.qty ?? 0;
@@ -662,6 +672,10 @@ function NewStoSheet({ onClose, onCreated }: { onClose: () => void; onCreated: (
       }
     >
       {error && <div className="mb-3"><ErrorNote message={error} /></div>}
+      <div className="mb-4">
+        <DocumentNumberCard docType="sto" value={scope} ready exclusive showInvalid={touched}
+                            onChange={(patch) => setScope((current) => ({ ...current, ...patch }))} />
+      </div>
       <SheetSection title="Route">
         <div className="space-y-3">
           <Field label="Select source">

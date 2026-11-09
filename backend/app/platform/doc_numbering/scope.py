@@ -196,3 +196,155 @@ async def renumber(db: AsyncSession, document, doc_type: str, number_attr: str,
 def remember_number_args(document) -> None:
     """Call before changing a draft's selection, so `renumber` can tell it moved."""
     document._number_args_before = number_args(document)
+
+
+# --------------------------------------------------------------------------- #
+#  Indent, STR, monthly indent, STO and material issue (2026-11-09)
+# --------------------------------------------------------------------------- #
+# Procurement selects everything on the form. These documents are raised by people who
+# ARE somewhere in HCM, so what HCM says about them is used, and fixed, before anything
+# is offered to pick:
+#
+#   - the raiser's project (the post in hand, else the employee) is the project, locked;
+#   - else their department, matched BY NAME to the organisation feed's departments
+#     (the feed states no link to HCM, so a name is all there is), locked;
+#   - else one of the two is picked on the form, and one is required.
+#
+# The organisation is the configured default (`ORG_DEFAULT_NAME`) and is locked when one
+# is configured: nothing in HCM says which organisation a person is in. A direct STO and
+# a direct material issue select all of it, opening on the same values.
+
+def _norm(text: str | None) -> str:
+    return " ".join((text or "").split()).casefold()
+
+
+async def default_organisation(db: AsyncSession) -> Organization | None:
+    """The configured default organisation, when it names an active one."""
+    from app.core.config import settings
+    from sqlalchemy import select
+
+    wanted = _norm(settings.ORG_DEFAULT_NAME)
+    if not wanted:
+        return None
+    rows = (await db.execute(
+        select(Organization).where(Organization.is_active.is_(True)))).scalars().all()
+    return next((row for row in rows if _norm(row.name) == wanted), None)
+
+
+async def raiser_mapping(db: AsyncSession, user) -> dict:
+    """What HCM says about the person raising the document: their project, else their
+    department matched by name to the feed. Empty values where HCM says nothing usable.
+
+    Read off the post in hand first, then the employee, the order `indents` reads its
+    own context in, so the card and the save can never disagree about what is fixed."""
+    from sqlalchemy import select
+    from app.platform.hcm.models import HcmDepartment, HcmPosition
+    from app.shared.models.master import Project
+
+    position = None
+    position_id = getattr(user, "active_position_id", None)
+    if position_id is not None:
+        position = await db.get(HcmPosition, position_id)
+    out = {"project_id": None, "project_name": None,
+           "org_department_id": None, "org_department_name": None}
+
+    project_id = (getattr(position, "project_id", None) or getattr(user, "project_id", None))
+    if project_id:
+        project = await db.get(Project, project_id)
+        if project is not None and project.is_active:
+            out.update(project_id=project.id, project_name=project.name)
+            return out
+
+    department_id = (getattr(position, "department_id", None)
+                     or getattr(user, "department_id", None))
+    if department_id:
+        department = await db.get(HcmDepartment, department_id)
+        name = _norm(getattr(department, "name", None))
+        if name:
+            matches = [row for row in (await db.execute(
+                select(OrgDepartment).where(OrgDepartment.is_active.is_(True))
+            )).scalars().all() if _norm(row.name) == name]
+            if len(matches) == 1:   # two of one name is not an answer
+                out.update(org_department_id=matches[0].id,
+                           org_department_name=matches[0].name)
+    return out
+
+
+async def _project(db: AsyncSession, project_id: int | None, keep=None):
+    from app.shared.models.master import Project
+
+    if not project_id:
+        return None
+    project = await db.get(Project, project_id)
+    held = getattr(keep, "project_id", None)
+    if project is None or (not project.is_active and project_id != held):
+        raise ValidationError("That project is closed or does not exist. Pick an active "
+                              "one from the list.")
+    return project
+
+
+async def resolve_selection(db: AsyncSession, *, organization_id: int | None,
+                            org_department_id: int | None, project_id: int | None,
+                            fiscal_year: str | None = None, keep=None) -> dict:
+    """A form's free selection — direct STO, direct material issue — as snapshot values,
+    with the project. Project OR department: both given keeps the project, the way the
+    number reads it; neither is refused, so the number can never print NA."""
+    project = await _project(db, project_id, keep)
+    values = await resolve(db, organization_id,
+                           None if project else org_department_id,
+                           keep=keep, fiscal_year=fiscal_year)
+    values["project_id"] = project.id if project else None
+    values["project_name"] = project.name if project else None
+    if not (values["project_name"] or values["org_department_name"]):
+        raise OrganisationRequired("Select the project or the department this document "
+                                   "is for.")
+    return values
+
+
+async def resolve_for_raiser(db: AsyncSession, user, *, organization_id: int | None,
+                             org_department_id: int | None, project_id: int | None,
+                             fiscal_year: str | None = None, keep=None) -> dict:
+    """An indent / STR / monthly indent's selection, with what HCM fixes applied first.
+
+    A value HCM fixes is used whatever was sent, and a DIFFERENT value sent for it is
+    refused rather than silently replaced — a caller that sent it believed it would
+    stick. `keep` is the saved draft, whose own values are never refused."""
+    default_org = await default_organisation(db)
+    if default_org is not None:
+        held = getattr(keep, "organization_id", None)
+        if organization_id and organization_id not in (default_org.id, held):
+            raise ValidationError(
+                f"Documents are raised under {default_org.name}. The organisation "
+                "cannot be changed here.")
+        organization_id = organization_id or held or default_org.id
+
+    mapped = await raiser_mapping(db, user)
+    if mapped["project_id"]:
+        if project_id and project_id not in (mapped["project_id"],
+                                             getattr(keep, "project_id", None)):
+            raise ValidationError(
+                f"Your project is {mapped['project_name']} in HCM, so this document is "
+                "raised under it.")
+        project_id, org_department_id = mapped["project_id"], None
+    elif mapped["org_department_id"]:
+        if org_department_id and org_department_id not in (
+                mapped["org_department_id"], getattr(keep, "org_department_id", None)):
+            raise ValidationError(
+                f"Your department is {mapped['org_department_name']}, so this document "
+                "is raised under it.")
+        if project_id and project_id != getattr(keep, "project_id", None):
+            raise ValidationError(
+                f"Your department is {mapped['org_department_name']} and you hold no "
+                "project in HCM, so this document is raised under the department.")
+        project_id, org_department_id = None, mapped["org_department_id"]
+    return await resolve_selection(
+        db, organization_id=organization_id, org_department_id=org_department_id,
+        project_id=project_id, fiscal_year=fiscal_year, keep=keep)
+
+
+def stamp_with_project(document, values: dict) -> None:
+    """`stamp`, plus the project, for a document whose project is part of its scope."""
+    stamp(document, {k: v for k, v in values.items()
+                     if k not in ("project_id", "project_name")})
+    document.project_id = values.get("project_id")
+    document.project_name = values.get("project_name")

@@ -24,14 +24,8 @@ class POLineIn(CombinationIn):
     pack_breakdown: Annotated[list[PackEntryIn], PACK_ENTRIES] | None = None
 
 
-class OrgScopeOut(BaseModel):
-    """Whose paper a document is on. All null on one raised before organisations."""
-    organization_id: int | None = None
-    organization_code: str | None = None
-    organization_name: str | None = None
-    org_department_id: int | None = None
-    org_department_name: str | None = None
-    fiscal_year: str | None = None
+# Whose paper a document is on: shared with indents, STOs and material issues.
+from app.shared.org_scope_schemas import OrgScopeOut  # noqa: E402
 
 
 class POHeaderIn(BaseModel):

@@ -1167,6 +1167,12 @@ export interface PickingWrite {
 
 /** `out_issues`. `direction` is `OUT` for an issue and `IN` for a return against one. */
 export interface Issue {
+  /** Whose paper it is on (2026-11-09); null on an issue older than organisations. */
+  organization_id?: number | null;
+  organization_name?: string | null;
+  org_department_id?: number | null;
+  org_department_name?: string | null;
+  fiscal_year?: string | null;
   id: number;
   issue_no: string;
   issue_type: string;
@@ -1558,6 +1564,12 @@ export interface StockAvailability {
 }
 
 export interface IssueWrite {
+  /** Whose paper it is on (2026-11-09); null on an issue older than organisations. */
+  organization_id?: number | null;
+  organization_name?: string | null;
+  org_department_id?: number | null;
+  org_department_name?: string | null;
+  fiscal_year?: string | null;
   issue_type: string;
   issue_date: string;
   indent_id?: number | null;

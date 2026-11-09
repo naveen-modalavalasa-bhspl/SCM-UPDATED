@@ -7,6 +7,7 @@ status are decided by the service, and accepting them from the client would let 
 caller invent its own document number or mark its own issue approved.
 """
 from app.shared.packing import PACK_ENTRIES, PackEntryIn, describe as describe_packs
+from app.shared.org_scope_schemas import OrgScopeIn, OrgScopeOut
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
@@ -1708,7 +1709,7 @@ class IssueItemWrite(CombinationIn):
     break_bulk: bool = False
 
 
-class IssueWrite(BaseModel):
+class IssueWrite(OrgScopeIn):
     issue_type: IssueType = IssueType.DIRECT
     issue_date: date
     indent_id: int | None = None
@@ -2090,7 +2091,7 @@ class TrackingTypeRead(_Read):
     hint: str
 
 
-class IssueRead(_Read):
+class IssueRead(OrgScopeOut, _Read):
     id: int
     issue_no: str
     issue_type: str
@@ -4238,7 +4239,7 @@ class ItemOption(Option):
     location_count: int | None = None
 
 
-class IndentIssueSource(BaseModel):
+class IndentIssueSource(OrgScopeOut):
     indent_id: int
     indent_no: str
     warehouse_id: int

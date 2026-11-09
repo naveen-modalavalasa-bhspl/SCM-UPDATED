@@ -21,6 +21,15 @@ export interface DocNumberCardData {
   projects: DocNumberOption[];
   default_organization_id: number | null;
   own_project_id: number | null;
+  /** What HCM fixes for the person raising (2026-11-09): their project, else their
+   *  department matched by name to the feed. Indents, STRs and monthly indents lock these;
+   *  the save fixes the same values. */
+  mapped_project_id?: number | null;
+  mapped_project_name?: string | null;
+  mapped_org_department_id?: number | null;
+  mapped_org_department_name?: string | null;
+  /** A default organisation is configured, so documents raised by a person use it. */
+  organisation_fixed?: boolean;
 }
 
 export interface DocNumberPart {
@@ -56,6 +65,9 @@ export interface DocNumberLocks {
   all?: boolean;
   organisation?: boolean;
   project?: boolean;
+  department?: boolean;
+  /** Why a locked field is locked, when it is not "copied from the document before". */
+  reasons?: Partial<Record<DocNumberField, string>>;
 }
 
 export const docNumberApi = {
@@ -140,4 +152,74 @@ export function openingValues(
 export function numberWillChange(saved: string | null | undefined, previewed: string | null): boolean {
   if (!saved || !previewed || saved.startsWith("DRAFT-")) return false;
   return !saved.startsWith(previewed.replace(/#+$/, ""));
+}
+
+/** A new document's card value, nothing chosen yet. */
+export const emptyDocNumberValue = (): DocNumberValue => ({
+  organizationId: "", projectId: "", orgDepartmentId: "", fiscalYear: "",
+});
+
+/** A saved document's scope, in the shape the card edits. */
+export const docNumberValueFrom = (doc: {
+  organization_id?: number | null; organization_name?: string | null;
+  org_department_id?: number | null; org_department_name?: string | null;
+  project_id?: number | null; project_name?: string | null; fiscal_year?: string | null;
+}): DocNumberValue => ({
+  organizationId: doc.organization_id ?? "",
+  organizationName: doc.organization_name ?? "",
+  orgDepartmentId: doc.org_department_id ?? "",
+  departmentName: doc.org_department_name ?? "",
+  projectId: doc.project_id ?? "",
+  projectName: doc.project_name ?? "",
+  fiscalYear: doc.fiscal_year ?? "",
+});
+
+/** The same values on a NEW document raised from `doc`: the year is never inherited. */
+export const docNumberValueCarried: typeof docNumberValueFrom = (doc) => ({
+  ...docNumberValueFrom(doc), fiscalYear: "",
+});
+
+/** What goes on the wire. Project OR department, the way the number reads them. */
+export const docNumberPayload = (value: DocNumberValue) => ({
+  organization_id: value.organizationId === "" ? null : value.organizationId,
+  project_id: value.projectId === "" ? null : value.projectId,
+  org_department_id: value.projectId !== "" || value.orgDepartmentId === ""
+    ? null : value.orgDepartmentId,
+  fiscal_year: value.fiscalYear || null,
+});
+
+/**
+ * What HCM fixes for the person raising an indent, STR or monthly indent, as card locks
+ * and the values to open on. Their project, else their department; with neither, both
+ * stay open and one must be picked. The organisation is locked when a default is
+ * configured. Mirrors `scope.resolve_for_raiser`, which fixes the same values on save.
+ */
+export function raiserScope(card: DocNumberCardData): {
+  locks: DocNumberLocks; patch: Partial<DocNumberValue>;
+} {
+  const fromHcm = "Set from your HCM record.";
+  const project = card.mapped_project_id ?? null;
+  const department = card.mapped_org_department_id ?? null;
+  const locks: DocNumberLocks = { reasons: {} };
+  const patch: Partial<DocNumberValue> = {};
+  if (card.organisation_fixed && card.default_organization_id != null) {
+    locks.organisation = true;
+    locks.reasons!.organisation = "Documents are raised under this organisation.";
+    patch.organizationId = card.default_organization_id;
+  }
+  if (project != null) {
+    locks.project = locks.department = true;
+    locks.reasons!.project = fromHcm;
+    locks.reasons!.department = "Your project prints instead.";
+    Object.assign(patch, { projectId: project, projectName: card.mapped_project_name ?? "",
+                           orgDepartmentId: "" as const, departmentName: "" });
+  } else if (department != null) {
+    locks.project = locks.department = true;
+    locks.reasons!.department = fromHcm;
+    locks.reasons!.project = "You hold no project in HCM; your department prints.";
+    Object.assign(patch, { orgDepartmentId: department,
+                           departmentName: card.mapped_org_department_name ?? "",
+                           projectId: "" as const, projectName: "" });
+  }
+  return { locks, patch };
 }

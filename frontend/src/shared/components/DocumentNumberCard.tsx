@@ -174,6 +174,8 @@ export function DocumentNumberCard({
   const lockedAll = Boolean(locks.all);
   const orgLocked = lockedAll || Boolean(locks.organisation);
   const projectLocked = lockedAll || Boolean(locks.project);
+  const departmentLocked = lockedAll || Boolean(locks.department);
+  const reasonFor = (field: DocNumberField) => locks.reasons?.[field] ?? fromSource;
 
   const shell = (field: DocNumberField) => ({
     active: activeField === field,
@@ -194,7 +196,7 @@ export function DocumentNumberCard({
                   {...shell("organisation")}
                   hint={guessed.includes("organisation") ? guess
                     : lockedAll ? "Fixed once submitted."
-                      : locks.organisation ? fromSource
+                      : locks.organisation ? reasonFor("organisation")
                         : inNumber ? "Goes into the number." : notPrinted}>
         <Select
           ariaLabel="Organisation" value={value.organizationId === "" ? "" : String(value.organizationId)}
@@ -212,7 +214,7 @@ export function DocumentNumberCard({
                   {...shell("project")}
                   hint={guessed.includes("project") ? guess
                     : lockedAll ? "Fixed once submitted."
-                      : locks.project ? fromSource
+                      : locks.project ? reasonFor("project")
                         : !inNumber ? notPrinted
                           : value.orgDepartmentId !== "" && value.projectId === ""
                             ? "Not set. The department prints instead."
@@ -235,16 +237,19 @@ export function DocumentNumberCard({
       </FieldShell>
     ),
     department: (inNumber) => (
-      <FieldShell key="department" title="Department" required={neither} locked={lockedAll}
+      <FieldShell key="department" title="Department" required={neither && !departmentLocked}
+                  locked={departmentLocked}
                   {...shell("department")}
                   hint={lockedAll ? "Fixed once submitted."
+                    : locks.department ? reasonFor("department")
                     : !inNumber ? notPrinted
                       : value.projectId !== "" || carried
                         ? exclusive ? "Picking one clears the project." : "Kept on the document. The project prints."
                         : value.orgDepartmentId !== "" ? "Prints in the number." : "Prints when there is no project."}>
         <Select
           ariaLabel="Department" value={value.orgDepartmentId === "" ? "" : String(value.orgDepartmentId)}
-          placeholder="Select department" options={departments} isDisabled={lockedAll}
+          placeholder={departmentLocked ? "Not chosen here" : "Select department"}
+          options={departments} isDisabled={departmentLocked}
           isInvalid={showInvalid && neither}
           onChange={(v) => {
             const id = v ? Number(v) : "";

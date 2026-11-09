@@ -65,6 +65,12 @@ async def card(db: AsyncSession, doc_type: str, user) -> dict:
     projects = await _active(db, Project)
     project_ids = {row.id for row in projects}
     own_project = getattr(user, "project_id", None)
+    # What HCM fixes for the raiser (2026-11-09): the post's project, else the
+    # employee's, else their department matched by name. A form that raises under
+    # these (indent, STR, monthly indent) locks them; the save fixes the same values.
+    from app.platform.doc_numbering import scope as org_scope
+    mapped = await org_scope.raiser_mapping(db, user)
+    fixed_org = await org_scope.default_organisation(db)
     return {
         "doc_type": doc_type, "pattern": pattern, "prefix": prefix,
         "fields": card_fields(pattern),
@@ -75,6 +81,11 @@ async def card(db: AsyncSession, doc_type: str, user) -> dict:
         "projects": [_option(row) for row in projects],
         "default_organization_id": _default_organisation(organisations),
         "own_project_id": own_project if own_project in project_ids else None,
+        "mapped_project_id": mapped["project_id"],
+        "mapped_project_name": mapped["project_name"],
+        "mapped_org_department_id": mapped["org_department_id"],
+        "mapped_org_department_name": mapped["org_department_name"],
+        "organisation_fixed": fixed_org is not None,
     }
 
 

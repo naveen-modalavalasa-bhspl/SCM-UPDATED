@@ -9,7 +9,9 @@ import {
   CardBody, Skeleton,
   Table, TableBody, TableCell, TableColumn, TableHeader, TableRow,
 } from "@heroui/react";
-import { PageHeader, Button, Can, Card, ConfirmModal, ErrorBanner, useToast } from "@/shared/components";
+import {
+  PageHeader, Button, Can, Card, ConfirmModal, DocumentScopeStrip, ErrorBanner, useToast,
+} from "@/shared/components";
 import { ReturnTargetSelect, targetLabel } from "../components/ReturnTargetSelect";
 import { alerts } from "@/modules/alerts";
 import { useAuth } from "@/shared/auth/AuthContext";
@@ -382,6 +384,8 @@ export function IndentDetailPage() {
           </div>
         )}
       />
+      {/* Whose paper it is on; says nothing on an indent older than organisations. */}
+      <DocumentScopeStrip doc={indent} className="mb-4" />
 
       {isReturnedForCorrection && (
         <Card className="mb-5 border-warn/40 bg-warn-bg">

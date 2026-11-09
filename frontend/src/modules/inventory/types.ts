@@ -1040,6 +1040,14 @@ export interface STOItemOut {
 }
 
 export interface STOListRow {
+  /** Whose paper it is on (2026-11-09); null on an STO older than organisations. */
+  organization_id?: number | null;
+  organization_name?: string | null;
+  org_department_id?: number | null;
+  org_department_name?: string | null;
+  project_id?: number | null;
+  project_name?: string | null;
+  fiscal_year?: string | null;
   id: number;
   sto_no: string;
   from_warehouse_id: number;

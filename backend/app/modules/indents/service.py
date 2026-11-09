@@ -31,6 +31,7 @@ from app.modules.inventory.models import (
     Allocation, AllocationItem, MaterialRequest, MaterialRequestItem, PositionLocation, Stock,
     StockTransferOrder,
 )
+from app.platform.doc_numbering import scope as org_scope
 from app.platform.hcm import mappers
 from app.platform.hcm.models import (
     HcmDepartment, HcmEmployee, HcmOffice, HcmPosition, HcmPositionAssignment,
@@ -362,6 +363,23 @@ async def _assert_can_raise_str(db: AsyncSession, user) -> None:
         raise PermissionError_("You are not allowed to raise a stock transfer request")
 
 
+def indent_series(indent_type: str | None) -> str:
+    """The number series an indent is drawn from. An STR carries its own (STR prefix) so a
+    transfer is never read as an indent on paper; a monthly indent its own (MI-IND,
+    2026-11-09) so it is never read as an ordinary one."""
+    if indent_type == IndentType.STR.value:
+        return "str"
+    if indent_type == IndentType.MONTHLY.value:
+        return "monthly_indent"
+    return "indent"
+
+
+def _scope_view(scope: dict):
+    """A resolved selection, read the way `org_scope.number_args` reads a document."""
+    from types import SimpleNamespace
+    return SimpleNamespace(department_name=None, **scope)
+
+
 async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
     _validate_required_date(data.required_date)
     priority = _validate_priority(data.priority) or Priority.NORMAL.value
@@ -401,6 +419,15 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
     context = await _requester_context(db, user)
     if source is not None:
         await assert_str_source_fits(db, source, await _draft_str_destination(db, context))
+    # Whose paper it is on (2026-11-09): what HCM fixes for the raiser, else what the
+    # form selected. Ahead of next_number() so a refused selection burns no number. A
+    # request naming no organisation where none is configured keeps the old numbering.
+    scope = None
+    if getattr(data, "organization_id", None) or await org_scope.default_organisation(db):
+        scope = await org_scope.resolve_for_raiser(
+            db, user, organization_id=data.organization_id,
+            org_department_id=data.org_department_id, project_id=data.project_id,
+            fiscal_year=data.fiscal_year)
 
     indent_date = utcnow().date()
     if indent_type == IndentType.MONTHLY.value:
@@ -412,9 +439,11 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
     indent = Indent(
         # An STR carries its own series (STR prefix) so a transfer is never read as an
         # indent on paper.
-        indent_no=await next_number(
-            db, "str" if indent_type == IndentType.STR.value else "indent",
-            project=context["project_name"]),
+        indent_no=(await next_number(db, indent_series(indent_type),
+                                     **org_scope.number_args(_scope_view(scope)))
+                   if scope is not None else
+                   await next_number(db, indent_series(indent_type),
+                                     project=context["project_name"])),
         indent_type=indent_type,
         indent_date=indent_date,
         required_date=data.required_date,
@@ -444,6 +473,8 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
         created_by_id=user.id,
         created_by_name=user.full_name,
     )
+    if scope is not None:
+        org_scope.stamp_with_project(indent, scope)
     db.add(indent)
     await db.flush()
 
@@ -1868,6 +1899,34 @@ async def set_indent_bookmark(
     return await _attach_capabilities(db, indent, user)
 
 
+_SCOPE_INPUTS = ("organization_id", "org_department_id", "project_id", "fiscal_year")
+
+
+async def _apply_scope_edit(db: AsyncSession, indent: Indent, data, user) -> None:
+    """A draft's organisation / project / department / year, changed on the form: the
+    same rules as at create, and a new number when the selection moved. Fixed once
+    submitted (a correction is not a draft). An indent raised before organisations is
+    left exactly as it was."""
+    given = {field for field in _SCOPE_INPUTS if field in data.model_fields_set}
+    if not given or not org_scope.uses_org(indent, indent.indent_no):
+        return
+    stated = {field: getattr(data, field) for field in given}
+    org_scope.assert_lockable(
+        indent, indent.indent_no, is_draft=indent.status == IndentStatus.DRAFT.value,
+        source_has_org=False, given=given, **stated)
+    org_scope.remember_number_args(indent)
+    pick = {field: stated.get(field, getattr(indent, field, None)) for field in _SCOPE_INPUTS}
+    if "project_id" in given and stated["project_id"] and "org_department_id" not in given:
+        pick["org_department_id"] = None   # picking a project replaces the department
+    if "org_department_id" in given and stated["org_department_id"] and "project_id" not in given:
+        pick["project_id"] = None
+    scope = await org_scope.resolve_for_raiser(db, user, keep=indent, **pick)
+    org_scope.stamp_with_project(indent, scope)
+    org_scope.assert_complete(indent)
+    await org_scope.renumber(db, indent, indent_series(indent.indent_type), "indent_no",
+                             "ind_indents", user)
+
+
 async def update_indent(db: AsyncSession, indent_id: int, data: IndentUpdate, user) -> Indent:
     indent = await get_indent(db, indent_id, user)
     if indent.status == IndentStatus.DRAFT.value:
@@ -1886,6 +1945,7 @@ async def update_indent(db: AsyncSession, indent_id: int, data: IndentUpdate, us
         raise ValidationError(f"Cannot edit an indent in {indent.status} status")
 
     _validate_required_date(data.required_date)
+    await _apply_scope_edit(db, indent, data, user)
 
     before = {
         "required_date": indent.required_date.isoformat() if indent.required_date else None,
@@ -2047,6 +2107,9 @@ async def submit_indent(db: AsyncSession, indent_id: int, user) -> Indent:
         # from before an approver can judge whether that point is theirs.
         raise ValidationError(
             "Choose the source point this transfer should come from, then submit")
+    if org_scope.uses_org(indent, indent.indent_no):
+        # The number was drawn from this selection; it must not print NA (2026-11-09).
+        org_scope.assert_complete(indent)
     if indent.indent_type == IndentType.STR.value:
         # A draft saved before SCM_0182 may name its own delivery point.
         await assert_str_source_fits(
@@ -8684,12 +8747,20 @@ async def copy_monthly_cycle(db: AsyncSession, user, *, required_date=None,
     # Straight through create_indent, so numbering, the requester snapshot, validation
     # and the audit row are all identical to a hand-typed indent. A second create path
     # is a second set of rules to keep in step.
+    # Last cycle's organisation / department / project carry forward (2026-11-09); what
+    # HCM fixes for the raiser still wins inside create_indent. The year is today's.
+    source = (await db.execute(select(Indent).where(
+        Indent.indent_no == previous["indent_no"]))).scalars().first()
     return await create_indent(db, IndentCreate(
         required_date=required_date or _next_cycle_required_date(
             previous.get("required_date")),
         indent_type=IndentType.MONTHLY,
         remarks=remarks or f"Copied from {previous['indent_no']}",
         items=lines,
+        organization_id=getattr(source, "organization_id", None),
+        org_department_id=getattr(source, "org_department_id", None),
+        project_id=(getattr(source, "project_id", None)
+                    if getattr(source, "organization_id", None) else None),
     ), user)
 
 

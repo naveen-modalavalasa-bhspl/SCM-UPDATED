@@ -172,7 +172,10 @@ def current_period(policy: str | None, now: datetime | None = None) -> str | Non
 
 # Prefixes for the series auto-created when none is configured. Anything not listed
 # falls back to the first three letters of the doc type.
-_DEFAULT_PREFIXES = {"indent": "IND", "mr": "MR", "po": "PO", "grn": "GRN",
+_DEFAULT_PREFIXES = {"indent": "IND",
+                     # A monthly indent is numbered apart from an ordinary one, so the two
+                     # never read alike on paper (2026-11-09).
+                     "monthly_indent": "MI-IND", "mr": "MR", "po": "PO", "grn": "GRN",
                      "issue": "ISS", "gatepass": "GP",
                      # Warehouse. Named here because the three-letter fallback reads
                      # badly for the two-word types ("WH_" for WH_ISSUE, "PUR" for

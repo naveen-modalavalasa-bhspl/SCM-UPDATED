@@ -3,7 +3,13 @@ import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowRightLeft, LibraryBig, Plus, Trash2 } from "lucide-react";
 import { CardBody, Skeleton } from "@heroui/react";
-import { PageHeader, Button, Card, Field, Input, Select, useToast } from "@/shared/components";
+import {
+  PageHeader, Button, Card, DocumentNumberCard, Field, Input, Select, useToast,
+} from "@/shared/components";
+import {
+  docNumberApi, docNumberPayload, docNumberValueFrom, emptyDocNumberValue, raiserScope,
+  type DocNumberValue,
+} from "@/shared/documentNumber";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { getMyStockingPoints } from "@/modules/inventory/api";
 import {
@@ -136,6 +142,18 @@ export function IndentFormPage() {
   const [indentType, setIndentType] = useState<IndentType>(
     strRoute || searchParams.get("type") === INDENT_TYPE.STR ? INDENT_TYPE.STR : INDENT_TYPE.REGULAR);
   const isStr = indentType === INDENT_TYPE.STR;
+  // The number series this document is drawn from: an STR its own, a monthly indent its
+  // own (MI-IND), every other indent the indent series. The card reads it off the server.
+  const numberDocType = isStr ? "str" : indentType === INDENT_TYPE.MONTHLY ? "monthly_indent" : "indent";
+  // Organisation, project / department and year (2026-11-09). What HCM fixes for the
+  // raiser is filled and locked (`raiserScope`); the save fixes the same values.
+  const [scope, setScope] = useState<DocNumberValue>(emptyDocNumberValue);
+  const [scopeReady, setScopeReady] = useState(false);
+  const numberCard = useQuery({
+    queryKey: ["document-number-card", numberDocType],
+    queryFn: () => docNumberApi.card(numberDocType),
+  });
+  const raiser = numberCard.data ? raiserScope(numberCard.data) : { locks: {}, patch: {} };
   const docLabel = isStr ? "request" : "indent";
   const detailPath = (id: number) => `${indentBase(indentType)}/${id}`;
   const [vehicleId, setVehicleId] = useState<number | "">("");
@@ -270,6 +288,7 @@ export function IndentFormPage() {
     setIndentType((draft.indent_type as IndentType) || INDENT_TYPE.REGULAR);
     setVehicleId(draft.vehicle_id ?? "");
     setSourceId(draft.source_warehouse_id ?? "");
+    setScope(docNumberValueFrom(draft));
     setRequiredDate(draft.required_date ?? "");
     setRemarks(draft.remarks ?? "");
     setDeliveryOfficeId(draft.office_id ?? "");
@@ -308,7 +327,19 @@ export function IndentFormPage() {
     }]);
   }, [isEditing, searchParams]);
 
+  // An indent saved before organisations keeps its fields and its number as they were.
+  const olderDraft = isEditing && Boolean(draft) && !draft?.organization_id;
+
+  // A NEW document opens on what HCM fixes, then the card fills the rest (organisation,
+  // year, and a project only when HCM fixes nothing).
+  useEffect(() => {
+    if (isEditing || scopeReady || !numberCard.data) return;
+    setScope((current) => ({ ...current, ...raiserScope(numberCard.data!).patch }));
+    setScopeReady(true);
+  }, [isEditing, numberCard.data, scopeReady]);
+
   const payload = (): IndentCreate => ({
+    ...(olderDraft ? {} : docNumberPayload(scope)),
     priority,
     indent_type: indentType,
     vehicle_id: hideVehicleAndSac || resolvedVehicleId === "" ? null : Number(resolvedVehicleId),
@@ -544,6 +575,18 @@ export function IndentFormPage() {
           </Button>
         ) : undefined}
       />
+
+      {!olderDraft && (
+        <div className="mb-5">
+          <DocumentNumberCard
+            docType={numberDocType} value={scope}
+            onChange={(patch) => setScope((current) => ({ ...current, ...patch }))}
+            ready={scopeReady} locks={raiser.locks} exclusive defaultProject={!raiser.locks.project}
+            showInvalid={hasAttemptedSubmit}
+            savedNumber={isEditing ? draft?.indent_no ?? null : null}
+          />
+        </div>
+      )}
 
       {bomNotice && (
         <div className="mb-4 rounded-xl bg-ok-bg px-4 py-3 text-sm font-medium text-ok" role="status">
