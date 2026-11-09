@@ -2151,7 +2151,8 @@ def _dispatch_lots(lines, qty_field: str) -> list[tuple]:
 
 
 async def credit_arrival(db: AsyncSession, dispatch: m.Dispatch, user, *,
-                         cap_by_item: dict[int, Decimal] | None = None) -> None:
+                         cap_by_item: dict[int, Decimal] | None = None,
+                         prefer_units: dict[int, list[str]] | None = None) -> None:
     """Post the destination's inward leg for a consignment that has arrived.
 
     THE one place a consignment becomes stock at the far end. There are three doors
@@ -2247,6 +2248,7 @@ async def credit_arrival(db: AsyncSession, dispatch: m.Dispatch, user, *,
         units = await _land_units(
             db, markers=markers, item_id=item_id, qty=delta,
             to_warehouse_id=dispatch.to_warehouse_id, ref_no=dispatch.dispatch_no,
+            prefer=(prefer_units or {}).get(item_id),
         )
         # The cartons' packs land with them (2026-10-22): the destination's stock
         # balance reads "3 Box + 5 loose", not a bare number.
@@ -10894,8 +10896,12 @@ async def _receiver_confirmed(db: AsyncSession, issue: m.MaterialIssue) -> bool:
 
     from app.modules.indents.models import IndentItem
 
+    # ARRIVED, not accepted: goods turned away at the door (`rejected_quantity`) are on the
+    # receiving shelf all the same, and they have to be credited there for a return to be
+    # raised from it. `received_quantity` alone is still what "owed" is measured by.
     confirmed = dict((await db.execute(
-        select(IndentItem.id, IndentItem.received_quantity)
+        select(IndentItem.id,
+               IndentItem.received_quantity + func.coalesce(IndentItem.rejected_quantity, 0))
         .where(IndentItem.id.in_([line.indent_item_id for line in lines]))
     )).all())
 
@@ -10944,6 +10950,101 @@ async def _dispatch_confirmation_caps(db: AsyncSession,
     return dict(total)
 
 
+async def delivered_by_indent_item(db: AsyncSession,
+                                    indent_item_ids: list[int]) -> dict[int, Decimal]:
+    """What has actually gone out against each indent line, net of returns.
+
+    The same running total `_receiver_confirmed` measures a confirmation against: issues
+    that left (`_GONE_OUT_STATUSES`), with the relay legs the requester never sees left
+    out. `indents.acknowledge_receipt` asks it before accepting a rejection, so a line
+    cannot be turned away for more than reached the requester.
+    """
+    if not indent_item_ids:
+        return {}
+    rows = (await db.execute(
+        select(m.MaterialIssueLine.indent_item_id,
+               func.sum(m.MaterialIssueLine.issued_qty
+                        - func.coalesce(m.MaterialIssueLine.returned_qty, 0)))
+        .join(m.MaterialIssue, m.MaterialIssue.id == m.MaterialIssueLine.issue_id)
+        .where(m.MaterialIssueLine.indent_item_id.in_(list(indent_item_ids)),
+               m.MaterialIssue.direction == IssueDirection.OUT.value,
+               m.MaterialIssue.is_stock_posted.is_(True),
+               m.MaterialIssue.status.in_(_GONE_OUT_STATUSES),
+               ~_relayed_onward())
+        .group_by(m.MaterialIssueLine.indent_item_id)
+    )).all()
+    return {int(line_id): _d(total) for line_id, total in rows}
+
+
+#: What a unit's remarks start with once its receiver has turned it away (2026-11-06).
+REJECTED_UNIT_PREFIX = "Not accepted on "
+
+
+def _unit_code_clause(codes: list[str]):
+    """A unit answers to its serial, IMEI, asset code or consumable code."""
+    return or_(m.SerialNumber.serial_number.in_(codes), m.SerialNumber.imei.in_(codes),
+               m.SerialNumber.asset_code.in_(codes), m.SerialNumber.consumable_code.in_(codes))
+
+
+async def resolve_rejected_units(db: AsyncSession, *, item_id: int, codes: list[str],
+                                 receiver_warehouse_id: int | None = None) -> list[m.SerialNumber]:
+    """The unit rows behind the codes a receiver names as turned away (2026-11-06).
+
+    Each code must be a real, active unit of this item that is either still on the road
+    (issued out of a store) or already on the receiver's shelf, and not already turned
+    away; anything else is refused with the codes named. Row locks are taken, since the
+    same units are about to be re-homed.
+    """
+    wanted = [str(c).strip() for c in codes if str(c).strip()]
+    if not wanted:
+        return []
+    rows = list((await db.execute(
+        select(m.SerialNumber).where(
+            m.SerialNumber.item_id == item_id, m.SerialNumber.is_active.is_(True),
+            _unit_code_clause(wanted),
+        ).with_for_update())).scalars().all())
+    item = await db.get(Item, item_id)
+    mode = _unit_mode(item)
+    found: dict[str, m.SerialNumber] = {}
+    for row in rows:
+        for key in _unit_keys(row, mode):
+            found[key] = row
+    bad = [c for c in wanted if c not in found]
+    for key in wanted:
+        row = found.get(key)
+        if row is None:
+            continue
+        here = (row.status == SerialStatus.ISSUED.value
+                or (receiver_warehouse_id is not None
+                    and row.warehouse_id == receiver_warehouse_id))
+        if not here or (row.remarks or "").startswith(REJECTED_UNIT_PREFIX):
+            bad.append(key)
+    if bad:
+        raise ValidationError(
+            "These are not units of this delivery that can still be turned away: "
+            + ", ".join(sorted(set(bad))[:8]))
+    return [found[c] for c in wanted]
+
+
+async def mark_rejected_units(db: AsyncSession, rows: list[m.SerialNumber], note: str) -> None:
+    """Stamp units as turned away, so they cannot be named twice. Run after they have landed:
+    the landing finds units by their in-flight stamp.
+
+    A unit that did NOT land on the receiver's shelf was not part of this delivery (it
+    wore another document's stamp), and a return could not send it back: refuse, which
+    rolls the whole acknowledgement back."""
+    ids = [r.id for r in rows]
+    for row in rows:
+        await db.refresh(row)
+        if row.status != SerialStatus.AVAILABLE.value:
+            raise ValidationError(
+                f"{row.serial_number or row.imei or row.asset_code or row.consumable_code} "
+                "is not part of this delivery, so it cannot be turned away from it.")
+    if ids:
+        await _set_unit_fields(db, ids, remarks=f"{REJECTED_UNIT_PREFIX}{note}"[:500])
+        await db.flush()
+
+
 async def _issue_confirmation_caps(db: AsyncSession, issue: m.MaterialIssue) -> dict[int, Decimal]:
     """How much of THIS issue's quantities the requester has confirmed, per item.
 
@@ -10970,8 +11071,12 @@ async def _issue_confirmation_caps(db: AsyncSession, issue: m.MaterialIssue) -> 
 
     from app.modules.indents.models import IndentItem
 
+    # ARRIVED, not accepted: goods turned away at the door (`rejected_quantity`) are on the
+    # receiving shelf all the same, and they have to be credited there for a return to be
+    # raised from it. `received_quantity` alone is still what "owed" is measured by.
     confirmed = dict((await db.execute(
-        select(IndentItem.id, IndentItem.received_quantity)
+        select(IndentItem.id,
+               IndentItem.received_quantity + func.coalesce(IndentItem.rejected_quantity, 0))
         .where(IndentItem.id.in_([line.indent_item_id for line in lines]))
     )).all())
 
@@ -13732,8 +13837,13 @@ async def _land_units(
     qty,
     to_warehouse_id: int,
     ref_no: str | None,
+    prefer: list[str] | None = None,
 ) -> list[str]:
     """Shelve the units a consignment carried at the point that received it.
+
+    `prefer` names units that must land first (2026-11-06): the ones the receiver is turning
+    away, which have to be on his shelf for a return to send them back. The rest of the
+    quantity lands oldest-first as before.
 
     THE missing half of the unit's journey. `_place_unit_codes` mints a unit at the
     warehouse that first receives the goods and deliberately never mints another one
@@ -13753,14 +13863,25 @@ async def _land_units(
     wanted = int(_d(qty))
     if wanted <= 0:
         return []
-    rows = (await db.execute(
-        select(m.SerialNumber).where(
-            m.SerialNumber.item_id == item_id,
-            m.SerialNumber.status == SerialStatus.ISSUED.value,
-            m.SerialNumber.remarks.in_(markers),
-            m.SerialNumber.is_active.is_(True),
-        ).order_by(m.SerialNumber.id).limit(wanted).with_for_update()
-    )).scalars().all()
+    in_flight = (
+        m.SerialNumber.item_id == item_id,
+        m.SerialNumber.status == SerialStatus.ISSUED.value,
+        m.SerialNumber.remarks.in_(markers),
+        m.SerialNumber.is_active.is_(True),
+    )
+    rows: list = []
+    if prefer:
+        rows = list((await db.execute(
+            select(m.SerialNumber).where(*in_flight, _unit_code_clause(prefer))
+            .order_by(m.SerialNumber.id).limit(wanted).with_for_update()
+        )).scalars().all())
+    if len(rows) < wanted:
+        rest = select(m.SerialNumber).where(*in_flight)
+        if rows:
+            rest = rest.where(m.SerialNumber.id.notin_([r.id for r in rows]))
+        rows += list((await db.execute(
+            rest.order_by(m.SerialNumber.id).limit(wanted - len(rows)).with_for_update()
+        )).scalars().all())
 
     item = await db.get(Item, item_id)
     mode = _unit_mode(item)
@@ -13813,6 +13934,42 @@ async def _ship_units(
                            status=SerialStatus.ISSUED.value, remarks=marker)
     await db.flush()
     return codes
+
+
+async def ship_named_units(db: AsyncSession, *, item_id: int, warehouse_id: int,
+                            codes: list[str], marker: str) -> list[str]:
+    """Send these exact units out of a warehouse under `marker` (2026-11-06).
+
+    The counterpart of `_ship_units` for a return that names WHICH units go back: they
+    must be on this warehouse's shelf and free. Fewer found than named is refused, since
+    the receiver chose those units and "some others instead" would put the wrong ones on
+    the road."""
+    wanted = [str(c).strip() for c in codes if str(c).strip()]
+    if not wanted:
+        return []
+    rows = list((await db.execute(
+        select(m.SerialNumber).where(
+            m.SerialNumber.item_id == item_id,
+            m.SerialNumber.warehouse_id == warehouse_id,
+            m.SerialNumber.is_active.is_(True),
+            m.SerialNumber.status == SerialStatus.AVAILABLE.value,
+            _unit_code_clause(wanted),
+        ).with_for_update())).scalars().all())
+    if len(rows) < len(wanted):
+        raise ValidationError(
+            f"{len(wanted) - len(rows)} of the units chosen for this return are not on the "
+            "sending shelf any more.")
+    item = await db.get(Item, item_id)
+    mode = _unit_mode(item)
+    shipped: list[str] = []
+    for row in rows:
+        keys = _unit_keys(row, mode)
+        if keys:
+            shipped.append(keys[0])
+    await _set_unit_fields(db, [row.id for row in rows],
+                           status=SerialStatus.ISSUED.value, remarks=marker)
+    await db.flush()
+    return shipped
 
 
 async def _claim_issue_units(
@@ -14145,6 +14302,7 @@ async def _apply_issue_acknowledgement(db: AsyncSession, issue: m.MaterialIssue,
                                        user, *,
                                        received_by_item: dict[int, Decimal] | None = None,
                                        box_received: dict | None = None,
+                                       prefer_units: dict[int, list[str]] | None = None,
                                        ) -> None:
     """Sign the issue off and carry the signature onto what it was attached to.
 
@@ -14212,7 +14370,7 @@ async def _apply_issue_acknowledgement(db: AsyncSession, issue: m.MaterialIssue,
     # (the `if` above only re-stamps the in-transit ones): `credit_arrival` is
     # idempotent on the ledger, so the credit lands exactly once whichever door ran first.
     if dispatch is not None:
-        await credit_arrival(db, dispatch, user)
+        await credit_arrival(db, dispatch, user, prefer_units=prefer_units)
 
     await _close_indents_on_issue(db, issue, user)
 
@@ -14272,7 +14430,8 @@ async def auto_acknowledge_for_indent(db: AsyncSession, indent_id: int,
                                       user, *, condition: str | None = None,
                                       remarks: str | None = None,
                                       fully_received: bool = False,
-                                     box_received: dict | None = None) -> list[str]:
+                                     box_received: dict | None = None,
+                                     prefer_units: dict[int, list[str]] | None = None) -> list[str]:
     """Sign off every open issue serving this indent that the raiser has now confirmed.
 
     The warehouse used to click Acknowledge a second time after the requester had
@@ -14313,7 +14472,8 @@ async def auto_acknowledge_for_indent(db: AsyncSession, indent_id: int,
         if not await _receiver_confirmed(db, issue):
             continue
         await _apply_issue_acknowledgement(db, issue, _name(user), None, user,
-                                           box_received=box_received)
+                                           box_received=box_received,
+                                           prefer_units=prefer_units)
         signed.append(issue.issue_no)
         settled.add(issue.id)
 
@@ -14352,7 +14512,8 @@ async def auto_acknowledge_for_indent(db: AsyncSession, indent_id: int,
         box_codes.apply_package_receipts(dispatch.items, box_received or None)
         await credit_arrival(db, dispatch, user,
                              cap_by_item=(await _dispatch_confirmation_caps(db, carried)
-                                          if grouped else caps))
+                                          if grouped else caps),
+                             prefer_units=prefer_units)
 
     signed += await _sign_transport_for_indent(
         db, indent_id, user, condition=condition, remarks=remarks,
@@ -15038,8 +15199,14 @@ async def acknowledge_direct_issue(db: AsyncSession, issue_id: int,
                                    lines: dict[int, Decimal], user, *,
                                    condition: str | None = None,
                                    remarks: str | None = None,
-                                   package_receipts: dict[int, dict] | None = None) -> dict:
+                                   package_receipts: dict[int, dict] | None = None,
+                                   rejections: dict[int, list[dict]] | None = None) -> dict:
     """The recipient of a direct issue confirms what reached them.
+
+    `lines` is what was ACCEPTED; `rejections` is what reached them and was not, by reason
+    (2026-11-06). The rejected goods are booked onto the recipient's shelf with the rest,
+    and a return is raised for each reason — so the "shortfall is a return to raise" below
+    is now done for them rather than left to be remembered.
 
     Held to the indent receipt's proof rules: a consignment photo and a photo of every
     item being confirmed. The issue has no received column, so what was counted goes on
@@ -15070,18 +15237,27 @@ async def acknowledge_direct_issue(db: AsyncSession, issue_id: int,
             f"{named}{f' and {more} more' if more > 0 else ''}.")
     counted: dict[str, float] = {}
     short: list[str] = []
+    rejections = {k: v for k, v in (rejections or {}).items() if v}
+    for line_id in rejections:
+        if line_id not in by_id:
+            raise ValidationError(f"Line {line_id} is not on {issue.issue_no}")
+    rejected_by_line = {k: sum((_d(r["quantity"]) for r in rows), ZERO)
+                        for k, rows in rejections.items()}
     for line_id, got in lines.items():
         line = by_id.get(line_id)
         if line is None:
             raise ValidationError(f"Line {line_id} is not on {issue.issue_no}")
         sent = _d(line.issued_qty) - _d(line.returned_qty)
         got = _d(got)
-        if got <= 0 or got > sent:
+        turned_away = rejected_by_line.get(line_id, ZERO)
+        if got < 0 or (got == 0 and turned_away <= 0) or got + turned_away > sent:
             raise ValidationError(
-                f"{line.item_name or line.item_code}: enter between 1 and {sent:g}")
+                f"{line.item_name or line.item_code}: accepted and rejected together "
+                f"must be between 1 and {sent:g}")
         counted[str(line.id)] = float(got)
-        if got < sent:
-            short.append(f"{line.item_name or line.item_code} {got:g} of {sent:g}")
+        if got + turned_away < sent:
+            short.append(
+                f"{line.item_name or line.item_code} {got + turned_away:g} of {sent:g}")
     for line in issue.items:
         sent = _d(line.issued_qty) - _d(line.returned_qty)
         if line.id not in lines and sent > 0:
@@ -15105,6 +15281,11 @@ async def acknowledge_direct_issue(db: AsyncSession, issue_id: int,
             package_notes.append(f"{code} missing" if got == 0 else
                                  f"{code}: {shared_packing.fmt(got)} of "
                                  f"{shared_packing.fmt(sent_in[code])} arrived")
+    groups = ind.rejection_groups(by_id, rejections)
+    if groups:
+        remarks = " · ".join(p for p in ((remarks or "").strip(), ind.rejection_remark(groups)) if p)
+        if condition is None and any(g["reason"] in ind.ACK_DAMAGE_REASONS for g in groups):
+            condition = ind.ACK_CONDITION_DAMAGED
     ack_condition = ind._delivery_condition(condition, remarks)
     note = "; ".join(filter(None, [
         f"Condition {ack_condition}" if ack_condition != ind.ACK_CONDITION_GOOD else None,
@@ -15115,20 +15296,35 @@ async def acknowledge_direct_issue(db: AsyncSession, issue_id: int,
 
     received_by_item: dict[int, Decimal] = defaultdict(Decimal)
     for line_id, got in lines.items():
-        received_by_item[by_id[line_id].item_id] += _d(got)
+        # What ARRIVED, accepted or not: both sit on the recipient's shelf.
+        received_by_item[by_id[line_id].item_id] += _d(got) + rejected_by_line.get(line_id, ZERO)
     before_status = issue.status
     box_received = {code: _d(got) for by_code in (package_receipts or {}).values()
                     for code, got in (by_code or {}).items()}
+    # The units being turned away land first, so a return can send those very ones back.
+    turned_units, prefer_units = await ind.resolve_rejection_units(db, by_id, rejections)
     await _apply_issue_acknowledgement(db, issue, _name(user), note, user,
                                        received_by_item=received_by_item,
-                                       box_received=box_received)
+                                       box_received=box_received,
+                                       prefer_units=prefer_units or None)
+    await mark_rejected_units(db, turned_units, issue.issue_no)
+    # The turned-away goods are on the recipient's shelf now, so a return can be raised
+    # from it — one per reason, in this same transaction.
+    receipt_returns = await ind._raise_rejection_returns(db, user, {
+        "kind": "DIRECT_ISSUE", "number": issue.issue_no, "indent_id": None,
+        "issue_id": issue.id,
+    }, groups)
     await write_audit(db, entity="out_issues", entity_id=issue.id, entity_no=issue.issue_no,
                       action=AuditAction.UPDATE, actor=user,
                       before={"status": before_status},
                       after={"status": issue.status, "received": counted,
-                             "condition": ack_condition, "remarks": note})
+                             "condition": ack_condition, "remarks": note,
+                             **({"returns": ", ".join(r["return_no"] for r in receipt_returns)}
+                                if receipt_returns else {})})
     await db.commit()
-    return await direct_issue_receipt(db, issue.id, user)
+    result = await direct_issue_receipt(db, issue.id, user)
+    result["receipt_returns"] = receipt_returns
+    return result
 
 
 async def cancel_issue(db: AsyncSession, issue_id: int, reason: str | None, user) -> m.MaterialIssue:
@@ -24677,6 +24873,7 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
         for item in sorted(indent.items, key=lambda i: i.line_no or 0):
             approved = owed_quantity(item)
             received = _d(item.received_quantity)
+            rejected = _d(item.rejected_quantity)
             issued = issued_by_line.get(item.id, ZERO)
             dispatched = dispatched_by_line.get(item.id, ZERO)
             on_order = on_order_by_line.get(item.id, ZERO)
@@ -24701,6 +24898,7 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
                 "issued_quantity": float(issued),
                 "dispatched_quantity": float(dispatched),
                 "received_quantity": float(received),
+                "rejected_quantity": float(rejected),
                 "is_serial_tracked": bool(getattr(
                     item_rows.get(item.item_id), "is_serial_tracked", False)),
                 # Served, never inferred in a screen (same rule as the issue picker):
@@ -24720,8 +24918,10 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
                 # The packs it was sent in, merged over its issue lines (2026-10-22).
                 **(wh_packing.merge_breakdowns(packs_by_indent_line.get(item.id, []),
                                                item.uom_code) or {}),
-                "pending_with": None if is_excluded else _pending_with(approved, issued, dispatched, received,
-                                              indent.status, on_order),
+                # Goods turned away at the door have arrived: they are not "on the way".
+                "pending_with": None if is_excluded else _pending_with(
+                    approved, issued, dispatched, received + rejected,
+                    indent.status, on_order),
             })
         out.append({
             "indent_id": indent.id,
@@ -24734,8 +24934,9 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
             "project_name": indent.project_name,
             # Nothing has reached the requester yet, so there is nothing to confirm. The
             # row still shows, because "where is my stuff" is the other half of the job.
-            "can_acknowledge": any(line["dispatched_quantity"] > line["received_quantity"]
-                                   for line in lines),
+            "can_acknowledge": any(
+                line["dispatched_quantity"] > line["received_quantity"] + line["rejected_quantity"]
+                for line in lines),
             "lines": lines,
             # "Where is it and how do I follow it" — the courier docket and the
             # tracking link, on the same row as the confirm button. Without this the

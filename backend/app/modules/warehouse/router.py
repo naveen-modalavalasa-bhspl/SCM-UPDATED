@@ -1598,6 +1598,18 @@ async def my_acknowledgements(search: str | None = None, status: str | None = No
         indent_types=indent_type)
 
 
+# The reasons a delivered quantity can be turned away for, with the words the screen
+# shows (2026-11-06). Served so the dropdown and the validation cannot disagree.
+@router.get("/acknowledgements/rejection-reasons")
+async def acknowledgement_rejection_reasons(user=Depends(require_permission_or(
+        INDENT_VIEW, STOCK_TRANSFER_RECEIVE, service.anywhere_in_reach))):
+    from app.modules.indents.schemas import ACK_DAMAGE_REASONS, ACK_REJECTION_LABELS
+    return [{"value": value, "label": label,
+             "needs_comment": value == "OTHER",
+             "claims_carrier": value in ACK_DAMAGE_REASONS}
+            for value, label in ACK_REJECTION_LABELS.items()]
+
+
 # Direct issues (no indent) handed to this person. Same gate as /acknowledgements/mine;
 # the service only ever returns issues whose `issued_to_id` is the caller.
 @router.get("/acknowledgements/direct-issues", response_model=list[s.DirectIssueAckRow])
@@ -1640,7 +1652,9 @@ async def acknowledge_direct_issue(issue_id: int, body: IndentAcknowledgeIn,
     return await service.acknowledge_direct_issue(
         db, issue_id, lines, user, condition=body.condition, remarks=body.remarks,
         package_receipts={line.indent_item_id: line.package_receipts or {}
-                          for line in body.lines})
+                          for line in body.lines},
+        rejections={line.indent_item_id: [r.model_dump() for r in line.rejections]
+                    for line in body.lines if line.rejections})
 
 
 @router.get("/acknowledgements/direct-issues/{issue_id:int}/attachments",

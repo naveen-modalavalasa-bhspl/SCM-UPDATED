@@ -395,8 +395,9 @@ export function receiptApi(kind: ReceiptKind) {
       upload: indentApi.uploadReceiptAttachment,
       download: indentApi.downloadReceiptAttachment,
       remove: indentApi.deleteReceiptAttachment,
-      acknowledge: (id: number, lines: AcknowledgeLine[]) =>
-        indentApi.acknowledge(id, lines) as Promise<unknown>,
+      acknowledge: (id: number, lines: AcknowledgeLine[],
+        receipt: { condition?: string; remarks?: string } = {}) =>
+        indentApi.acknowledge(id, lines, receipt) as Promise<unknown>,
     };
   }
   return {
@@ -417,8 +418,9 @@ export function receiptApi(kind: ReceiptKind) {
         .then((r) => r.data as Blob),
     remove: (attachmentId: number) =>
       api.delete<void>(`${DIRECT}/attachments/${attachmentId}`).then((r) => r.data),
-    acknowledge: (id: number, lines: AcknowledgeLine[]) =>
-      api.post<Acknowledgement>(`${DIRECT}/${id}/acknowledge`, { lines })
+    acknowledge: (id: number, lines: AcknowledgeLine[],
+      receipt: { condition?: string; remarks?: string } = {}) =>
+      api.post<Acknowledgement>(`${DIRECT}/${id}/acknowledge`, { lines, ...receipt })
         .then((r) => r.data) as Promise<unknown>,
   };
 }

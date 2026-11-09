@@ -10,6 +10,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from decimal import Decimal
 from fastapi import FastAPI
 
 from app.core.exceptions import ValidationError
@@ -608,20 +609,67 @@ class TestWhereItActuallyWent:
 
 
 class TestOtherHasToSayWhatItMeans:
-    def _write(self, reason, note=None):
-        return ReturnWrite(reason=reason, reason_note=note,
-                           items=[ReturnLineIn(item_id=1, quantity="1")])
+    def _check(self, reason, note=None):
+        write = ReturnWrite(reason=reason, reason_note=note,
+                            items=[ReturnLineIn(item_id=1, quantity="1")])
+        total = service._total_qty(write.items)
+        service._assert_reasons(service._reason_rows(write, total), total,
+                                shorthand_note=write.reason_note)
 
     def test_other_without_a_note_is_refused(self):
         with pytest.raises(ValidationError):
-            service._assert_reason_stated(self._write(ReturnReason.OTHER))
+            self._check(ReturnReason.OTHER)
 
     def test_other_with_a_note_is_fine(self):
-        service._assert_reason_stated(
-            self._write(ReturnReason.OTHER, "chewed by rats"))
+        self._check(ReturnReason.OTHER, "chewed by rats")
 
     def test_every_other_reason_describes_itself(self):
-        service._assert_reason_stated(self._write(ReturnReason.EXPIRED))
+        self._check(ReturnReason.EXPIRED)
+
+
+class TestReasonRows:
+    """A return holds several reasons, each with a quantity, and they cover every unit."""
+
+    def _rows(self, *pairs):
+        return [{"reason": reason.value, "quantity": float(qty), "note": None}
+                for reason, qty in pairs]
+
+    def test_reasons_that_cover_the_quantity_pass(self):
+        service._assert_reasons(
+            self._rows((ReturnReason.DAMAGED, 10), (ReturnReason.EXPIRED, 2)), Decimal("12"))
+
+    def test_reasons_that_fall_short_or_run_over_are_refused(self):
+        for given in (11, 13):
+            with pytest.raises(ValidationError):
+                service._assert_reasons(
+                    self._rows((ReturnReason.DAMAGED, given - 2),
+                               (ReturnReason.EXPIRED, 2)), Decimal("12"))
+
+    def test_no_reason_is_refused_unless_the_caller_is_an_acknowledgement(self):
+        with pytest.raises(ValidationError):
+            service._assert_reasons([], Decimal("5"))
+        service._assert_reasons([], Decimal("5"), allow_blank=True)
+
+    def test_a_reason_cannot_be_listed_twice(self):
+        with pytest.raises(ValidationError):
+            service._assert_reasons(
+                self._rows((ReturnReason.DAMAGED, 3), (ReturnReason.DAMAGED, 2)), Decimal("5"))
+
+    def test_the_single_reason_shorthand_means_all_of_it(self):
+        write = ReturnWrite(reason=ReturnReason.EXPIRED,
+                            items=[ReturnLineIn(item_id=1, quantity="4")])
+        assert service._reason_rows(write, Decimal("4")) == [
+            {"reason": "EXPIRED", "quantity": 4.0, "note": None}]
+
+    def test_the_main_reason_is_the_one_with_most_units(self):
+        rows = self._rows((ReturnReason.EXPIRED, 2), (ReturnReason.DAMAGED, 10))
+        assert service._main_reason(rows) == "DAMAGED"
+        assert service._main_reason([]) is None
+
+    def test_a_return_raised_before_reason_rows_reads_as_one_reason_for_all(self):
+        assert service._reasons_of({"reason": "EXPIRED", "note": "n"}, Decimal("6")) == [
+            {"reason": "EXPIRED", "quantity": 6.0, "note": "n"}]
+        assert service._reasons_of({}, Decimal("6")) == []
 
 
 class TestSchemas:

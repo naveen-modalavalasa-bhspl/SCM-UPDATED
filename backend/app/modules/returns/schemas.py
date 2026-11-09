@@ -20,6 +20,9 @@ class ReturnLineIn(CombinationIn):
     item_id: int
     quantity: Decimal = Field(gt=0)
     remarks: str | None = None
+    #: The exact units going back, for coded goods (2026-11-06). Empty means "whichever
+    #: the shelf gives up first", as it always was.
+    serial_numbers: list[str] = Field(default_factory=list, max_length=500)
 
     @field_validator("quantity")
     @classmethod
@@ -32,12 +35,48 @@ class ReturnLineIn(CombinationIn):
         return value
 
 
+class ReturnReasonRowIn(BaseModel):
+    """One reason a part of the return is going back, and how much of it (2026-11-07).
+
+    A return holds several of these ("Damaged 10, Expired 2"); together they account for
+    every unit on it. Kept on the return itself, not as another document, so the approval
+    chain, the decision desk and the receipt still see ONE return."""
+
+    reason: ReturnReason
+    quantity: Decimal = Field(gt=0)
+    note: str | None = Field(default=None, max_length=500)
+
+    @field_validator("quantity")
+    @classmethod
+    def _sane(cls, value: Decimal) -> Decimal:
+        if value != value.quantize(Decimal("0.001")):
+            raise ValueError("Quantity cannot be finer than three decimal places")
+        return value
+
+    @field_validator("note")
+    @classmethod
+    def _trim(cls, value: str | None) -> str | None:
+        return (value or "").strip() or None
+
+
+class ReturnReasonOut(BaseModel):
+    reason: str
+    reason_label: str | None = None
+    quantity: Decimal
+    note: str | None = None
+
+
 class ReturnWrite(BaseModel):
     """What the raiser fills in. Source, destination, and the whole identity block are
     derived server-side — see `service._raiser_context`. A browser cannot claim to be
     returning somebody else's stock from somebody else's office."""
 
-    reason: ReturnReason
+    #: The single-reason shorthand, still accepted: it means "all of it, for this reason".
+    #: Either this or `reasons` must be given by the screens; only the acknowledgement
+    #: raises a return with neither, and that draft is completed on the Returns page.
+    reason: ReturnReason | None = None
+    #: The reasons by quantity (2026-11-07). They must add up to the quantity returned.
+    reasons: list[ReturnReasonRowIn] = Field(default_factory=list, max_length=12)
     reason_note: str | None = Field(default=None, max_length=500)
     to_warehouse_id: int | None = None
     # ADDED 2026-09-07 — the indent this return answers. Optional: a return raised on its
@@ -221,8 +260,10 @@ class ReturnOut(BaseModel):
     kind_label: str | None = None
     intent: str | None = None
     intent_label: str | None = None
+    #: The main reason (the one with the most units) and the words for ALL of them.
     reason: str | None = None
     reason_label: str | None = None
+    reasons: list[ReturnReasonOut] = []
     reason_note: str | None = None
     # The request this return answers. None on a return raised on its own — which is every
     # return raised before 2026-09-07, and those keep their own approval chain.

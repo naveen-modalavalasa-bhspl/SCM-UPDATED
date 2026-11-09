@@ -2,46 +2,61 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
 import {
-  ArrowLeft, Check, ClipboardList, Info, Package, PackageCheck, RefreshCw, RotateCcw,
-  Search, SlidersHorizontal, Undo2, UserX, Users, X,
+  AlertCircle, ArrowLeft, Check, ClipboardList, Info, Package, PackageCheck, Percent,
+  RefreshCw, Search, Trash2, Undo2, UserX, Users, X,
 } from "lucide-react";
-import {
-  Button, Card, PageHeader, ResponsiveList, Select, StatCard, type Column,
-} from "@/shared/components";
+import { Button, Card, ConfirmModal, PageHeader, StatCard } from "@/shared/components";
 import { approvalsApi } from "../api";
 import { useConsolidationDecisions } from "../consolidationDecisions";
+import {
+  indentLineIds, isIndentRemoved, reducePercent, resolveItem,
+} from "../consolidationLines";
 import { PriorityFilter, PriorityTag } from "../components/PriorityFilter";
-import { formatQty, resolveItem } from "./ConsolidationPage";
+import { formatQty } from "./ConsolidationPage";
 import type { ConsolidationIndentSummary } from "../types";
 import { QuantityInput } from "@/shared/components/QuantityInput";
 
 /** One consolidated item, and everyone who asked for it.
  *
  *  The consolidation screen answers "what does this month need"; this one answers
- *  "who needs it, and what does each of them get". They used to be the same screen —
- *  every item carried its own split, and the batch's indents were listed again
- *  underneath — which put the same twenty indent numbers in front of the approver
- *  several times over and left the exclude box as free text nobody trusted.
+ *  "who needs it, and what does each of them get". The approver decides AT THE INDENT:
+ *  every row carries its own quantity box and its own exclude button, and there is no
+ *  batch total shared out in proportion. Two things act on more than one row, and both
+ *  are deliberate presses rather than rules left running in the background:
+ *
+ *    - "Remove from all items" — a row that is already excluded from this item offers to
+ *      take its indent out of every item in the cycle, so the indent is held back whole.
+ *    - "Reduce %" — gives every INCLUDED indent the same share of its own ceiling, for
+ *      this one item. It fills the quantity boxes in; each stays editable afterwards.
  *
  *  Nothing new is fetched: the batch already ships each item's `allocations`, so this
  *  is the same cached workspace response the consolidation screen is showing, read
- *  one item deep. The quantity and the exclusions are held in the shared per-cycle
- *  draft (`consolidationDecisions.ts`) — set here, spent by Approve all over there.
+ *  one item deep. The quantities and exclusions are held in the shared per-cycle draft
+ *  (`consolidationDecisions.ts`) — set here, spent by Approve all over there.
  */
 
-/** One requester's line for this item: their share of the allocation, joined to the
- *  indent header the batch already carries, so the row can be filtered by the same
- *  dimensions the rest of the module offers. */
+/** One requester's line for this item, joined to the indent header the batch already
+ *  carries so the row can be filtered by the same dimensions the rest of the module
+ *  offers. */
 interface ItemRow {
   line_id: number;
   indent_id: number;
   indent_no: string;
   requested_quantity: number;
-  allocated: number;
+  /** The most this line may be passed. */
+  cap: number;
+  /** What goes out for it right now. */
+  value: number;
+  /** What is in the box ("" = untouched = the full ceiling). */
+  typed: string;
   excluded: boolean;
   /** Dropped at a rung BELOW this approver — read-only here, not theirs to undo. */
   excludedBelow: boolean;
   excludedByName: string | null;
+  /** This indent is out of every item it is on, not just this one. */
+  removedEverywhere: boolean;
+  invalid: boolean;
+  over: boolean;
   indent?: ConsolidationIndentSummary;
 }
 
@@ -59,6 +74,8 @@ const initials = (name?: string | null) => {
 const share = (part: number, whole: number) =>
   whole > 0 ? Math.max(0, Math.min(100, Math.round((part / whole) * 100))) : 0;
 
+const ROW_BUTTON = "flex h-9 items-center gap-1.5 whitespace-nowrap rounded-lg border px-2.5 text-xs font-semibold transition-colors";
+
 export function ConsolidationItemPage() {
   const nav = useNavigate();
   const { cycle = "", itemId = "" } = useParams<{ cycle: string; itemId: string }>();
@@ -71,15 +88,19 @@ export function ConsolidationItemPage() {
     queryFn: () => approvalsApi.consolidation({ cycle }),
   });
   const batch = query.data?.items?.[0] ?? null;
-  const item = batch?.consolidated_items.find((row) => String(row.item_id) === itemId) ?? null;
+  const allItems = batch?.consolidated_items ?? [];
+  const item = allItems.find((row) => String(row.item_id) === itemId) ?? null;
 
-  const { decisions, setApproved, toggleExcluded, includeAll } = useConsolidationDecisions(cycle);
-  const decision = decisions[itemId];
+  const { decisions, setApproved, setApprovedMany, setExcluded } = useConsolidationDecisions(cycle);
 
   const [search, setSearch] = useState("");
   const [priority, setPriority] = useState("");
+  const [reduceOpen, setReduceOpen] = useState(false);
+  const [percent, setPercent] = useState("");
+  const [removing, setRemoving] = useState<ItemRow | null>(null);
 
-  const resolved = item ? resolveItem(item, decision) : null;
+  const resolved = item ? resolveItem(item, decisions) : null;
+  const decimals = item?.uom_decimals ?? 3;
 
   // Every requester of this item, in one row each. Built from the allocations rather
   // than from the batch's indents: an indent that does not carry this item has no
@@ -87,26 +108,29 @@ export function ConsolidationItemPage() {
   const rows: ItemRow[] = useMemo(() => {
     if (!item || !resolved) return [];
     const byId = new Map((batch?.indents ?? []).map((row) => [row.id, row]));
-    const excluded = (decision?.excluded ?? []).map((no) => no.toUpperCase());
-    return (item.allocations ?? []).map((allocation) => ({
-      line_id: allocation.line_id,
-      indent_id: allocation.indent_id,
-      indent_no: allocation.indent_no,
-      requested_quantity: allocation.requested_quantity,
-      allocated: resolved.split.get(allocation.line_id) ?? 0,
-      excluded: Boolean(allocation.is_excluded)
-        || excluded.includes(allocation.indent_no.toUpperCase()),
-      // Already dropped further down the ladder. That decision is made: this approver
-      // reads it, and is not offered a button to redo or undo it (BUG_SCM_0008).
-      excludedBelow: Boolean(allocation.is_excluded),
-      excludedByName: allocation.excluded_by_name ?? null,
-      indent: byId.get(allocation.indent_id),
+    return resolved.lines.map((line) => ({
+      line_id: line.allocation.line_id,
+      indent_id: line.allocation.indent_id,
+      indent_no: line.allocation.indent_no,
+      requested_quantity: line.allocation.requested_quantity,
+      cap: line.cap,
+      value: line.value,
+      typed: line.typed,
+      excluded: line.excluded,
+      excludedBelow: line.excludedBelow,
+      excludedByName: line.allocation.excluded_by_name ?? null,
+      removedEverywhere: line.excluded && !line.excludedBelow
+        && isIndentRemoved(allItems, line.allocation.indent_id, decisions),
+      invalid: line.invalid,
+      over: line.over,
+      indent: byId.get(line.allocation.indent_id),
     }));
-  }, [batch, decision, item, resolved]);
+    // `resolved` is rebuilt from item + decisions on every render; depending on those two.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allItems, batch, decisions, item]);
 
-  // Search and priority hide rows; they never change the split. What each requester
-  // gets depends on who is excluded, not on who the approver is currently looking at —
-  // a filtered-out indent still holds its share.
+  // Search and priority hide rows; they never change a quantity. A filtered-out indent
+  // still goes out at whatever its box holds.
   const shown = useMemo(() => {
     const needle = search.trim().toLowerCase();
     return rows
@@ -122,107 +146,149 @@ export function ConsolidationItemPage() {
   }, [priority, rows, search]);
 
   const name = item?.item_name ?? item?.item_code ?? "Item";
+  const unit = item?.uom_code ?? "";
   const control = "h-11 rounded-xl border border-line bg-content1 text-sm text-ink outline-none focus:border-brand";
 
-  const columns: Column<ItemRow>[] = [
-    {
-      key: "indent",
-      header: "Indent",
-      render: (row) => <div className="flex min-w-0 items-center gap-2.5">
-        <span
-          aria-hidden
-          className={`grid h-9 w-9 shrink-0 place-items-center rounded-xl text-[11px] font-bold ${
-            row.excluded
-              ? "bg-content2 text-muted"
-              : row.indent?.priority === "URGENT"
-                ? "bg-bad-bg text-bad"
-                : "bg-brand-050 text-brand"
-          }`}
-        >
-          {initials(row.indent?.requested_by_name)}
-        </span>
-        <span className="min-w-0">
-          <span className="flex items-center gap-2">
-            <strong className={`font-mono ${row.excluded ? "text-muted line-through" : "text-ink"}`}>
-              {row.indent_no}
-            </strong>
-            <PriorityTag priority={row.indent?.priority} />
-          </span>
-          <span className="block truncate text-xs text-muted">
-            {row.indent?.requested_by_name ?? "—"}
-          </span>
-        </span>
-      </div>,
-    },
-    {
-      key: "region",
-      header: "Region",
-      hideOnNarrow: true,
-      render: (row) => <span className="text-muted">{row.indent?.region_name ?? "—"}</span>,
-    },
-    {
-      key: "project",
-      header: "Project",
-      hideOnNarrow: true,
-      render: (row) => <span className="text-muted">{row.indent?.project_name ?? "—"}</span>,
-    },
-    {
-      key: "vehicle",
-      header: "Vehicle",
-      hideOnNarrow: true,
-      render: (row) => <span className="text-muted">{row.indent?.vehicle_number ?? "—"}</span>,
-    },
-    {
-      key: "requested",
-      header: "Requested",
-      render: (row) => <span className="tabular text-body">{formatQty(row.requested_quantity)}</span>,
-    },
-    {
-      key: "allocated",
-      header: "Gets",
-      // The number, and how much of the ask it covers. A cut is the whole point of this
-      // screen, and a bar says "this one is being halved" faster than two numbers do.
-      render: (row) => {
-        if (row.excluded) {
-          return <span className="inline-flex items-center rounded-full bg-warn/15 px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide text-warn">
-            Excluded
-          </span>;
-        }
-        const pct = share(row.allocated, row.requested_quantity);
-        return <div className="w-24">
-          <span className="flex items-baseline gap-1.5">
-            <strong className="tabular text-ink">{formatQty(row.allocated)}</strong>
-            <span className="tabular text-[11px] text-muted">{pct}%</span>
-          </span>
-          <span className="mt-1 block h-1.5 w-full overflow-hidden rounded-full bg-content2">
-            <span
-              className={`block h-full rounded-full ${pct >= 100 ? "bg-ok" : pct > 0 ? "bg-brand" : "bg-line"}`}
-              style={{ width: `${pct}%` }}
-            />
-          </span>
-        </div>;
-      },
-    },
-    {
-      key: "action",
-      header: "",
-      render: (row) => (row.excludedBelow ? (
-        <span className="text-xs text-muted">
-          {row.excludedByName ? `Excluded by ${row.excludedByName}` : "Already excluded"}
-        </span>
-      ) : <button
-        type="button"
-        onClick={() => toggleExcluded(Number(itemId), row.indent_no)}
-        className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors ${
-          row.excluded
-            ? "border-brand text-brand hover:bg-brand-050"
-            : "border-line text-muted hover:border-danger hover:text-danger"
+  /* ---- the row actions ---- */
+  const exclude = (row: ItemRow) => setExcluded([row.line_id], true);
+  const include = (row: ItemRow) => setExcluded([row.line_id], false);
+  const includeEverywhere = (row: ItemRow) =>
+    setExcluded(indentLineIds(allItems, row.indent_id), false);
+  const removeEverywhere = (row: ItemRow) => {
+    setExcluded(indentLineIds(allItems, row.indent_id), true);
+    setRemoving(null);
+  };
+
+  /* ---- Reduce % ---- */
+  const parsedPercent = percent.trim() === "" ? null : Number(percent);
+  const percentOk = parsedPercent !== null && !Number.isNaN(parsedPercent)
+    && parsedPercent >= 0 && parsedPercent <= 100;
+  const reduction = item && percentOk ? reducePercent(item, decisions, parsedPercent) : null;
+  const applyReduction = () => {
+    if (!reduction) return;
+    setApprovedMany(reduction.entries.map(({ lineId, approved }) => ({ lineId, approved })));
+    setReduceOpen(false);
+  };
+
+  /** The quantity box for one row. A plain input, not a grid cell: <ResponsiveList>
+   *  renders a react-aria grid, and a grid cell swallows the keystrokes an <input> needs
+   *  — which is why this list is a hand-built table. */
+  const quantityBox = (row: ItemRow) => {
+    if (row.excluded) {
+      return <span className="inline-flex items-center rounded-full bg-warn/15 px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide text-warn">
+        Excluded
+      </span>;
+    }
+    const error = row.invalid
+      ? "Enter a quantity of 0 or more."
+      : row.over ? `Capped at ${formatQty(row.cap)}.` : null;
+    const pct = share(row.value, row.requested_quantity);
+    return <div className="w-40">
+      <div
+        className={`flex h-10 items-center rounded-xl border bg-content1 pr-2.5 transition focus-within:ring-2 ${
+          error
+            ? "border-bad bg-bad-bg/40 focus-within:ring-bad/30"
+            : "border-line focus-within:border-brand focus-within:ring-brand/25"
         }`}
       >
-        {row.excluded ? <><Undo2 className="h-3.5 w-3.5" /> Include</> : <><UserX className="h-3.5 w-3.5" /> Exclude</>}
-      </button>),
-    },
-  ];
+        <QuantityInput
+          decimals={decimals}
+          min={0}
+          max={row.cap}
+          aria-label={`Quantity for ${row.indent_no}`}
+          aria-invalid={Boolean(error)}
+          placeholder={formatQty(row.cap)}
+          value={row.typed}
+          onChange={(raw) => setApproved(row.line_id, raw)}
+          className="h-full min-w-0 flex-1 rounded-xl bg-transparent px-2.5 text-right font-semibold tabular outline-none placeholder:font-normal placeholder:text-muted"
+        />
+        {unit && <span className="shrink-0 whitespace-nowrap text-xs font-medium text-muted">{unit}</span>}
+      </div>
+      <p
+        role={error ? "alert" : undefined}
+        className={`mt-1 flex items-center gap-1 text-[11px] ${error ? "font-medium text-bad" : "text-muted"}`}
+      >
+        {error && <AlertCircle className="h-3 w-3 shrink-0" aria-hidden />}
+        {error ?? (row.typed.trim() === ""
+          ? `Blank sends the full ${formatQty(row.cap)}.`
+          : `${pct}% of the ask`)}
+      </p>
+    </div>;
+  };
+
+  /** The buttons for one row — the two-step exclude lives here. */
+  const rowActions = (row: ItemRow) => {
+    if (row.excludedBelow) {
+      return <span className="text-xs text-muted">
+        {row.excludedByName ? `Excluded by ${row.excludedByName}` : "Already excluded"}
+      </span>;
+    }
+    if (!row.excluded) {
+      return <button
+        type="button"
+        onClick={() => exclude(row)}
+        className={`${ROW_BUTTON} border-line text-muted hover:border-danger hover:text-danger`}
+      >
+        <UserX className="h-3.5 w-3.5" /> Exclude
+      </button>;
+    }
+    if (row.removedEverywhere) {
+      return <div className="flex flex-wrap items-center justify-end gap-2">
+        <span className="rounded-full bg-warn/15 px-2 py-0.5 text-[11px] font-semibold text-warn">
+          Removed from all items
+        </span>
+        <button
+          type="button"
+          onClick={() => includeEverywhere(row)}
+          className={`${ROW_BUTTON} border-brand text-brand hover:bg-brand-050`}
+        >
+          <Undo2 className="h-3.5 w-3.5" /> Include again
+        </button>
+      </div>;
+    }
+    return <div className="flex flex-wrap items-center justify-end gap-2">
+      <button
+        type="button"
+        onClick={() => setRemoving(row)}
+        className={`${ROW_BUTTON} border-danger/50 text-danger hover:bg-danger/10`}
+      >
+        <Trash2 className="h-3.5 w-3.5" /> Remove from all items
+      </button>
+      <button
+        type="button"
+        onClick={() => include(row)}
+        className="flex items-center gap-1 px-1 text-xs font-medium text-brand hover:underline"
+      >
+        <Undo2 className="h-3 w-3" /> Include
+      </button>
+    </div>;
+  };
+
+  const requesterCell = (row: ItemRow) => <div className="flex min-w-0 items-center gap-2.5">
+    <span
+      aria-hidden
+      className={`grid h-9 w-9 shrink-0 place-items-center rounded-xl text-[11px] font-bold ${
+        row.excluded
+          ? "bg-content2 text-muted"
+          : row.indent?.priority === "URGENT"
+            ? "bg-bad-bg text-bad"
+            : "bg-brand-050 text-brand"
+      }`}
+    >
+      {initials(row.indent?.requested_by_name)}
+    </span>
+    <span className="min-w-0">
+      <span className="flex items-center gap-2">
+        <strong className={`font-mono ${row.excluded ? "text-muted line-through" : "text-ink"}`}>
+          {row.indent_no}
+        </strong>
+        <PriorityTag priority={row.indent?.priority} />
+      </span>
+      <span className="block truncate text-xs text-muted">
+        {row.indent?.requested_by_name ?? "—"}
+      </span>
+    </span>
+  </div>;
 
   return <>
     <PageHeader
@@ -248,7 +314,7 @@ export function ConsolidationItemPage() {
                 <div key={i} className="h-24 animate-pulse rounded-2xl border border-line/70 bg-content1" />
               ))}
             </div>
-            <div className="h-36 animate-pulse rounded-2xl border border-line/70 bg-content1" />
+            <div className="h-20 animate-pulse rounded-2xl border border-line/70 bg-content1" />
             <div className="h-64 animate-pulse rounded-2xl border border-line/70 bg-content1" />
           </div>
         : !item || !resolved
@@ -284,9 +350,8 @@ export function ConsolidationItemPage() {
                       </span>
                     </span>
                     <p className="mt-2 max-w-prose text-sm text-body">
-                      Every indent in this cycle that asked for it. Set the total going
-                      out and it is shared in proportion to what each one requested;
-                      exclude an indent and its share goes to the rest.
+                      Every indent in this cycle that asked for it. Set what each one gets
+                      in its own row, or exclude it.
                     </p>
                   </div>
 
@@ -342,103 +407,27 @@ export function ConsolidationItemPage() {
                 />
               </div>
 
-              {/* The two decisions on this screen, side by side and visibly separate:
-                  how much goes out, and who is left out of it. */}
-              <Card className="mb-4 overflow-hidden">
-                <div className="grid lg:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
-                  {/* Outside a table on purpose: <ResponsiveList> renders a react-aria
-                      grid, and a grid cell swallows the keystrokes an <input> needs. */}
-                  <label className="block border-b border-line/70 bg-brand-050/40 p-4 lg:border-b-0 lg:border-r">
-                    <span className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted">
-                      <SlidersHorizontal className="h-3.5 w-3.5 text-brand" /> Approve (total)
-                    </span>
-                    <span className="relative block">
-                      <QuantityInput
-                        className={`${control} h-12 w-full px-3 text-lg font-semibold tabular placeholder:font-normal placeholder:text-muted ${
-                          item.uom_code ? "pr-16" : ""
-                        }`}
-                        // The unit's own places: a countable item cannot be typed as
-                        // 5.7 here any more than it can be split into 5.7 below.
-                        decimals={item.uom_decimals ?? 3}
-                        data-decimals={item.uom_decimals ?? undefined}
-                        min={0}
-                        max={resolved.ceiling}
-                        aria-label={`Approved quantity for ${name}`}
-                        placeholder={formatQty(resolved.ceiling)}
-                        value={decision?.approved ?? ""}
-                        onChange={(raw) => setApproved(Number(itemId), raw)}
-                      />
-                      {item.uom_code && (
-                        <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs font-semibold uppercase tracking-wide text-muted">
-                          {item.uom_code}
-                        </span>
-                      )}
-                    </span>
-                    <span className="mt-1.5 block text-xs">
-                      {resolved.invalid
-                        ? <span className="text-danger">Enter a quantity of 0 or more.</span>
-                        : resolved.over
-                          ? <span className="text-danger">Capped at {formatQty(resolved.ceiling)}.</span>
-                          : resolved.rounded
-                            // A countable unit has no fractions to give away. Said out
-                            // loud, because the number keyed in is not the number that
-                            // goes out — 1.3 boxes used to read back as 1.3 while the
-                            // split handed over 1.
-                            ? <span className="text-warn">
-                                {item.uom_code ?? "This unit"} goes out in whole units
-                                — sending {formatQty(resolved.total)}.
-                              </span>
-                            : <span className="text-muted">
-                                Blank sends the full {formatQty(resolved.ceiling)}.
-                              </span>}
-                    </span>
-                  </label>
-
-                  <div className="p-4">
-                    <span className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted">
-                      <UserX className="h-3.5 w-3.5 text-brand" /> Leave an indent out
-                    </span>
-                    {/* Picking a real indent, not typing one: the old free-text box
-                        matched on substrings, so "IND-1" quietly excluded IND-10 too. */}
-                    <Select
-                      // Remounted on every change so the box clears itself — it is an
-                      // action, not a field holding a value.
-                      key={`exclude-${resolved.droppedCount}`}
-                      ariaLabel="Exclude an indent from this item"
-                      placeholder="Search an indent no. or requester…"
-                      value=""
-                      onChange={(next) => { if (next) toggleExcluded(Number(itemId), next); }}
-                      options={rows.filter((row) => !row.excluded).map((row) => ({
-                        value: row.indent_no,
-                        label: `${row.indent_no} · ${row.indent?.requested_by_name ?? "—"} · ${formatQty(row.requested_quantity)}`,
-                      }))}
-                    />
-                    {resolved.droppedCount === 0
-                      ? <p className="mt-2 flex items-center gap-1.5 text-xs text-muted">
-                          <Check className="h-3.5 w-3.5 text-ok" />
-                          Everyone who asked is getting a share.
-                        </p>
-                      : <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                          {(decision?.excluded ?? []).map((indentNo) => (
-                            <button
-                              key={indentNo}
-                              type="button"
-                              onClick={() => toggleExcluded(Number(itemId), indentNo)}
-                              className="flex items-center gap-1 rounded-full bg-warn/15 px-2.5 py-1 font-mono text-xs font-semibold text-warn hover:bg-warn/25"
-                            >
-                              {indentNo} <X className="h-3 w-3" />
-                            </button>
-                          ))}
-                          <button
-                            type="button"
-                            onClick={() => includeAll(Number(itemId))}
-                            className="flex items-center gap-1 px-1.5 text-xs font-medium text-muted hover:text-ink"
-                          >
-                            <RotateCcw className="h-3 w-3" /> Include all
-                          </button>
-                        </div>}
-                  </div>
+              {/* The one action that acts on the whole item: an even cut across every
+                  included indent. Everything else is decided in the rows below. */}
+              <Card className="mb-4 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <p className="max-w-prose text-sm text-body">
+                    Set each indent's quantity in its row, or exclude it. To cut this item
+                    evenly across every indent that is still in, use <strong>Reduce %</strong>.
+                  </p>
+                  <Button
+                    variant="ghost"
+                    disabled={resolved.included.length === 0}
+                    onClick={() => { setPercent(""); setReduceOpen(true); }}
+                  >
+                    <Percent className="h-4 w-4" /> Reduce %
+                  </Button>
                 </div>
+                {resolved.droppedCount > 0 && (
+                  <p className="mt-2 text-xs text-muted">
+                    {resolved.droppedCount} of {rows.length} indent{rows.length === 1 ? "" : "s"} out of this item.
+                  </p>
+                )}
               </Card>
 
               <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -469,72 +458,59 @@ export function ConsolidationItemPage() {
                 </span>
               </div>
 
-              <ResponsiveList
-                data={shown}
-                columns={columns}
-                keyOf={(row) => row.line_id}
-                empty="No indent here matches."
-                renderCard={(row) => <div className={`space-y-2 ${row.excluded ? "opacity-75" : ""}`}>
-                  <div className="flex items-start justify-between gap-2">
-                    <span className="flex min-w-0 items-center gap-2.5">
-                      <span
-                        aria-hidden
-                        className={`grid h-9 w-9 shrink-0 place-items-center rounded-xl text-[11px] font-bold ${
-                          row.excluded
-                            ? "bg-content2 text-muted"
-                            : row.indent?.priority === "URGENT"
-                              ? "bg-bad-bg text-bad"
-                              : "bg-brand-050 text-brand"
-                        }`}
-                      >
-                        {initials(row.indent?.requested_by_name)}
-                      </span>
-                      <span className="flex min-w-0 flex-wrap items-center gap-2">
-                        <strong className={`font-mono ${row.excluded ? "text-muted line-through" : "text-ink"}`}>
-                          {row.indent_no}
-                        </strong>
-                        <PriorityTag priority={row.indent?.priority} />
-                      </span>
-                    </span>
-                    {row.excludedBelow ? (
-                      <span className="text-xs text-muted">
-                        {row.excludedByName ? `Excluded by ${row.excludedByName}` : "Already excluded"}
-                      </span>
-                    ) : <button
-                      type="button"
-                      onClick={() => toggleExcluded(Number(itemId), row.indent_no)}
-                      className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold ${
-                        row.excluded ? "border-brand text-brand" : "border-line text-muted"
-                      }`}
-                    >
-                      {row.excluded ? <><Undo2 className="h-3.5 w-3.5" /> Include</> : <><UserX className="h-3.5 w-3.5" /> Exclude</>}
-                    </button>}
-                  </div>
-                  <p className="text-sm text-body">{row.indent?.requested_by_name ?? "—"}</p>
-                  <p className="text-xs text-muted">
-                    {[row.indent?.region_name, row.indent?.project_name, row.indent?.vehicle_number]
-                      .filter(Boolean).join(" · ") || "—"}
-                  </p>
-                  <p className="text-xs text-muted">
-                    Requested {formatQty(row.requested_quantity)}
-                    {" · gets "}
-                    {row.excluded
-                      ? <span className="font-semibold text-warn">nothing</span>
-                      : <><strong className="text-ink">{formatQty(row.allocated)}</strong>
-                          {" "}({share(row.allocated, row.requested_quantity)}%)</>}
-                  </p>
-                  {!row.excluded && (
-                    <span className="block h-1.5 w-full overflow-hidden rounded-full bg-content2">
-                      <span
-                        className={`block h-full rounded-full ${
-                          share(row.allocated, row.requested_quantity) >= 100 ? "bg-ok" : "bg-brand"
-                        }`}
-                        style={{ width: `${share(row.allocated, row.requested_quantity)}%` }}
-                      />
-                    </span>
-                  )}
-                </div>}
-              />
+              {shown.length === 0
+                ? <Card className="p-8 text-center text-muted">No indent here matches.</Card>
+                : <>
+                    {/* Desktop: a table. */}
+                    <div className="hidden overflow-x-auto rounded-2xl border border-line/70 bg-content1 md:block">
+                      <table className="w-full text-left text-sm">
+                        <thead className="bg-content2">
+                          <tr className="text-[11px] uppercase tracking-wider text-muted">
+                            <th scope="col" className="px-4 py-3 font-semibold">Indent</th>
+                            <th scope="col" className="hidden px-3 py-3 font-semibold lg:table-cell">Region</th>
+                            <th scope="col" className="hidden px-3 py-3 font-semibold lg:table-cell">Project</th>
+                            <th scope="col" className="hidden px-3 py-3 font-semibold xl:table-cell">Vehicle</th>
+                            <th scope="col" className="px-3 py-3 font-semibold">Requested</th>
+                            <th scope="col" className="px-3 py-3 font-semibold">Quantity</th>
+                            <th scope="col" className="px-4 py-3 text-right font-semibold">
+                              <span className="sr-only">Actions</span>
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-line">
+                          {shown.map((row) => (
+                            <tr key={row.line_id} className={row.excluded ? "bg-content2/40" : ""}>
+                              <td className="px-4 py-3 align-top">{requesterCell(row)}</td>
+                              <td className="hidden px-3 py-3 align-top text-muted lg:table-cell">{row.indent?.region_name ?? "—"}</td>
+                              <td className="hidden px-3 py-3 align-top text-muted lg:table-cell">{row.indent?.project_name ?? "—"}</td>
+                              <td className="hidden px-3 py-3 align-top text-muted xl:table-cell">{row.indent?.vehicle_number ?? "—"}</td>
+                              <td className="px-3 py-3 align-top tabular text-body">{formatQty(row.requested_quantity)}</td>
+                              <td className="px-3 py-3 align-top">{quantityBox(row)}</td>
+                              <td className="px-4 py-3 text-right align-top">{rowActions(row)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* Phone: one card per indent, the same controls. */}
+                    <div className="space-y-3 md:hidden">
+                      {shown.map((row) => (
+                        <Card key={row.line_id} className={`space-y-3 p-3 ${row.excluded ? "opacity-80" : ""}`}>
+                          {requesterCell(row)}
+                          <p className="text-xs text-muted">
+                            {[row.indent?.region_name, row.indent?.project_name, row.indent?.vehicle_number]
+                              .filter(Boolean).join(" · ") || "—"}
+                          </p>
+                          <p className="text-xs text-muted">
+                            Requested <strong className="text-body">{formatQty(row.requested_quantity)}</strong>
+                          </p>
+                          <div>{quantityBox(row)}</div>
+                          <div className="flex justify-end">{rowActions(row)}</div>
+                        </Card>
+                      ))}
+                    </div>
+                  </>}
 
               <p className="mt-3 flex items-start gap-2 rounded-xl border border-line/70 bg-content2/60 p-3 text-xs text-muted">
                 <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-brand" />
@@ -544,6 +520,65 @@ export function ConsolidationItemPage() {
                   the consolidation, is what sends these quantities to the indents.
                 </span>
               </p>
+
+              <ConfirmModal
+                isOpen={reduceOpen}
+                title={`Reduce ${name}`}
+                message="Every indent that is still in gets the same share of its own ceiling for this item. Other items of those indents are not touched, and you can still change any row afterwards."
+                confirmLabel="Apply"
+                confirmDisabled={!reduction || reduction.entries.length === 0}
+                onClose={() => setReduceOpen(false)}
+                onConfirm={applyReduction}
+              >
+                <label className="block text-sm font-semibold text-ink">
+                  Percentage of each indent's ceiling
+                  <span className="mt-2 flex h-11 items-center rounded-xl border border-line bg-content1 pr-3 focus-within:border-brand focus-within:ring-2 focus-within:ring-brand/25">
+                    <QuantityInput
+                      autoFocus
+                      decimals={2}
+                      min={0}
+                      max={100}
+                      aria-label="Percentage"
+                      placeholder="e.g. 80"
+                      value={percent}
+                      onChange={setPercent}
+                      className="h-full min-w-0 flex-1 rounded-xl bg-transparent px-3 text-right text-base font-semibold tabular outline-none placeholder:font-normal placeholder:text-muted"
+                    />
+                    <span className="text-sm font-semibold text-muted">%</span>
+                  </span>
+                </label>
+                <p className="mt-2 min-h-5 text-xs" role="status">
+                  {percent.trim() !== "" && !percentOk
+                    ? <span className="text-danger">Enter a percentage from 0 to 100.</span>
+                    : reduction
+                      ? parsedPercent === 100
+                        ? <span className="text-muted">Puts every indent still in back to its full ceiling.</span>
+                        : <span className="text-body">
+                            {reduction.entries.length} indent{reduction.entries.length === 1 ? "" : "s"}
+                            {" · "}<strong className="tabular">{formatQty(reduction.before)}</strong>
+                            {" → "}<strong className="tabular">{formatQty(reduction.after)}</strong>
+                            {unit ? ` ${unit}` : ""}
+                            {reduction.zeroed > 0 && <span className="text-warn">
+                              {" · "}{reduction.zeroed} would drop to 0
+                            </span>}
+                          </span>
+                      : null}
+                </p>
+              </ConfirmModal>
+
+              <ConfirmModal
+                isOpen={removing !== null}
+                title={removing ? `Remove ${removing.indent_no} from all items?` : "Remove from all items?"}
+                message={removing
+                  ? `${removing.indent_no} is left out of every item it is on in this cycle `
+                    + `(${indentLineIds(allItems, removing.indent_id).length} line${indentLineIds(allItems, removing.indent_id).length === 1 ? "" : "s"}). `
+                    + "It is not rejected: it stays in your queue for the next round, and you can include it again from any of its rows."
+                  : ""}
+                confirmLabel="Remove from all items"
+                danger
+                onClose={() => setRemoving(null)}
+                onConfirm={() => { if (removing) removeEverywhere(removing); }}
+              />
             </>}
   </>;
 }

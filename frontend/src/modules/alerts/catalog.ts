@@ -450,6 +450,8 @@ const DEFINITIONS: AlertDef[] = [
     "{number} is inspected and sent for put-away.",
   ),
   alert("issue.acknowledged", "success", "Receipt acknowledged", "{number} has been confirmed."),
+  alert("issue.acknowledged_rejected", "success", "Receipt acknowledged",
+    "{number} has been confirmed. Return {returns} was raised for the goods you sent back. Open it in Returns and say why."),
   // Forwarding an arrived consignment on to the points below. The screen fired
   // "issue.created", which is not a key in here, so the toast showed a green tick and
   // no words — the storekeeper had no idea whether anything had been created.

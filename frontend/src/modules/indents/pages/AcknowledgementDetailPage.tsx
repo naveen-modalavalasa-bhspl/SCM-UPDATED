@@ -1,12 +1,13 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { Navigate, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Navigate, useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   INDENT_ACK_HOME, TRANSFER_ACK_HOME, ackDetailPath, isTransferRow,
 } from "../ackPaths";
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/react";
 import {
   AlertTriangle, ArrowRight, Barcode, Boxes, Building2, CalendarClock,
-  Camera, Check, CheckCircle2, ChevronDown, Circle, ExternalLink, Eye, FileText, Hash,
+  Camera, Check, CheckCircle2, ChevronDown, Circle, ExternalLink, Eye, FileText,
   Lock, MapPin, Package, Phone, Plus, Receipt, RectangleHorizontal, Ruler, ScanBarcode,
   PackageCheck as PackageCheckIcon, Send, Signature, Snowflake, Tag, Trash2, Truck, UserRound, Weight,
 } from "lucide-react";
@@ -25,8 +26,8 @@ import type { TrackingType } from "@/modules/warehouse/types";
 import { indentApi, indentKeys, receiptApi, useIndentAccountScope, type ReceiptKind } from "../api";
 import { cancelIndentReceiptReads, commitConfirmedIndentReceipt } from "../receiptRefresh";
 import type {
-  Acknowledgement, AcknowledgementLine, AcknowledgementPackageQuantity, Indent,
-  RaiserTracking, ReceiptAttachment, ShipmentTrack,
+  AcknowledgeLine, Acknowledgement, AcknowledgementLine, AcknowledgementPackageQuantity, Indent,
+  RaiserTracking, ReceiptAttachment, ReceiptReturn, ShipmentTrack,
 } from "../types";
 import {
   BILL, PHOTO, STAGE, STAGE_HINT, TRACKING, dayStamp, lineStage, neededBy, onOrder, qty,
@@ -226,23 +227,148 @@ function journeyStops(consignments: ReceiptConsignment[]): Stop[] {
   return stops;
 }
 
-/** One thing that has to be true before a stop is finished, and whether it is. */
-interface StepTask {
-  done: boolean;
-  /** Short and plain: "Count all 3 items", "Photo of each item (1 of 3)". */
-  label: string;
-  /** Good to have, never required to sign — drawn grey rather than amber, so the
-   *  one colour that means "you must" is spent only on what you must. */
-  optional?: boolean;
+/* ---------------------------------------------------------------------------
+ * The wizard: one small popup per question, in the order the delivery happens.
+ *
+ * SIMPLIFIED (2026-11-07). The journey rail and its full-page stops are gone. The
+ * delivery is confirmed in a popup, one step at a time:
+ *
+ *   consignment -> photo, and "is it damaged?"
+ *   package     -> photo, and "is it damaged?"   (repeated for every package)
+ *   items       -> what is in that package: Received and Returned
+ *
+ * Received and Returned are two views of one number: what was sent is either received or
+ * going back, so changing one changes the other. NO reason is asked here - the person at
+ * the delivery says how much goes back, and the Returns page asks why, as reason rows.
+ * ------------------------------------------------------------------------ */
+
+type WizardStep =
+  | { kind: "gate"; key: string; stop: Stop; title: string }
+  | { kind: "package"; key: string; stop: Stop; title: string }
+  | { kind: "items"; key: string; stop: Stop; title: string };
+
+function wizardSteps(stops: Stop[]): WizardStep[] {
+  return stops.flatMap((stop): WizardStep[] => (stop.kind === "gate"
+    ? [{ kind: "gate", key: stop.key, stop, title: stop.plain }]
+    : [
+      { kind: "package", key: stop.key, stop, title: stop.plain },
+      { kind: "items", key: `${stop.key}-items`, stop, title: `Items in ${stop.plain.toLowerCase()}` },
+    ]));
 }
 
-/**
- * Where a stop stands. `optional` is its own state because a step with nothing
- * REQUIRED on it is not unfinished: the consignment photo is recommended, and a rail
- * that kept that step amber forever told everybody who skipped it that they had left
- * something undone. It is drawn as a hollow ring instead — not done, not owed.
- */
-type StopState = "done" | "optional" | "todo";
+/** "Is it damaged?" - answered for the consignment and for every package. */
+interface DamageAnswer {
+  answer: "yes" | "no" | "";
+  note: string;
+}
+
+const damageDone = (value?: DamageAnswer) =>
+  value?.answer === "no" || (value?.answer === "yes" && value.note.trim() !== "");
+
+function DamageQuestion({ subject, value, onChange }: {
+  subject: string;
+  value?: DamageAnswer;
+  onChange: (next: DamageAnswer) => void;
+}) {
+  const current: DamageAnswer = value ?? { answer: "", note: "" };
+  const choice = (answer: "yes" | "no", label: string, tone: string) => (
+    <button
+      type="button"
+      aria-pressed={current.answer === answer}
+      onClick={() => onChange({ ...current, answer })}
+      className={`min-h-11 flex-1 rounded-xl border-2 px-4 text-sm font-semibold transition ${
+        current.answer === answer ? tone : "border-line bg-content1 text-body hover:border-brand/40"
+      }`}
+    >
+      {label}
+    </button>
+  );
+  return (
+    <section aria-label={`Is ${subject} damaged`}>
+      <SectionLabel>Is it damaged?</SectionLabel>
+      <div className="mt-2.5 flex gap-2">
+        {choice("no", "No, it is fine", "border-ok bg-ok-bg text-ok")}
+        {choice("yes", "Yes, damaged", "border-warn bg-warn-bg text-warn")}
+      </div>
+      {current.answer === "yes" && (
+        <div className="mt-2.5">
+          <Input
+            aria-label={`What is damaged on ${subject}`}
+            placeholder="What is damaged? (needed for the claim)"
+            value={current.note}
+            isInvalid={current.note.trim() === ""}
+            onChange={(event) => onChange({ ...current, note: event.target.value })}
+          />
+        </div>
+      )}
+    </section>
+  );
+}
+
+function AcknowledgementWizard({
+  open, onClose, steps, index, onIndex, stepDone, renderBody, ready, saving, onAcknowledge,
+}: {
+  open: boolean;
+  onClose: () => void;
+  steps: WizardStep[];
+  index: number;
+  onIndex: (next: number) => void;
+  stepDone: (step: WizardStep) => boolean;
+  renderBody: (step: WizardStep) => ReactNode;
+  ready: boolean;
+  saving: boolean;
+  onAcknowledge: () => void;
+}) {
+  const step = steps[index];
+  if (!step) return null;
+  const last = index === steps.length - 1;
+  const done = stepDone(step);
+  return (
+    <Modal
+      isOpen={open}
+      onClose={onClose}
+      size="3xl"
+      scrollBehavior="inside"
+      isDismissable={false}
+    >
+      <ModalContent>
+        <ModalHeader className="flex flex-col gap-1.5">
+          <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-step-live">
+            Step {index + 1} of {steps.length}
+          </span>
+          <span className="font-display text-xl font-bold text-ink">{step.title}</span>
+          <ol className="mt-1 flex gap-1.5" aria-label="Progress">
+            {steps.map((item, position) => (
+              <li
+                key={item.key}
+                aria-current={position === index ? "step" : undefined}
+                className={`h-1.5 flex-1 rounded-full ${
+                  stepDone(item) ? "bg-ok" : position === index ? "bg-step-live" : "bg-content3"
+                }`}
+              />
+            ))}
+          </ol>
+        </ModalHeader>
+        <ModalBody className="space-y-6 pb-4">{renderBody(step)}</ModalBody>
+        <ModalFooter className="justify-between gap-2">
+          <Button variant="subtle" onClick={() => (index === 0 ? onClose() : onIndex(index - 1))}>
+            {index === 0 ? "Close" : "Back"}
+          </Button>
+          {last ? (
+            <Button onClick={onAcknowledge} disabled={!ready || saving}>
+              <Signature className="h-4 w-4" />
+              {saving ? "Saving..." : "Acknowledge"}
+            </Button>
+          ) : (
+            <Button onClick={() => onIndex(index + 1)} disabled={!done}>
+              Next <ArrowRight className="h-4 w-4" aria-hidden />
+            </Button>
+          )}
+        </ModalFooter>
+      </ModalContent>
+    </Modal>
+  );
+}
 
 function AcknowledgementDetail({ row, kind, onDone, accountScope, qc, backTo, backLabel }: {
   row: Acknowledgement;
@@ -253,20 +379,19 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc, backTo, ba
   accountScope: ReturnType<typeof useIndentAccountScope>;
   qc: QueryClient;
 }) {
+  // What was ACCEPTED, per item per package. It starts at everything sent; what is not
+  // received is, by definition, returned - there is no third "missing" bucket.
   const [received, setReceived] = useState<Record<string, string>>(() =>
     initialReceivedByReceiptLine(row.lines));
-  // The open stop lives in the URL, not in state (2026-09-26). Held in state, opening
-  // a package added no history entry, so the browser's Back from inside a package
-  // skipped every stop and left the acknowledgement altogether. `?stop=` gives each
-  // stop its own entry: Back from a package lands on the consignment it came out of,
-  // and a reload or a shared link reopens the same carton.
-  const [params, setParams] = useSearchParams();
-  const stopKey = params.get("stop") ?? "";
   const [serialTarget, setSerialTarget] = useState<ReceiptPackageLine | null>(null);
   const [pickedSerials, setPickedSerials] = useState<Record<string, string[]>>({});
   // Packages checked carton by carton, for lines issued in packages (2026-10-26).
   const [packChecks, setPackChecks] = useState<Record<string, PackageCheck>>({});
-  // Labels for what was RECEIVED on one consignment (2026-10-28) — never what was sent.
+  // "Is it damaged?", keyed by the consignment's or the package's own proof scope.
+  const [damage, setDamage] = useState<Record<string, DamageAnswer>>({});
+  const [wizardOpen, setWizardOpen] = useState(() => row.lines.some((line) => receivable(line) > 0));
+  const [wizardIndex, setWizardIndex] = useState(0);
+  // Labels for what was RECEIVED on one consignment (2026-10-28) - never what was sent.
   const [labelDispatch, setLabelDispatch] = useState<number | null>(null);
   const [viewing, setViewing] = useState<
     { files: ReceiptAttachment[]; index: number } | null>(null);
@@ -298,11 +423,28 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc, backTo, ba
     onSuccess: () => attachments.refetch(),
   });
 
+  const consignments = useMemo(
+    () => receiptConsignments(row, tracking.data),
+    [row, tracking.data],
+  );
+  const stops = useMemo(() => journeyStops(consignments), [consignments]);
+  const steps = useMemo(() => wizardSteps(stops), [stops]);
+
+  /** The damage the person reported, as the receipt's condition and remarks: it is what
+   *  the claim against the carrier is investigated from. */
+  const damageReceipt = () => {
+    const notes = stops
+      .filter((item) => damage[item.scope]?.answer === "yes")
+      .map((item) => `${item.kind === "gate" ? "Consignment" : "Package"} ${item.label}: ${damage[item.scope].note.trim()}`);
+    return notes.length > 0 ? { condition: "DAMAGED", remarks: notes.join(" · ") } : {};
+  };
+
   const confirm = useMutation({
     mutationFn: () =>
       server.acknowledge(
         row.indent_id,
-        acknowledgementPayload(row.lines, received, packChecks),
+        acknowledgementPayload(row.lines, received, packChecks, pickedSerials),
+        damageReceipt(),
       ),
     onMutate: () => (kind === "indent"
       ? cancelIndentReceiptReads(qc, accountScope, row.indent_id) : undefined),
@@ -316,21 +458,26 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc, backTo, ba
       qc.invalidateQueries({ queryKey: ["indent-fulfilment"] });
       // Said out loud. The press used to drop the person back on the list with
       // nothing to say it had worked, which is how a receipt gets signed twice.
-      void alerts.success("issue.acknowledged", { number: row.indent_no });
+      const raised = (updated as { receipt_returns?: ReceiptReturn[] } | null)?.receipt_returns ?? [];
+      if (raised.length > 0) {
+        // What was returned is now ONE draft return waiting in Returns, which asks why.
+        void alerts.success("issue.acknowledged_rejected", {
+          number: row.indent_no, returns: raised.map((item) => item.return_no).join(", "),
+        });
+        qc.invalidateQueries({ queryKey: ["returns"] });
+      } else {
+        void alerts.success("issue.acknowledged", { number: row.indent_no });
+      }
       onDone();
     },
   });
 
   const allAttachments = attachments.data ?? [];
   /**
-   * Every filed item photo, indexed by its full scope — `I-<line>-<package hash>` —
-   * so a photo belongs to ONE item in ONE package.
-   *
-   * Per package, not per line (2026-09-26). The same item split over two cartons of
-   * five is two things to check: photographing it while the first carton was open
-   * used to tick the second carton off too, before anybody had opened it. The server
-   * still counts by line (`ack_category_item`), so this is the stricter of the two
-   * and the save can never refuse what the screen let through.
+   * Every filed item photo, indexed by its full scope - `I-<line>-<package hash>` -
+   * so a photo belongs to ONE item in ONE package. The server still counts by line
+   * (`ack_category_item`), so this is the stricter of the two and the save can never
+   * refuse what the screen let through.
    */
   const photosByScope = useMemo(() => {
     const index = new Map<string, ReceiptAttachment[]>();
@@ -356,23 +503,17 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc, backTo, ba
       ["DRAFT", "PENDING_APPROVAL", "QUOTING", "AWAITING_CARRIER", "READY"].includes(leg.status))
     : undefined;
   const receivingSummary = useMemo(() => {
-    const payload = acknowledgementPayload(row.lines, received);
+    const payload = acknowledgementPayload(row.lines, received, {}, pickedSerials);
     return {
       quantity: payload.reduce((sum, line) => sum + line.received_quantity, 0),
+      returned: payload.reduce((sum, line) =>
+        sum + (line.rejections ?? []).reduce((inner, item) => inner + item.quantity, 0), 0),
       lines: payload.length,
     };
-  }, [row.lines, received]);
-  const entered = receivingSummary.quantity > 0;
+  }, [row.lines, received, pickedSerials]);
+  const entered = receivingSummary.quantity + receivingSummary.returned > 0;
 
-  const consignments = useMemo(
-    () => receiptConsignments(row, tracking.data),
-    [row, tracking.data],
-  );
-  const stops = useMemo(() => journeyStops(consignments), [consignments]);
-  const activeIndex = Math.max(stops.findIndex((item) => item.key === stopKey), 0);
-  const stop = stops[activeIndex];
-
-  /** This stop's own proof, and — on the first handover only — anything filed before
+  /** This stop's own proof, and - on the first handover only - anything filed before
    *  the scope existed (or against the indent itself, before a consignment could be
    *  named), so nothing an earlier receipt attached disappears from view. */
   const proofFor = (target: Stop) => allAttachments.filter((file) => {
@@ -384,142 +525,50 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc, backTo, ba
   const photosFor = (target: Stop) => proofFor(target).filter(
     (file) => attachmentBase(file.doc_category) === PHOTO);
 
-  /** Where one item in one package stands: counted, photographed in THIS package,
-   *  and — for coded goods — every unit's code matched in THIS package. A line
-   *  counted at zero owes nothing else: there is nothing there to photograph. */
+  /** Where one item in one package stands: photographed in THIS package and - for coded
+   *  goods - every accepted unit's code matched in THIS package. Whatever is not
+   *  received is returned, so nothing else is owed on a line. */
   const lineProgress = (line: ReceiptPackageLine, packKey: string) => {
     const value = received[line.receipt_key] ?? "";
-    const counted = value.trim() !== "";
     const count = receivedNumber(value);
-    const photographed = count <= 0 || photosOf(line, packKey).length > 0;
+    const sent = Number(line.package_quantity ?? receivable(line));
+    // Accepted OR returned: either way the item reached the requester, and the server
+    // wants a photo of it.
+    const photographed = sent <= 0 || photosOf(line, packKey).length > 0;
     const serials = line.serial_numbers?.filter(Boolean) ?? [];
     const needSerials = requiredSerialCount(line, value);
     const matched = serialPickForQuantity(
       serials, pickedSerials[line.receipt_key], needSerials).length;
-    return {
-      counted,
-      count,
-      photographed,
-      coded: serials.length > 0,
-      serialsDone: matched >= needSerials,
-    };
+    return { count, photographed, serialsDone: matched >= needSerials };
   };
 
-  const countedFor = (pack?: ReceiptPackage) => {
-    const lines = (pack?.lines ?? []).filter(
+  /** Has this step been answered? One rule for the dots, the Next button and Acknowledge. */
+  const stepDone = (step: WizardStep): boolean => {
+    if (step.kind === "gate") {
+      // The sealed load, the seal and the number plate are what a claim against the
+      // carrier is argued from; the server refuses a receipt without one.
+      return photosFor(step.stop).length > 0 && damageDone(damage[step.stop.scope]);
+    }
+    if (step.kind === "package") return damageDone(damage[step.stop.scope]);
+    const lines = (step.stop.pack?.lines ?? []).filter(
       (line) => Number(line.package_quantity ?? receivable(line)) > 0);
-    const progress = lines.map((line) => lineProgress(line, pack?.key ?? ""));
-    const present = progress.filter((item) => item.count > 0);
-    const coded = present.filter((item) => item.coded);
-    return {
-      total: lines.length,
-      done: progress.filter((item) => item.counted).length,
-      // Counted over the ITEMS in the carton rather than over the photos filed
-      // against it: two shots of one cable and none of the other is not "2 of 2".
-      toPhotograph: present.length,
-      photographed: present.filter((item) => item.photographed).length,
-      coded: coded.length,
-      matched: coded.filter((item) => item.serialsDone).length,
-    };
-  };
-
-  /**
-   * What this stop still needs, in the words of the person standing at the delivery.
-   *
-   * One list answers both "is it done" and "what is left": the checklist on the sheet
-   * renders it and `stopState` reads it, so the tick and the to-do list cannot drift
-   * apart the way two copies of a rule always eventually do.
-   */
-  const tasksFor = (target: Stop): StepTask[] => {
-    if (target.kind === "gate") {
-      // REQUIRED (2026-09-28). The sealed load, the seal and the number plate are what
-      // a claim against the carrier is argued from, and a photo taken after the
-      // cartons are open cannot show them. The server refuses a receipt without one.
-      return [{
-        done: photosFor(target).length > 0,
-        label: "Photo of the consignment",
-      }];
-    }
-    const counted = countedFor(target.pack);
-    // Nothing receivable in this package: it is finished by having nothing to do,
-    // and asking for a photo of it would block a delivery over an empty carton.
-    if (counted.total === 0) {
-      return [{ done: true, label: "Nothing to do in this package" }];
-    }
-    const tasks: StepTask[] = [{
-      done: counted.done === counted.total,
-      label: counted.total === 1 ? "Count the item" : `Count all ${counted.total} items`,
-    }];
-    if (counted.toPhotograph > 0) {
-      tasks.push({
-        // ITEM-WISE, and the count is in the label: "Photo of each item" on a
-        // carton of eleven says a photo is missing and never how many.
-        done: counted.photographed === counted.toPhotograph,
-        label: counted.toPhotograph === 1
-          ? "Photo of the item"
-          : `Photo of each item (${counted.photographed} of ${counted.toPhotograph})`,
-      });
-    }
-    if (counted.coded > 0) {
-      tasks.push({
-        done: counted.matched === counted.coded,
-        label: counted.coded === 1
-          ? "Match the serial numbers"
-          : `Match serial numbers (${counted.matched} of ${counted.coded})`,
-      });
-    }
-    return tasks;
-  };
-
-  /**
-   * Read off the live counts and the filed attachments, never remembered: delete the
-   * only photo and the tick goes, take another and it comes back. Only REQUIRED tasks
-   * decide green; a step whose every task is optional is `optional` until it is done.
-   */
-  const stopState = (target: Stop): StopState => {
-    const tasks = tasksFor(target);
-    const required = tasks.filter((task) => !task.optional);
-    if (required.length === 0) return tasks.every((task) => task.done) ? "done" : "optional";
-    return required.every((task) => task.done) ? "done" : "todo";
+    return lines.every((line) => {
+      const progress = lineProgress(line, step.stop.pack?.key ?? "");
+      return progress.photographed && progress.serialsDone;
+    });
   };
 
   const uploadFile = (scope: string) => (file: File, base: string) =>
     upload.mutate({ file, category: scopedCategory(base, scope) });
 
-  const go = (index: number) => {
-    const key = stops[Math.min(Math.max(index, 0), stops.length - 1)].key;
-    if (key === stop.key) return;   // re-pressing the open stop is not a step to go back over
-    setParams((current) => {
-      const next = new URLSearchParams(current);
-      next.set("stop", key);
-      return next;
-    });
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  };
-  /** Inside a package, the header goes back to the consignment it came out of — one
-   *  level up — never straight out to the list with the delivery half checked. */
-  const parentStop = stop.kind === "package"
-    ? stops.find((item) => item.kind === "gate" && item.consignment?.key === stop.consignment?.key)
-    : undefined;
-
-  const packageStops = stops.filter((item) => item.kind === "package");
-  /** The stops still owing something. Acknowledge unlocks only when this is empty:
-   *  every consignment photographed, every package counted, each item in it
-   *  photographed, every code matched. */
-  const unfinished = stops.filter((item) => stopState(item) !== "done");
+  const unfinished = steps.filter((step) => !stepDone(step));
   const ready = anythingToConfirm && entered && unfinished.length === 0;
-  /** Why Acknowledge is unavailable, named rather than counted. A disabled button with
-   *  nothing beside it is the single most common way a screen strands somebody who
-   *  does not already know the rule; "1 package left" on a load of six sends them
-   *  through every carton to find out which. */
+  /** Why Acknowledge is unavailable, named rather than counted. */
   const blocker = !anythingToConfirm || ready
     ? null
     : unfinished.length > 0
-      ? `Still to finish: ${sentenceList(unfinished.slice(0, 3).map((item) => {
-        const owed = tasksFor(item).filter((task) => !task.done && !task.optional);
-        return `${item.plain} (${owed.map((task) => shortTask(task.label)).join(", ")})`;
-      }))}${unfinished.length > 3 ? ` and ${unfinished.length - 3} more` : ""}`
-      : "Count at least one item first";
+      ? `Still to finish: ${sentenceList(unfinished.slice(0, 3).map((step) => step.title))}${unfinished.length > 3 ? ` and ${unfinished.length - 3} more` : ""}`
+      : "Enter what you received first";
 
   const sharedPhotoProps = {
     indentId: row.indent_id,
@@ -529,18 +578,122 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc, backTo, ba
     onDelete: (id: number) => remove.mutate(id),
   };
 
+  const openWizardAt = (index: number) => {
+    setWizardIndex(Math.min(Math.max(index, 0), Math.max(steps.length - 1, 0)));
+    setWizardOpen(true);
+  };
+
+  const renderStep = (step: WizardStep): ReactNode => {
+    const stop = step.stop;
+    if (step.kind === "gate") {
+      return (
+        <>
+          <ConsignmentSlip
+            no={stop.consignment?.no ?? "Consignment"}
+            isConsignment={stop.consignment?.isConsignment ?? false}
+            leg={stop.consignment?.leg}
+            packages={stop.consignment?.packages ?? []}
+            loading={tracking.isLoading}
+            failed={Boolean(tracking.error)}
+          />
+          <PhotoStrip
+            title="Photo of the consignment"
+            note="The load, the seal and the number plate, before anything is opened. At least one is needed."
+            required
+            buttonLabel="Add photos"
+            files={photosFor(stop)}
+            onUpload={(file) => uploadFile(stop.scope)(file, PHOTO)}
+            {...sharedPhotoProps}
+          />
+          <DamageQuestion
+            subject="the consignment"
+            value={damage[stop.scope]}
+            onChange={(next) => setDamage((current) => ({ ...current, [stop.scope]: next }))}
+          />
+          {stop.legacyProof && (
+            <PhotoStrip
+              title="Bill or delivery challan"
+              note="If the vendor's bill or a challan came with the goods, add it here. A photo or a PDF."
+              optional
+              buttonLabel="Add the bill"
+              buttonIcon={Receipt}
+              accept="image/*,application/pdf"
+              files={bills}
+              onUpload={(file) => uploadFile("")(file, BILL)}
+              {...sharedPhotoProps}
+            />
+          )}
+        </>
+      );
+    }
+    if (step.kind === "package" && stop.pack) {
+      return (
+        <>
+          <PackageIdentityCard pack={stop.pack} />
+          <PhotoStrip
+            title="Photo of the package"
+            note="The outside, the seal or the label."
+            optional
+            buttonLabel="Add photos"
+            files={photosFor(stop)}
+            onUpload={(file) => uploadFile(stop.scope)(file, PHOTO)}
+            {...sharedPhotoProps}
+          />
+          <DamageQuestion
+            subject="the package"
+            value={damage[stop.scope]}
+            onChange={(next) => setDamage((current) => ({ ...current, [stop.scope]: next }))}
+          />
+        </>
+      );
+    }
+    const pack = stop.pack;
+    if (!pack) return null;
+    return (
+      <section>
+        <SectionLabel>
+          {pack.lines.length === 1 ? "Item inside" : `Items inside (${pack.lines.length})`}
+        </SectionLabel>
+        <p className="mt-1 text-xs text-muted">
+          Enter what you received. Whatever you do not receive is returned, and the Returns
+          page asks why.
+        </p>
+        <ul className="mt-2.5 space-y-3">
+          {pack.lines.map((line) => (
+            <PackageLineRow
+              key={line.receipt_key}
+              line={line}
+              value={received[line.receipt_key] ?? ""}
+              onChange={(value) =>
+                setReceived((current) => ({ ...current, [line.receipt_key]: value }))}
+              selectedSerials={pickedSerials[line.receipt_key] ?? []}
+              onPickSerials={() => setSerialTarget(line)}
+              packCheck={packChecks[line.receipt_key]}
+              onPackCheck={(check) =>
+                setPackChecks((current) => ({ ...current, [line.receipt_key]: check }))}
+              photos={photosOf(line, pack.key)}
+              // The item's own shot, filed against the LINE and the carton it was taken in.
+              onUploadPhoto={(file) => upload.mutate({
+                file,
+                category: scopedCategory(PHOTO, itemProofScope(line.indent_item_id, pack.key)),
+              })}
+              {...sharedPhotoProps}
+            />
+          ))}
+        </ul>
+      </section>
+    );
+  };
+
+  const firstLeg = consignments[0]?.leg;
+
   return (
     <div className="space-y-4">
-      <PageHeader
-        title={row.indent_no}
-        back={parentStop
-          ? { to: `?stop=${encodeURIComponent(parentStop.key)}`, label: `Back to ${parentStop.plain.toLowerCase()}` }
-          : { to: backTo, label: backLabel }}
-      />
+      <PageHeader title={row.indent_no} back={{ to: backTo, label: backLabel }} />
 
       <ErrorBanner error={confirm.error ?? upload.error ?? remove.error} />
 
-      {/* Once something has been acknowledged, its labels can be printed here — only
+      {/* Once something has been acknowledged, its labels can be printed here - only
           what arrived, each package at what arrived in it (`received_labels`). */}
       {row.lines.some((line) => line.received_quantity > 0) && packedDispatches(row.lines).size > 0 && (
         <div className="flex flex-wrap items-center gap-2 rounded-xl border border-line bg-content1 px-4 py-3">
@@ -563,88 +716,54 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc, backTo, ba
         anythingToConfirm={anythingToConfirm}
         nothingSentYet={nothingSentYet}
       >
-        <JourneyRail
-          stops={stops}
-          activeIndex={activeIndex}
-          stateOf={stopState}
-          onJump={go}
-        />
+        {anythingToConfirm && steps.length > 0 && (
+          <ol className="mt-4 grid gap-2 sm:grid-cols-2" aria-label="Steps">
+            {steps.map((step, position) => {
+              const done = stepDone(step);
+              return (
+                <li key={step.key}>
+                  <button
+                    type="button"
+                    onClick={() => openWizardAt(position)}
+                    className={`flex min-h-11 w-full items-center gap-2.5 rounded-xl border px-3 py-2 text-left text-sm transition hover:border-brand/40 ${
+                      done ? "border-ok/40 bg-ok-bg/30 text-ok" : "border-line bg-content1 text-body"
+                    }`}
+                  >
+                    {done
+                      ? <CheckCircle2 className="h-4 w-4 shrink-0" aria-hidden />
+                      : <Circle className="h-4 w-4 shrink-0 text-muted" aria-hidden />}
+                    <span className="min-w-0 truncate font-semibold">{step.title}</span>
+                  </button>
+                </li>
+              );
+            })}
+          </ol>
+        )}
       </ReceiptHeader>
 
-      {stop.kind === "gate" && (
-        <GateStop
-          stop={stop}
-          tasks={tasksFor(stop)}
-          photos={photosFor(stop)}
-          loading={tracking.isLoading}
-          failed={Boolean(tracking.error)}
-          onUpload={uploadFile(stop.scope)}
-          onOpenPackage={(pack) => {
-            const target = stops.findIndex(
-              (item) => item.kind === "package" && item.pack?.key === pack.key);
-            if (target >= 0) go(target);
-          }}
-          packageLabel={(pack) => stops.find(
-            (item) => item.kind === "package" && item.pack?.key === pack.key)?.plain ?? pack.no}
-          packageProgress={(pack) => {
-            const target = stops.find(
-              (item) => item.kind === "package" && item.pack?.key === pack.key);
-            const counted = countedFor(pack);
-            return {
-              done: target ? stopState(target) === "done" : false,
-              countedDone: counted.done,
-              countedTotal: counted.total,
-              // ITEMS photographed, not photos filed, so it is the same kind of number
-              // as the count beside it.
-              photographed: counted.photographed,
-              toPhotograph: counted.toPhotograph,
-            };
-          }}
-          // The bill is the delivery's, not a carton's: offered once, on the first
-          // consignment, now that there is no sign-off stop to carry it.
-          bills={stop.legacyProof ? bills : null}
-          onUploadBill={uploadFile("")}
-          inProcess={stop.legacyProof
-            ? row.lines.filter((line) =>
-              receivable(line) <= 0
-              && Number(line.approved_quantity ?? 0) > Number(line.received_quantity ?? 0))
-            : []}
-          {...sharedPhotoProps}
-        />
+      {firstLeg && <ArrivalTrail leg={firstLeg} loading={tracking.isLoading} failed={Boolean(tracking.error)} />}
+
+      {anythingToConfirm && (
+        <InProcessPanel lines={row.lines.filter((line) =>
+          receivable(line) <= 0
+          && Number(line.approved_quantity ?? 0) > Number(line.received_quantity ?? 0))} />
       )}
 
-      {stop.kind === "package" && stop.pack && (
-        <PackageStop
-          pack={stop.pack}
-          tasks={tasksFor(stop)}
-          position={packageStops.findIndex((item) => item.key === stop.key) + 1}
-          total={packageStops.length}
-          photos={photosFor(stop)}
-          received={received}
-          pickedSerials={pickedSerials}
-          packChecks={packChecks}
-          onPackCheck={(key, check) => setPackChecks((current) => ({ ...current, [key]: check }))}
-          photosOf={(line) => photosOf(line, stop.pack?.key ?? "")}
-          onUpload={uploadFile(stop.scope)}
-          // The item's own shot, filed against the LINE and the carton it was taken
-          // in. `uploadFile` files against the stop; this one files against the row.
-          onUploadItem={(line, file) => upload.mutate({
-            file,
-            category: scopedCategory(
-              PHOTO, itemProofScope(line.indent_item_id, stop.pack?.key ?? "")),
-          })}
-          onChange={(key, value) =>
-            setReceived((current) => ({ ...current, [key]: value }))}
-          onPickSerials={setSerialTarget}
-          {...sharedPhotoProps}
-        />
-      )}
+      <AcknowledgementWizard
+        open={wizardOpen && steps.length > 0}
+        onClose={() => setWizardOpen(false)}
+        steps={steps}
+        index={wizardIndex}
+        onIndex={setWizardIndex}
+        stepDone={stepDone}
+        renderBody={renderStep}
+        ready={ready}
+        saving={confirm.isPending}
+        onAcknowledge={() => confirm.mutate()}
+      />
 
-      {/* One line of words, one button. No Back/Next: the rail and the package rows
-          move between steps, and the only press this bar exists for is Acknowledge,
-          which unlocks once every package is finished. The line wraps rather than
-          truncating: on a phone the named unfinished package is the part that was
-          being cut off. */}
+      {/* One line of words, one button. Continue reopens the popup at the first step that
+          still needs something; once every step is done it is Acknowledge. */}
       <div className="sticky bottom-0 z-10 -mx-1 rounded-t-2xl border-t border-line bg-content1/95 px-4 py-3 backdrop-blur">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
           <p className={`flex min-w-0 flex-1 items-start gap-1.5 text-xs leading-snug ${
@@ -656,7 +775,7 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc, backTo, ba
             <span className="line-clamp-2">
               {anythingToConfirm
                 ? blocker
-                  ?? `Ready to acknowledge: ${qty(receivingSummary.quantity)} across ${receivingSummary.lines} item${receivingSummary.lines === 1 ? "" : "s"}`
+                  ?? `Ready to acknowledge: ${qty(receivingSummary.quantity)} received across ${receivingSummary.lines} item${receivingSummary.lines === 1 ? "" : "s"}${receivingSummary.returned > 0 ? `, ${qty(receivingSummary.returned)} returned` : ""}`
                 : heldLeg
                   ? `Nothing to acknowledge yet — shipment ${heldLeg.tr_no} is ${heldLeg.status.replace(/_/g, " ").toLowerCase()} and has not left the warehouse. Logistics must dispatch it first.`
                   : "Nothing to acknowledge."}
@@ -665,11 +784,17 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc, backTo, ba
           {anythingToConfirm && (
             <div className="flex shrink-0 items-center justify-end">
               <Button
-                onClick={() => confirm.mutate()}
-                disabled={!ready || confirm.isPending}
+                onClick={() => {
+                  if (ready) confirm.mutate();
+                  else {
+                    const next = steps.findIndex((step) => !stepDone(step));
+                    openWizardAt(next < 0 ? steps.length - 1 : next);
+                  }
+                }}
+                disabled={confirm.isPending}
               >
                 <Signature className="h-4 w-4" />
-                {confirm.isPending ? "Saving..." : "Acknowledge"}
+                {confirm.isPending ? "Saving..." : ready ? "Acknowledge" : "Continue"}
               </Button>
             </div>
           )}
@@ -1024,18 +1149,47 @@ function initialReceivedByReceiptLine(lines: AcknowledgementLine[]) {
   );
 }
 
-function acknowledgementPayload(
+export function acknowledgementPayload(
   lines: AcknowledgementLine[],
   received: Record<string, string>,
   checks: Record<string, PackageCheck> = {},
-) {
+  picked: Record<string, string[]> = {},
+): AcknowledgeLine[] {
   return lines
-    .map((line) => {
+    .map((line): AcknowledgeLine => {
       const parts = packagePartsForLine(line);
-      const total = parts.length > 0
-        ? parts.reduce((sum, part) =>
-          sum + receivedNumber(received[packageLineKey(line, part)]), 0)
-        : receivedNumber(received[fallbackLineKey(line)]);
+      // What was sent, what was received, and so what goes back - per package. Received
+      // and returned are one number seen from both sides: nothing is "missing". No reason
+      // is sent; the Returns page asks for one.
+      let accepted = 0;
+      let back = 0;
+      const backCodes: string[] = [];
+      const tally = (sent: number, got: number, codes: string[], key: string, typed: string) => {
+        const kept = Math.min(Math.max(got, 0), Math.max(sent, 0));
+        accepted += kept;
+        const gone = Math.max(sent - kept, 0);
+        if (gone <= 0) return;
+        back += gone;
+        if (codes.length > 0) {
+          const taken = new Set(serialPickForQuantity(
+            codes, picked[key], requiredSerialCount({ ...line, serial_numbers: codes }, typed)));
+          backCodes.push(...codes.filter((code) => !taken.has(code)).slice(0, Math.floor(gone)));
+        }
+      };
+      if (parts.length > 0) {
+        let offset = 0;
+        parts.forEach((part) => {
+          const packed = receiptPackageLine(line, part, offset);
+          offset += Math.max(Math.floor(Number(part.quantity ?? 0)), 0);
+          const typed = received[packed.receipt_key] ?? "";
+          tally(Number(part.quantity ?? 0), receivedNumber(typed),
+            packed.serial_numbers?.filter(Boolean) ?? [], packed.receipt_key, typed);
+        });
+      } else {
+        const typed = received[fallbackLineKey(line)] ?? "";
+        tally(receivable(line), receivedNumber(typed),
+          line.serial_numbers?.filter(Boolean) ?? [], fallbackLineKey(line), typed);
+      }
       // Packages that came short or missing, by code (2026-10-26).
       const packageReceipts: Record<string, number> = {};
       parts.forEach((part) => {
@@ -1048,13 +1202,20 @@ function acknowledgementPayload(
           }
         });
       });
-      return {
+      const result: AcknowledgeLine = {
         indent_item_id: line.indent_item_id,
-        received_quantity: Math.min(total, receivable(line)),
-        ...(Object.keys(packageReceipts).length ? { package_receipts: packageReceipts } : {}),
+        received_quantity: Math.min(accepted, receivable(line)),
       };
+      if (Object.keys(packageReceipts).length) result.package_receipts = packageReceipts;
+      if (back > 0) {
+        // A unit list is only sent when it names exactly one code per unit going back.
+        const named = backCodes.length === back && Number.isInteger(back);
+        result.rejections = [{ quantity: back, ...(named ? { serial_numbers: backCodes } : {}) }];
+      }
+      return result;
     })
-    .filter((line) => line.received_quantity > 0);
+    // A line returned whole has nothing accepted and is still a line to send.
+    .filter((line) => line.received_quantity > 0 || (line.rejections?.length ?? 0) > 0);
 }
 
 function receivedNumber(value: string | undefined) {
@@ -1206,15 +1367,6 @@ function sentenceList(parts: string[]) {
   return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
 }
 
-/** A task's label cut to the one word the footer has room for: "count", "photo",
- *  "serial numbers". Read off the same labels `tasksFor` writes, never a second list. */
-function shortTask(label: string) {
-  if (label.startsWith("Count")) return "count";
-  if (label.startsWith("Photo")) return "photo";
-  if (label.startsWith("Match")) return "serial numbers";
-  return label.toLowerCase();
-}
-
 /**
  * The one strip of chrome on the page: whose delivery this is, how much of it is
  * waiting on you, and — as its children — the rail that says where you are.
@@ -1271,124 +1423,6 @@ function ReceiptHeader({ row, waiting, anythingToConfirm, nothingSentYet, childr
   );
 }
 
-/**
- * Where you are in the delivery, and every other place you could be.
- *
- * Dots on a line: the numeral says which of how many, the name under it says which,
- * green says done. A step with only optional work is a DASHED ring, so skipping the
- * consignment photo does not read as unfinished business. The colours are the
- * product's own rail tokens (`--color-step-*`), the same three every other stepper in
- * the system uses — never the solid brand fill, which draws the brand sweep.
- */
-function JourneyRail({ stops, activeIndex, stateOf, onJump }: {
-  stops: Stop[];
-  activeIndex: number;
-  stateOf: (stop: Stop) => StopState;
-  onJump: (index: number) => void;
-}) {
-  return (
-    <div className="-mx-1 mt-4 overflow-x-auto border-t border-line pt-3">
-      <ol className="flex min-w-max items-start">
-        {stops.map((stop, index) => {
-          const state = stateOf(stop);
-          const active = index === activeIndex;
-          const done = state === "done";
-          const optional = state === "optional";
-          return (
-            <li key={stop.key} className="flex items-start">
-              {index > 0 && (
-                <span
-                  aria-hidden
-                  className={`mt-[21px] h-0.5 w-6 shrink-0 rounded-full sm:w-12 ${
-                    stateOf(stops[index - 1]) === "done" ? "bg-step-done-rail" : "bg-line"
-                  }`}
-                />
-              )}
-              <button
-                type="button"
-                onClick={() => onJump(index)}
-                aria-current={active ? "step" : undefined}
-                aria-label={`${stop.plain}${done ? ", finished" : optional ? ", optional" : ""}`}
-                title={stop.label}
-                className="group flex w-[76px] shrink-0 flex-col items-center gap-1.5 rounded-xl px-1 py-2 text-center transition hover:bg-content2/60 sm:w-[100px]"
-              >
-                {/* Finished wins the colour, the current step keeps its ring: "where am
-                    I" and "is it done" are both answered by the one disc. */}
-                <span className={`grid h-[26px] w-[26px] place-items-center rounded-full text-[11px] font-semibold tabular-nums transition ${
-                  done
-                    ? `bg-step-done text-white ${active ? "ring-4 ring-step-done/25" : ""}`
-                    : active
-                      ? "bg-step-live text-white ring-4 ring-step-live/20"
-                      : optional
-                        ? "border-2 border-dashed border-line bg-content1 text-muted"
-                        : "bg-content2 text-muted"
-                }`}>
-                  {done ? <Check className="h-3.5 w-3.5" strokeWidth={3} /> : index + 1}
-                </span>
-                <span className={`line-clamp-2 text-[11px] leading-tight ${
-                  active ? "font-semibold text-ink" : done ? "text-body" : "text-muted"
-                }`}>
-                  {stop.plain}
-                </span>
-                {optional && !active && (
-                  <span className="-mt-1 text-[10px] text-muted">Optional</span>
-                )}
-              </button>
-            </li>
-          );
-        })}
-      </ol>
-    </div>
-  );
-}
-
-/**
- * One step, as a sheet: what this step is, what to do, and the checklist of what it
- * needs — one chip per task, green the moment it is true, amber while it is owed, grey
- * when it is only recommended. Then the work.
- */
-function StepSheet({ kicker, headline, note, tasks, children }: {
-  /** Which step this is, in two or three words: "At the gate", "Package 1 of 3". */
-  kicker: string;
-  headline: string;
-  note: string;
-  tasks: StepTask[];
-  children: ReactNode;
-}) {
-  return (
-    <section className="rounded-3xl bg-content1 px-5 py-6 shadow-[0_1px_3px_rgba(16,24,40,0.04)] sm:px-7">
-      <header>
-        <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-step-live">
-          {kicker}
-        </div>
-        <h2 className="mt-1.5 font-display text-xl font-bold leading-tight text-ink sm:text-2xl">
-          {headline}
-        </h2>
-        <p className="mt-1.5 max-w-prose text-sm leading-relaxed text-muted">{note}</p>
-        <ul className="mt-4 flex flex-wrap gap-2" aria-label="This step needs">
-          {tasks.map((task) => (
-            <li
-              key={task.label}
-              className={`inline-flex min-h-8 items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold ${
-                task.done
-                  ? "bg-ok-bg text-ok"
-                  : task.optional ? "bg-content2 text-muted" : "bg-warn-bg text-warn"
-              }`}
-            >
-              {task.done
-                ? <CheckCircle2 className="h-4 w-4 shrink-0" aria-hidden />
-                : <Circle className="h-4 w-4 shrink-0" aria-hidden />}
-              <span>{task.label}</span>
-              <span className="sr-only">{task.done ? "(done)" : "(not done yet)"}</span>
-            </li>
-          ))}
-        </ul>
-      </header>
-      <div className="mt-6 space-y-6">{children}</div>
-    </section>
-  );
-}
-
 /** What every photo strip on the page is handed, whichever pile it is showing. */
 interface PhotoProps {
   indentId: number;
@@ -1401,105 +1435,6 @@ interface PhotoProps {
 /* ---------------------------------------------------------------------------
  * Stop 1: the load at the gate, before anything is opened.
  * ------------------------------------------------------------------------ */
-
-/**
- * Somebody is standing in front of a truck with a delivery note in their hand: the
- * first thing they do is match the paper to the load, the second is photograph it
- * before a single box moves, the third is find the cartons. So: the slip, the camera,
- * the packages — and the trail of how it got here folded away underneath, open on its
- * own only when something went wrong on the road.
- */
-function GateStop({
-  stop, tasks, photos, loading, failed, onUpload, onOpenPackage, packageLabel,
-  packageProgress, bills, onUploadBill, inProcess, ...photoProps
-}: {
-  stop: Stop;
-  tasks: StepTask[];
-  photos: ReceiptAttachment[];
-  loading: boolean;
-  failed: boolean;
-  onUpload: (file: File, base: string) => void;
-  onOpenPackage: (pack: ReceiptPackage) => void;
-  packageLabel: (pack: ReceiptPackage) => string;
-  packageProgress: (pack: ReceiptPackage) => PackageProgress;
-  /** The delivery's bills, or null on every consignment but the first. */
-  bills: ReceiptAttachment[] | null;
-  onUploadBill: (file: File, base: string) => void;
-  /** Approved lines not in this delivery at all — context, never work. */
-  inProcess: AcknowledgementLine[];
-} & PhotoProps) {
-  const leg = stop.consignment?.leg;
-  const packages = stop.consignment?.packages ?? [];
-  return (
-    <StepSheet
-      kicker="At the gate"
-      headline="Check the delivery before you open it"
-      note="Match the number below with the paper the driver gives you. Walk around the load and photograph anything broken, wet or crushed."
-      tasks={tasks}
-    >
-      <ConsignmentSlip
-        no={stop.consignment?.no ?? "Consignment"}
-        isConsignment={stop.consignment?.isConsignment ?? false}
-        leg={leg}
-        packages={packages}
-        loading={loading}
-        failed={failed}
-      />
-
-      <PhotoStrip
-        // Named for what the pictures ARE, in the word the paperwork uses: they are
-        // the consignment's photos, filed against the number on the slip above.
-        title="Consignment photos"
-        note="The load, the seal, the number plate and anything damaged. At least one is needed before you can acknowledge."
-        required
-        buttonLabel="Add photos"
-        files={photos}
-        onUpload={(file) => onUpload(file, PHOTO)}
-        {...photoProps}
-      />
-
-      {packages.length > 0 && (
-        <section>
-          <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-            <SectionLabel>
-              {packages.length === 1 ? "The package" : `Packages (${packages.length})`}
-            </SectionLabel>
-            <span className="text-[11px] text-muted">Open them in any order</span>
-          </div>
-          <ul className="mt-2.5 space-y-2">
-            {packages.map((pack) => (
-              <PackageRow
-                key={pack.key}
-                pack={pack}
-                label={packageLabel(pack)}
-                progress={packageProgress(pack)}
-                onOpen={() => onOpenPackage(pack)}
-              />
-            ))}
-          </ul>
-        </section>
-      )}
-
-      {bills && (
-        <PhotoStrip
-          title="Bill or delivery challan"
-          note="If the vendor's bill or a challan came with the goods, add it here. A photo or a PDF."
-          optional
-          buttonLabel="Add the bill"
-          buttonIcon={Receipt}
-          accept="image/*,application/pdf"
-          files={bills}
-          onUpload={(file) => onUploadBill(file, BILL)}
-          {...photoProps}
-        />
-      )}
-
-      {leg && <ArrivalTrail leg={leg} loading={loading} failed={failed} />}
-
-      {inProcess.length > 0 && <InProcessPanel lines={inProcess} />}
-    </StepSheet>
-  );
-}
 
 /**
  * The consignment, drawn as the slip that came with it.
@@ -1929,134 +1864,6 @@ function dueNote(leg?: ReceiptLeg) {
   return { text: `In ${plural(-days)}`, tone: "text-muted" };
 }
 
-/** How far one package has got, read off the same rules its own stop is judged by:
- *  never a second copy of them. */
-interface PackageProgress {
-  done: boolean;
-  countedDone: number;
-  countedTotal: number;
-  /** How many ITEMS in this carton have a picture of themselves — not how many
-   *  photos are filed. */
-  photographed: number;
-  /** How many need one: the items counted above zero. */
-  toPhotograph: number;
-}
-
-/**
- * One package in the consignment, as one row you press to open it.
- *
- * Name, the number printed on the carton, what kind of container it is — the three
- * things that tell two cartons apart on the floor — then the work left on it as two
- * fractions (counted, photographed), the same two the package's own step asks for.
- */
-function PackageRow({ pack, label, progress, onOpen }: {
-  pack: ReceiptPackage;
-  label: string;
-  progress: PackageProgress;
-  onOpen: () => void;
-}) {
-  const { done, countedDone, countedTotal, photographed, toPhotograph } = progress;
-  const nothing = countedTotal === 0;
-  const weight = packageWeight(pack);
-  const size = packageSize(pack);
-  const facts = [
-    packageKindLabel(pack),
-    weight,
-    size,
-    `${pack.lines.length} item${pack.lines.length === 1 ? "" : "s"}, ${qty(pack.quantity)}`,
-  ].filter(Boolean).join(" · ");
-
-  return (
-    <li>
-      {/* Drawn as the carton's own TAG (2026-09-26): an orange label stub carrying the
-          number printed on the box, torn off along a perforation from the work left
-          on it. The brand's warm orange is the package's colour everywhere on this
-          screen, as crimson is the consignment's, so the row reads as "a carton" before a word of it is read. */}
-      <button
-        type="button"
-        onClick={onOpen}
-        className={`group relative flex min-h-[4.75rem] w-full overflow-hidden rounded-2xl border-2 text-left transition hover:-translate-y-0.5 hover:shadow-[0_12px_26px_-18px_var(--color-signal)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 ${
-          done ? "border-ok/40 bg-ok-bg/20" : "border-signal/25 bg-content1 hover:border-signal/60"
-        }`}
-      >
-        <span className={`flex w-[5.5rem] shrink-0 flex-col items-center justify-center gap-1.5 border-r-2 border-dashed px-2 py-3 sm:w-24 ${
-          done ? "border-ok/30 bg-ok-bg/40" : "border-signal/30 bg-signal/8"
-        }`}>
-          <span className={`grid h-9 w-9 place-items-center rounded-xl text-white shadow-[0_6px_14px_-8px_var(--color-signal)] ${
-            done ? "bg-ok" : "bg-signal"
-          }`}>
-            {done
-              ? <Check className="h-5 w-5" strokeWidth={3} aria-hidden />
-              : <Package className="h-5 w-5" strokeWidth={1.8} aria-hidden />}
-          </span>
-          <span
-            title={pack.no}
-            className={`max-w-full truncate font-mono text-[11px] font-bold tracking-tight ${done ? "text-ok" : "text-brand"}`}
-          >
-            {pack.no}
-          </span>
-        </span>
-
-        <span className="flex min-w-0 flex-1 flex-col justify-center gap-2 px-3.5 py-3 sm:px-4">
-          <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <span className="text-sm font-semibold text-ink group-hover:text-brand">{label}</span>
-            {pack.detail?.is_fragile && (
-              <Handling icon={AlertTriangle} tone="bg-warn-bg text-warn" label="Fragile" />
-            )}
-            {pack.detail?.is_temp_controlled && (
-              <Handling icon={Snowflake} tone="bg-info-bg text-info" label="Keep cold" />
-            )}
-          </span>
-          <span className="truncate text-[11px] text-muted" title={facts}>{facts}</span>
-          {!nothing && (
-            <span className="flex flex-wrap gap-x-5 gap-y-2">
-              <PackageMeter icon={Hash} label="Counted" done={countedDone} of={countedTotal} />
-              {toPhotograph > 0 && (
-                <PackageMeter icon={Camera} label="Photographed" done={photographed} of={toPhotograph} />
-              )}
-            </span>
-          )}
-        </span>
-
-        <span className="flex shrink-0 items-center pr-3 sm:pr-4">
-          <span className="grid h-9 w-9 place-items-center rounded-full bg-content2 text-muted transition group-hover:bg-signal group-hover:text-white">
-            <ArrowRight className="h-4 w-4 transition group-hover:translate-x-0.5" aria-hidden />
-          </span>
-        </span>
-      </button>
-    </li>
-  );
-}
-
-/** One of the two things a carton owes, as a fraction over a thin bar. */
-function PackageMeter({ icon: Icon, label, done, of }: {
-  icon: typeof Hash;
-  label: string;
-  done: number;
-  of: number;
-}) {
-  const complete = of > 0 && done >= of;
-  const pct = of > 0 ? Math.min(100, Math.round((done / of) * 100)) : 0;
-  const text = complete ? "text-ok" : done > 0 ? "text-warn" : "text-muted";
-  return (
-    <span className="flex min-w-[7.5rem] flex-1 basis-28 flex-col gap-1 sm:max-w-[11rem]">
-      <span className="flex items-center justify-between gap-2 text-[11px]">
-        <span className="inline-flex items-center gap-1 text-muted">
-          <Icon className="h-3 w-3" aria-hidden />
-          {label}
-        </span>
-        <span className={`font-semibold tabular-nums ${text}`}>{done}/{of}</span>
-      </span>
-      <span className="h-1.5 overflow-hidden rounded-full bg-content2" aria-hidden>
-        <span
-          className={`block h-full rounded-full transition-[width] ${complete ? "bg-ok" : "bg-warn"}`}
-          style={{ width: `${pct}%` }}
-        />
-      </span>
-    </span>
-  );
-}
-
 function Handling({ icon: Icon, tone, label }: {
   icon: typeof AlertTriangle;
   tone: string;
@@ -2073,71 +1880,6 @@ function Handling({ icon: Icon, tone, label }: {
 /* ---------------------------------------------------------------------------
  * Stops 2..n-1: one package at a time.
  * ------------------------------------------------------------------------ */
-
-function PackageStop({
-  pack, tasks, position, total, photos, received, pickedSerials, packChecks, onPackCheck,
-  photosOf, onUpload, onUploadItem, onChange, onPickSerials, ...photoProps
-}: {
-  pack: ReceiptPackage;
-  tasks: StepTask[];
-  position: number;
-  total: number;
-  photos: ReceiptAttachment[];
-  received: Record<string, string>;
-  pickedSerials: Record<string, string[]>;
-  packChecks: Record<string, PackageCheck>;
-  onPackCheck: (receiptKey: string, check: PackageCheck) => void;
-  /** This item's own photos, taken while THIS package was open. */
-  photosOf: (line: ReceiptPackageLine) => ReceiptAttachment[];
-  onUpload: (file: File, base: string) => void;
-  onUploadItem: (line: ReceiptPackageLine, file: File) => void;
-  onChange: (receiptKey: string, value: string) => void;
-  onPickSerials: (line: ReceiptPackageLine) => void;
-} & PhotoProps) {
-  return (
-    <StepSheet
-      kicker={total > 1 ? `Package ${position} of ${total}` : "The package"}
-      headline="Open it, count, and photograph each item"
-      note="Enter what you really find, even if it is less than the paper says. One photo per item is enough."
-      tasks={tasks}
-    >
-      <PackageIdentityCard pack={pack} />
-
-      <section>
-        <SectionLabel>
-          {pack.lines.length === 1 ? "Item inside" : `Items inside (${pack.lines.length})`}
-        </SectionLabel>
-        <ul className="mt-2.5 space-y-3">
-          {pack.lines.map((line) => (
-            <PackageLineRow
-              key={line.receipt_key}
-              line={line}
-              value={received[line.receipt_key] ?? ""}
-              onChange={(value) => onChange(line.receipt_key, value)}
-              selectedSerials={pickedSerials[line.receipt_key] ?? []}
-              onPickSerials={() => onPickSerials(line)}
-              packCheck={packChecks[line.receipt_key]}
-              onPackCheck={(check) => onPackCheck(line.receipt_key, check)}
-              photos={photosOf(line)}
-              onUploadPhoto={(file) => onUploadItem(line, file)}
-              {...photoProps}
-            />
-          ))}
-        </ul>
-      </section>
-
-      <PhotoStrip
-        title="Photos of the box"
-        note="The outside, the seal or the label. Useful if the box arrived damaged."
-        optional
-        buttonLabel="Add photos"
-        files={photos}
-        onUpload={(file) => onUpload(file, PHOTO)}
-        {...photoProps}
-      />
-    </StepSheet>
-  );
-}
 
 /**
  * The carton, described so it can be checked against the thing standing in front of
@@ -2264,10 +2006,11 @@ function PackageLineRow({
   const unit = (tracking ?? TRACKING.SERIAL).unit;
   const serialComplete = displayedSerials.length === requiredSerials && requiredSerials > 0;
   const current = receivedNumber(value);
-  const short = max > 0 && current < max;
+  // Received and Returned are one number from two sides: what is not received goes back.
+  const returned = Math.max(max - current, 0);
   const label = line.item_name ?? line.item_code ?? "item";
-  const finished = max > 0 && current > 0 && photos.length > 0
-    && (serials.length === 0 || serialComplete);
+  const finished = max > 0 && photos.length > 0
+    && (serials.length === 0 || requiredSerials === 0 || serialComplete);
   // A line issued in PACKAGES (2026-10-26): counted package by package.
   const packs = line.package_box_codes ?? [];
   const [checking, setChecking] = useState(false);
@@ -2341,10 +2084,34 @@ function PackageLineRow({
               <PackageCheckIcon className="h-4 w-4" />
               {check.kept.length}/{packWord(packs.length)} arrived
             </Button>
-            <span className="text-[11px] text-muted">{qty(current)} of {qty(max)} {line.uom_code ?? ""} received</span>
+            <span className="text-[11px] text-muted">
+              {qty(current)} of {qty(max)} {line.uom_code ?? ""} received
+              {returned > 0 && ` · ${qty(returned)} returned`}
+            </span>
           </div>
         ) : max > 0 ? (
-          <QuantityStepper value={value} max={max} onChange={onChange} label={label} uom={line.uom_code} />
+          <div className="flex flex-wrap items-start gap-4">
+            <div>
+              <div className="mb-1 text-center text-[11px] font-semibold uppercase tracking-wide text-muted">
+                Received
+              </div>
+              <QuantityStepper value={value} max={max} onChange={onChange} label={label} uom={line.uom_code} />
+            </div>
+            <div>
+              <div className="mb-1 text-center text-[11px] font-semibold uppercase tracking-wide text-muted">
+                Returned
+              </div>
+              {/* Edits the same number: returning 3 of 10 is receiving 7. */}
+              <QuantityStepper
+                value={String(returned)}
+                max={max}
+                onChange={(next) => onChange(String(Math.max(max - receivedNumber(next), 0)))}
+                label={`returned ${label}`}
+                allLabel={`All ${qty(max)} returned`}
+                uom={line.uom_code}
+              />
+            </div>
+          </div>
         ) : (
           <span className="text-xs text-muted">
             {line.pending_with || "Nothing to confirm here"}
@@ -2353,21 +2120,16 @@ function PackageLineRow({
       </div>
 
       {max > 0 && (
-        /* Three states, because they mean three different things and one of them is
-           not a problem. Not started is grey -- every line begins there, and opening
-           a package to a wall of amber teaches somebody to ignore amber. */
         <p className={`mt-2.5 flex items-start gap-1.5 text-xs leading-relaxed ${
-          current <= 0 ? "text-muted" : short ? "text-warn" : "text-ok"
+          returned > 0 ? "text-warn" : "text-ok"
         }`}>
-          {current > 0 && !short
-            ? <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
-            : <Circle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />}
+          {returned > 0
+            ? <Circle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+            : <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />}
           <span>
-            {current <= 0
-              ? "Not counted yet"
-              : short
-                ? `${qty(max - current)} missing. They can still come later.`
-                : `All ${qty(max)} here`}
+            {returned > 0
+              ? `${qty(returned)} will be returned. The Returns page asks why.`
+              : `All ${qty(max)} received`}
           </span>
         </p>
       )}
@@ -2627,11 +2389,13 @@ function SerialPanel({
 
 /** Often a phone, often one hand: 44px of button beats a keyboard at a pallet, and
  *  the box is still there for 37 of something. */
-function QuantityStepper({ value, max, onChange, label, uom }: {
+function QuantityStepper({ value, max, onChange, label, allLabel, uom }: {
   value: string;
   max: number;
   onChange: (value: string) => void;
   label: string;
+  /** The shortcut under the box; "All N arrived" unless it is the Returned box. */
+  allLabel?: string;
   /** The line's unit: a whole unit refuses the "." as it is typed (2026-11-03). */
   uom?: string | null;
 }) {
@@ -2678,7 +2442,7 @@ function QuantityStepper({ value, max, onChange, label, uom }: {
         disabled={current === max}
         className="mt-1 block min-h-8 w-full text-center text-[11px] font-semibold text-brand hover:underline disabled:text-muted disabled:no-underline"
       >
-        All {qty(max)} arrived
+        {allLabel ?? `All ${qty(max)} arrived`}
       </button>
     </div>
   );

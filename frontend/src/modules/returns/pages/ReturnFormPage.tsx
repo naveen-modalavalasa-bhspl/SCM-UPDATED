@@ -11,6 +11,11 @@ import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { FormSection } from "../components/FormSection";
 import { NextStepsCard } from "../components/NextStepsCard";
 import { RaiserStrip } from "../components/RaiserStrip";
+import { ReasonRowsEditor } from "../components/ReasonRowsEditor";
+import {
+  newReasonRow, reasonProblems, reasonRowsFrom, reasonRowsPayload,
+  withSingleRowFollowingTotal, type ReasonRow,
+} from "../reasonRows";
 import { SubmitChecklist, type ChecklistItem } from "../components/SubmitChecklist";
 import {
   BLANK_LINE, ReturnLinesEditor, holdingFor, isWholeUnit,
@@ -115,7 +120,7 @@ export default function ReturnFormPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
-  const [reason, setReason] = useState("");
+  const [reasonRows, setReasonRows] = useState<ReasonRow[]>(() => [newReasonRow()]);
   const [reasonNote, setReasonNote] = useState("");
   /**
    * The indent this return answers. THREE states, not two (2026-09-07):
@@ -233,7 +238,9 @@ export default function ReturnFormPage() {
 
   useEffect(() => {
     if (!existing) return;
-    setReason(existing.reason ?? "");
+    setReasonRows(reasonRowsFrom(
+      existing.reasons, existing.reason, existing.reason_note,
+      existing.items.reduce((sum, line) => sum + Number(line.quantity ?? 0), 0)));
     setReasonNote(existing.reason_note ?? "");
     setIntent(existing.intent ?? "RETURN");
     setKind(existing.kind ?? "FIELD");
@@ -321,14 +328,23 @@ export default function ReturnFormPage() {
     attached.filter((file) => file.doc_category === PHOTO_CATEGORY).length +
     staged.filter((row) => row.category === PHOTO_CATEGORY).length;
 
-  const noteRequired = reason === "OTHER";
+  // What the reasons have to add up to, read from the same lines `canSave` reads so the
+  // two cannot disagree.
+  const totalQty = useMemo(
+    () => validLines.reduce((running, line) => running + Number(line.quantity), 0),
+    [validLines],
+  );
+  // One row is "all of it" and follows the lines; several are the person's own split.
+  const rows = useMemo(
+    () => withSingleRowFollowingTotal(reasonRows, totalQty), [reasonRows, totalQty]);
+  const reasonIssues = useMemo(() => reasonProblems(rows, totalQty), [rows, totalQty]);
+  const reasonDone = rows.length > 0 && reasonIssues.length === 0;
   const canSave =
-    Boolean(reason) &&
+    reasonDone &&
     validLines.length > 0 &&
     !overCommitted &&
     !hasDuplicate &&
-    !hasFraction &&
-    !(noteRequired && !reasonNote.trim());
+    !hasFraction;
   // A draft is a scratchpad and saves without the photo; submitting is what needs it,
   // and the backend refuses a submit without one either way.
   const canSubmit = canSave && photoCount > 0;
@@ -339,13 +355,8 @@ export default function ReturnFormPage() {
    * a summary panel that recomputes the rules is how a screen ends up reporting
    * "all set" for a document the server then rejects.
    */
-  const noteDone = !noteRequired || Boolean(reasonNote.trim());
-  const step1Done = indentAnswered && Boolean(reason) && noteDone;
+  const step1Done = indentAnswered && reasonDone;
   const linesClean = validLines.length > 0 && !overCommitted && !hasDuplicate && !hasFraction;
-  const totalQty = useMemo(
-    () => validLines.reduce((running, line) => running + Number(line.quantity), 0),
-    [validLines],
-  );
 
   /**
    * The step to fill in next: the first that is neither finished nor unreachable. One
@@ -372,19 +383,9 @@ export default function ReturnFormPage() {
     {
       key: "reason",
       label: "Pick a reason",
-      done: Boolean(reason),
-      hint: "Why is this coming back?",
+      done: reasonDone,
+      hint: reasonIssues[0] ?? "Why is this coming back? Split it over several reasons if needed.",
     },
-    // Only asked for when it is actually required, so a form nobody has broken never
-    // shows a row nobody has to act on.
-    ...(noteRequired
-      ? [{
-          key: "note",
-          label: "Add a description",
-          done: noteDone,
-          hint: "Required when the reason is Others.",
-        }]
-      : []),
     {
       key: "lines",
       label: "Add at least one item",
@@ -431,7 +432,7 @@ export default function ReturnFormPage() {
   ];
 
   const body = (): ReturnWrite => ({
-    reason,
+    reasons: reasonRowsPayload(rows),
     reason_note: reasonNote.trim() || null,
     // null, not omitted: clearing the picker on an edit has to CLEAR the link, and the
     // backend rebuilds the whole marker payload from what it is sent.
@@ -655,34 +656,28 @@ export default function ReturnFormPage() {
                 )}
               </div>
 
-              <Field label="Reason" required>
-                <Select
-                  value={reason}
-                  onChange={setReason}
-                  options={reasons.map((row) => ({ value: row.value, label: row.label }))}
-                  placeholder="Why is this coming back?"
-                  isDisabled={readOnly}
-                  ariaLabel="Reason for the return"
+              <Field
+                label="Reasons"
+                required
+                hint="One row per reason, with how many. Together they cover every unit."
+              >
+                <ReasonRowsEditor
+                  rows={rows}
+                  reasons={reasons.map((row) => ({ value: row.value, label: row.label }))}
+                  total={totalQty}
+                  readOnly={readOnly}
+                  onChange={setReasonRows}
                 />
+                {reasonIssues.length > 0 && rows.some((row) => row.reason) && (
+                  <p className="mt-2 text-xs text-warn">{reasonIssues[0]}</p>
+                )}
               </Field>
 
-              {/* Beside Reason rather than under it. It was full-width under a row of two
-                * fields; with the kind dropdown gone it is the natural partner for Reason
-                * — the two are one sentence, "why, and in your own words". */}
-              <Field
-                label={noteRequired ? "Description" : "Description (optional)"}
-                hint={
-                  noteRequired
-                    ? "Required when the reason is Others"
-                    : "Anything the approver should know"
-                }
-                required={noteRequired}
-              >
+              <Field label="Description (optional)" hint="Anything the approver should know">
                 <Input
                   value={reasonNote}
                   onChange={(event) => setReasonNote(event.target.value)}
                   disabled={readOnly}
-                  isInvalid={noteRequired && !reasonNote.trim()}
                   placeholder="In your own words"
                   aria-label="Description"
                 />

@@ -272,6 +272,9 @@ export interface AcknowledgementLine extends CombinationValue {
   issued_quantity: number;
   dispatched_quantity: number;
   received_quantity: number;
+  /** Reached the requester and was not accepted (2026-11-06): counted as arrived, so not
+   *  offered again, but not received — the line is still owed. Absent on an older backend. */
+  rejected_quantity?: number;
   is_serial_tracked?: boolean;
   /**
    * Which KIND of identifier `serial_numbers` holds — SERIAL, IMEI, ASSET,
@@ -441,10 +444,22 @@ export interface Acknowledgement {
   shipments: ShipmentTrack[];
 }
 
-/** What arrived in THIS delivery, not the running total. */
+/** What arrived in THIS delivery and was ACCEPTED, not the running total; and, apart from
+ *  it, what arrived and was turned away, by reason (2026-11-06). */
 export interface AcknowledgeLine {
   indent_item_id: number;
   received_quantity: number;
+  /** What goes back. The reason is NOT given here (2026-11-07): the Returns page asks. */
+  rejections?: { reason?: string; quantity: number; comment?: string; serial_numbers?: string[] }[];
+  package_receipts?: Record<string, number>;
+}
+
+/** A return an acknowledgement raised for goods it did not accept. */
+export interface ReceiptReturn {
+  id: number;
+  return_no: string;
+  reason: string;
+  quantity: number;
 }
 
 export interface ReceiptAttachment {
