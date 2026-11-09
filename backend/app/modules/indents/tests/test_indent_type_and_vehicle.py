@@ -27,6 +27,9 @@ from app.shared.models.master import Item, Uom
 # than one module, so a column quietly disappearing from the model is invisible until
 # something reads a stale value. Listing them here makes that a test failure.
 EXPECTED_INDENT_COLUMNS = {
+    # Whose paper it is on (2026-11-09, `OrgScopeColumns`).
+    "organization_id", "organization_code", "organization_name",
+    "org_department_id", "org_department_name", "fiscal_year",
     "id", "indent_no", "indent_type", "indent_date", "required_date",
     "requested_by_id", "requested_by_name", "requested_by_code",
     "position_id", "position_name", "department_id", "department_name",
