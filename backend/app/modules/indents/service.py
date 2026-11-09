@@ -396,6 +396,9 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
     # minted, for the same reason as the vehicle above.
     source = (await _resolve_str_source(db, getattr(data, "source_warehouse_id", None))
               if indent_type == IndentType.STR.value else None)
+    context = await _requester_context(db, user)
+    if source is not None:
+        await assert_str_source_fits(db, source, await _draft_str_destination(db, context))
 
     indent_date = utcnow().date()
     if indent_type == IndentType.MONTHLY.value:
@@ -403,7 +406,6 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
         await monthly_indent_service.assert_can_submit_monthly(db, user)
         indent_date = await monthly_indent_service.local_today(db)
 
-    context = await _requester_context(db, user)
     total_qty = sum(line.quantity for line in data.items)
     indent = Indent(
         # An STR carries its own series (STR prefix) so a transfer is never read as an
@@ -1269,6 +1271,42 @@ async def _resolve_str_source(db: AsyncSession, warehouse_id: int | None) -> War
     return point
 
 
+async def assert_str_source_fits(db: AsyncSession, source: Warehouse | None,
+                                 destination_id: int | None) -> None:
+    """What an STR's source may not be, whatever screen or route named it (SCM_0182).
+
+    - Never the point the stock is going INTO: that is not a transfer, and its issue
+      would leave and land on the same shelf.
+    - A WAREHOUSE delivery point is served by another warehouse: warehouses transfer
+      between warehouses by TYPE, not by who holds them (2026-11-09), so an LIP or an
+      MDP is never the source of a warehouse's STR.
+
+    The source LIST (`locations.same_rank_points`) already leaves both out; this is the
+    check that decides, because a request can name any point.
+    """
+    if source is None or not destination_id:
+        return
+    if source.id == destination_id:
+        raise ValidationError(
+            f"{source.name} is where this stock is going. Pick the point it should "
+            "come from.")
+    destination = await db.get(Warehouse, destination_id)
+    if (destination is not None
+            and locations.tier_of(destination.warehouse_type) == LocationTier.WAREHOUSE
+            and locations.tier_of(source.warehouse_type) != LocationTier.WAREHOUSE):
+        tier = locations.tier_label(locations.tier_of(source.warehouse_type))
+        raise ValidationError(
+            f"{destination.name} is a warehouse, so this transfer comes from another "
+            f"warehouse. {source.name} is {'an' if tier[:1] in 'AEIOU' else 'a'} {tier}.")
+
+
+async def _draft_str_destination(db: AsyncSession, context: dict) -> int | None:
+    """The delivery point of an STR not yet saved, from the raiser's context."""
+    from types import SimpleNamespace
+    return await str_destination_point(db, SimpleNamespace(
+        position_id=context.get("position_id"), office_id=context.get("office_id")))
+
+
 async def str_destination_point(db: AsyncSession, indent: Indent) -> int | None:
     """The point an STR (or any indent) is delivered INTO: the shelf the raising post
     holds, else its primary link, else the stocking point of its office."""
@@ -1347,9 +1385,11 @@ async def str_sources_in_use(db: AsyncSession, user) -> list[dict]:
 
 
 async def str_source_options(db: AsyncSession, user) -> list[dict]:
-    """The points an STR raised by this login may name as its source — the shelves
-    held at the same HCM rank, network-wide, less the raiser's own."""
-    return await locations.same_rank_points(db, user)
+    """The points an STR raised by this login may name as its source: other warehouses
+    when it is delivered into a warehouse, else the shelves held at the same HCM rank,
+    network-wide — never the raiser's own points nor the point it is delivered into."""
+    destination = await _draft_str_destination(db, await _requester_context(db, user))
+    return await locations.same_rank_points(db, user, destination_id=destination)
 
 
 async def change_str_source(db: AsyncSession, indent: Indent, warehouse_id: int, user,
@@ -1882,6 +1922,7 @@ async def update_indent(db: AsyncSession, indent_id: int, data: IndentUpdate, us
     if (indent.indent_type == IndentType.STR.value
             and "source_warehouse_id" in data.model_fields_set):
         source = await _resolve_str_source(db, data.source_warehouse_id)
+        await assert_str_source_fits(db, source, await str_destination_point(db, indent))
         indent.source_warehouse_id = source.id
         indent.source_warehouse_name = source.name
         indent.source_warehouse_code = source.code
@@ -1997,6 +2038,11 @@ async def submit_indent(db: AsyncSession, indent_id: int, user) -> Indent:
         # from before an approver can judge whether that point is theirs.
         raise ValidationError(
             "Choose the source point this transfer should come from, then submit")
+    if indent.indent_type == IndentType.STR.value:
+        # A draft saved before SCM_0182 may name its own delivery point.
+        await assert_str_source_fits(
+            db, await db.get(Warehouse, indent.source_warehouse_id),
+            await str_destination_point(db, indent))
 
     if indent.indent_type == IndentType.MONTHLY.value:
         from app.platform.monthly_indent import service as monthly_indent_service

@@ -2117,6 +2117,9 @@ class IssueRead(_Read):
     destination_warehouse_name: str | None = None
     #: MAIN / MDP / LIP of the chosen destination point, for its badge.
     destination_warehouse_type: str | None = None
+    #: Whether the destination runs a vehicle and carries an SAC — an LIP only. None
+    #: when the point is unknown (the screen then keeps both rows).
+    destination_needs_vehicle_and_sac: bool | None = None
     #: The Stock Transfer Order this issue executes (2026-10-29). `sto_kind` is DIRECT
     #: for an order raised on its own, STR for the one an STR's allocation produced.
     #: The destination of such an issue is the order's and is frozen on it.
@@ -4255,6 +4258,8 @@ class IndentIssueSource(BaseModel):
     destination_office_id: int | None = None
     destination_office_name: str | None = None
     destination_office_sac: str | None = None
+    #: Only an LIP runs a vehicle and carries an SAC; None when no point resolves.
+    destination_needs_vehicle_and_sac: bool | None = None
     items: list[IssueItemWrite] = []
 
 

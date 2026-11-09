@@ -293,6 +293,9 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   // filled from the same answer, because it belongs to the office the goods are going
   // to — never to whoever happens to be raising the issue.
   const [destinationSac, setDestinationSac] = useState<string | null>(null);
+  // Whether the point the goods go INTO runs a vehicle and carries an SAC — an LIP
+  // only (served). False hides both rows on an indent / STR / STO issue; null keeps them.
+  const [needsVehicleSac, setNeedsVehicleSac] = useState<boolean | null>(null);
   // The employee dropdown loads one page of names, so the indent raiser this form
   // defaults to is usually not in it. Hold the name that came with the id, or the
   // field shows its placeholder over a person who IS selected.
@@ -336,6 +339,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     setMode(modeOf(doc));
     setDestination(doc.destination_office_name ?? "");
     setDestinationSac(doc.destination_office_sac ?? null);
+    setNeedsVehicleSac(doc.destination_needs_vehicle_and_sac ?? null);
     setIssuedToName(doc.issued_to_name ?? null);
     setIssuedTo(doc.issued_to_id
       ? { id: doc.issued_to_id, name: doc.issued_to_name ?? String(doc.issued_to_id) }
@@ -870,6 +874,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     onSuccess: (source) => {
       setDestination(source.destination_office_name ?? "");
       setDestinationSac(source.destination_office_sac ?? null);
+      setNeedsVehicleSac(source.destination_needs_vehicle_and_sac ?? null);
       setIndentOffice(source.destination_office_id ?? null);
       setMixedProjects(!!source.mixed_projects);
       if (source.issued_to_id) setIssuedToName(source.issued_to_name ?? null);
@@ -977,6 +982,10 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   // A point with no service area code (an MDP, a main warehouse) says "None" there.
   const pointHasNoSac = !!destPoint && !destPoint.sac;
   const direct = !form.indent_id && direction === "OUT";
+  // A warehouse or an MDP takes no vehicle and no SAC (served per destination). Only
+  // an indent / STR / STO issue hides them: a direct issue names its own destination
+  // and already says "None" for a point without them.
+  const hideVehicleSac = needsVehicleSac === false;
   // The issue executes a Stock Transfer Order whose destination is a real point: the
   // destination is the ORDER's, shown locked (2026-10-29). Like the server
   // (`_assert_direct_issue_parties(for_sto=)`), the order is its request, so neither
@@ -1761,6 +1770,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                 <LockedDestination name={doc?.sto_to_warehouse_name ?? doc?.destination_warehouse_name}
                                    stoNo={doc!.sto_no!} />
               </div>
+              {hideVehicleSac ? null : (<>
               <Field label="Service area code (SAC)" hint="Of the destination point.">
                 <Input value={destinationSac ?? doc?.destination_office_sac ?? "None"} disabled />
               </Field>
@@ -1768,6 +1778,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                 <Input value={form.vehicle_number ?? ""} disabled={locked}
                        onChange={(e) => set("vehicle_number", e.target.value)} placeholder="Vehicle number" />
               </Field>
+              </>)}
               <div className="sm:col-span-2">{transferPicker}</div>
             </>
           ) : direct ? (
@@ -1881,22 +1892,26 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                     }} placeholder="Person" />
           </Field>
           )}
+          {!hideVehicleSac && (
           <Field label="Vehicle">
             <Input value={form.vehicle_number ?? ""} disabled={locked}
                    onChange={(e) => set("vehicle_number", e.target.value)} placeholder="Vehicle number" />
           </Field>
+          )}
           <Field label="Destination" hint="Office of the issued-to employee — from the indent when one is picked, else from the person.">
             <Input value={destination || "—"} disabled />
           </Field>
           {/* Read-only like Destination above it, and filled from the same answer: the
               SAC belongs to the office receiving the goods, so it follows the indent
               when one is picked and the issued-to person otherwise. */}
+          {!hideVehicleSac && (
           <Field label="Service area code (SAC)" hint="Of the destination office — from the indent when one is picked, else from the person.">
             <Input
               value={destinationSac ?? (destination ? "No service area code for this office" : "—")}
               disabled
             />
           </Field>
+          )}
             </>
           )}
         </div>

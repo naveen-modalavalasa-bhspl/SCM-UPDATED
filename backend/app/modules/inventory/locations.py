@@ -237,7 +237,8 @@ async def own_linked_points(db: AsyncSession, user) -> set[int]:
     )).scalars().all())
 
 
-async def same_rank_points(db: AsyncSession, user) -> list[dict]:
+async def same_rank_points(db: AsyncSession, user,
+                           destination_id: int | None = None) -> list[dict]:
     """Every stocking point an STR raised by this login may name as its SOURCE
     (2026-11-04): the points of the posts at the SAME HCM RANK as the post the login
     is acting as, on the SAME TIER as the raiser's own point, across the whole
@@ -250,20 +251,39 @@ async def same_rank_points(db: AsyncSession, user) -> list[dict]:
     beside the rank because one rank serves several rungs (a Store Keeper sits at LIPs,
     at MDPs and at the main warehouse). A post with no rank on record is offered every
     point on its own tier, so a gap in HCM narrows the list instead of emptying it.
+
+    WAREHOUSES go by TYPE, not by rank (2026-11-09). A warehouse rank usually has one
+    post — one SCM HEAD, at Central Warehouse-1 — so "the same rank elsewhere" was
+    nobody and the list was empty. When the STR is delivered into a warehouse, every
+    other active warehouse is offered, whoever holds it. LIPs and MDPs keep the rank
+    rule. `destination_id` (the point the STR is delivered into) is never offered, and
+    decides the tier when the login's own posts are linked to no point.
     """
     position_id = getattr(user, "active_position_id", None)
     own = await own_linked_points(db, user)
-    # The tier of the point the post in hand is linked to; any post's when it has none.
+    excluded = own | ({destination_id} if destination_id else set())
+    # The tier of the point the post in hand is linked to; any post's when it has none;
+    # the delivery point's when no post of theirs is linked to a point at all.
     mine_now = set((await db.execute(
         select(PositionLocation.warehouse_id).where(
             PositionLocation.position_id == position_id,
             PositionLocation.is_active == 1)
     )).scalars().all()) if position_id else set()
+    anchor = mine_now or own or ({destination_id} if destination_id else set())
     tiers = {tier_of(t) for t in (await db.execute(
-        select(Warehouse.warehouse_type).where(Warehouse.id.in_(mine_now or own or {0}))
+        select(Warehouse.warehouse_type).where(Warehouse.id.in_(anchor or {0}))
     )).scalars().all()}
     if not tiers:
         return []
+    if destination_id:
+        # The STR is going INTO this point, so its tier decides — a login holding posts
+        # on two tiers must not be offered the other tier's points.
+        dest_type = await db.scalar(
+            select(Warehouse.warehouse_type).where(Warehouse.id == destination_id))
+        if dest_type is not None:
+            tiers = {tier_of(dest_type)}
+    if tiers == {LocationTier.WAREHOUSE}:
+        return await _other_warehouses(db, excluded)
     wanted_types = [t.value for t in WarehouseType if tier_of(t.value) in tiers]
     role_id = (await db.scalar(select(HcmPosition.role_id).where(
         HcmPosition.id == position_id))) if position_id else None
@@ -284,7 +304,7 @@ async def same_rank_points(db: AsyncSession, user) -> list[dict]:
     points: dict[int, dict] = {}
     rank_posts: dict[int, set[int]] = {}
     for wid, pos_id, code, name, wh_type in (await db.execute(stmt)).all():
-        if wid in own:
+        if wid in excluded:
             continue
         tier = tier_of(wh_type)
         points.setdefault(wid, {
@@ -295,6 +315,25 @@ async def same_rank_points(db: AsyncSession, user) -> list[dict]:
     # "Held by" here is the people of that rank at the point — the OE whose MDP it is,
     # not the storekeeper who keeps its shelf.
     names = await point_holder_names(db, set(points), rank_posts)
+    out = [{**row, "held_by": names.get(wid, [])} for wid, row in points.items()]
+    return sorted(out, key=lambda r: ((r["warehouse_name"] or "").lower(), r["warehouse_id"]))
+
+
+async def _other_warehouses(db: AsyncSession, excluded: set[int]) -> list[dict]:
+    """Every active WAREHOUSE-tier point less `excluded`: the STR source list of a
+    warehouse, by type and never by who holds it (`same_rank_points`)."""
+    rows = (await db.execute(
+        select(Warehouse.id, Warehouse.code, Warehouse.name, Warehouse.warehouse_type)
+        .where(Warehouse.is_active.is_(True))
+    )).all()
+    points = {
+        wid: {"warehouse_id": wid, "warehouse_code": code, "warehouse_name": name,
+              "warehouse_type": wh_type, "tier": LocationTier.WAREHOUSE.value,
+              "tier_label": tier_label(LocationTier.WAREHOUSE)}
+        for wid, code, name, wh_type in rows
+        if wid not in excluded and tier_of(wh_type) == LocationTier.WAREHOUSE
+    }
+    names = await point_holder_names(db, set(points))
     out = [{**row, "held_by": names.get(wid, [])} for wid, row in points.items()]
     return sorted(out, key=lambda r: ((r["warehouse_name"] or "").lower(), r["warehouse_id"]))
 

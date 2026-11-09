@@ -569,6 +569,15 @@ async def assert_str_approvable(db: AsyncSession, indent: Indent, instance,
         return
     if not any(qty > 0 for qty in approved_by_line.values()):
         return
+    # An STR raised before SCM_0182 may name its own delivery point as the source.
+    # Approving it would draft an issue that leaves and lands on the same shelf.
+    from app.modules.indents import service as indent_service
+    if indent.source_warehouse_id and hasattr(indent, "position_id") and (
+            indent.source_warehouse_id
+            == await indent_service.str_destination_point(db, indent)):
+        raise ValidationError(
+            f"{indent.source_warehouse_name or 'The source'} is also where this stock is "
+            "going. Change the source to a point that holds it, or return the request.")
     committed = await committed_by_line(db, indent.id)
     owed = Decimal("0")
     for line in indent.items:
@@ -752,6 +761,11 @@ async def str_allocate(db: AsyncSession, indent_id: int, body, user) -> dict:
     reason = (body.reason or "").strip()
     if moving and not reason:
         raise ValidationError("Say why you are changing the source point")
+    # Never the point the stock is going into, and a warehouse is served by a
+    # warehouse (SCM_0182) — the same rule the STR itself is saved under.
+    await indent_service.assert_str_source_fits(
+        db, await db.get(Warehouse, target),
+        await indent_service.str_destination_point(db, indent))
 
     signed = {q.line_id: Decimal(str(q.approved_quantity)) for q in body.items}
     committed = await committed_by_line(db, indent_id)
@@ -809,8 +823,9 @@ async def str_forward(db: AsyncSession, indent_id: int, body, user):
     target = body.source_warehouse_id
     if not target or target not in await locations.location_ids_for_user(db, user):
         raise ValidationError("Choose one of your own points as the new source")
-    if target == await indent_service.str_destination_point(db, indent):
-        raise ValidationError("The source cannot be the point receiving the stock")
+    await indent_service.assert_str_source_fits(
+        db, await db.get(Warehouse, target),
+        await indent_service.str_destination_point(db, indent))
     reason = (body.reason or "").strip()
     if not reason:
         raise ValidationError("Say why you are changing the source point")
