@@ -10808,9 +10808,7 @@ async def get_issue(db: AsyncSession, issue_id: int, user=None) -> m.MaterialIss
     # `_assert_issue_holder`, which the press itself goes through.
     setattr(issue, "can_issue_from_stock",
             issue.status == IssueStatus.APPROVED.value and not issue.is_stock_posted
-            and user is not None
-            and (await _may_act_as_issue_holder(db, user, holders)
-                 or await _issue_approved_by(db, issue.id, user)))
+            and await _may_issue(db, issue, user, holders))
     setattr(issue, "can_swap_codes", issue.can_issue_from_stock)
     setattr(issue, "can_acknowledge", await _receiver_confirmed(db, issue))
     setattr(issue, "is_stock_transfer", await is_stock_transfer_issue(db, issue.id))
@@ -12446,6 +12444,31 @@ async def _issue_approved_by(db: AsyncSession, issue_id: int, user) -> bool:
     )).scalar_one_or_none() is not None
 
 
+async def _may_issue(db: AsyncSession, issue, user, holders) -> bool:
+    """Who may issue an approved issue from stock: the person it is WITH (or their
+    reporting line), anyone who APPROVED it — and on a floor piece of a split, whoever
+    RAISED the parent (2026-11-10). They could issue all of it before the split, and
+    handing pieces to the floors must not take that away, least of all where the parent
+    was auto-approved and its raiser is the only person who ever signed it. The
+    parent's approvers already count through `_issue_approved_by`.
+
+    The one rule: the press (`_assert_issue_holder`) and the button
+    (`can_issue_from_stock`) both read it."""
+    if user is None:
+        return False
+    if await _may_act_as_issue_holder(db, user, holders):
+        return True
+    if await _issue_approved_by(db, issue.id, user):
+        return True
+    parent_id = getattr(issue, "parent_issue_id", None)
+    if parent_id:
+        parent_raiser = await db.scalar(select(m.MaterialIssue.created_by_id).where(
+            m.MaterialIssue.id == parent_id))
+        if parent_raiser and parent_raiser == getattr(user, "id", None):
+            return True
+    return False
+
+
 async def _assert_issue_holder(db: AsyncSession, issue, user) -> None:
     """Who works an approved issue: the person it is WITH (or their reporting line),
     or anyone who APPROVED it.
@@ -12456,14 +12479,13 @@ async def _assert_issue_holder(db: AsyncSession, issue, user) -> None:
     because an issue cannot be posted without them.
     """
     holders = (await _issue_holders_bulk(db, [issue])).get(issue.id, [])
-    if await _may_act_as_issue_holder(db, user, holders):
-        return
-    if await _issue_approved_by(db, issue.id, user):
+    if await _may_issue(db, issue, user, holders):
         return
     raise PermissionError_(
         f"{issue.issue_no} is with {_holder_label(holders) or 'another person'}. "
-        "Only they, someone they report to, or an approver of this issue can pick its "
-        "serials and issue it from stock.")
+        "Only they, someone they report to, an approver of this issue, or (on a floor "
+        "piece) whoever raised the issue it was split from can pick its serials and "
+        "issue it from stock.")
 
 
 async def submit_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
@@ -12545,33 +12567,150 @@ def _floor_of(index: dict, bin_id: int | None) -> tuple[int | None, str | None]:
     return steps[0]["id"], steps[0]["name"]
 
 
-async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
-    """Break one approved issue into a child per floor that actually holds the stock.
+async def _plan_floor_split(db: AsyncSession, parent) -> tuple[dict, list]:
+    """Where each piece of an approved issue goes when it is split across floors.
 
-    **The issue itself is never tagged to a floor, and must not be.** It is raised by
-    an allocation against a WAREHOUSE and belongs to nobody in particular; writing a
-    floor onto it would be storing an answer that stops being true the moment the
-    goods are moved. So the generic issue is broken UP instead: each child names the
-    floor it was handed to — a fact about who was given the work, which moving stock
-    does not change — and carries only what that floor was holding when the manager
-    pressed the button.
+    **From the parent's own picks** (2026-11-10). A line that names a storage location
+    goes to that location's floor with exactly its batch and quantity — the lot the
+    storekeeper chose and the approver signed. Re-picking from the whole shelf, as this
+    used to, handed floors lots nobody had approved; and because every line re-read
+    the shelf from the top, two picks of one item both landed on the first lot (the
+    "two picks draw on the same batch and storage location" warning).
 
-    Quantities are DISTRIBUTED, never repeated. Ask for 100 with 40 on the third floor
-    and 60 on the ground floor and you get two children, for 40 and 60. Ask for 100
-    with only 70 anywhere and you get 70 — the missing 30 stays UNFULFILLED on the
-    parent and is reported back, because a shortage belongs to the indent and rounding
-    it away silently is how a site waits for goods nobody is buying.
+    A line naming no location ("that batch, wherever it stands") is placed FEFO over
+    the stock this issue may draw, and what each placement takes is taken OFF, so no
+    lot is counted twice. A pick at a location on no floor, or quantity nothing can
+    place, is returned as shortfall: it stays on the parent and is reported.
 
-    Splitting is OPTIONAL. A warehouse manager is not floor-restricted
-    (`floor_scope_ids` answers None for them), so they can post the whole issue
-    themselves and never press this. It exists for handing the work down, not for
-    taking it away.
+    Releases a direct parent's hold first (each child re-takes its own piece), so a
+    preview runs this inside a savepoint it rolls back.
 
-    Ordered expiry-then-batch, the same order `issue_stock_sources` uses, so the
-    children come out FIFO without this function knowing what FIFO is.
+    Returns ({floor id: {name, lines}}, shortfall).
     """
     from app.modules.inventory.models import Reservation, Stock
 
+    index = await _location_index(db, parent.warehouse_id)
+    await _release_issue_hold(db, parent.id)
+
+    # Only lines naming no location read the shelf: own reservations added back, as
+    # `issue_stock_sources` does; another document's hold stays subtracted.
+    loose = [line for line in parent.items if not line.bin_id]
+    rows = []
+    if loose:
+        item_ids = list({line.item_id for line in loose})
+        if parent.indent_id:
+            mine = (
+                select(Reservation.stock_id.label("stock_id"),
+                       func.sum(Reservation.quantity).label("qty"))
+                .where(Reservation.ref_type == InventoryRefType.RESERVATION.value,
+                       Reservation.ref_id == parent.indent_id,
+                       Reservation.status == ReservationStatus.ACTIVE.value)
+                .group_by(Reservation.stock_id)
+                .subquery()
+            )
+            drawable = func.sum(Stock.available_qty) + func.coalesce(func.sum(mine.c.qty), 0)
+        else:
+            mine = None
+            drawable = func.sum(Stock.available_qty)
+        stmt = (
+            select(Stock.item_id, Stock.bin_id, Stock.batch_id, drawable.label("qty"),
+                   m.Batch.batch_no, m.Batch.expiry_date)
+            .select_from(Stock)
+            .outerjoin(m.Batch, m.Batch.id == Stock.batch_id)
+        )
+        if mine is not None:
+            stmt = stmt.outerjoin(mine, mine.c.stock_id == Stock.id)
+        rows = (await db.execute(
+            stmt.where(Stock.warehouse_id == parent.warehouse_id,
+                       Stock.item_id.in_(item_ids),
+                       _stock_offerable(parent.indent_id))
+            .group_by(Stock.item_id, Stock.bin_id, Stock.batch_id,
+                      m.Batch.batch_no, m.Batch.expiry_date)
+            .order_by(m.Batch.expiry_date.is_(None), m.Batch.expiry_date, Stock.batch_id)
+        )).all()
+    # What is still free at each (item, bin, batch) after the placements so far.
+    left = {(row.item_id, row.bin_id, row.batch_id or 0): _d(row.qty) for row in rows}
+
+    by_floor: dict[int, dict] = {}
+    shortfall: list[dict] = []
+
+    def place(line, floor_id, floor_name, bin_id, batch_id, batch_no, expiry, qty):
+        node = index.get(bin_id) or {}
+        by_floor.setdefault(floor_id, {"name": floor_name, "lines": []})["lines"].append({
+            "indent_item_id": line.indent_item_id,
+            "item_id": line.item_id, "item_code": line.item_code,
+            "item_name": line.item_name, "uom_code": line.uom_code,
+            "bin_id": bin_id, "bin_code": node.get("code") or line.bin_code,
+            "batch_id": batch_id, "batch_no": batch_no, "expiry_date": expiry,
+            "qty": qty,
+            # The parent line's own rate, so a child is valued exactly as the parent.
+            "rate": line.rate,
+            "combination": combinations.carry(line),
+        })
+
+    # Fixed picks first, so a loose line can never take a lot a fixed pick holds.
+    for line in sorted(parent.items, key=lambda l: (not l.bin_id, l.line_no or 0)):
+        wanted = _d(line.issued_qty) if _d(line.issued_qty) > ZERO else _d(line.requested_qty)
+        if wanted <= ZERO:
+            continue
+        # The children never pass through `_reserve_issue_serials`, which refuses a
+        # fractional serialized line on create and edit, so it is repeated here.
+        item = await _item_snapshot(db, line.item_id)
+        whole = item.is_serial_tracked or (
+            await uom_rules.decimals_by_code(db, [line.uom_code])
+        ).get(line.uom_code, uom_rules.MAX_DECIMALS) == 0
+        if whole and wanted != wanted.to_integral_value():
+            raise ValidationError(
+                f"{item.code}: {wanted} {line.uom_code} is not a whole number — "
+                f"cancel {parent.issue_no} and raise it again in whole units.")
+        if line.bin_id:
+            floor_id, floor_name = _floor_of(index, line.bin_id)
+            if floor_id is None:
+                shortfall.append({
+                    "item_id": line.item_id, "item_code": line.item_code,
+                    "item_name": line.item_name, "qty": str(wanted),
+                    "reason": f"{line.bin_code or 'Its location'} is on no floor"})
+                continue
+            place(line, floor_id, floor_name, line.bin_id, line.batch_id, line.batch_no,
+                  line.expiry_date, wanted)
+            key = (line.item_id, line.bin_id, line.batch_id or 0)
+            if key in left:
+                left[key] = max(left[key] - wanted, ZERO)
+            continue
+        outstanding = wanted
+        for row in rows:
+            if outstanding <= ZERO:
+                break
+            if row.item_id != line.item_id:
+                continue
+            if line.batch_id and row.batch_id != line.batch_id:
+                continue    # "this batch, wherever it stands": never another batch
+            key = (row.item_id, row.bin_id, row.batch_id or 0)
+            available = left.get(key, ZERO)
+            if whole:
+                available = Decimal(int(available))
+            if available <= ZERO:
+                continue
+            floor_id, floor_name = _floor_of(index, row.bin_id)
+            if floor_id is None:
+                continue          # stock at warehouse level, not on any floor
+            take = min(outstanding, available)
+            place(line, floor_id, floor_name, row.bin_id, row.batch_id, row.batch_no,
+                  row.expiry_date, take)
+            left[key] = available - take
+            outstanding -= take
+        if outstanding > ZERO:
+            shortfall.append({
+                "item_id": line.item_id, "item_code": line.item_code,
+                "item_name": line.item_name, "qty": str(outstanding),
+                "reason": "No floor holds it"})
+    return by_floor, shortfall
+
+
+async def _splittable_issue(db: AsyncSession, issue_id: int, user):
+    """The issue, if THIS login may split it across floors now; refused otherwise. One
+    set of rules for the split and its preview, so the preview never offers a split
+    the button would refuse."""
     parent = await get_issue(db, issue_id)
     if parent.status in (IssueStatus.SPLIT.value, IssueStatus.CLOSED.value):
         raise ValidationError(
@@ -12603,117 +12742,67 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
             f"{parent.issue_no} has already been split into {existing} issue(s). "
             "Cancel those before splitting again.")
 
-    index = await _location_index(db, parent.warehouse_id)
+    return parent
 
-    # A direct parent holds its own stock (`_hold_direct_issue_stock`). Handed back
-    # before the shelf is read, so the floors' free stock includes it; each child
-    # re-takes exactly its own piece below, in the same transaction, so nothing is
-    # ever briefly free to anybody else.
-    await _release_issue_hold(db, parent.id)
 
-    # Every (bin, batch) the parent's items can be drawn from in this warehouse,
-    # oldest stock first. Read off stk_balance, never off the unit tables — those hold
-    # one row per physical thing and there are hundreds of thousands of them.
-    #
-    # **`available_qty` ALONE IS WRONG HERE**, and getting it wrong looks exactly like
-    # an empty warehouse. Approving the allocation behind this issue RESERVED the very
-    # stock the issue is about to move, so the balance row it is going to draw from
-    # reads `available_qty = 0` — the goods are on the shelf, spoken for, by this
-    # document. Splitting on that number refused every real issue with "no floor is
-    # holding stock for these items" while the pallet was standing on the third floor.
-    # So this adds the parent's OWN reservations back, exactly as
-    # `issue_stock_sources` does for the same reason; another indent's reservation
-    # stays subtracted, because that stock genuinely is not ours to hand out.
-    item_ids = [line.item_id for line in parent.items]
-    if parent.indent_id:
-        mine = (
-            select(Reservation.stock_id.label("stock_id"),
-                   func.sum(Reservation.quantity).label("qty"))
-            .where(Reservation.ref_type == InventoryRefType.RESERVATION.value,
-                   Reservation.ref_id == parent.indent_id,
-                   Reservation.status == ReservationStatus.ACTIVE.value)
-            .group_by(Reservation.stock_id)
-            .subquery()
-        )
-        drawable = func.sum(Stock.available_qty) + func.coalesce(func.sum(mine.c.qty), 0)
-    else:
-        mine = None
-        drawable = func.sum(Stock.available_qty)
+async def preview_floor_split(db: AsyncSession, issue_id: int, user) -> dict:
+    """Where a split would send the work, written nowhere (2026-11-10): "3rd floor 40,
+    ground floor 60", before anybody presses Confirm. Runs the very planner the split
+    runs, inside a savepoint that is rolled back, so the preview and the split cannot
+    disagree."""
+    parent = await _splittable_issue(db, issue_id, user)
+    savepoint = await db.begin_nested()
+    try:
+        by_floor, shortfall = await _plan_floor_split(db, parent)
+    finally:
+        await savepoint.rollback()
+    floors = [{
+        "floor_location_id": floor_id,
+        "floor_location_name": bucket["name"],
+        "total_qty": str(sum((_d(line["qty"]) for line in bucket["lines"]), ZERO)),
+        "lines": [{
+            "item_code": line["item_code"], "item_name": line["item_name"],
+            "uom_code": line["uom_code"], "batch_no": line["batch_no"],
+            "expiry_date": line["expiry_date"].isoformat() if line["expiry_date"] else None,
+            "bin_code": line["bin_code"], "qty": str(line["qty"]),
+        } for line in bucket["lines"]],
+    } for floor_id, bucket in by_floor.items()]
+    in_charge = await stock_locations.floor_incharge_people(db, set(by_floor))
+    for floor in floors:
+        floor["in_charge_names"] = [name for _id, name in
+                                    in_charge.get(floor["floor_location_id"], [])]
+    return {"issue_id": parent.id, "issue_no": parent.issue_no,
+            "floors": floors, "shortfall": shortfall,
+            "can_split": bool(floors)}
 
-    stmt = (
-        select(Stock.item_id, Stock.bin_id, Stock.batch_id,
-               drawable.label("qty"),
-               m.Batch.batch_no, m.Batch.expiry_date)
-        .select_from(Stock)
-        .outerjoin(m.Batch, m.Batch.id == Stock.batch_id)
-    )
-    if mine is not None:
-        stmt = stmt.outerjoin(mine, mine.c.stock_id == Stock.id)
-    rows = (await db.execute(
-        stmt.where(Stock.warehouse_id == parent.warehouse_id,
-                   Stock.item_id.in_(item_ids),
-                   _stock_offerable(parent.indent_id))
-        .group_by(Stock.item_id, Stock.bin_id, Stock.batch_id,
-                  m.Batch.batch_no, m.Batch.expiry_date)
-        .order_by(m.Batch.expiry_date.is_(None), m.Batch.expiry_date, Stock.batch_id)
-    )).all() if item_ids else []
 
-    # floor id -> {name, lines: [...]}, and what could not be placed anywhere.
-    by_floor: dict[int, dict] = {}
-    shortfall: list[dict] = []
+async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
+    """Break one approved issue into a child per floor that actually holds the stock.
 
-    for line in parent.items:
-        outstanding = _d(line.requested_qty)
-        if outstanding <= ZERO:
-            continue
-        # The children are written straight to the table and never pass through
-        # `_reserve_issue_serials`, the check that refuses a fractional serialized
-        # line on create and edit. So it is repeated here: a 9.5 child of a serialized
-        # item can never be completed at Outward QC.
-        item = await _item_snapshot(db, line.item_id)
-        whole = item.is_serial_tracked or (
-            await uom_rules.decimals_by_code(db, [line.uom_code])
-        ).get(line.uom_code, uom_rules.MAX_DECIMALS) == 0
-        if whole and outstanding != outstanding.to_integral_value():
-            raise ValidationError(
-                f"{item.code}: {outstanding} {line.uom_code} is not a whole number — "
-                f"cancel {parent.issue_no} and raise it again in whole units.")
-        for row in rows:
-            if outstanding <= ZERO:
-                break
-            if row.item_id != line.item_id:
-                continue
-            available = _d(row.qty)
-            if whole:
-                # Whole units only, or a fractional balance row splits 9 into 4.5 + 4.5.
-                available = Decimal(int(available))
-            if available <= ZERO:
-                continue
-            floor_id, floor_name = _floor_of(index, row.bin_id)
-            if floor_id is None:
-                continue          # stock at warehouse level, not on any floor
-            take = min(outstanding, available)
-            node = index.get(row.bin_id) or {}
-            bucket = by_floor.setdefault(floor_id, {"name": floor_name, "lines": []})
-            bucket["lines"].append({
-                "indent_item_id": line.indent_item_id,
-                "item_id": line.item_id, "item_code": line.item_code,
-                "item_name": line.item_name, "uom_code": line.uom_code,
-                "bin_id": row.bin_id, "bin_code": node.get("code"),
-                "batch_id": row.batch_id, "batch_no": row.batch_no,
-                "expiry_date": row.expiry_date,
-                "qty": take,
-                # The parent line's own rate, so a child is valued exactly as the
-                # parent was — a child written without one listed at Rs 0.
-                "rate": line.rate,
-            })
-            outstanding -= take
-        if outstanding > ZERO:
-            shortfall.append({
-                "item_id": line.item_id, "item_code": line.item_code,
-                "item_name": line.item_name, "qty": str(outstanding),
-            })
+    **The issue itself is never tagged to a floor, and must not be.** It is raised by
+    an allocation against a WAREHOUSE and belongs to nobody in particular; writing a
+    floor onto it would be storing an answer that stops being true the moment the
+    goods are moved. So the generic issue is broken UP instead: each child names the
+    floor it was handed to — a fact about who was given the work, which moving stock
+    does not change — and carries only what that floor was holding when the manager
+    pressed the button.
 
+    Quantities are DISTRIBUTED, never repeated. Ask for 100 with 40 on the third floor
+    and 60 on the ground floor and you get two children, for 40 and 60. Ask for 100
+    with only 70 anywhere and you get 70 — the missing 30 stays UNFULFILLED on the
+    parent and is reported back, because a shortage belongs to the indent and rounding
+    it away silently is how a site waits for goods nobody is buying.
+
+    Splitting is OPTIONAL. A warehouse manager is not floor-restricted
+    (`floor_scope_ids` answers None for them), so they can post the whole issue
+    themselves and never press this. It exists for handing the work down, not for
+    taking it away.
+
+    Each piece is cut from the parent's OWN picks (`_plan_floor_split`): the lots the
+    approver signed, never a fresh pick off the shelf.
+    """
+    parent = await _splittable_issue(db, issue_id, user)
+    by_floor, shortfall = await _plan_floor_split(db, parent)
     if not by_floor:
         raise ValidationError(
             "No floor in this warehouse is holding stock for these items, so there "
@@ -12782,6 +12871,9 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
                 requested_qty=spec["qty"], issued_qty=spec["qty"],
                 rate=spec["rate"],
                 amount=(spec["qty"] * _d(spec["rate"])) if spec["rate"] else None,
+                # The parent pick's brand / variant / model: the piece issues what was
+                # approved, not any brand of the item.
+                **spec["combination"],
             ))
         _issue_totals(child)
         db.add(child)

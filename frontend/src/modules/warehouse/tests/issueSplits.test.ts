@@ -2,8 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   allowedExpiries, batchChoices, groupIssueLines, locationChoices, normalizeSplits,
   redistribute, replaceGroup, splitProblems, trackingOf, trimUnits, codedSwapBatches,
-  fefoPlan,
+  fefoPlan, batchesForPick,
 } from "../issueSplits";
+import type { IssueGroup } from "../issueSplits";
 import type { IssueItemWrite, IssueStockSource, TrackingType } from "../types";
 
 /**
@@ -604,5 +605,42 @@ describe("the coded-item FEFO exception", () => {
     expect(codedSwapBatches([codedOld], [codedOld, mid]).size).toBe(0);
     const plain = [old, mid].map((row) => ({ ...row, codes_required: false }));
     expect(codedSwapBatches([plain[0]], plain).size).toBe(0);
+  });
+});
+
+
+describe("one batch at a time (2026-11-10)", () => {
+  const shelf: IssueStockSource[] = [
+    { item_id: 1, bin_id: 1, batch_id: 11, batch_no: "AUG-27", expiry_date: "2027-08-31",
+      drawable_qty: 5, total_qty: 5, available_qty: 5, reserved_qty: 0, own_reserved_qty: 0 },
+    { item_id: 1, bin_id: 2, batch_id: 12, batch_no: "SEP-27", expiry_date: "2027-09-30",
+      drawable_qty: 10, total_qty: 10, available_qty: 10, reserved_qty: 0, own_reserved_qty: 0 },
+    { item_id: 1, bin_id: 3, batch_id: null, batch_no: null, expiry_date: null,
+      drawable_qty: 7, total_qty: 7, available_qty: 7, reserved_qty: 0, own_reserved_qty: 0 },
+  ] as unknown as IssueStockSource[];
+
+  const group = (splits: { index: number; batch: number | null; issued: number }[]): IssueGroup => ({
+    plan: fefoPlan(shelf, 22),
+    splits: splits.map((s) => ({ index: s.index, issued: s.issued, line: { batch_id: s.batch } })),
+  }) as unknown as IssueGroup;
+
+  it("offers only the earliest batch, even when the ask needs more than it holds", () => {
+    expect([...batchesForPick(group([{ index: 0, batch: null, issued: 0 }]), 0)!]).toEqual([11]);
+  });
+
+  it("offers the next batch only once the earlier picks use the first one up", () => {
+    const g = group([{ index: 0, batch: 11, issued: 5 }, { index: 1, batch: null, issued: 0 }]);
+    expect([...batchesForPick(g, 1)!]).toEqual([12]);
+    // Only part of AUG-27 taken: the next pick is still offered AUG-27, not SEP-27.
+    const part = group([{ index: 0, batch: 11, issued: 3 }, { index: 1, batch: null, issued: 0 }]);
+    expect([...batchesForPick(part, 1)!]).toEqual([11]);
+  });
+
+  it("reaches stock with no batch last, after every dated batch", () => {
+    const plan = fefoPlan(shelf, 22);
+    expect(plan.map((step) => step.batches.map((b) => b.batchId ?? 0))).toEqual([[11], [12], [0]]);
+    const g = group([{ index: 0, batch: 11, issued: 5 }, { index: 1, batch: 12, issued: 10 },
+                     { index: 2, batch: null, issued: 0 }]);
+    expect([...batchesForPick(g, 2)!]).toEqual([0]);
   });
 });

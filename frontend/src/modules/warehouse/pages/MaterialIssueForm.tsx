@@ -32,7 +32,8 @@ import {
   issueApprovalHistory,  postIssue, projectOptions,
   occupancyPreview,
   itemHandlingUnits,
-  returnableIssueOptions, rejectIssue, setIssueSerials, splitIssue, submitIssue, updateIssue,
+  previewIssueSplit, returnableIssueOptions, rejectIssue, setIssueSerials, splitIssue,
+  submitIssue, updateIssue,
   warehouseOptions,
   issueStockSources, listSerials,
   issueUnitSupply,
@@ -1176,6 +1177,14 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   });
 
   const [splitResult, setSplitResult] = useState<IssueSplitResult | null>(null);
+  // The floor plan, read the moment the confirm opens: which floor gets what, from the
+  // lots this issue already picked. Nothing is written until Confirm.
+  const splitPreview = useQuery({
+    queryKey: ["wh-issue-split-preview", id],
+    queryFn: () => previewIssueSplit(Number(id)),
+    enabled: confirming === "split" && editing,
+    staleTime: 0,
+  });
   const split = useMutation({
     mutationFn: () => splitIssue(Number(id)),
     onSuccess: (result) => {
@@ -2397,17 +2406,59 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
       <ConfirmModal
         isOpen={confirming === "split"}
         title="Split this issue across the floors?"
-        message={"One issue is created per floor that is holding stock for these items, "
-          + "each for the quantity that floor actually has, numbered off this one — "
-          + `${doc?.issue_no ?? "this issue"}-001, -002 and so on. The floor in-charges see `
-          + "their own and nobody else's. Anything no floor is holding stays unfulfilled "
-          + "and is listed for you. Nothing leaves the warehouse yet."}
+        message={"One issue per floor, each for exactly the lots this issue picked there, "
+          + `numbered off this one — ${doc?.issue_no ?? "this issue"}-001, -002 and so on. `
+          + "Nothing leaves the warehouse yet."}
         confirmLabel="Split across floors"
         busy={split.isPending}
-        error={split.error}
+        confirmDisabled={!splitPreview.data?.can_split}
+        error={split.error ?? splitPreview.error}
         onConfirm={() => { split.mutate(); setConfirming(null); }}
         onClose={() => setConfirming(null)}
-      />
+      >
+        {splitPreview.isLoading ? (
+          <p className="text-sm text-muted">Working out which floor gets what…</p>
+        ) : splitPreview.data && (
+          <div className="space-y-2">
+            {splitPreview.data.floors.map((floor) => (
+              <div key={floor.floor_location_id} className="rounded-xl border border-line bg-content2/40 p-3">
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="font-semibold text-ink">{floor.floor_location_name}</span>
+                  <span className="font-mono text-sm font-semibold text-ink">{fmtQty(Number(floor.total_qty))}</span>
+                </div>
+                {floor.in_charge_names.length > 0 && (
+                  <p className="text-xs text-muted">To {floor.in_charge_names.join(", ")}</p>
+                )}
+                <ul className="mt-1.5 space-y-0.5 text-xs text-body">
+                  {floor.lines.map((line, i) => (
+                    <li key={i} className="flex justify-between gap-2">
+                      <span className="min-w-0 truncate">
+                        {line.item_code} · {line.batch_no ?? "No batch"}{line.bin_code ? ` · ${line.bin_code}` : ""}
+                      </span>
+                      <span className="shrink-0 font-mono">{fmtQty(Number(line.qty))} {line.uom_code ?? ""}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+            {splitPreview.data.shortfall.length > 0 && (
+              <div className="rounded-xl bg-warn-bg p-3 text-xs text-warn">
+                <p className="font-semibold">Stays on this issue, not handed to any floor:</p>
+                <ul className="mt-1 space-y-0.5">
+                  {splitPreview.data.shortfall.map((row, i) => (
+                    <li key={i}>{row.item_code} — {fmtQty(Number(row.qty))}{row.reason ? ` (${row.reason})` : ""}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {!splitPreview.data.can_split && (
+              <p className="text-sm font-medium text-bad">
+                None of these picks sits on a floor, so there is nothing to hand down. Issue it from stock yourself.
+              </p>
+            )}
+          </div>
+        )}
+      </ConfirmModal>
 
       <ConfirmModal
         isOpen={confirming === "post"}

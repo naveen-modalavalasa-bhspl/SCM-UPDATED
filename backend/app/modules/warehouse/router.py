@@ -825,6 +825,13 @@ async def split_issue(issue_id: int, db: AsyncSession = Depends(get_db),
     return await service.split_issue_by_floor(db, issue_id, user)
 
 
+@router.get("/issues/{issue_id}/split-preview")
+async def split_issue_preview(issue_id: int, db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(ISSUE_SPLIT))):
+    """Where a split would send the work, before anything is written."""
+    return await service.preview_floor_split(db, issue_id, user)
+
+
 @router.post("/issues/{issue_id}/reject", response_model=s.IssueDetail)
 async def reject_issue(issue_id: int, body: s.ApprovalIn,
                        db: AsyncSession = Depends(get_db),

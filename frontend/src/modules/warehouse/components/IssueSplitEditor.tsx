@@ -12,8 +12,8 @@ import { LocationTrail } from "./LocationTrail";
 import { BatchPicker, LocationPicker, expiryLabel } from "./SourcePicker";
 import { fmtQty, num } from "../format";
 import {
-  allowedExpiries, batchChoices, locationChoices, redistribute, replaceGroup, round,
-  sourceKey, trimUnits,
+  allowedExpiries, batchChoices, batchesForPick, locationChoices, redistribute, replaceGroup,
+  round, sourceKey, trimUnits,
 } from "../issueSplits";
 import type { BatchChoice, IssueGroup, IssueSplit } from "../issueSplits";
 import { sourcesFor } from "../issueSplits";
@@ -852,6 +852,13 @@ function PickRow(props: PickProps) {
   } = props;
 
   const line = split.line;
+  // One batch at a time (2026-11-10): this pick is offered the earliest batch the other
+  // picks have not used up — the next one only once that is all taken. A direct issue
+  // keeps every batch, oldest first, with the FEFO hint as advice.
+  const allowedForPick = group.direct ? null : batchesForPick(group, split.index);
+  const pickBatches = allowedForPick
+    ? batches.filter((choice) => allowedForPick.has(choice.batchId ?? 0))
+    : batches;
   const todayIso = new Date().toISOString().slice(0, 10);
   const isBatchExpired = !!(split.batchExpiry && split.batchExpiry < todayIso);
   // Only the locations holding THIS batch of this item. Changing the bay within a
@@ -954,7 +961,9 @@ function PickRow(props: PickProps) {
         <div className="min-w-0">
           <CellLabel>Batch</CellLabel>
           <BatchPicker
-            choices={batches}
+            choices={pickBatches}
+            unbatched={!line.batch_id && !!line.bin_id
+              && sources.some((row) => !row.batch_id && row.bin_id === line.bin_id)}
             value={line.batch_id}
             isDisabled={locked || !line.item_id}
             isBatchTracked={group.isBatchTracked}
