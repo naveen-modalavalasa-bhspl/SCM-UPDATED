@@ -89,6 +89,39 @@ def slug(value: str | None, limit: int = 12) -> str:
     return cleaned[:limit] or UNSET
 
 
+#: How long an organisation / project / department CODE may run in a number
+#: (2026-11-11). Codes replaced the first three letters of the name; twelve keeps the
+#: longest default-pattern number (12 + 12 + year + prefix + sequence) inside the 50
+#: characters every document-number column now holds (`f2c4e6a8b0d1`).
+CODE_TOKEN_LEN = 12
+
+
+def code_token(code: str | None) -> str | None:
+    """A master's CODE as it prints in a document number: upper case, letters, digits
+    and single hyphens (`AP-104-MMU`), at most `CODE_TOKEN_LEN`. None when there is no
+    usable code, so the caller falls back to the name."""
+    cleaned = re.sub(r"-{2,}", "-", re.sub(r"[^A-Za-z0-9-]", "", code or "").upper())
+    cleaned = cleaned.strip("-")[:CODE_TOKEN_LEN].strip("-")
+    return cleaned or None
+
+
+async def scope_codes(db: AsyncSession, *, project_id: int | None = None,
+                      org_department_id: int | None = None) -> str | None:
+    """The code a number prints for its project — else its department — read off the
+    masters by id (2026-11-11). None when neither names a coded row."""
+    from app.shared.models.master import OrgDepartment, Project
+    if project_id:
+        code = await db.scalar(select(Project.code).where(Project.id == project_id))
+        if code_token(code):
+            return code_token(code)
+    if org_department_id:
+        code = await db.scalar(
+            select(OrgDepartment.code).where(OrgDepartment.id == org_department_id))
+        if code_token(code):
+            return code_token(code)
+    return None
+
+
 def tokens_in(pattern: str | None) -> set[str]:
     """The field names a pattern uses, normalised (`{SEQ:5}` -> `num`)."""
     return {_ALIASES[m.group(1)] for m in _FIELD.finditer(pattern or "")
@@ -301,6 +334,8 @@ async def preview_number(db: AsyncSession, doc_type: str, *, company: str | None
 
 async def next_number(db: AsyncSession, doc_type: str, *, project: str | None = None,
                       company: str | None = None, fiscal_year: str | None = None,
+                      company_code: str | None = None, project_id: int | None = None,
+                      org_department_id: int | None = None,
                       **extra: str) -> str:
     """Draw the next number. `company` is the organisation a document names; a caller
     with none (every document outside procurement) gets Settings > Company, as ever.
@@ -335,12 +370,18 @@ async def next_number(db: AsyncSession, doc_type: str, *, project: str | None = 
 
     # Identity tokens the pattern asks for. Resolved only when asked for, so a plain
     # {PREFIX}/{FY}/{SEQ} series still costs exactly one query.
+    # A document that names its organisation / project / department prints their
+    # CODES (2026-11-11), not the first three letters of their names; a row with no
+    # code falls back to the name, and a document naming none to Settings > Company.
     wanted = tokens_in(series.pattern) & set(_SCOPE_TOKENS)
     if "project" in wanted:
-        extra["project"] = slug(project, SCOPE_SLUG_LEN)
+        extra["project"] = (await scope_codes(db, project_id=project_id,
+                                              org_department_id=org_department_id)
+                            or slug(project, SCOPE_SLUG_LEN))
     if "company" in wanted:
-        extra["company"] = (slug(company, SCOPE_SLUG_LEN) if company
-                            else await _company(db))
+        extra["company"] = (code_token(company_code)
+                            or (slug(company, SCOPE_SLUG_LEN) if company
+                                else await _company(db)))
 
     key = scope_key_for(series.pattern, fiscal_year=fy, **extra)
     if key is not None:

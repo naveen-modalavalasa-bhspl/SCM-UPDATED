@@ -30,12 +30,12 @@ from app.shared.models.master import OrgScopeColumns
 class PurchaseOrder(OrgScopeColumns, Base):
     __tablename__ = "pro_purchase_orders"
     id = pk()
-    po_no = Column(String(30), unique=True, nullable=False)
+    po_no = Column(String(50), unique=True, nullable=False)
     po_date = Column(Date, nullable=True)
     expected_date = Column(Date, nullable=True)
 
     indent_id = Column(ForeignKey("ind_indents.id"), index=True, nullable=True)  # backward pointer
-    indent_no = Column(String(30), nullable=True)   # snapshot
+    indent_no = Column(String(50), nullable=True)   # snapshot
 
     # The buying chain this PO came off, when it was raised from an award rather than
     # straight off an indent. Soft FKs, all nullable: a PO raised from an indent has
@@ -43,9 +43,9 @@ class PurchaseOrder(OrgScopeColumns, Base):
     # the PO is written with — without it the winning offer had to be retyped and the
     # trail indent -> MR -> requisition -> RFQ -> quotation -> PO broke at the last hop.
     requisition_id = soft_fk()
-    requisition_no = Column(String(30), nullable=True)    # snapshot
+    requisition_no = Column(String(50), nullable=True)    # snapshot
     rfq_id = soft_fk()
-    rfq_no = Column(String(30), nullable=True)            # snapshot
+    rfq_no = Column(String(50), nullable=True)            # snapshot
     quotation_id = soft_fk()
     quotation_no = Column(String(50), nullable=True)      # snapshot
 
@@ -218,7 +218,7 @@ class Requisition(OrgScopeColumns, Base):
     """
     __tablename__ = "pro_requisitions"
     id = pk()
-    req_no = Column(String(30), unique=True, nullable=False)
+    req_no = Column(String(50), unique=True, nullable=False)
     req_date = Column(Date, nullable=True)
 
     warehouse_id = soft_fk()
@@ -278,7 +278,7 @@ class RequisitionItem(CombinationMixin, Base):
     # Backward pointers, both optional: a requisition may be raised cold, or it may
     # come off an indent that stock could not fill.
     indent_id = soft_fk()
-    indent_no = Column(String(30), nullable=True)         # snapshot
+    indent_no = Column(String(50), nullable=True)         # snapshot
     indent_item_id = soft_fk()
 
     item_id = Column(ForeignKey("mst_items.id"), index=True, nullable=False)
@@ -349,7 +349,7 @@ class RequisitionSource(Base):
     # across (rule 10).
     mr_id = soft_fk()
     mr_no = Column(String(30), nullable=True)             # snapshot
-    indent_no = Column(String(30), nullable=True)         # snapshot, for the trail
+    indent_no = Column(String(50), nullable=True)         # snapshot, for the trail
     item_count = Column(Integer, nullable=False, default=0)
     created_at = created_at_col()
 
@@ -364,14 +364,14 @@ Index("ix_pro_req_source_mr", RequisitionSource.mr_id)
 class RFQ(OrgScopeColumns, Base):
     __tablename__ = "pro_rfqs"
     id = pk()
-    rfq_no = Column(String(30), unique=True, nullable=False)
+    rfq_no = Column(String(50), unique=True, nullable=False)
     rfq_type = Column(String(20), nullable=True)
     rfq_date = Column(Date, nullable=True)
     # The submission deadline. A vendor may read after it and may not quote.
     due_date = Column(Date, nullable=True)
 
     requisition_id = Column(ForeignKey("pro_requisitions.id"), index=True, nullable=True)
-    requisition_no = Column(String(30), nullable=True)    # snapshot
+    requisition_no = Column(String(50), nullable=True)    # snapshot
 
     warehouse_id = soft_fk()
     warehouse_name = Column(String(200), nullable=True)   # snapshot
@@ -397,7 +397,7 @@ class RFQ(OrgScopeColumns, Base):
     # The consolidated sheet this RFQ is buying against, when it came off one.
     # Backward pointer, like every other link in this chain.
     consolidation_id = soft_fk()
-    consolidation_no = Column(String(30), nullable=True)  # snapshot
+    consolidation_no = Column(String(50), nullable=True)  # snapshot
 
     awarded_vendor_id = Column(ForeignKey("mst_vendors.id"), index=True, nullable=True)
     awarded_vendor_name = Column(String(200), nullable=True)   # snapshot
@@ -501,7 +501,7 @@ class Quotation(OrgScopeColumns, Base):
 
     rfq_id = Column(ForeignKey("pro_rfqs.id", ondelete="CASCADE"),
                     index=True, nullable=False)
-    rfq_no = Column(String(30), nullable=True)            # snapshot
+    rfq_no = Column(String(50), nullable=True)            # snapshot
     vendor_id = Column(ForeignKey("mst_vendors.id"), index=True, nullable=False)
     vendor_name = Column(String(200), nullable=True)      # snapshot
     vendor_ref_no = Column(String(50), nullable=True)
@@ -573,7 +573,7 @@ class QuoteChangeRequest(OrgScopeColumns, Base):
     # the tender the request is negotiating against, and listing a vendor's open
     # requests must not chase two joins.
     rfq_id = Column(ForeignKey("pro_rfqs.id"), index=True, nullable=False)
-    cr_no = Column(String(30), unique=True, nullable=False)   # CR-2026-27/0001
+    cr_no = Column(String(50), unique=True, nullable=False)   # CR-2026-27/0001
     # Copied from the document before, so this one reads and lists on its own.
     project_id = soft_fk()
     project_name = Column(String(200), nullable=True)     # snapshot
@@ -681,7 +681,7 @@ class DespatchNote(OrgScopeColumns, Base):
     """
     __tablename__ = "pro_despatch_notes"
     id = pk()
-    dn_no = Column(String(30), unique=True, nullable=False)
+    dn_no = Column(String(50), unique=True, nullable=False)
     # Copied from the document before, so this one reads and lists on its own.
     project_id = soft_fk()
     project_name = Column(String(200), nullable=True)     # snapshot
@@ -689,7 +689,7 @@ class DespatchNote(OrgScopeColumns, Base):
 
     # Backward pointer, like every other link in this chain.
     po_id = Column(ForeignKey("pro_purchase_orders.id"), index=True, nullable=False)
-    po_no = Column(String(30), nullable=True)              # snapshot
+    po_no = Column(String(50), nullable=True)              # snapshot
     vendor_id = Column(ForeignKey("mst_vendors.id"), index=True, nullable=False)
     vendor_name = Column(String(200), nullable=True)       # snapshot
 
@@ -847,7 +847,7 @@ class PurchaseConsolidation(OrgScopeColumns, Base):
     """
     __tablename__ = "pro_consolidations"
     id = pk()
-    cons_no = Column(String(30), unique=True, nullable=False)
+    cons_no = Column(String(50), unique=True, nullable=False)
     cons_date = Column(Date, nullable=True)
     title = Column(String(300), nullable=True)
     # What the sheet covers, in the buyer's words: "August 2026 — Southern region".
@@ -931,7 +931,7 @@ class PurchaseConsolidationSource(Base):
                               index=True, nullable=False)
     requisition_id = Column(ForeignKey("pro_requisitions.id"), index=True,
                             nullable=False)
-    requisition_no = Column(String(30), nullable=True)    # snapshot
+    requisition_no = Column(String(50), nullable=True)    # snapshot
     project_name = Column(String(200), nullable=True)     # snapshot
     item_count = Column(Integer, nullable=False, default=0)
     estimated_value = Column(Numeric(16, 2), nullable=False, default=0)

@@ -17,7 +17,8 @@ from app.core.config import settings
 from app.core.exceptions import ValidationError
 from app.shared.models.master import OrgDepartment, Organization, Project
 from app.shared.numbering import (
-    SCOPE_SLUG_LEN, _fiscal_year, configured_series, describe_number, pattern_tokens,
+    SCOPE_SLUG_LEN, _fiscal_year, code_token, configured_series, describe_number,
+    pattern_tokens,
     selectable_fiscal_years, slug,
 )
 
@@ -107,10 +108,17 @@ async def preview(db: AsyncSession, doc_type: str, *, organization_id: int | Non
     # save has the document to check that against, and a preview changes nothing.
     year = fiscal_year or _fiscal_year()
 
+    # Codes, not the first letters of names (2026-11-11) — the same answer `next_number`
+    # prints; a row with no code falls back to its name.
+    company_part = ((code_token(organisation.code) or slug(organisation.name, SCOPE_SLUG_LEN))
+                    if organisation else None)
+    scope_code = (code_token(project.code) if project
+                  else code_token(department.code) if department and not project_text
+                  else None)
     parts = describe_number(
         pattern, prefix, year,
-        company=slug(organisation.name, SCOPE_SLUG_LEN) if organisation else None,
-        project=slug(scope, SCOPE_SLUG_LEN) if scope else None)
+        company=company_part,
+        project=scope_code or (slug(scope, SCOPE_SLUG_LEN) if scope else None))
     scope_source = "project" if project_text else "department" if scope else None
     for part in parts:
         if part["kind"] == "company":

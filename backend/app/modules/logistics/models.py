@@ -36,7 +36,7 @@ class GRN(Base):
     grn_no = Column(String(30), unique=True, nullable=False)
     grn_date = Column(Date, nullable=True)
     po_id = Column(ForeignKey("pro_purchase_orders.id"), index=True, nullable=True)  # backward pointer
-    po_no = Column(String(30), nullable=True)   # snapshot
+    po_no = Column(String(50), nullable=True)   # snapshot
     vendor_id = soft_fk()
     vendor_name = Column(String(200), nullable=True)
     facility_id = soft_fk()
@@ -85,10 +85,10 @@ class GRNItem(Base):
 class Issue(Base):
     __tablename__ = "lgs_issues"
     id = pk()
-    issue_no = Column(String(30), unique=True, nullable=False)
+    issue_no = Column(String(50), unique=True, nullable=False)
     issue_date = Column(Date, nullable=True)
     indent_id = Column(ForeignKey("ind_indents.id"), index=True, nullable=True)
-    indent_no = Column(String(30), nullable=True)
+    indent_no = Column(String(50), nullable=True)
     facility_id = soft_fk()            # issued from
     facility_name = Column(String(200), nullable=True)
     department_id = soft_fk()          # issued to

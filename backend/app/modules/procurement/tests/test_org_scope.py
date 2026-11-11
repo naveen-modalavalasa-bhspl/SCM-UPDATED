@@ -62,16 +62,16 @@ async def test_direct_documents_must_select_and_the_number_follows(db):
 
     req = await service.create_requisition(
         db, _req(item.id, organization_id=BAVYA, project_id=77), creator)
-    assert req.req_no.startswith("BAV/104/") and "NA" not in req.req_no
+    assert req.req_no.startswith("B-01/P-104/") and "NA" not in req.req_no
     assert req.organization_name == "BAVYA" and req.organization_code == "B-01"
 
     by_department = await service.create_requisition(
         db, _req(item.id, organization_id=OTHER, org_department_id=HR), creator)
-    assert by_department.req_no.startswith("SAM/HUM/")
+    assert by_department.req_no.startswith("S-ORG-01/HR-01/")
 
     po = await service.create_po(db, _po(vendor.id, item.id, organization_id=BAVYA,
                                          org_department_id=HR), creator)
-    assert po.po_no.startswith("BAV/HUM/") and po.project_id is None
+    assert po.po_no.startswith("B-01/HR-01/") and po.project_id is None
     assert po.org_department_name == "HUMAN RESOURCES"
 
 
@@ -82,8 +82,8 @@ async def test_each_combination_counts_on_its_own(db):
     first = await make(organization_id=BAVYA, project_id=77)
     second = await make(organization_id=OTHER, project_id=77)
     third = await make(organization_id=BAVYA, project_id=77)
-    assert first.po_no.endswith("PO0001") and first.po_no.startswith("BAV/104/")
-    assert second.po_no.endswith("PO0001") and second.po_no.startswith("SAM/104/")
+    assert first.po_no.endswith("PO0001") and first.po_no.startswith("B-01/P-104/")
+    assert second.po_no.endswith("PO0001") and second.po_no.startswith("S-ORG-01/P-104/")
     assert third.po_no.endswith("PO0002")
 
 
@@ -99,7 +99,7 @@ async def test_a_draft_renumbers_when_the_selection_moves_and_only_then(db):
 
     moved = await service.update_po_header(
         db, po.id, POHeaderUpdate(organization_id=BAVYA, org_department_id=HR), creator)
-    assert moved.po_no.startswith("BAV/HUM/") and moved.po_no != first
+    assert moved.po_no.startswith("B-01/HR-01/") and moved.po_no != first
     assert moved.project_id is None
 
 
@@ -114,7 +114,7 @@ async def test_the_po_edit_screen_renumbers_a_draft_too(db):
         lines=[POAmendLineIn(id=po.items[0].id, item_id=item.id, quantity=1, rate=10,
                              tax_percent=0)],
     ), creator)
-    assert edited.po_no.startswith("SAM/HUM/")
+    assert edited.po_no.startswith("S-ORG-01/HR-01/")
     assert edited.organization_name == "Sample Org"
 
 
@@ -148,7 +148,7 @@ async def test_the_chain_carries_it_and_locks_the_organisation(db):
     rfq = await service.create_rfq(db, RFQCreate(
         requisition_id=req.id,
         lines=[RFQLineIn(item_id=item.id, quantity=5)]), creator)
-    assert rfq.rfq_no.startswith("BAV/104/")
+    assert rfq.rfq_no.startswith("B-01/P-104/")
     assert rfq.organization_name == "BAVYA"
     assert rfq.org_department_name == "HUMAN RESOURCES"
 
@@ -186,7 +186,7 @@ async def test_po_from_a_quotation_copies_a_department_only_rfq(db):
         organization_name="BAVYA", org_department_id=HR,
         org_department_name="HUMAN RESOURCES")
     po = await service.create_po_from_quotation(db, quote.id, POFromQuotationIn(), creator)
-    assert po.po_no.startswith("BAV/HUM/")
+    assert po.po_no.startswith("B-01/HR-01/")
     assert po.org_department_name == "HUMAN RESOURCES"
 
 
@@ -197,7 +197,7 @@ async def test_po_from_a_quotation_takes_the_buyers_selection_in_its_number(db):
         organization_code="B-01", project_id=77, project_name="104")
     po = await service.create_po_from_quotation(
         db, quote.id, POFromQuotationIn(org_department_id=HR), creator)
-    assert po.po_no.startswith("BAV/HUM/") and po.project_id is None
+    assert po.po_no.startswith("B-01/HR-01/") and po.project_id is None
 
 
 async def test_an_older_rfq_needs_the_organisation_selected_on_its_po(db):
@@ -207,7 +207,7 @@ async def test_an_older_rfq_needs_the_organisation_selected_on_its_po(db):
         await service.create_po_from_quotation(db, quote.id, POFromQuotationIn(), creator)
     po = await service.create_po_from_quotation(
         db, quote.id, POFromQuotationIn(organization_id=BAVYA), creator)
-    assert po.po_no.startswith("BAV/104/")
+    assert po.po_no.startswith("B-01/P-104/")
 
 
 async def test_a_draft_raised_by_mr_approval_holds_until_it_is_selected(db):
@@ -230,7 +230,7 @@ async def test_a_draft_raised_by_mr_approval_holds_until_it_is_selected(db):
     numbered = await service.update_requisition(
         db, req.id, ReqCreate(organization_id=BAVYA, project_id=77,
                               lines=[ReqLineIn(item_id=item.id, quantity=5)]), creator)
-    assert numbered.req_no.startswith("BAV/104/")
+    assert numbered.req_no.startswith("B-01/P-104/")
 
 
 async def test_a_sheet_refuses_two_organisations_and_carries_one(db):
@@ -252,7 +252,7 @@ async def test_a_sheet_refuses_two_organisations_and_carries_one(db):
 
     sheet = await consolidation.create_consolidation(
         db, ConsolidationCreate(requisition_ids=[bavya_a, bavya_b]), creator)
-    assert sheet.cons_no.startswith("BAV/104/")
+    assert sheet.cons_no.startswith("B-01/P-104/")
     assert sheet.organization_name == "BAVYA"
 
 

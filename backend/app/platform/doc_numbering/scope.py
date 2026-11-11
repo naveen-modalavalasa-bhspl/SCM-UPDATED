@@ -121,12 +121,19 @@ def number_args(document, *, carried: bool = False) -> dict:
     has none. An older document's HCM department still counts: its children have to
     be numbered from something. `carried`: `document` is the source of a new document
     that has no year of its own yet, so the source's year must not be used."""
+    project_name = getattr(document, "project_name", None)
     return {
         "company": document.organization_name,
-        "project": (getattr(document, "project_name", None)
+        "project": (project_name
                     or document.org_department_name
                     or getattr(document, "department_name", None)),
         "fiscal_year": None if carried else getattr(document, "fiscal_year", None),
+        # The CODES the number prints (2026-11-11): the organisation's snapshot, and the
+        # project — else the department — looked up by id when the number is drawn.
+        "company_code": getattr(document, "organization_code", None),
+        "project_id": getattr(document, "project_id", None) if project_name else None,
+        "org_department_id": (None if project_name
+                              else getattr(document, "org_department_id", None)),
     }
 
 
@@ -166,8 +173,12 @@ def assert_lockable(document, label: str, *, is_draft: bool, source_has_org: boo
                               "was raised from and cannot be changed here.")
 
 
-def _as_printed(args: dict) -> tuple[str, str, str]:
-    return (slug(args["company"], SCOPE_SLUG_LEN), slug(args["project"], SCOPE_SLUG_LEN),
+def _as_printed(args: dict) -> tuple:
+    """Whether two selections number alike: the same organisation, project or
+    department and year — compared by what identifies them, not by printed letters."""
+    return (args.get("company_code") or slug(args["company"], SCOPE_SLUG_LEN),
+            args.get("project_id"), args.get("org_department_id"),
+            slug(args["project"], SCOPE_SLUG_LEN),
             args.get("fiscal_year") or _fiscal_year())
 
 
