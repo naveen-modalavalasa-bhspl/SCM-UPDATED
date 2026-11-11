@@ -1259,6 +1259,8 @@ export interface Issue {
   /** Only the person an approved issue is with (or someone they report to) may pick
    *  its serials and issue it from stock. The server enforces the same rule. */
   can_issue_from_stock?: boolean;
+  /** A split parent whose floor pieces this login may issue all at once. */
+  can_issue_split?: boolean;
   /** May swap auto-assigned asset/consumable codes: the issuer, or anyone who approved it. */
   can_swap_codes?: boolean;
   /** Who submitted it for approval; shown until stock is posted. */

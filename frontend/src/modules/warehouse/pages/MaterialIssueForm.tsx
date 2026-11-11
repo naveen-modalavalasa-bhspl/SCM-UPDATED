@@ -32,7 +32,7 @@ import {
   issueApprovalHistory,  postIssue, projectOptions,
   occupancyPreview,
   itemHandlingUnits,
-  previewIssueSplit, returnableIssueOptions, rejectIssue, setIssueSerials, splitIssue,
+  postSplitIssue, previewIssueSplit, returnableIssueOptions, rejectIssue, setIssueSerials, splitIssue,
   submitIssue, updateIssue,
   warehouseOptions,
   issueStockSources, listSerials,
@@ -288,7 +288,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   const [pickedSto, setPickedSto] = useState<StoIssueOption | null>(null);
   const stoRows = useRef(new Map<number, StoIssueOption>());
   const [confirming, setConfirming] = useState<
-    "submit" | "approve" | "reject" | "post" | "split" | "ack" | "cancel" | null
+    "submit" | "approve" | "reject" | "post" | "split" | "postSplit" | "ack" | "cancel" | null
   >(null);
   const [reason, setReason] = useState("");
   // Labels print once the stock is posted (2026-10-28): the whole issue or chosen items.
@@ -1185,6 +1185,14 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     enabled: confirming === "split" && editing,
     staleTime: 0,
   });
+  const postSplit = useMutation({
+    mutationFn: () => postSplitIssue(Number(id)),
+    onSuccess: () => {
+      setConfirming(null);
+      qc.invalidateQueries({ queryKey: ["wh-issue", id] });
+      qc.invalidateQueries({ queryKey: [`wh-issues-${direction}`] });
+    },
+  });
   const split = useMutation({
     mutationFn: () => splitIssue(Number(id)),
     onSuccess: (result) => {
@@ -1486,6 +1494,12 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                 >
                   Issue from stock
                 </Button>
+              </Can>
+            )}
+            {/* A split parent: its raiser or approver issues every floor piece at once. */}
+            {editing && doc?.status === "SPLIT" && doc?.can_issue_split && (
+              <Can do="issue.issue">
+                <Button onClick={() => setConfirming("postSplit")}>Issue from stock</Button>
               </Can>
             )}
             {/* The manager's other option on the same approved issue: hand it to the
@@ -2459,6 +2473,20 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
           </div>
         )}
       </ConfirmModal>
+
+      <ConfirmModal
+        isOpen={confirming === "postSplit"}
+        title="Issue every floor piece now?"
+        message={`Every floor piece of ${doc?.issue_no ?? "this issue"} not yet issued leaves the `
+          + "warehouse now, each from its own lots. All or nothing: if any piece is not ready "
+          + "(serial numbers not picked, stock no longer there), nothing is issued and that "
+          + "piece is named — open it, fix it, and press again."}
+        confirmLabel="Issue from stock"
+        busy={postSplit.isPending}
+        error={postSplit.error}
+        onConfirm={() => postSplit.mutate()}
+        onClose={() => { setConfirming(null); postSplit.reset(); }}
+      />
 
       <ConfirmModal
         isOpen={confirming === "post"}

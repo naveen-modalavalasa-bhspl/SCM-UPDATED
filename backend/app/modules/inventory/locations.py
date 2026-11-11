@@ -428,6 +428,13 @@ async def floor_ids_for_user(db: AsyncSession, user) -> set[int] | None:
     positions = await active_positions_of(db, user)
     if not positions:
         return None
+    # The post in hand decides (2026-11-10). One person holding the in-charge post of
+    # three floors saw all three floors' pieces whichever post they were working as;
+    # the floor is a fact about the POST, so switching "Working as" switches the floor.
+    # No post selected keeps every post's floors, as before.
+    active = getattr(user, "active_position_id", None)
+    if active is not None and active in positions:
+        positions = [active]
     floor_posts = set((await db.execute(
         select(HcmPosition.id).where(
             HcmPosition.id.in_(positions),

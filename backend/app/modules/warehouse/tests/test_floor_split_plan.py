@@ -147,3 +147,61 @@ async def test_whoever_raised_the_parent_may_issue_its_floor_pieces(monkeypatch)
     # Not a piece of a split: the parent's raiser is no reason at all.
     whole = SimpleNamespace(id=9, parent_issue_id=None)
     assert await service._may_issue(_Scalar(), whole, SimpleNamespace(id=42), []) is False
+
+
+class _Session:
+    """Records what the all-or-nothing issue does to the transaction."""
+
+    def __init__(self, pieces):
+        self.pieces = pieces
+        self.committed = self.rolled_back = False
+
+    async def execute(self, _stmt):
+        return _Rows(self.pieces)
+
+    async def commit(self):
+        self.committed = True
+
+    async def rollback(self):
+        self.rolled_back = True
+
+
+def _split_parent_stubs(monkeypatch, refuse=None):
+    issued = []
+
+    async def parent(_db, _issue_id):
+        return SimpleNamespace(id=5, issue_no="WHI0110", status="SPLIT", created_by_id=42)
+
+    async def allowed(*_args):
+        return True
+
+    async def core(_db, piece_id, _user):
+        if piece_id == refuse:
+            raise service.ValidationError("serial numbers not picked.")
+        issued.append(piece_id)
+
+    async def nothing(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(service, "get_issue", parent)
+    monkeypatch.setattr(service, "_may_issue_parent", allowed)
+    monkeypatch.setattr(service, "_post_issue_core", core)
+    monkeypatch.setattr(service, "write_audit", nothing)
+    return issued
+
+
+async def test_a_split_parent_issues_every_piece_in_one_go(monkeypatch):
+    issued = _split_parent_stubs(monkeypatch)
+    db = _Session([(1, "WHI0110-001"), (2, "WHI0110-002"), (3, "WHI0110-003")])
+    await service.post_split_issue(db, 5, SimpleNamespace(id=42))
+    assert issued == [1, 2, 3] and db.committed and not db.rolled_back
+
+
+async def test_one_piece_not_ready_issues_nothing_and_is_named(monkeypatch):
+    _split_parent_stubs(monkeypatch, refuse=3)
+    db = _Session([(1, "WHI0110-001"), (2, "WHI0110-002"), (3, "WHI0110-003")])
+    with pytest.raises(service.ValidationError) as caught:
+        await service.post_split_issue(db, 5, SimpleNamespace(id=42))
+    assert "Nothing was issued" in caught.value.message
+    assert "WHI0110-003" in caught.value.message and "serial numbers" in caught.value.message
+    assert db.rolled_back and not db.committed
