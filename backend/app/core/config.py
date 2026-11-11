@@ -105,6 +105,15 @@ class Settings(BaseSettings):
     HCM_TIMEOUT_SECONDS: float = 5.0
     HCM_RETRIES: int = 3
 
+    # --- Organisation directory — OPTIONAL, a separate feed with its own key (rule 13).
+    # Unset leaves the masters tabs saying so and every other screen unchanged.
+    ORG_SYNC_URL: str | None = None
+    ORG_SYNC_API_KEY: str | None = None
+    ORG_SYNC_TIMEOUT_SECONDS: float = 10.0
+    # The organisation a new document opens on, by name. Unset, forms open on the first
+    # in the list and say it is only a guess.
+    ORG_DEFAULT_NAME: str | None = None
+
     # --- Mail (SMTP out, IMAP in) — all OPTIONAL, all from .env (rule 13) ---
     #
     # Optional on purpose: an unconfigured mailbox must leave the app exactly as it is

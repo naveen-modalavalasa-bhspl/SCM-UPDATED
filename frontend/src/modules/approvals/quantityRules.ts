@@ -26,9 +26,25 @@ export function approvalCeiling(line: ApprovalIndentLine): number {
 export const formatQuantity = (value: number) =>
   String(Number(value.toFixed(QUANTITY_DECIMALS)));
 
-/** True when the line was already cut by an approver below this one. */
+/**
+ * True when the line was already cut by an approver below this one. What was allocated
+ * is not a cut: 6 of 10 served leaves 4 to decide, and the 10 still stands.
+ */
 export const wasReducedBelow = (line: ApprovalIndentLine) =>
-  approvalCeiling(line) < Number(line.requested_quantity);
+  approvalCeiling(line) + (line.served_quantity ?? 0) < Number(line.requested_quantity);
+
+/**
+ * What this approver signs for the whole line: what they typed, plus what is already
+ * allocated. The field shows only what is left, but the server stores one approved
+ * figure per line. Sending the field alone turned "10, with 6 served" into an approved
+ * 4, which read as nothing owed, and the 4 still owed was never served.
+ */
+export const signedTotal = (line: ApprovalIndentLine, raw: string | undefined) =>
+  Number((quantityValue(raw) + (line.served_quantity ?? 0)).toFixed(QUANTITY_DECIMALS));
+
+/** A line at 0 with nothing allocated is rejected; with stock allocated it just stops there. */
+export const isRejectedLine = (line: ApprovalIndentLine, raw: string | undefined) =>
+  (raw ?? "").trim() !== "" && quantityValue(raw) === 0 && !(line.served_quantity ?? 0);
 
 /** "15 EA" — the cap with its unit, for messages that name the limit itself. */
 export function ceilingLabel(line: ApprovalIndentLine): string {

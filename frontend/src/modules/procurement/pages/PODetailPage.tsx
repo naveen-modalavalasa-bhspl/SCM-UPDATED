@@ -18,6 +18,7 @@ import { ApprovalTrail } from "../components/ApprovalTrail";
 import { POPaymentsPanel } from "../components/POPaymentsPanel";
 import { POApprovalChat } from "../components/POApprovalChat";
 import { POCorrectionForm } from "../components/POCorrectionForm";
+import { departmentOf } from "../orgScope";
 import { POAddressesTerms } from "../components/POAddressesTerms";
 import { blankPOHeader, POHeaderFields, poHeaderFrom, poHeaderPayload, type POHeaderValue } from "../components/POHeaderFields";
 import { LinePicker, type DraftLine } from "../components/LinePicker";
@@ -30,6 +31,7 @@ import { CombinationTag } from "@/shared/combination";
 import { QuantityInput } from "@/shared/components/QuantityInput";
 import { useUomDecimals } from "@/shared/hooks/useUomDecimals";
 import { quantityProblem } from "@/shared/quantity";
+import { despatchLabel } from "../poStatus";
 
 const money = (value: number | null | undefined) =>
   new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value ?? 0);
@@ -326,6 +328,7 @@ export function PODetailPage() {
       { id: "approved", label: "Approved", status: "upcoming" },
       { id: "sent", label: "Sent to Supplier", status: "upcoming" },
       { id: "accepted", label: "Accepted", status: "upcoming" },
+      { id: "dispatched", label: "Dispatched", status: "upcoming" },
       { id: "received", label: "Received", status: "upcoming" },
     ];
     if (s === "DRAFT" || s === "SUBMITTED" || s === "PENDING_APPROVAL") base[1].status = "current";
@@ -340,9 +343,20 @@ export function PODetailPage() {
         else if (s === "SENT_TO_VENDOR") base[3].status = "current";
         else {
           base[3].status = "complete";
-          if (s === "ACCEPTED_BY_SUPPLIER") base[4].status = "current";
-          else if (s === "PARTIALLY_RECEIVED") { base[4].status = "current"; base[4].description = "Partially received"; }
-          else if (s === "RECEIVED" || s === "CLOSED") base[4].status = "complete";
+          // Dispatched is DERIVED (despatch_status, off the supplier's submitted
+          // despatch notes); a receipt landing implies the goods were sent.
+          const ds = po.data.despatch_status;
+          if (s === "ACCEPTED_BY_SUPPLIER") {
+            if (ds === "DISPATCHED") { base[4].status = "complete"; base[5].status = "current"; }
+            else if (ds === "PARTIALLY_DISPATCHED") { base[4].status = "current"; base[4].description = "Partially dispatched"; }
+            else base[4].status = "current";
+          }
+          else if (s === "PARTIALLY_RECEIVED") {
+            base[4].status = ds === "PARTIALLY_DISPATCHED" ? "current" : "complete";
+            if (ds === "PARTIALLY_DISPATCHED") base[4].description = "Partially dispatched";
+            base[5].status = "current"; base[5].description = "Partially received";
+          }
+          else if (s === "RECEIVED" || s === "CLOSED") { base[4].status = "complete"; base[5].status = "complete"; }
         }
       }
     }
@@ -373,7 +387,7 @@ export function PODetailPage() {
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <StatusPill status={po.data.status} variant="solid" />
+              <StatusPill status={po.data.status} label={despatchLabel(po.data.status, po.data.despatch_status) ?? undefined} variant="solid" />
               {po.data.vendor_status && <StatusPill status={po.data.vendor_status} variant="solid" />}
               <Button variant="subtle" onClick={() => window.open(`/pos/${poId}/print`, "_blank")} className="!bg-slate-50 !text-slate-900 shadow-sm hover:!bg-slate-200">
                 <Printer className="h-4 w-4" /> PDF
@@ -422,7 +436,11 @@ export function PODetailPage() {
           <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
             {[
               { label: "Vendor", value: po.data.vendor_name, icon: Building2, tint: "bg-black/25" },
-              { label: "Project", value: po.data.project_name ?? "—", icon: ShoppingCart, tint: "bg-black/25" },
+              ...(po.data.organization_name
+                ? [{ label: "Organisation", value: po.data.organization_name, icon: Building2, tint: "bg-black/25" }] : []),
+              departmentOf(po.data) && !po.data.project_name
+                ? { label: "Department", value: departmentOf(po.data), icon: ShoppingCart, tint: "bg-black/25" }
+                : { label: "Project", value: po.data.project_name ?? "—", icon: ShoppingCart, tint: "bg-black/25" },
               { label: "Expected", value: fmtDate(po.data.expected_date), icon: Calendar, tint: "bg-black/25" },
             ].map((k) => (
               <div key={k.label} className={`rounded-2xl ${k.tint} p-3 backdrop-blur`}>
@@ -468,7 +486,11 @@ export function PODetailPage() {
             {[
               { label: "Vendor", value: po.data.vendor_name ?? "—" },
               { label: "Vendor GSTIN", value: po.data.vendor_gstin ?? "—" },
-              { label: "Project", value: po.data.project_name ?? "—" },
+              ...(po.data.organization_name
+                ? [{ label: "Organisation", value: po.data.organization_name }] : []),
+              departmentOf(po.data) && !po.data.project_name
+                ? { label: "Department", value: departmentOf(po.data) }
+                : { label: "Project", value: po.data.project_name ?? "—" },
               { label: "Expected date", value: fmtDate(po.data.expected_date) },
             ].map((f) => (
               <div key={f.label} className="rounded-xl bg-white p-3 ring-1 ring-amber-100">
@@ -565,6 +587,7 @@ export function PODetailPage() {
                               <div className="flex items-center justify-end gap-1">
                                 <QuantityInput
                                   decimals={uomDecimals(item.uom_code)}
+                                  data-uom={item.uom_code ?? ""}
                                   min={1}
                                   max={original}
                                   value={draftVal}

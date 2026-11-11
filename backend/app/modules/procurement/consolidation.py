@@ -40,6 +40,7 @@ from app.shared.enums import (
 )
 from app.shared.models.base import utcnow
 from app.shared.numbering import next_number
+from app.platform.doc_numbering import scope as org_scope
 from app.shared.masters import combinations
 
 logger = logging.getLogger(__name__)
@@ -364,15 +365,42 @@ async def _link_sources(db: AsyncSession, doc: PurchaseConsolidation,
     doc.source_count = len(requisitions)
 
 
+def _assert_one_organisation(requisitions: list[Requisition]) -> int | None:
+    """One sheet is one company's paper: taking the first requisition's would quietly put
+    the others on the wrong one. An older requisition with none does not clash."""
+    named = {row.organization_id: row.organization_name
+             for row in requisitions if row.organization_id}
+    if len(named) > 1:
+        raise ValidationError(
+            "These requisitions belong to different organisations ("
+            + ", ".join(sorted(str(name) for name in named.values()))
+            + "). Consolidate each organisation on its own sheet.")
+    return next(iter(named), None)
+
+
+async def _sheet_scope(db: AsyncSession, requisitions: list[Requisition], data) -> dict:
+    """Copied from the requisitions, or selected on the sheet when they are older than
+    organisations. A department the requisitions do not all share is left off."""
+    organization_id = _assert_one_organisation(requisitions)
+    if not organization_id:
+        return await org_scope.resolve(db, data.organization_id, data.org_department_id,
+                                       fiscal_year=data.fiscal_year)
+    departments = {row.org_department_id for row in requisitions if row.organization_id}
+    department_id = next(iter(departments)) if len(departments) == 1 else None
+    return await org_scope.resolve(db, organization_id,
+                                   data.org_department_id or department_id,
+                                   keep=next(row for row in requisitions
+                                             if row.organization_id),
+                                   fiscal_year=data.fiscal_year)
+
+
 async def create_consolidation(db: AsyncSession, data, user) -> PurchaseConsolidation:
     requisitions = await _load_requisitions(db, data.requisition_ids)
     rows = await _aggregate(db, requisitions)
+    scope = await _sheet_scope(db, requisitions, data)
 
     doc = PurchaseConsolidation(
-        # Same project the sheet is filed under, two lines below.
-        cons_no=await next_number(db, DocType.CONSOLIDATION.value.lower(),
-                                  project=(data.project_name
-                                           or requisitions[0].project_name)),
+        cons_no="",  # Drawn below from the document itself, so the two cannot disagree.
         cons_date=data.cons_date or date.today(),
         title=data.title, period_label=data.period_label,
         project_id=data.project_id or requisitions[0].project_id,
@@ -385,6 +413,10 @@ async def create_consolidation(db: AsyncSession, data, user) -> PurchaseConsolid
         created_by_name=getattr(user, "full_name", None),
         created_position_id=getattr(user, "active_position_id", None),
     )
+    org_scope.stamp(doc, scope)
+    org_scope.assert_complete(doc)
+    doc.cons_no = await next_number(db, DocType.CONSOLIDATION.value.lower(),
+                                    **org_scope.number_args(doc))
     _apply_aggregate(doc, rows)
     db.add(doc)
     await db.flush()
@@ -421,6 +453,12 @@ async def rebuild_consolidation(db: AsyncSession, cons_id: int, data,
     await db.flush()
 
     requisitions = await _load_requisitions(db, data.requisition_ids)
+    # The sheet keeps the organisation it has: a rebuild changes what is on it, not whose.
+    if doc.organization_id and _assert_one_organisation(requisitions) not in (
+            None, doc.organization_id):
+        raise ValidationError(
+            f"{doc.cons_no} belongs to {doc.organization_name}; these requisitions "
+            "belong to another organisation.")
     rows = await _aggregate(db, requisitions)
     _apply_aggregate(doc, rows)
     await _link_sources(db, doc, requisitions)

@@ -62,6 +62,6 @@ export const SHORT_CODE_PATHS: Record<string, string> = {
   "item-classes": "/api/item-classes", "item-subclasses": "/api/item-sub-classes",
   "dosage-forms": "/api/dosage-forms", attributes: "/api/attributes",
   specs: "/api/specs", features: "/api/features", packaging: "/api/packaging",
-  uom: "/api/uom", "uom-classes": "/api/uom-classes", boms: "/api/boms",
+  uom: "/api/uom", boms: "/api/boms",
   "vendor-categories": "/api/vendor-categories",
 };

@@ -260,6 +260,8 @@ export function QtyInput({
       decimals={typePlaces}
       min={min}
       max={max}
+      data-decimals={places === 0 ? 0 : undefined}
+      data-uom={uom === undefined ? undefined : uom ?? ""}
       value={local}
       disabled={disabled}
       aria-label={ariaLabel}

@@ -1,3 +1,4 @@
+import type { QuantityChangeRow } from "@/shared/components";
 import { api } from "@/shared/api/client";
 import type {
   PositionLocationTag, PositionLocationWrite, FloorOption, FloorAccess, MovementClassification,
@@ -20,6 +21,7 @@ import type {
   MRClaims,
   MovementRow,
   Page,
+  BoxLabelFacets,
   BoxLabelRow,
   ReplenishmentRule,
   StockBalanceFilter,
@@ -505,6 +507,11 @@ export const correctMaterialRequest = (id: number, data: {
 
 /** Change what the request asks for before it is signed. Lines are keyed by MR LINE
  *  id, never item id — one MR can carry the same item twice. */
+/** Every quantity change since the request was raised, oldest first. */
+export const materialRequestQuantityChanges = (id: number) =>
+  api.get<{ items: QuantityChangeRow[] }>(`/api/material-requests/${id}/quantity-changes`)
+    .then((r) => r.data.items);
+
 export const reviseMaterialRequest = (
   id: number,
   lines: { id: number; quantity: number }[],
@@ -785,9 +792,15 @@ export const rejectSTO = (id: number, comments: string) =>
   api.post(`/api/stock/sto/${id}/reject`, { comments }).then((r) => r.data);
 
 /** Stock Transfer Requests — indents of type STR, listed on Inventory > Stock Transfer. */
+/** The source points named on the STRs this login can read — the Source filter. */
+export const strSourcesInUse = () =>
+  api.get<{ value: number; label: string }[]>("/api/indents/stock-transfer-requests/sources")
+    .then((r) => r.data);
+
 export const listSTRs = (params?: {
   page?: number; size?: number; search?: string; status?: string;
   created_date_from?: string; created_date_to?: string;
+  source_warehouse_id?: number;
 }) =>
   // The transfer screen's own list, under `stock.transfer.view` — not /api/indents,
   // which would demand all of Indents to see a transfer request.
@@ -937,12 +950,25 @@ export const rejectStockEdit = (id: number, remarks?: string) =>
 
 /** The print queue of new box codes (Labels & Printing > Box labels, 2026-10-26). */
 export const listBoxLabels = (params: { status?: string; warehouse_id?: string; search?: string;
+                                        item_id?: string; batch_id?: string; bin_id?: string;
                                         page?: number; size?: number }) =>
   api.get<Page<BoxLabelRow>>("/api/warehouse/box-labels", {
+    // batch_id / bin_id "0" is a real choice (no batch / no location), so it is kept.
     params: clean({ status: params.status || undefined,
                     warehouse_id: params.warehouse_id || undefined,
+                    item_id: params.item_id || undefined,
+                    batch_id: params.batch_id, bin_id: params.bin_id,
                     search: params.search?.trim() || undefined,
                     page: params.page ?? 1, size: params.size ?? 200 }),
+  }).then((r) => r.data);
+
+/** What each step of the Box labels cascade may offer (warehouse -> item -> batch ->
+ *  location), with how many labels each choice holds. */
+export const getBoxLabelFacets = (params: { warehouse_id: string; status?: string;
+                                            item_id?: string; batch_id?: string }) =>
+  api.get<BoxLabelFacets>("/api/warehouse/box-labels/facets", {
+    params: clean({ warehouse_id: params.warehouse_id, status: params.status || undefined,
+                    item_id: params.item_id || undefined, batch_id: params.batch_id }),
   }).then((r) => r.data);
 
 export const markBoxLabelsPrinted = (ids: number[]) =>

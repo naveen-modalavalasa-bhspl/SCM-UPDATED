@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Repeat2, ShoppingCart, Trash2 } from "lucide-react";
+import { ArrowRightLeft, Plus, Repeat2, ShoppingCart, Trash2 } from "lucide-react";
 import { Can, PageHeader, Button, Card, Field, Input, Select } from "@/shared/components";
 import { createAllocation, createMaterialRequest, getAllocationProposal } from "../api";
 // A LIP or an MDP is a distribution rung, never the default shelf — see
@@ -126,7 +126,12 @@ export function AllocationPage() {
     if (!data) return;
     const seed: Record<number, Split[]> = {};
     for (const line of data.lines) {
-      const best = [...line.warehouses]
+      // An STR asked for one point (2026-11-04): open on it whenever it holds the item
+      // and this login may draw from it. The storekeeper can still change it.
+      const asked = data.str_source_warehouse_id
+        ? line.warehouses.find((w) => w.warehouse_id === data.str_source_warehouse_id && w.available_qty > 0)
+        : undefined;
+      const best = asked ?? [...line.warehouses]
         .filter((w) => !isChainPoint(w) && w.available_qty > 0)
         .sort((a, b) => b.available_qty - a.available_qty)[0];
       const wh = best ? String(best.warehouse_id) : "";
@@ -320,6 +325,32 @@ export function AllocationPage() {
         much to give and from where. Nothing is reserved until this is approved.
       </p>
 
+      {/* The point the STR asked for (2026-11-04). Every line opens on it when this
+          login can draw from it; the dropdown still offers the rest. */}
+      {data.str_source_warehouse_name && (() => {
+        const offered = data.lines.some((line) =>
+          line.warehouses.some((w) => w.warehouse_id === data.str_source_warehouse_id));
+        return (
+          <div className={`mb-4 flex items-start gap-3 rounded-2xl border p-3.5 ${
+            offered ? "border-brand/30 bg-brand-050/50" : "border-warn/30 bg-warn-bg/50"}`}>
+            <span className={`grid h-9 w-9 shrink-0 place-items-center rounded-xl ${
+              offered ? "bg-brand text-white" : "bg-warn text-white"}`}>
+              <ArrowRightLeft className="h-4 w-4" aria-hidden />
+            </span>
+            <div className="min-w-0 text-sm">
+              <p className="font-semibold text-ink">
+                Requested source: {data.str_source_warehouse_name}
+              </p>
+              <p className="text-xs text-muted">
+                {offered
+                  ? "Lines open on this point where it holds the item. Change a line only if it cannot be served from here."
+                  : "You cannot draw from this point. It belongs to that point's own fulfilment desk."}
+              </p>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* Every fulfilment-queue row opens this screen, including the ones with no
           decision left in them. Saying so here — with a link to whatever is already
           promising the goods — beats four different destinations and a red error. */}
@@ -505,6 +536,7 @@ export function AllocationPage() {
                         <Field label={i === 0 ? `Give (${line.uom_code ?? ""})` : ""}>
                           <Input
                             type="number"
+                            data-uom={line.uom_code ?? ""}
                             min={0}
                             max={ceilingFor(line, splits, i)}
                             value={s.qty}

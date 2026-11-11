@@ -9,8 +9,6 @@ import QualityInspectionForm from "./pages/QualityInspectionForm";
 import OutboundQualityInspectionForm from "./pages/OutboundQualityInspectionForm";
 import Putaway from "./pages/Putaway";
 import PutawayForm from "./pages/PutawayForm";
-import Picklist from "./pages/Picklist";
-import PicklistForm from "./pages/PicklistForm";
 import MaterialIssues from "./pages/MaterialIssues";
 import MaterialIssueForm from "./pages/MaterialIssueForm";
 import Consignments from "./pages/Consignments";
@@ -88,13 +86,10 @@ export function WarehouseModule() {
         <Route path="stock-movements/new" element={<StockMovementForm />} />
         <Route path="stock-movements/view" element={<StockMovementDetail />} />
 
-        <Route path="fulfilment" element={<Picklist />} />
-        <Route path="fulfilment/new" element={<PicklistForm />} />
-        <Route path="fulfilment/:id" element={<PicklistForm />} />
-        {/* Legacy URLs stay valid for bookmarks while the UI uses the clearer name. */}
-        <Route path="picklist" element={<Picklist />} />
-        <Route path="picklist/new" element={<PicklistForm />} />
-        <Route path="picklist/:id" element={<PicklistForm />} />
+        {/* Picklists RETIRED from the UI (2026-11-04): every old path lands on
+            Material Issues. Picklist.tsx / PicklistForm.tsx stay on disk, unimported. */}
+        <Route path="fulfilment/*" element={<Navigate to="../material-issues" replace />} />
+        <Route path="picklist/*" element={<Navigate to="../material-issues" replace />} />
 
         <Route path="material-issues" element={<MaterialIssues />} />
         <Route path="material-issues/new" element={<MaterialIssueForm />} />
@@ -152,14 +147,10 @@ export function WarehouseModule() {
       <Route path="stock-movements/new" element={<StockMovementForm />} />
       <Route path="stock-movements/view" element={<StockMovementDetail />} />
 
-      {/* The RBAC menu still points at /warehouse/picklist; without these the link
-       * hit the catch-all below and bounced to the dashboard. */}
-      <Route path="fulfilment" element={<Picklist />} />
-      <Route path="fulfilment/new" element={<PicklistForm />} />
-      <Route path="fulfilment/:id" element={<PicklistForm />} />
-      <Route path="picklist" element={<Picklist />} />
-      <Route path="picklist/new" element={<PicklistForm />} />
-      <Route path="picklist/:id" element={<PicklistForm />} />
+      {/* Picklists RETIRED from the UI (2026-11-04): every old path lands on
+          Material Issues. Picklist.tsx / PicklistForm.tsx stay on disk, unimported. */}
+      <Route path="fulfilment/*" element={<Navigate to="../material-issues" replace />} />
+      <Route path="picklist/*" element={<Navigate to="../material-issues" replace />} />
 
       <Route path="material-issues" element={<MaterialIssues />} />
       <Route path="material-issues/new" element={<MaterialIssueForm />} />

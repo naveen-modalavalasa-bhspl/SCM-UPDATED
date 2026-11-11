@@ -2095,7 +2095,7 @@ function PackageLineRow({
               <div className="mb-1 text-center text-[11px] font-semibold uppercase tracking-wide text-muted">
                 Received
               </div>
-              <QuantityStepper value={value} max={max} onChange={onChange} label={label} />
+              <QuantityStepper value={value} max={max} onChange={onChange} label={label} uom={line.uom_code} />
             </div>
             <div>
               <div className="mb-1 text-center text-[11px] font-semibold uppercase tracking-wide text-muted">
@@ -2108,6 +2108,7 @@ function PackageLineRow({
                 onChange={(next) => onChange(String(Math.max(max - receivedNumber(next), 0)))}
                 label={`returned ${label}`}
                 allLabel={`All ${qty(max)} returned`}
+                uom={line.uom_code}
               />
             </div>
           </div>
@@ -2388,13 +2389,15 @@ function SerialPanel({
 
 /** Often a phone, often one hand: 44px of button beats a keyboard at a pallet, and
  *  the box is still there for 37 of something. */
-function QuantityStepper({ value, max, onChange, label, allLabel }: {
+function QuantityStepper({ value, max, onChange, label, allLabel, uom }: {
   value: string;
   max: number;
   onChange: (value: string) => void;
   label: string;
   /** The shortcut under the box; "All N arrived" unless it is the Returned box. */
   allLabel?: string;
+  /** The line's unit: a whole unit refuses the "." as it is typed (2026-11-03). */
+  uom?: string | null;
 }) {
   const current = receivedNumber(value);
   const set = (next: number) =>
@@ -2418,6 +2421,7 @@ function QuantityStepper({ value, max, onChange, label, allLabel }: {
             max={max}
             step="any"
             aria-label={`How many arrived for ${label}`}
+            data-uom={uom ?? ""}
             value={value}
             onChange={(event) => onChange(event.target.value)}
           />

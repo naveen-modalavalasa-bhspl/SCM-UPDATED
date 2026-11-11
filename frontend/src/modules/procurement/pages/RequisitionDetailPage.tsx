@@ -1,6 +1,9 @@
+import { departmentOf } from "../orgScope";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Can, ErrorBanner, PageHeader, ResponsiveList, StatusPill, useToast, type Column } from "@/shared/components";
+import {
+  Can, ErrorBanner, PageHeader, QuantityChanges, ResponsiveList, StatusPill, useToast, type Column,
+} from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { Button } from "../components/ActionButton";
 import { fmtDate } from "@/shared/datetime";
@@ -38,6 +41,14 @@ export function RequisitionDetailPage() {
   const trail = useQuery({
     queryKey: approvalTrailKey("REQUISITION", reqId),
     queryFn: () => approvalTrailApi.get("REQUISITION", reqId),
+    enabled: Number.isFinite(reqId),
+  });
+
+  // Every recorded quantity change (2026-11-03) — a line cut below what its material
+  // request asked for. Lines can only ever come down, so each row is a cut.
+  const qtyChanges = useQuery({
+    queryKey: ["requisition", id, "quantity-changes"],
+    queryFn: () => requisitionApi.quantityChanges(reqId),
     enabled: Number.isFinite(reqId),
   });
 
@@ -100,7 +111,14 @@ export function RequisitionDetailPage() {
       key: "qty",
       header: "Quantity",
       className: "text-right",
-      render: (r) => `${r.quantity} ${r.uom_code ?? ""}`.trim(),
+      render: (r) => (
+        <div className="text-right">
+          <div className="tabular font-semibold text-ink">{`${r.quantity} ${r.uom_code ?? ""}`.trim()}</div>
+          {r.requested_quantity != null && r.requested_quantity !== r.quantity && (
+            <div className="text-[11px] text-muted">asked {r.requested_quantity}</div>
+          )}
+        </div>
+      ),
     },
     // No rate, no amount, no "ordered", no per-line indent. Nobody has quoted yet, so a
     // figure here reads as a price when it is a guess; the ordered quantity belongs on
@@ -201,10 +219,11 @@ export function RequisitionDetailPage() {
                         ? <span className="capitalize">{req.priority.toLowerCase()}</span>
                         : "—",
                     },
-                    { label: "Department", value: req.department_name ?? "—" },
+                    { label: "Department", value: departmentOf(req) ?? "—" },
                     { label: "Shipment Address", value: req.warehouse_name ?? "—" },
                     { label: "Project", value: req.project_name ?? "—" },
-                    { label: "Company", value: req.company_name ?? "—" },
+                    { label: req.organization_name ? "Organisation" : "Company",
+                      value: req.organization_name ?? req.company_name ?? "—" },
                   ]}
                 />
 
@@ -246,6 +265,7 @@ export function RequisitionDetailPage() {
                 )}
               />
             </SectionCard>
+            <QuantityChanges rows={qtyChanges.data ?? []} loading={qtyChanges.isLoading} />
           </>
         )}
         rail={(

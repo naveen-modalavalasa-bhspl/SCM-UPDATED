@@ -278,6 +278,7 @@ export function AllocationApprovalDetailPage() {
                             <div className="w-32">
                               <Input
                                 type="number"
+                                data-uom={item.uom_code ?? ""}
                                 min={0}
                                 max={cap}
                                 step="any"

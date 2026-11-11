@@ -32,7 +32,7 @@ from app.shared.models.master import (
     CategoryTag, DosageForm, Feature, GeneralName, HsnCode, Item, ItemCategory,
     ItemClass, ItemComponent, ItemGroup, ItemPackaging, ItemSubClass, Manufacturer,
     PackHierarchy, Packaging, PaymentTerm, Project, Spec, Uom, UomConversion, Vendor, VendorItem,
-    UomClassRow, VendorCategory, VendorCategoryMember,
+    VendorCategory, VendorCategoryMember,
 )
 from app.shared.models.warehouse import Bin, StorageType, Warehouse
 
@@ -501,31 +501,15 @@ async def apply_category(db: AsyncSession, cat: ItemCategory, data: CategoryIn) 
 # --------------------------------------------------------------------------- #
 #  UOM and conversions
 # --------------------------------------------------------------------------- #
-class UomClassIn(BaseModel):
-    """A kind of unit (Count, Weight, Volume ...): the UOM form's "What it measures"."""
-    code: str = Field(min_length=1, max_length=30, pattern=r"^[A-Za-z0-9_]+$")
-    name: str = Field(min_length=1, max_length=100)
-    description: str | None = Field(None, max_length=300)
-    # Off → every unit of this type is whole-only on every document (shared.uom).
-    allows_decimal: bool = True
-    is_active: bool = True
-
-    @field_validator("code", mode="before")
-    @classmethod
-    def _upper(cls, value):
-        return str(value).strip().upper() if value is not None else value
-
-
-def uom_class_out(row: UomClassRow) -> dict:
-    return {**named_code_out(row), "allows_decimal": bool(row.allows_decimal)}
-
-
 class UomIn(BaseModel):
     # Same rule the form enforces (uomTabs.tsx): letters, digits and "/" only. The
     # server must hold it too, or an API call / bulk upload saves what the form refuses.
     code: str = Field(min_length=1, max_length=20, pattern=r"^[A-Za-z0-9/]+$")
     name: str = Field(min_length=1, max_length=100)
     uom_class: str
+    # Off → whole units only on every document (shared.uom), and the unit's stock is
+    # coded one code per unit at putaway. On → fractions allowed, coded per lot/pack.
+    allows_decimal: bool = False
     is_active: bool = True
 
     @field_validator("code", "name", mode="before")
@@ -540,23 +524,20 @@ class UomIn(BaseModel):
 
 
 def uom_out(u: Uom) -> dict:
-    return {"id": u.id, "code": u.code, "name": u.name,
-            "uom_class": u.uom_class, "is_active": u.is_active}
+    return {"id": u.id, "code": u.code, "name": u.name, "uom_class": u.uom_class,
+            "allows_decimal": bool(u.allows_decimal), "is_active": u.is_active}
 
 
 async def apply_uom(db: AsyncSession, row: Uom, data: UomIn) -> None:
-    # Any case is accepted (“Count”, “count”), and the allowed list is the UOM types
-    # master (mst_uom_classes), so a site can add a kind of unit without a release.
+    # Any case is accepted (“Count”, “count”). The types are the built-in UomClass
+    # values (2026-11-04): the UOM Types master is retired, and "Allows decimal" is
+    # the unit's own switch.
     data.uom_class = (data.uom_class or "").strip().upper()
-    allowed = {code: name for code, name in (await db.execute(
-        select(UomClassRow.code, UomClassRow.name)
-        .where(UomClassRow.is_active.is_(True)))).all()}
-    if not allowed:                       # master not seeded yet: the old fixed list
-        allowed = {c.value: c.value.title() for c in UomClass}
+    allowed = {c.value: c.value.title() for c in UomClass}
     if data.uom_class not in allowed:
         raise ValidationError(
             f"Unit type: “{data.uom_class}” is not one of the choices. Pick one of: "
-            f"{', '.join(allowed.values())} — or add it under Masters › UOM Types.")
+            f"{', '.join(allowed.values())}.")
     await require_unique(db, Uom, "code", data.code, row, "UOM code")
     # Name is scoped to the class: "Ton" as a weight and "Ton" as a refrigeration
     # capacity are different units that happen to share a word.
@@ -3275,15 +3256,6 @@ MASTERS: list[MasterDef] = [
               serialize=named_code_out, search_cols=("name", "code"),
               apply=named_code_apply(DosageForm, "A dosage form"),
               usage=((*USED_BY_ITEMS, "dosage_form_id"),)),
-
-    # What a unit measures. Was the UomClass enum; a master since 2026-10-01 so the
-    # UOM form's list can be extended without a release. Same permission as UOM.
-    MasterDef(path="uom-classes", name="UOM type", model=UomClassRow,
-              schema=UomClassIn, manage_perm=perms.MASTER_UOM_MANAGE,
-              serialize=uom_class_out, search_cols=("name", "code"),
-              order_col="name", paginated=False,
-              apply=named_code_apply(UomClassRow, "A UOM type"),
-              usage=(("Units of measure", "mst_uom", "uom_class"),)),
 
     MasterDef(path="uom", name="UOM", model=Uom, schema=UomIn,
               manage_perm=perms.MASTER_UOM_MANAGE, serialize=uom_out,

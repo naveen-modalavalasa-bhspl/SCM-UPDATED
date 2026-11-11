@@ -137,6 +137,21 @@ router.include_router(_profiles)
 _uom = APIRouter(tags=["masters"])
 
 
+@_uom.get("/api/uom/decimals")
+async def uom_decimals(db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
+    """How many decimals each unit may carry on a document (2026-11-03), for every
+    screen's quantity boxes: a whole-unit box refuses the "." before it is typed.
+
+    The SAME answer the flush guard enforces (`shared.uom`): the UOM type's
+    "Allows decimal" flag, else the built-in whole-unit classes. Served per unit with
+    its name, because documents snapshot either (`decimals_by_code` explains why), so
+    the screen resolves code, then code case-folded, then name — exactly as the save.
+    Reference data any signed-in user reads, like the suggestions below.
+    """
+    from app.shared import uom as uom_rules
+    return {"items": await uom_rules.decimals_table(db)}
+
+
 @_uom.get("/api/uom/suggestions")
 async def uom_suggestions(uom_class: str, db: AsyncSession = Depends(get_db),
                           user=Depends(get_current_user)):

@@ -70,7 +70,7 @@ ROLE_PERMS = {
     RoleCode.STORE.value: [P.GRN_VIEW, P.GRN_CREATE, P.GRN_QC, P.STOCK_VIEW,
                            P.STOCK_VIEW_ALL,
                            P.STOCK_ADJUST, P.STOCK_RESERVE, P.STOCK_TRANSFER,
-                           P.ISSUE_VIEW, P.ISSUE_CREATE, P.ISSUE_ISSUE,
+                           P.ISSUE_VIEW, P.ISSUE_CREATE, P.ISSUE_SUBMIT, P.ISSUE_ISSUE,
                            P.MASTER_LOCATION_MANAGE,
                            P.RECEIPT_VIEW, P.RECEIPT_CREATE, P.RECEIPT_POST,
                            P.INSPECTION_VIEW, P.INSPECTION_EXECUTE,
@@ -190,8 +190,9 @@ PAGE_TREE = [
     # two entries.
     ("wh_stock_movements", "/warehouse/stock-movements", "Stock Movements", "move",
      P.STOCK_VIEW, 47, "grp_warehouse"),
-    ("wh_picklist", "/warehouse/picklist", "Picklists", "list-checks",
-     P.PICKING_VIEW, 48, "grp_warehouse"),
+    # Picklists retired from the UI 2026-11-04 (page_registry.RETIRED_PAGES).
+    # ("wh_picklist", "/warehouse/picklist", "Picklists", "list-checks",
+    #  P.PICKING_VIEW, 48, "grp_warehouse"),
     ("wh_issues", "/warehouse/material-issues", "Material Issues", "send",
      P.ISSUE_VIEW, 49, "grp_warehouse"),
     ("wh_material_returns", "/warehouse/material-returns", "Material Returns",

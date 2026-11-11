@@ -9,6 +9,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 from sqlalchemy import BigInteger, DateTime, Numeric, String, and_, case, cast, exists, false, func, literal, or_, select, text, union_all
 from sqlalchemy.exc import DBAPIError
@@ -27,9 +28,10 @@ from app.core.dependencies import via_scoped_grant
 from app.modules.inventory import allocations, locations
 from app.modules.inventory import service as inventory_service
 from app.modules.inventory.models import (
-    Allocation, AllocationItem, MaterialRequest, MaterialRequestItem, Stock,
+    Allocation, AllocationItem, MaterialRequest, MaterialRequestItem, PositionLocation, Stock,
     StockTransferOrder,
 )
+from app.platform.doc_numbering import scope as org_scope
 from app.platform.hcm import mappers
 from app.platform.hcm.models import (
     HcmDepartment, HcmEmployee, HcmOffice, HcmPosition, HcmPositionAssignment,
@@ -54,8 +56,10 @@ from app.modules.indents.enums import (
     ConsolidationStatus, DocType, IndentActivityType, IndentItemStatus, IndentStatus,
     IndentType, InstanceStatus, MRStatus, MaterialDirection, Priority, RuleActionType,
 )
+from app.modules.inventory.enums import LocationTier
+from app.shared.enums import WarehouseType
 from app.modules.indents import eligibility
-from app.modules.indents.models import Consolidation, Indent, IndentItem
+from app.modules.indents.models import Consolidation, Indent, IndentItem, StrSourceChange
 from app.modules.indents.schemas import (
     ACK_DAMAGE_REASONS, ACK_REJECTION_LABELS, IndentCreate, IndentItemIn, IndentUpdate,
 )
@@ -359,6 +363,23 @@ async def _assert_can_raise_str(db: AsyncSession, user) -> None:
         raise PermissionError_("You are not allowed to raise a stock transfer request")
 
 
+def indent_series(indent_type: str | None) -> str:
+    """The number series an indent is drawn from. An STR carries its own (STR prefix) so a
+    transfer is never read as an indent on paper; a monthly indent its own (MI-IND,
+    2026-11-09) so it is never read as an ordinary one."""
+    if indent_type == IndentType.STR.value:
+        return "str"
+    if indent_type == IndentType.MONTHLY.value:
+        return "monthly_indent"
+    return "indent"
+
+
+def _scope_view(scope: dict):
+    """A resolved selection, read the way `org_scope.number_args` reads a document."""
+    from types import SimpleNamespace
+    return SimpleNamespace(department_name=None, **scope)
+
+
 async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
     _validate_required_date(data.required_date)
     priority = _validate_priority(data.priority) or Priority.NORMAL.value
@@ -391,6 +412,22 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
     # Ahead of next_number(): a rejected vehicle must not burn a document number.
     vehicle_id, vehicle_number = await _resolve_vehicle(
         db, getattr(data, "vehicle_id", None))
+    # An STR says where the stock comes FROM (2026-11-04); refused before a number is
+    # minted, for the same reason as the vehicle above.
+    source = (await _resolve_str_source(db, getattr(data, "source_warehouse_id", None))
+              if indent_type == IndentType.STR.value else None)
+    context = await _requester_context(db, user)
+    if source is not None:
+        await assert_str_source_fits(db, source, await _draft_str_destination(db, context))
+    # Whose paper it is on (2026-11-09): what HCM fixes for the raiser, else what the
+    # form selected. Ahead of next_number() so a refused selection burns no number. A
+    # request naming no organisation where none is configured keeps the old numbering.
+    scope = None
+    if getattr(data, "organization_id", None) or await org_scope.default_organisation(db):
+        scope = await org_scope.resolve_for_raiser(
+            db, user, organization_id=data.organization_id,
+            org_department_id=data.org_department_id, project_id=data.project_id,
+            fiscal_year=data.fiscal_year)
 
     indent_date = utcnow().date()
     if indent_type == IndentType.MONTHLY.value:
@@ -398,19 +435,23 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
         await monthly_indent_service.assert_can_submit_monthly(db, user)
         indent_date = await monthly_indent_service.local_today(db)
 
-    context = await _requester_context(db, user)
     total_qty = sum(line.quantity for line in data.items)
     indent = Indent(
         # An STR carries its own series (STR prefix) so a transfer is never read as an
         # indent on paper.
-        indent_no=await next_number(
-            db, "str" if indent_type == IndentType.STR.value else "indent",
-            project=context["project_name"]),
+        indent_no=(await next_number(db, indent_series(indent_type),
+                                     **org_scope.number_args(_scope_view(scope)))
+                   if scope is not None else
+                   await next_number(db, indent_series(indent_type),
+                                     project=context["project_name"])),
         indent_type=indent_type,
         indent_date=indent_date,
         required_date=data.required_date,
         vehicle_id=vehicle_id,
         vehicle_number=vehicle_number,
+        source_warehouse_id=source.id if source else None,
+        source_warehouse_name=source.name if source else None,
+        source_warehouse_code=source.code if source else None,
         requested_by_id=user.id,
         requested_by_name=user.full_name,
         requested_by_code=user.emp_code,
@@ -432,6 +473,8 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
         created_by_id=user.id,
         created_by_name=user.full_name,
     )
+    if scope is not None:
+        org_scope.stamp_with_project(indent, scope)
     db.add(indent)
     await db.flush()
 
@@ -449,7 +492,8 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
         action=AuditAction.CREATE, actor=user,
         after={"status": indent.status, "total_items": indent.total_items,
                "indent_type": indent.indent_type,
-               "vehicle_number": indent.vehicle_number},
+               "vehicle_number": indent.vehicle_number,
+               "source_warehouse_name": indent.source_warehouse_name},
     )
     await notify_indent_status_event(
         db,
@@ -812,6 +856,75 @@ async def _scm_stage_statuses(db: AsyncSession, user) -> list[str]:
     ]
 
 
+async def _served_points(db: AsyncSession, user) -> set[int] | None:
+    """The stocking points whose fulfilment work this login does (2026-11-02), or
+    None when it is the CENTRAL desk and serves every indent.
+
+    Read off the shelf the hat in hand holds (`locations.held_location_ids`, per POST):
+    an LIP serves itself; an MDP serves itself and every LIP under it
+    (`locations.parent_points`); a main warehouse — or a login holding no point at
+    all, the SCM desk that has always worked the whole queue — serves everyone.
+
+    Before this the SCM stage was gated on PERMISSIONS alone, so an LIP store keeper
+    holding `stock.view` (which his Stock screens need) read every indent past approval
+    in the company: Puthalapattu's store keeper listed Punganur's and Nr Peta's.
+    """
+    cache = db.info.setdefault("served_points_memo", {}) if isinstance(getattr(db, "info", None), dict) else {}
+    hat = getattr(user, "active_position_id", None)
+    key = (user.id, hat)
+    if key in cache:
+        return cache[key]
+
+    posts = {hat} if hat is not None else await locations.active_positions_of(db, user)
+    held: set[int] = set()
+    for position_id in posts:
+        held |= await locations.held_location_ids(db, position_id, subtree=False)
+    if not held:
+        cache[key] = None
+        return None
+    types = dict((await db.execute(
+        select(Warehouse.id, Warehouse.warehouse_type).where(Warehouse.id.in_(held))
+    )).all())
+    if any(locations.tier_of(types.get(w)) == LocationTier.WAREHOUSE for w in held):
+        cache[key] = None
+        return None
+
+    served = set(held)
+    mdps = {w for w in held if locations.tier_of(types.get(w)) == LocationTier.MDP}
+    if mdps:
+        lips = set((await db.execute(
+            select(Warehouse.id).where(Warehouse.warehouse_type == WarehouseType.LIP.value)
+        )).scalars().all())
+        parents = await locations.parent_points(db, lips)
+        served |= {lip for lip, parent in parents.items() if parent in mdps}
+    cache[key] = served
+    return served
+
+
+async def _scm_stage_condition(db: AsyncSession, user):
+    """Indents past approval that are this login's FULFILMENT work, or None.
+
+    The permission check says whether the login works the inventory stage at all;
+    `_served_points` says WHERE. An indent belongs to the point linked to the post
+    that raised it (`inv_position_locations` — the same link that answers "which point
+    serves this post"), and an STR also to the point its transfer order is bound for.
+    """
+    scm_statuses = await _scm_stage_statuses(db, user)
+    if not scm_statuses:
+        return None
+    at_stage = Indent.status.in_(scm_statuses)
+    served = await _served_points(db, user)
+    if served is None:
+        return at_stage
+    raised_here = Indent.position_id.in_(
+        select(PositionLocation.position_id).where(
+            PositionLocation.warehouse_id.in_(served),
+            PositionLocation.is_active == 1,
+        )
+    )
+    return and_(at_stage, or_(raised_here, str_addressed_to(served)))
+
+
 async def indent_access_condition(db: AsyncSession, user):
     """Central visibility scope for indents.
 
@@ -866,9 +979,9 @@ async def indent_access_condition(db: AsyncSession, user):
     # and the SCM department sits on posts with no children, so no branch above can ever
     # show them one. Holding the SCM read permissions does — and only from the point the
     # request reaches inventory, never before approval.
-    scm_statuses = await _scm_stage_statuses(db, user)
-    if scm_statuses:
-        visible.append(Indent.status.in_(scm_statuses))
+    scm_stage = await _scm_stage_condition(db, user)
+    if scm_stage is not None:
+        visible.append(scm_stage)
 
     clause = or_(*visible)
     cache[key] = clause
@@ -969,7 +1082,10 @@ async def _indent_visibility(db: AsyncSession, user):
     for the same reason `scope_condition` always OR-s in `mine`: narrow the rung and
     you narrow whose work you see, never whether you can do your own.
     """
+    scm_stage = await _scm_stage_condition(db, user)
     branches = [await indent_participant_condition(db, user)]
+    if scm_stage is not None:
+        branches.append(scm_stage)
     branches.append(
         and_(
             await indent_access_condition(db, user),
@@ -1181,7 +1297,171 @@ async def _attach_office_sac(db: AsyncSession, indent: Indent) -> Indent:
     """
     office = await db.get(HcmOffice, indent.office_id) if indent.office_id else None
     indent.office_sac = mappers.office_sac(office.raw) if office else None
+    return await _attach_str_route(db, indent)
+
+
+async def _resolve_str_source(db: AsyncSession, warehouse_id: int | None) -> Warehouse:
+    """The source point an STR names. Required — an approver decides whether the
+    point is theirs, and cannot decide that about nothing."""
+    if not warehouse_id:
+        raise ValidationError("Choose the source point this transfer should come from")
+    point = await db.get(Warehouse, int(warehouse_id))
+    if point is None or not point.is_active:
+        raise ValidationError("That source point no longer exists or is inactive")
+    return point
+
+
+async def assert_str_source_fits(db: AsyncSession, source: Warehouse | None,
+                                 destination_id: int | None) -> None:
+    """What an STR's source may not be, whatever screen or route named it (SCM_0182).
+
+    - Never the point the stock is going INTO: that is not a transfer, and its issue
+      would leave and land on the same shelf.
+    - A WAREHOUSE delivery point is served by another warehouse: warehouses transfer
+      between warehouses by TYPE, not by who holds them (2026-11-09), so an LIP or an
+      MDP is never the source of a warehouse's STR.
+
+    The source LIST (`locations.same_rank_points`) already leaves both out; this is the
+    check that decides, because a request can name any point.
+    """
+    if source is None or not destination_id:
+        return
+    if source.id == destination_id:
+        raise ValidationError(
+            f"{source.name} is where this stock is going. Pick the point it should "
+            "come from.")
+    destination = await db.get(Warehouse, destination_id)
+    if (destination is not None
+            and locations.tier_of(destination.warehouse_type) == LocationTier.WAREHOUSE
+            and locations.tier_of(source.warehouse_type) != LocationTier.WAREHOUSE):
+        tier = locations.tier_label(locations.tier_of(source.warehouse_type))
+        raise ValidationError(
+            f"{destination.name} is a warehouse, so this transfer comes from another "
+            f"warehouse. {source.name} is {'an' if tier[:1] in 'AEIOU' else 'a'} {tier}.")
+
+
+async def _draft_str_destination(db: AsyncSession, context: dict) -> int | None:
+    """The delivery point of an STR not yet saved, from the raiser's context."""
+    from types import SimpleNamespace
+    return await str_destination_point(db, SimpleNamespace(
+        position_id=context.get("position_id"), office_id=context.get("office_id")))
+
+
+async def str_destination_point(db: AsyncSession, indent: Indent) -> int | None:
+    """The point an STR (or any indent) is delivered INTO: the shelf the raising post
+    holds, else its primary link, else the stocking point of its office."""
+    held = await locations.held_location_ids(db, indent.position_id, subtree=False)
+    if held:
+        return min(held)
+    primary = await locations.primary_location_for(db, indent.position_id)
+    if primary:
+        return primary
+    if indent.office_id:
+        return await db.scalar(
+            select(Warehouse.id).where(Warehouse.office_id == indent.office_id,
+                                       Warehouse.is_active.is_(True))
+            .order_by(Warehouse.id).limit(1))
+    return None
+
+
+def _point_out(point: Warehouse | None, held_by: list[str] | None = None) -> dict | None:
+    if point is None:
+        return None
+    tier = locations.tier_of(point.warehouse_type)
+    return {
+        "warehouse_id": point.id, "warehouse_code": point.code,
+        "warehouse_name": point.name, "warehouse_type": point.warehouse_type,
+        "tier_label": locations.tier_label(tier), "held_by": held_by or [],
+    }
+
+
+async def _attach_str_route(db: AsyncSession, indent: Indent) -> Indent:
+    """Single-document only: where the goods land, whether that point takes a vehicle
+    and an SAC, and — on an STR — where they come from and every move of the source.
+
+    `needs_vehicle_and_sac` is the delivery point's TIER, read off the master: only the
+    bottom rung of the chain runs a vehicle and carries a service area code. No point
+    type is named here, so a chain that grows a rung keeps the rule."""
+    destination_id = await str_destination_point(db, indent)
+    destination = await db.get(Warehouse, destination_id) if destination_id else None
+    bottom = max(LocationTier)
+    indent.needs_vehicle_and_sac = (
+        None if destination is None
+        else locations.tier_of(destination.warehouse_type) == bottom)
+    indent.str_destination = None
+    indent.str_source = None
+    indent.str_source_changes = []
+    if indent.indent_type != IndentType.STR.value:
+        return indent
+    source = (await db.get(Warehouse, indent.source_warehouse_id)
+              if indent.source_warehouse_id else None)
+    held = await locations.point_holder_names(
+        db, {p.id for p in (source, destination) if p is not None})
+    indent.str_destination = _point_out(destination, held.get(destination_id))
+    indent.str_source = _point_out(source, held.get(indent.source_warehouse_id))
+    if source is None and indent.source_warehouse_name:
+        indent.str_source = {"warehouse_id": indent.source_warehouse_id,
+                             "warehouse_code": indent.source_warehouse_code,
+                             "warehouse_name": indent.source_warehouse_name,
+                             "held_by": []}
+    indent.str_source_changes = list((await db.execute(
+        select(StrSourceChange).where(StrSourceChange.indent_id == indent.id)
+        .order_by(StrSourceChange.id))).scalars().all())
     return indent
+
+
+async def str_sources_in_use(db: AsyncSession, user) -> list[dict]:
+    """The source points named on the STRs this login may read — the Requests tab's
+    Source filter, so it offers exactly the points the list can narrow to."""
+    rows = (await db.execute(
+        select(Indent.source_warehouse_id, func.max(Indent.source_warehouse_name))
+        .where(Indent.indent_type == IndentType.STR.value,
+               Indent.source_warehouse_id.is_not(None),
+               await _indent_visibility(db, user))
+        .group_by(Indent.source_warehouse_id)
+    )).all()
+    return sorted(({"value": wid, "label": name or f"Point {wid}"} for wid, name in rows),
+                  key=lambda o: o["label"].lower())
+
+
+async def str_source_options(db: AsyncSession, user) -> list[dict]:
+    """The points an STR raised by this login may name as its source: other warehouses
+    when it is delivered into a warehouse, else the shelves held at the same HCM rank,
+    network-wide — never the raiser's own points nor the point it is delivered into."""
+    destination = await _draft_str_destination(db, await _requester_context(db, user))
+    return await locations.same_rank_points(db, user, destination_id=destination)
+
+
+async def change_str_source(db: AsyncSession, indent: Indent, warehouse_id: int, user,
+                            *, reason: str, stage_name: str | None = None) -> None:
+    """Move an STR's source point and record the move. Called by the approver who
+    pulls a request onto one of their own points; the caller checks that the point is
+    in their scope. Not committed here — the caller allocates in the same transaction."""
+    point = await _resolve_str_source(db, warehouse_id)
+    if indent.source_warehouse_id == point.id:
+        return
+    position_id = getattr(user, "active_position_id", None)
+    db.add(StrSourceChange(
+        indent_id=indent.id,
+        from_warehouse_id=indent.source_warehouse_id,
+        from_warehouse_name=indent.source_warehouse_name,
+        to_warehouse_id=point.id, to_warehouse_name=point.name,
+        stage_name=stage_name, reason=(reason or "").strip()[:500] or None,
+        changed_by_id=user.id, changed_by_name=getattr(user, "full_name", None),
+        position_name=(await db.scalar(select(HcmPosition.name).where(
+            HcmPosition.id == position_id))) if position_id else None,
+    ))
+    before = indent.source_warehouse_name
+    indent.source_warehouse_id = point.id
+    indent.source_warehouse_name = point.name
+    indent.source_warehouse_code = point.code
+    await write_audit(
+        db, entity="ind_indents", entity_id=indent.id, entity_no=indent.indent_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"source_warehouse_name": before},
+        after={"source_warehouse_name": point.name, "reason": reason},
+        summary=f"Source moved from {before or 'none'} to {point.name}",
+    )
 
 
 async def _attach_brand_changes(db: AsyncSession, indent: Indent) -> Indent:
@@ -1343,6 +1623,7 @@ async def list_indents(
     is_bookmarked: str | None = None,
     has_remainder: bool = False,
     to_serve: bool = False,
+    source_warehouse_id: int | None = None,
     sort_by: str = "created_at",
     sort_dir: str = "desc",
 ) -> dict:
@@ -1360,6 +1641,8 @@ async def list_indents(
         include_unassigned_region=include_unassigned_region,
         is_bookmarked=is_bookmarked,
     )
+    if source_warehouse_id:
+        stmt = stmt.where(Indent.source_warehouse_id == source_warehouse_id)
     if to_serve and user is not None:
         # The fulfilment queue asks a narrower question than /indents does: not "may I
         # read this" but "is there fulfilment work in it FOR ME".
@@ -1384,6 +1667,18 @@ async def list_indents(
                 )
             ),
         ))
+        # An approved STR is served at its SOURCE point's desk (2026-11-04): the last
+        # approver signed it without the source in their scope, so the work belongs to
+        # whoever can draw from that point. A desk with unrestricted reach (None) still
+        # sees every one; an STR with no source on record is left as it always was.
+        drawable = await inventory_service.drawable_warehouse_ids(db, user)
+        if drawable is not None:
+            stmt = stmt.where(or_(
+                Indent.indent_type != IndentType.STR.value,
+                Indent.status == IndentStatus.PENDING_APPROVAL.value,
+                Indent.source_warehouse_id.is_(None),
+                Indent.source_warehouse_id.in_(drawable or {0}),
+            ))
     if has_remainder:
         # At least one line still owes something. EXISTS rather than a join, so an
         # indent with three unfulfilled lines is still one row in the queue.
@@ -1604,6 +1899,34 @@ async def set_indent_bookmark(
     return await _attach_capabilities(db, indent, user)
 
 
+_SCOPE_INPUTS = ("organization_id", "org_department_id", "project_id", "fiscal_year")
+
+
+async def _apply_scope_edit(db: AsyncSession, indent: Indent, data, user) -> None:
+    """A draft's organisation / project / department / year, changed on the form: the
+    same rules as at create, and a new number when the selection moved. Fixed once
+    submitted (a correction is not a draft). An indent raised before organisations is
+    left exactly as it was."""
+    given = {field for field in _SCOPE_INPUTS if field in data.model_fields_set}
+    if not given or not org_scope.uses_org(indent, indent.indent_no):
+        return
+    stated = {field: getattr(data, field) for field in given}
+    org_scope.assert_lockable(
+        indent, indent.indent_no, is_draft=indent.status == IndentStatus.DRAFT.value,
+        source_has_org=False, given=given, **stated)
+    org_scope.remember_number_args(indent)
+    pick = {field: stated.get(field, getattr(indent, field, None)) for field in _SCOPE_INPUTS}
+    if "project_id" in given and stated["project_id"] and "org_department_id" not in given:
+        pick["org_department_id"] = None   # picking a project replaces the department
+    if "org_department_id" in given and stated["org_department_id"] and "project_id" not in given:
+        pick["project_id"] = None
+    scope = await org_scope.resolve_for_raiser(db, user, keep=indent, **pick)
+    org_scope.stamp_with_project(indent, scope)
+    org_scope.assert_complete(indent)
+    await org_scope.renumber(db, indent, indent_series(indent.indent_type), "indent_no",
+                             "ind_indents", user)
+
+
 async def update_indent(db: AsyncSession, indent_id: int, data: IndentUpdate, user) -> Indent:
     indent = await get_indent(db, indent_id, user)
     if indent.status == IndentStatus.DRAFT.value:
@@ -1622,6 +1945,7 @@ async def update_indent(db: AsyncSession, indent_id: int, data: IndentUpdate, us
         raise ValidationError(f"Cannot edit an indent in {indent.status} status")
 
     _validate_required_date(data.required_date)
+    await _apply_scope_edit(db, indent, data, user)
 
     before = {
         "required_date": indent.required_date.isoformat() if indent.required_date else None,
@@ -1634,6 +1958,7 @@ async def update_indent(db: AsyncSession, indent_id: int, data: IndentUpdate, us
         "remarks": indent.remarks,
         "total_items": indent.total_items,
         "total_qty": float(indent.total_qty or 0),
+        "source_warehouse_name": indent.source_warehouse_name,
     }
     indent.required_date = data.required_date
     if data.priority is not None:
@@ -1663,6 +1988,13 @@ async def update_indent(db: AsyncSession, indent_id: int, data: IndentUpdate, us
         indent.office_name = office.name if office else None
     if "remarks" in data.model_fields_set:
         indent.remarks = data.remarks
+    if (indent.indent_type == IndentType.STR.value
+            and "source_warehouse_id" in data.model_fields_set):
+        source = await _resolve_str_source(db, data.source_warehouse_id)
+        await assert_str_source_fits(db, source, await str_destination_point(db, indent))
+        indent.source_warehouse_id = source.id
+        indent.source_warehouse_name = source.name
+        indent.source_warehouse_code = source.code
 
     if data.items is not None:
         if not data.items:
@@ -1703,6 +2035,7 @@ async def update_indent(db: AsyncSession, indent_id: int, data: IndentUpdate, us
             "remarks": indent.remarks,
             "total_items": indent.total_items,
             "total_qty": float(indent.total_qty or 0),
+            "source_warehouse_name": indent.source_warehouse_name,
         },
     )
     await db.commit()
@@ -1769,6 +2102,19 @@ async def submit_indent(db: AsyncSession, indent_id: int, user) -> Indent:
         raise PermissionError_("Only the requester can submit this indent")
     if indent.status != IndentStatus.DRAFT.value:
         raise ValidationError(f"Cannot submit an indent in {indent.status} status")
+    if indent.indent_type == IndentType.STR.value and not indent.source_warehouse_id:
+        # A draft saved before the field existed: it has to say where the stock comes
+        # from before an approver can judge whether that point is theirs.
+        raise ValidationError(
+            "Choose the source point this transfer should come from, then submit")
+    if org_scope.uses_org(indent, indent.indent_no):
+        # The number was drawn from this selection; it must not print NA (2026-11-09).
+        org_scope.assert_complete(indent)
+    if indent.indent_type == IndentType.STR.value:
+        # A draft saved before SCM_0182 may name its own delivery point.
+        await assert_str_source_fits(
+            db, await db.get(Warehouse, indent.source_warehouse_id),
+            await str_destination_point(db, indent))
 
     if indent.indent_type == IndentType.MONTHLY.value:
         from app.platform.monthly_indent import service as monthly_indent_service
@@ -2360,9 +2706,11 @@ async def act_on_indent(db: AsyncSession, indent_id: int, action: ApprovalAction
         indent.approved_at = utcnow()
         indent.current_approver_name = None
         await _fulfil(db, indent, user)
+        await _finish_str_approval(db, indent, user)
     elif instance.status == InstanceStatus.REJECTED.value:
         indent.status = IndentStatus.REJECTED.value
         indent.current_approver_name = None
+        await _withdraw_str_allocations(db, indent, user, f"{indent.indent_no} was rejected")
         # Whatever this indent was holding goes back on the shelf immediately —
         # otherwise a rejected request quietly keeps stock out of everyone's reach.
         await inventory_service.release_for_indent(db, indent.id)
@@ -2429,6 +2777,8 @@ async def return_indent_for_correction(
     )
     indent.status = IndentStatus.RETURNED_FOR_CORRECTION.value
     indent.current_approver_name = None
+    await _withdraw_str_allocations(
+        db, indent, user, f"{indent.indent_no} was returned for correction")
     await notify_indent_followers(db, indent, indent.status)
     await write_audit(
         db, entity="ind_indents", entity_id=indent.id, entity_no=indent.indent_no,
@@ -6603,6 +6953,12 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
         "blocked_reason": blocked_reason,
         "allocations": [{"id": row.id, "allocation_no": row.allocation_no,
                          "status": row.status} for row in live],
+        # The point an STR asked to be served from (2026-11-04): the screen opens every
+        # line on it when this login can draw from it.
+        "str_source_warehouse_id": (indent.source_warehouse_id
+                                    if indent.indent_type == IndentType.STR.value else None),
+        "str_source_warehouse_name": (indent.source_warehouse_name
+                                      if indent.indent_type == IndentType.STR.value else None),
         "lines": [{**p, "available_total": float(p["available_total"]),
                    # What the WAREHOUSE can serve, LIP and MDP points excluded. Zero
                    # here with stock still showing in `available_total` is the case the
@@ -6921,10 +7277,6 @@ async def create_allocation_for_indent(db: AsyncSession, indent: Indent,
     approver commits their own stock while the indent is still PENDING_APPROVAL, which
     is exactly the moment the allocation screen must refuse.
     """
-    # Imported here, not at module load: warehouse sits after indents in the import
-    # chain, so a top-level import would run it backwards.
-    from app.modules.warehouse import service as warehouse_service
-
     # Approved allocations do not block a further one while the indent still owes
     # something — that IS the cascade, each rung allocating what it holds. Only
     # inventory knows about allocations and only indents knows the remainder, so the
@@ -6998,7 +7350,7 @@ async def create_allocation_for_indent(db: AsyncSession, indent: Indent,
         # The ladder can approve at submit (the allocator IS the top of it, or the
         # policy lets him sign his own). The warehouse drafts must be generated then
         # too, exactly as they are when a separate approver acts.
-        on_approved=warehouse_service.create_fulfilment_drafts_for_allocation,
+        on_approved=_fulfilment_drafts,
     )
 
     # Approved the moment it was raised, so the indent has to move here too — the
@@ -7248,10 +7600,6 @@ async def allocation_histories(db: AsyncSession,
 async def act_on_allocation(db: AsyncSession, allocation_id: int, action: str, user,
                             comments: str = "", revisions: list[dict] | None = None):
     """Approve or reject. Approval reserves the stock and updates the indent."""
-    # Imported at the handoff rather than module load: Warehouse reads indent models
-    # for fulfilment sources, so a top-level import would make the dependency circular.
-    from app.modules.warehouse import service as warehouse_service
-
     # Read the indent first: approval can raise a material request, and only this side
     # of the chain can tell inventory which project that request belongs to.
     existing = await allocations.get(db, allocation_id)
@@ -7260,7 +7608,7 @@ async def act_on_allocation(db: AsyncSession, allocation_id: int, action: str, u
         db, allocation_id, action, user, comments,
         ctx={"project_id": getattr(indent, "project_id", None),
              "project_name": getattr(indent, "project_name", None)},
-        on_approved=warehouse_service.create_fulfilment_drafts_for_allocation,
+        on_approved=_fulfilment_drafts,
         revisions=revisions,
     )
 
@@ -7280,6 +7628,67 @@ async def act_on_allocation(db: AsyncSession, allocation_id: int, action: str, u
     return alloc
 
 
+async def _draft_str_issues(db: AsyncSession, indent: Indent, user) -> list:
+    """Draft an STR's material issues over EVERY allocation signed for it. Levels may
+    each allocate from one point, and the warehouse drafts `allocated - already issued`
+    per point, so the allocations must be handed over together: one at a time, the
+    second of two from one point reads as already issued and drafts nothing."""
+    # Imported here, not at module load: warehouse sits after indents in the chain.
+    from app.modules.warehouse import service as warehouse_service
+
+    signed = (await db.execute(select(Allocation).where(
+        Allocation.indent_id == indent.id,
+        Allocation.status.in_(allocations.SETTLED_ALLOCATION_STATUSES),
+    ).order_by(Allocation.id))).scalars().all()
+    if not signed:
+        return []
+    return await warehouse_service.create_fulfilment_drafts_for_allocation(
+        db,
+        SimpleNamespace(indent_id=indent.id,
+                        items=[line for alloc in signed for line in alloc.items]),
+        user,
+    )
+
+
+async def _fulfilment_drafts(db: AsyncSession, alloc, user) -> list:
+    """What a signed allocation hands the warehouse. An STR still in approval hands
+    over nothing: its stock is reserved, but no issue exists to post until its approval
+    has ended, so goods cannot leave under a request that can still be refused."""
+    from app.modules.warehouse import service as warehouse_service
+
+    indent = await db.get(Indent, alloc.indent_id)
+    if indent is None or indent.indent_type != IndentType.STR.value:
+        return await warehouse_service.create_fulfilment_drafts_for_allocation(db, alloc, user)
+    if indent.status == IndentStatus.PENDING_APPROVAL.value:
+        return []
+    return await _draft_str_issues(db, indent, user)
+
+
+async def _finish_str_approval(db: AsyncSession, indent: Indent, user) -> None:
+    """An STR's approval has ended: what was allocated on the way up goes to the
+    warehouse, and a request nothing more is owed on reads as allocated, not as waiting
+    at the Fulfilment Desk. An allocation still unsigned arrives through its own
+    signature, by `_fulfilment_drafts`."""
+    if indent.indent_type != IndentType.STR.value:
+        return
+    if indent.status != IndentStatus.AWAITING_ALLOCATION.value:
+        return
+    await _draft_str_issues(db, indent, user)
+    served = any(_d(line.allocated_quantity) > 0 for line in indent.items)
+    owed = any(_d(line.approved_quantity) > _d(line.allocated_quantity) for line in indent.items)
+    if served and not owed:
+        await _recalculate_indent_allocation_state(db, indent)
+
+
+async def _withdraw_str_allocations(db: AsyncSession, indent: Indent, user, reason: str) -> None:
+    """An STR refused or returned part-way up gives back what was allocated for it."""
+    if indent.indent_type != IndentType.STR.value:
+        return
+    if await allocations.withdraw_for_indent(db, indent.id, user, reason):
+        for line in indent.items:
+            line.allocated_quantity = Decimal("0")
+
+
 async def _settle_indent_approval(db: AsyncSession, indent: Indent, user,
                                   was_in_approval: bool) -> None:
     """After an allocation is approved, decide whether the indent is still climbing.
@@ -7294,6 +7703,12 @@ async def _settle_indent_approval(db: AsyncSession, indent: Indent, user,
     status — so goods that were already dispatched had nowhere to be acknowledged.
     """
     if not was_in_approval:
+        return
+    # An STR's ladder is ended by its approver's own press (`approve_indent`, which
+    # ends it when nothing is owed), and that is what hands its stock to the warehouse
+    # (`_finish_str_approval`). Settling here would end it with no issue drafted.
+    if indent.indent_type == IndentType.STR.value:
+        indent.status = IndentStatus.PENDING_APPROVAL.value
         return
     still_owed = any(
         Decimal(str(line.approved_quantity or 0)) > Decimal(str(line.allocated_quantity or 0))
@@ -8332,12 +8747,20 @@ async def copy_monthly_cycle(db: AsyncSession, user, *, required_date=None,
     # Straight through create_indent, so numbering, the requester snapshot, validation
     # and the audit row are all identical to a hand-typed indent. A second create path
     # is a second set of rules to keep in step.
+    # Last cycle's organisation / department / project carry forward (2026-11-09); what
+    # HCM fixes for the raiser still wins inside create_indent. The year is today's.
+    source = (await db.execute(select(Indent).where(
+        Indent.indent_no == previous["indent_no"]))).scalars().first()
     return await create_indent(db, IndentCreate(
         required_date=required_date or _next_cycle_required_date(
             previous.get("required_date")),
         indent_type=IndentType.MONTHLY,
         remarks=remarks or f"Copied from {previous['indent_no']}",
         items=lines,
+        organization_id=getattr(source, "organization_id", None),
+        org_department_id=getattr(source, "org_department_id", None),
+        project_id=(getattr(source, "project_id", None)
+                    if getattr(source, "organization_id", None) else None),
     ), user)
 
 

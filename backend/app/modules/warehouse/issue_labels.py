@@ -4,8 +4,10 @@ The Box labels queue prints a code the day it is made. This prints a DOCUMENT: e
 package that left on one issue — the carton or box named on the line, the strips
 inside it, the part pack cut at the desk — and every asset / consumable code it
 carried, item by item, so the desk that posts an issue can label the whole load in
-one press. Serial and IMEI numbers are never printed here (decided 2026-10-28): the
-maker's label is already on the goods.
+one press. Serial and IMEI numbers of a serial- or IMEI-TRACKED item are printed too
+(2026-11-02, reversing the 2026-10-28 "the maker's label is enough"): the desk asked
+for one sticker per handset it could scan into its details. A unit of an untracked
+item with no asset / consumable code is still skipped — its serial is internal.
 
 Two doors, one row shape:
 
@@ -169,10 +171,15 @@ async def _pack_rows(db: AsyncSession, roots: list, *, line, qty_of: dict[int, D
 
 
 async def _unit_rows(db: AsyncSession, units: list, *, line) -> list[dict]:
-    """Asset / consumable codes as label rows. A unit with neither is skipped: its only
-    identity is a serial or an IMEI, and those are the maker's label, not ours."""
+    """Unit labels: the asset / consumable code, else — for a serial- or IMEI-tracked
+    item — the serial or the IMEI. Each row carries both numbers when the unit has
+    them, so the sticker can print the pair a handset is checked against."""
     from app.modules.warehouse.service import public_label_token
+    from app.shared.models.master import Item
     batches = await _batches(db, {u.batch_id for u in units} | {line.batch_id})
+    item = await db.get(Item, line.item_id) if units else None
+    serial_tracked = bool(getattr(item, "is_serial_tracked", False))
+    imei_tracked = bool(getattr(item, "is_imei_tracked", False))
     # The pack each unit sits in, and every pack around that (2026-10-28).
     homes = {hu.id: hu for hu in (await db.execute(select(m.HandlingUnit).where(
         m.HandlingUnit.id.in_({u.handling_unit_id for u in units if u.handling_unit_id} or {0}))))
@@ -181,15 +188,23 @@ async def _unit_rows(db: AsyncSession, units: list, *, line) -> list[dict]:
     out = []
     for u in units:
         code = u.asset_code or u.consumable_code
+        pack_name = "Asset" if u.asset_code else "Consumable"
         if not code:
-            continue
+            if imei_tracked and not serial_tracked and u.imei:
+                code, pack_name = u.imei, "IMEI"
+            elif serial_tracked or imei_tracked:
+                code, pack_name = u.serial_number, "Serial no."
+            else:
+                continue
         batch = batches.get(u.batch_id) or batches.get(line.batch_id)
         out.append({
             "key": f"u-{u.id}", "kind": "UNIT", "code": code,
+            "serial_number": u.serial_number if (serial_tracked or imei_tracked) else None,
+            "imei": u.imei or None,
             "line_id": line.id, "item_id": line.item_id,
             "item_code": line.item_code, "item_name": line.item_name,
             "uom_code": line.uom_code,
-            "pack_name": "Asset" if u.asset_code else "Consumable",
+            "pack_name": pack_name,
             "qty": 1.0, "pack_size": 1.0, "part": False,
             "batch_no": getattr(batch, "batch_no", None) or line.batch_no,
             "expiry_date": getattr(batch, "expiry_date", None) or line.expiry_date,
@@ -231,7 +246,7 @@ async def _units_by_code(db: AsyncSession, item_id: int, codes: set[str]) -> lis
     return list((await db.execute(select(m.SerialNumber).where(
         m.SerialNumber.item_id == item_id,
         or_(m.SerialNumber.asset_code.in_(codes), m.SerialNumber.consumable_code.in_(codes),
-            m.SerialNumber.serial_number.in_(codes)))
+            m.SerialNumber.serial_number.in_(codes), m.SerialNumber.imei.in_(codes)))
         .order_by(m.SerialNumber.id))).scalars().all())
 
 

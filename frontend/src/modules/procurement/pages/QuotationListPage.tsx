@@ -155,6 +155,9 @@ export function QuotationListPage() {
                     <div className="font-mono text-[11px] text-muted">
                       {q.quotation_no}
                     </div>
+                    {q.organization_name && (
+                      <div className="truncate text-[11px] text-muted">{q.organization_name}</div>
+                    )}
                   </div>
                 </div>
                 <StatusPill status={q.status} />

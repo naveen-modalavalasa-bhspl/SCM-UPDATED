@@ -2,8 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   allowedExpiries, batchChoices, groupIssueLines, locationChoices, normalizeSplits,
   redistribute, replaceGroup, splitProblems, trackingOf, trimUnits, codedSwapBatches,
-  fefoPlan,
+  fefoPlan, batchesForPick,
 } from "../issueSplits";
+import type { IssueGroup } from "../issueSplits";
 import type { IssueItemWrite, IssueStockSource, TrackingType } from "../types";
 
 /**
@@ -169,6 +170,33 @@ describe("what inventory allocated, and what the picks now say", () => {
     expect(out.warehouseDrawable).toBe(10);
     expect(out.splits[0].batchTotal).toBe(30);
     expect(out.splits[0].batchDrawable).toBe(10);
+  });
+
+  it("splits the shelf into free, held for this document and held by others (2026-11-03)", () => {
+    // 300 here: 122 nobody's, 10 reserved for this indent, the other 168 reserved by
+    // other documents (on locations not offered at all, so not in the rows).
+    const sources = [
+      source({ bin_id: 1, batch_id: 11, available_qty: 10, reserved_qty: 40, own_reserved_qty: 10,
+               item_total_qty: 300, item_available_qty: 122 }),
+      source({ bin_id: 2, batch_id: 12, available_qty: 112, reserved_qty: 138,
+               item_total_qty: 300, item_available_qty: 122 }),
+    ];
+    const out = group([line({ requested_qty: 10, issued_qty: 10, batch_id: 11, bin_id: 1 })], sources);
+    expect(out.warehouseTotal).toBe(300);
+    expect(out.warehouseFree).toBe(122);
+    expect(out.heldForThis).toBe(10);
+    expect(out.heldByOthers).toBe(168);
+    expect(out.warehouseFree! + out.heldForThis! + out.heldByOthers!).toBe(out.warehouseTotal);
+  });
+
+  it("a direct issue's own hold counts as held for this document", () => {
+    const sources = [
+      source({ bin_id: 1, batch_id: 11, available_qty: 5, issue_hold_qty: 3,
+               item_total_qty: 8, item_available_qty: 5 }),
+    ];
+    const out = group([line({ indent_item_id: undefined, issued_qty: 3, batch_id: 11, bin_id: 1 })], sources);
+    expect(out.heldForThis).toBe(3);
+    expect(out.heldByOthers).toBe(0);
   });
 
   it("says nothing about either width until the sources have been read", () => {
@@ -577,5 +605,42 @@ describe("the coded-item FEFO exception", () => {
     expect(codedSwapBatches([codedOld], [codedOld, mid]).size).toBe(0);
     const plain = [old, mid].map((row) => ({ ...row, codes_required: false }));
     expect(codedSwapBatches([plain[0]], plain).size).toBe(0);
+  });
+});
+
+
+describe("one batch at a time (2026-11-10)", () => {
+  const shelf: IssueStockSource[] = [
+    { item_id: 1, bin_id: 1, batch_id: 11, batch_no: "AUG-27", expiry_date: "2027-08-31",
+      drawable_qty: 5, total_qty: 5, available_qty: 5, reserved_qty: 0, own_reserved_qty: 0 },
+    { item_id: 1, bin_id: 2, batch_id: 12, batch_no: "SEP-27", expiry_date: "2027-09-30",
+      drawable_qty: 10, total_qty: 10, available_qty: 10, reserved_qty: 0, own_reserved_qty: 0 },
+    { item_id: 1, bin_id: 3, batch_id: null, batch_no: null, expiry_date: null,
+      drawable_qty: 7, total_qty: 7, available_qty: 7, reserved_qty: 0, own_reserved_qty: 0 },
+  ] as unknown as IssueStockSource[];
+
+  const group = (splits: { index: number; batch: number | null; issued: number }[]): IssueGroup => ({
+    plan: fefoPlan(shelf, 22),
+    splits: splits.map((s) => ({ index: s.index, issued: s.issued, line: { batch_id: s.batch } })),
+  }) as unknown as IssueGroup;
+
+  it("offers only the earliest batch, even when the ask needs more than it holds", () => {
+    expect([...batchesForPick(group([{ index: 0, batch: null, issued: 0 }]), 0)!]).toEqual([11]);
+  });
+
+  it("offers the next batch only once the earlier picks use the first one up", () => {
+    const g = group([{ index: 0, batch: 11, issued: 5 }, { index: 1, batch: null, issued: 0 }]);
+    expect([...batchesForPick(g, 1)!]).toEqual([12]);
+    // Only part of AUG-27 taken: the next pick is still offered AUG-27, not SEP-27.
+    const part = group([{ index: 0, batch: 11, issued: 3 }, { index: 1, batch: null, issued: 0 }]);
+    expect([...batchesForPick(part, 1)!]).toEqual([11]);
+  });
+
+  it("reaches stock with no batch last, after every dated batch", () => {
+    const plan = fefoPlan(shelf, 22);
+    expect(plan.map((step) => step.batches.map((b) => b.batchId ?? 0))).toEqual([[11], [12], [0]]);
+    const g = group([{ index: 0, batch: 11, issued: 5 }, { index: 1, batch: 12, issued: 10 },
+                     { index: 2, batch: null, issued: 0 }]);
+    expect([...batchesForPick(g, 2)!]).toEqual([0]);
   });
 });

@@ -1,11 +1,16 @@
-import { Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, StatusPill } from "@/shared/components";
+import {
+  Button, Can, ConfirmModal, DocumentNumberCard, ErrorBanner, Field, Input, PageHeader, StatusPill,
+} from "@/shared/components";
+import {
+  docNumberPayload, docNumberValueFrom, emptyDocNumberValue, type DocNumberLocks,
+  type DocNumberValue,
+} from "@/shared/documentNumber";
 import { ladderFor, usageLevels, usePackOptions } from "@/shared/packing";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Accordion, AccordionItem } from "@heroui/react";
 import { ArrowLeft, Info, Lock, MapPin, FileText, ChevronRight, ChevronDown, Tag } from "lucide-react";
-import { LiveStockPanel } from "../components/LiveStockPanel";
 import { SplitFamilyCard } from "../components/SplitFamilyCard";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { Lookup } from "../components/Lookup";
@@ -27,7 +32,8 @@ import {
   issueApprovalHistory,  postIssue, projectOptions,
   occupancyPreview,
   itemHandlingUnits,
-  returnableIssueOptions, rejectIssue, setIssueSerials, splitIssue, submitIssue, updateIssue,
+  previewIssueSplit, returnableIssueOptions, rejectIssue, setIssueSerials, splitIssue,
+  submitIssue, updateIssue,
   warehouseOptions,
   issueStockSources, listSerials,
   issueUnitSupply,
@@ -294,6 +300,16 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   // filled from the same answer, because it belongs to the office the goods are going
   // to — never to whoever happens to be raising the issue.
   const [destinationSac, setDestinationSac] = useState<string | null>(null);
+  // Whether the point the goods go INTO runs a vehicle and carries an SAC — an LIP
+  // only (served). False hides both rows on an indent / STR / STO issue; null keeps them.
+  const [needsVehicleSac, setNeedsVehicleSac] = useState<boolean | null>(null);
+  // Organisation, project / department and year (2026-11-09). Against an indent, STR or
+  // STO they are COPIED from it and locked (`linkedScope` names it); a direct issue
+  // selects them, opening on the card's defaults. `olderScope`: the issue or its source
+  // predates organisations, so no card — it numbers exactly as before.
+  const [scope, setScope] = useState<DocNumberValue>(emptyDocNumberValue);
+  const [linkedScope, setLinkedScope] = useState<string | null>(null);
+  const [olderScope, setOlderScope] = useState(false);
   // The employee dropdown loads one page of names, so the indent raiser this form
   // defaults to is usually not in it. Hold the name that came with the id, or the
   // field shows its placeholder over a person who IS selected.
@@ -304,6 +320,9 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   const [issuedTo, setIssuedTo] = useState<IssueEmployeeOption | null>(null);
   // The employee list follows the destination's office unless the store asks for all.
   const [everyone, setEveryone] = useState(false);
+  // The office an STR's indent is bound for, from its issue source — a NEW issue has
+  // no saved document to read it off yet.
+  const [indentOffice, setIndentOffice] = useState<number | null>(null);
   const [departmentName, setDepartmentName] = useState<string | null>(null);
   const [projectName, setProjectName] = useState<string | null>(null);
   // Some of the reserved stock was received for another project, or for none.
@@ -332,8 +351,13 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   useEffect(() => {
     if (!doc) return;
     setMode(modeOf(doc));
+    setScope(docNumberValueFrom(doc));
+    setOlderScope(!doc.organization_id);
+    setLinkedScope(doc.indent_id ? (doc.indent_no ?? "the request")
+      : doc.sto_no ? doc.sto_no : null);
     setDestination(doc.destination_office_name ?? "");
     setDestinationSac(doc.destination_office_sac ?? null);
+    setNeedsVehicleSac(doc.destination_needs_vehicle_and_sac ?? null);
     setIssuedToName(doc.issued_to_name ?? null);
     setIssuedTo(doc.issued_to_id
       ? { id: doc.issued_to_id, name: doc.issued_to_name ?? String(doc.issued_to_id) }
@@ -532,8 +556,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     [form.items],
   );
   const {
-    data: sources = [], isSuccess: sourcesReady, dataUpdatedAt: sourcesAt,
-    isFetching: sourcesFetching, refetch: refetchSources,
+    data: sources = [], isSuccess: sourcesReady,
   } = useQuery({
     queryKey: ["wh-issue-sources", form.warehouse_id, form.indent_id ?? 0,
       form.project_id ?? 0, (editing ? Number(id) : (doc?.id ?? 0)), itemIds],
@@ -813,6 +836,8 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   const [unitsOneByOne, setUnitsOneByOne] = useState(false);
   useEffect(() => { if (serialLine === null) setUnitsOneByOne(false); }, [serialLine]);
   const payload = (): IssueWrite => ({
+    // The card first: the form's own project, kept in step with it, wins below.
+    ...(direction === "OUT" && !olderScope ? docNumberPayload(scope) : {}),
     ...form,
     // `normalizeSplits` first: the splits of one ask share its requested quantity
     // between them, and the server refuses a line requesting nothing or issuing more
@@ -869,6 +894,15 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     onSuccess: (source) => {
       setDestination(source.destination_office_name ?? "");
       setDestinationSac(source.destination_office_sac ?? null);
+      setNeedsVehicleSac(source.destination_needs_vehicle_and_sac ?? null);
+      // Copied from the indent / STR and fixed; an older one numbers as before.
+      setOlderScope(!source.organization_id);
+      setLinkedScope(source.indent_no ?? "the request");
+      setScope({
+        ...docNumberValueFrom({ ...source, fiscal_year: null }),
+        projectId: source.project_id ?? "", projectName: source.project_name ?? "",
+      });
+      setIndentOffice(source.destination_office_id ?? null);
       setMixedProjects(!!source.mixed_projects);
       if (source.issued_to_id) setIssuedToName(source.issued_to_name ?? null);
       if (source.department_id) setDepartmentName((source as any).department_name ?? null);
@@ -975,6 +1009,12 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   // A point with no service area code (an MDP, a main warehouse) says "None" there.
   const pointHasNoSac = !!destPoint && !destPoint.sac;
   const direct = !form.indent_id && direction === "OUT";
+  // A warehouse or an MDP takes no vehicle and no SAC (served per destination). Only
+  // an indent / STR / STO issue hides them: a direct issue names its own destination
+  // and already says "None" for a point without them.
+  const hideVehicleSac = needsVehicleSac === false;
+  const scopeLocks: DocNumberLocks = locked ? { all: true }
+    : linkedScope ? { organisation: true, project: true, department: true } : {};
   // The issue executes a Stock Transfer Order whose destination is a real point: the
   // destination is the ORDER's, shown locked (2026-10-29). Like the server
   // (`_assert_direct_issue_parties(for_sto=)`), the order is its request, so neither
@@ -985,7 +1025,67 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   // no indent behind it, these two are the only record of it. The server refuses the
   // same (`_build_issue`); this says it on the field before the press.
   const missingDestination = direct && !stoIssue && !form.destination_warehouse_id;
-  const missingIssuedTo = direct && !stoIssue && !form.issued_to_id;
+  // A stock transfer — an STO's issue, or one serving an STR — is issued TO somebody
+  // at the destination, exactly as a direct issue is (2026-11-02): the people offered
+  // are the destination office's ("Show everyone" widens it), and naming one is
+  // required. The server refuses the submit without it (`submit_issue`).
+  const strIssue = mode === "STR" || doc?.indent_type === "STR";
+  const transferIssue = direction === "OUT" && (stoIssue || strIssue);
+  const transferOffice = destPoint?.office_id ?? doc?.destination_office_id ?? indentOffice ?? null;
+  const transferPeopleOffice = !everyone ? transferOffice : null;
+  const missingIssuedTo = !form.issued_to_id
+    && ((direct && !stoIssue) || transferIssue);
+
+  /** On a transfer the destination is fixed by the order / request, so naming the
+   *  person never re-points it — unlike a direct issue, where the person's office
+   *  answers where the goods go. */
+  const chooseTransferPerson = (person: IssueEmployeeOption | null) => {
+    setIssuedTo(person);
+    setIssuedToName(person?.name ?? null);
+    set("issued_to_id", person?.id ?? null);
+  };
+
+  const transferDestinationName = doc?.sto_to_warehouse_name ?? doc?.destination_warehouse_name
+    ?? destPoint?.name ?? destination ?? null;
+
+  const transferPicker = (
+    <SearchPicker<IssueEmployeeOption>
+      label="Issued to"
+      required
+      error={touched && missingIssuedTo
+        ? "Pick who carries or receives this transfer — a stock transfer names a person." : null}
+      hint={transferPeopleOffice
+        ? "People at the destination — who carries or receives the goods."
+        : "Search every employee by name, code, office or department."}
+      placeholder="Search name, employee or position code"
+      value={issuedTo ? personRow(issuedTo) : (form.issued_to_id
+        ? { id: form.issued_to_id, title: issuedToName ?? String(form.issued_to_id) }
+        : null)}
+      onChange={chooseTransferPerson}
+      queryKey={["issue-employees", transferPeopleOffice]}
+      load={(q) => searchIssueEmployees(q, transferPeopleOffice)}
+      toRow={personRow}
+      emptyText={transferPeopleOffice ? "Nobody is recorded at the destination's office." : "No active employees."}
+      filterNote={transferOffice ? (everyone ? (
+        <span>
+          Showing everyone.{" "}
+          <button type="button" className="font-semibold text-brand hover:underline"
+                  onClick={() => setEveryone(false)}>
+            Only people at the destination
+          </button>
+        </span>
+      ) : (
+        <span>
+          Showing people at <b className="text-ink">{transferDestinationName ?? "the destination"}</b>.{" "}
+          <button type="button" className="font-semibold text-brand hover:underline"
+                  onClick={() => setEveryone(true)}>
+            Show everyone
+          </button>
+        </span>
+      )) : undefined}
+      disabled={locked}
+    />
+  );
 
   // A new issue seeded with an indent from elsewhere (a fulfilment pick, a deep link)
   // is an indent issue, whichever tile was showing.
@@ -998,6 +1098,9 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   const chooseMode = (next: IssueMode) => {
     if (next === mode) return;
     setMode(next);
+    setScope(emptyDocNumberValue());
+    setLinkedScope(null);
+    setOlderScope(false);
     setPickedSto(null);
     setDestPoint(null);
     setDestination("");
@@ -1074,6 +1177,14 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   });
 
   const [splitResult, setSplitResult] = useState<IssueSplitResult | null>(null);
+  // The floor plan, read the moment the confirm opens: which floor gets what, from the
+  // lots this issue already picked. Nothing is written until Confirm.
+  const splitPreview = useQuery({
+    queryKey: ["wh-issue-split-preview", id],
+    queryFn: () => previewIssueSplit(Number(id)),
+    enabled: confirming === "split" && editing,
+    staleTime: 0,
+  });
   const split = useMutation({
     mutationFn: () => splitIssue(Number(id)),
     onSuccess: (result) => {
@@ -1343,7 +1454,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
               </Can>
             )}
             {editing && doc?.status === "DRAFT" && (
-              <Can do="issue.create">
+              <Can do="issue.submit">
                 <Button
                   className={TONE_SUBMIT}
                   onClick={() => setConfirming("submit")}
@@ -1478,7 +1589,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
       {touched && !form.warehouse_id && <ErrorBanner error="Pick the issuing warehouse." />}
       {touched && form.items.length === 0 && <ErrorBanner error="Add at least one line." />}
       {touched && (missingDestination || missingIssuedTo) && (
-        <ErrorBanner error={`A direct issue needs ${[
+        <ErrorBanner error={`${transferIssue ? "A stock transfer" : "A direct issue"} needs ${[
           missingDestination && "a destination", missingIssuedTo && "the person it is issued to",
         ].filter(Boolean).join(" and ")} — pick ${missingDestination && missingIssuedTo ? "them" : "it"} under Issue details.`} />
       )}
@@ -1498,12 +1609,17 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         <MetaCard title="Document">
           <MetaRow label="Number" value={<span className="font-mono">{doc.issue_no}</span>} />
           <MetaRow label="Status" value={<StatusPill status={doc.status} />} />
-          <MetaRow
-            label="Currently with"
-            value={doc.currently_with
-              ? `${doc.currently_with}${awaitingIssue ? " — to issue from stock" : ""}`
-              : "—"}
-          />
+          {/* Only while the issue is still waiting on somebody's decision. Once it is
+            * approved or issued the row said nothing useful ("—", or the approver who
+            * had already signed). */}
+          {(doc.status === "DRAFT" || doc.status === "PENDING_APPROVAL") && (
+            <MetaRow
+              label="Currently with"
+              value={doc.currently_with
+                ? `${doc.currently_with}${awaitingIssue ? " — to issue from stock" : ""}`
+                : "—"}
+            />
+          )}
           <MetaRow label="Stock" value={doc.is_stock_posted ? `Posted ${fmtDateTime(doc.posted_at)}` : "Not posted"} />
           {doc.sto_no && !doc.indent_id ? (
             <MetaRow label="Against STO" value={<span className="font-mono">{doc.sto_no}</span>} />
@@ -1522,7 +1638,10 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
             <MetaRow label="Submitted by"
                      value={doc.submitted_by_name || doc.created_by_name || "—"} />
           )}
-          <MetaRow label="Acknowledged by" value={doc.acknowledged_by_name || "—"} />
+          {/* Only once the receiver has actually acknowledged it. */}
+          {doc.acknowledged_by_name && (
+            <MetaRow label="Acknowledged by" value={doc.acknowledged_by_name} />
+          )}
           {doc.parent_issue_id && (
             <MetaRow
               label="Split of"
@@ -1551,6 +1670,26 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
             <MetaRow label="Reverses" value={<span className="font-mono">{doc.original_issue_no}</span>} />
           )}
         </MetaCard>
+      )}
+
+      {direction === "OUT" && !olderScope && (linkedScope || !form.indent_id) && (
+        <div className="mb-5">
+          <DocumentNumberCard
+            docType="wh_issue" value={scope} exclusive
+            ready={!editing && !linkedScope}
+            locks={scopeLocks}
+            source={linkedScope ? { label: linkedScope } : null}
+            savedNumber={editing ? doc?.issue_no ?? null : null}
+            onChange={(patch) => {
+              setScope((current) => ({ ...current, ...patch }));
+              // A direct issue's project IS the form's project: keep the two in step.
+              if (!linkedScope && "projectId" in patch) {
+                set("project_id", patch.projectId === "" ? null : patch.projectId ?? null);
+                setProjectName(null);
+              }
+            }}
+          />
+        </div>
       )}
 
       <Section title={`${direction === "OUT" ? "Issue" : "Return"} details`}>
@@ -1691,6 +1830,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                 <LockedDestination name={doc?.sto_to_warehouse_name ?? doc?.destination_warehouse_name}
                                    stoNo={doc!.sto_no!} />
               </div>
+              {hideVehicleSac ? null : (<>
               <Field label="Service area code (SAC)" hint="Of the destination point.">
                 <Input value={destinationSac ?? doc?.destination_office_sac ?? "None"} disabled />
               </Field>
@@ -1698,22 +1838,8 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                 <Input value={form.vehicle_number ?? ""} disabled={locked}
                        onChange={(e) => set("vehicle_number", e.target.value)} placeholder="Vehicle number" />
               </Field>
-              <div className="sm:col-span-2">
-                <SearchPicker<IssueEmployeeOption>
-                  label="Issued to"
-                  hint="Optional — the order is the request. Name who carries or receives it."
-                  placeholder="Search name, employee or position code"
-                  value={issuedTo ? personRow(issuedTo) : (form.issued_to_id
-                    ? { id: form.issued_to_id, title: issuedToName ?? String(form.issued_to_id) }
-                    : null)}
-                  onChange={chooseEmployee}
-                  queryKey={["issue-employees", null]}
-                  load={(q) => searchIssueEmployees(q, null)}
-                  toRow={personRow}
-                  emptyText="No active employees."
-                  disabled={locked}
-                />
-              </div>
+              </>)}
+              <div className="sm:col-span-2">{transferPicker}</div>
             </>
           ) : direct ? (
             <>
@@ -1806,6 +1932,9 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
             </>
           ) : (
             <>
+          {transferIssue ? (
+            <div className="sm:col-span-2">{transferPicker}</div>
+          ) : (
           <Field label="Issued to">
             <Lookup name="employees" load={employeeOptions} value={form.issued_to_id ?? ""} isDisabled={locked}
                     // The list is the first page of employees, so a person outside it
@@ -1822,22 +1951,27 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                       else if (!form.indent_id) { setDestination(""); setDestinationSac(null); }
                     }} placeholder="Person" />
           </Field>
+          )}
+          {!hideVehicleSac && (
           <Field label="Vehicle">
             <Input value={form.vehicle_number ?? ""} disabled={locked}
                    onChange={(e) => set("vehicle_number", e.target.value)} placeholder="Vehicle number" />
           </Field>
+          )}
           <Field label="Destination" hint="Office of the issued-to employee — from the indent when one is picked, else from the person.">
             <Input value={destination || "—"} disabled />
           </Field>
           {/* Read-only like Destination above it, and filled from the same answer: the
               SAC belongs to the office receiving the goods, so it follows the indent
               when one is picked and the issued-to person otherwise. */}
+          {!hideVehicleSac && (
           <Field label="Service area code (SAC)" hint="Of the destination office — from the indent when one is picked, else from the person.">
             <Input
               value={destinationSac ?? (destination ? "No service area code for this office" : "—")}
               disabled
             />
           </Field>
+          )}
             </>
           )}
         </div>
@@ -1867,10 +2001,6 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         )}
 
 
-        {direction === "OUT" && !doc?.is_stock_posted && !!form.warehouse_id && (
-          <LiveStockPanel lines={form.items} sources={sources} updatedAt={sourcesAt}
-                          fetching={sourcesFetching} onRefresh={() => void refetchSources()} />
-        )}
 
         {/* A direct issue has no allocation behind it, so it holds its own stock. */}
         {direction === "OUT" && !form.indent_id && !doc?.is_stock_posted
@@ -2276,17 +2406,59 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
       <ConfirmModal
         isOpen={confirming === "split"}
         title="Split this issue across the floors?"
-        message={"One issue is created per floor that is holding stock for these items, "
-          + "each for the quantity that floor actually has, numbered off this one — "
-          + `${doc?.issue_no ?? "this issue"}-001, -002 and so on. The floor in-charges see `
-          + "their own and nobody else's. Anything no floor is holding stays unfulfilled "
-          + "and is listed for you. Nothing leaves the warehouse yet."}
+        message={"One issue per floor, each for exactly the lots this issue picked there, "
+          + `numbered off this one — ${doc?.issue_no ?? "this issue"}-001, -002 and so on. `
+          + "Nothing leaves the warehouse yet."}
         confirmLabel="Split across floors"
         busy={split.isPending}
-        error={split.error}
+        confirmDisabled={!splitPreview.data?.can_split}
+        error={split.error ?? splitPreview.error}
         onConfirm={() => { split.mutate(); setConfirming(null); }}
         onClose={() => setConfirming(null)}
-      />
+      >
+        {splitPreview.isLoading ? (
+          <p className="text-sm text-muted">Working out which floor gets what…</p>
+        ) : splitPreview.data && (
+          <div className="space-y-2">
+            {splitPreview.data.floors.map((floor) => (
+              <div key={floor.floor_location_id} className="rounded-xl border border-line bg-content2/40 p-3">
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="font-semibold text-ink">{floor.floor_location_name}</span>
+                  <span className="font-mono text-sm font-semibold text-ink">{fmtQty(Number(floor.total_qty))}</span>
+                </div>
+                {floor.in_charge_names.length > 0 && (
+                  <p className="text-xs text-muted">To {floor.in_charge_names.join(", ")}</p>
+                )}
+                <ul className="mt-1.5 space-y-0.5 text-xs text-body">
+                  {floor.lines.map((line, i) => (
+                    <li key={i} className="flex justify-between gap-2">
+                      <span className="min-w-0 truncate">
+                        {line.item_code} · {line.batch_no ?? "No batch"}{line.bin_code ? ` · ${line.bin_code}` : ""}
+                      </span>
+                      <span className="shrink-0 font-mono">{fmtQty(Number(line.qty))} {line.uom_code ?? ""}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+            {splitPreview.data.shortfall.length > 0 && (
+              <div className="rounded-xl bg-warn-bg p-3 text-xs text-warn">
+                <p className="font-semibold">Stays on this issue, not handed to any floor:</p>
+                <ul className="mt-1 space-y-0.5">
+                  {splitPreview.data.shortfall.map((row, i) => (
+                    <li key={i}>{row.item_code} — {fmtQty(Number(row.qty))}{row.reason ? ` (${row.reason})` : ""}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {!splitPreview.data.can_split && (
+              <p className="text-sm font-medium text-bad">
+                None of these picks sits on a floor, so there is nothing to hand down. Issue it from stock yourself.
+              </p>
+            )}
+          </div>
+        )}
+      </ConfirmModal>
 
       <ConfirmModal
         isOpen={confirming === "post"}

@@ -598,6 +598,26 @@ export interface IssueSplitResult {
 export const splitIssue = (id: number) =>
   post<IssueSplitResult>(`${BASE}/issues/${id}/split`);
 
+/** Where a split WOULD send the work, per floor — nothing is written (2026-11-10). */
+export interface IssueSplitPreview {
+  issue_id: number;
+  issue_no: string;
+  can_split: boolean;
+  floors: {
+    floor_location_id: number;
+    floor_location_name: string;
+    total_qty: string;
+    in_charge_names: string[];
+    lines: { item_code?: string | null; item_name?: string | null; uom_code?: string | null;
+             batch_no?: string | null; expiry_date?: string | null; bin_code?: string | null;
+             qty: string }[];
+  }[];
+  shortfall: { item_code?: string | null; item_name?: string | null; qty: string; reason?: string }[];
+}
+
+export const previewIssueSplit = (id: number) =>
+  get<IssueSplitPreview>(`${BASE}/issues/${id}/split-preview`);
+
 /** Names the physical units after approval — the rest of the issue stays frozen. */
 export const setIssueSerials = (
   id: number,
@@ -1120,6 +1140,12 @@ export const getIndentIssueSource = (indent_id: number, warehouse_id: number) =>
     destination_office_id?: number | null;
     destination_office_name?: string | null;
     destination_office_sac?: string | null;
+    destination_needs_vehicle_and_sac?: boolean | null;
+    project_name?: string | null;
+    organization_id?: number | null;
+    organization_name?: string | null;
+    org_department_id?: number | null;
+    org_department_name?: string | null;
     items: IssueWrite["items"];
   }>(`${BASE}/options/indent-issue-source`, { indent_id, warehouse_id });
 

@@ -1,11 +1,11 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Card, ErrorBanner, Field, FormActions, Input, PageHeader, ResponsiveList, Select, StatusPill, useToast, type Column } from "@/shared/components";
+import { Card, DocumentNumberCard, ErrorBanner, Field, FormActions, Input, PageHeader, ResponsiveList, Select, StatusPill, useToast, type Column } from "@/shared/components";
 import { Button } from "../components/ActionButton";
 import { fmtDate, todayIst } from "@/shared/datetime";
 import { requisitionApi } from "../api";
-import { OrgFields, type OrgValue } from "../components/OrgFields";
+import { emptyOrgValue, OrgFields, orgPayload, type OrgValue } from "../components/OrgFields";
 import { SelectAllBar } from "../components/SelectAllBar";
 import type { MRCandidate } from "../types";
 
@@ -40,9 +40,8 @@ export function MRConsolidationPage() {
   const queryClient = useQueryClient();
 
   const [picked, setPicked] = useState<number[]>([]);
-  const [org, setOrg] = useState<OrgValue>({
-    departmentId: "", warehouseId: "", projectId: "", companyName: "",
-  });
+  const [org, setOrg] = useState<OrgValue>(emptyOrgValue());
+  const [triedOrg, setTriedOrg] = useState(false);
   const [priority, setPriority] = useState("NORMAL");
   const [requiredDate, setRequiredDate] = useState("");
   const [remarks, setRemarks] = useState("");
@@ -73,10 +72,7 @@ export function MRConsolidationPage() {
     mutationFn: () =>
       requisitionApi.createFromMrs({
         mr_ids: picked,
-        warehouse_id: org.warehouseId === "" ? null : org.warehouseId,
-        project_id: org.projectId === "" ? null : org.projectId,
-        department_id: org.departmentId === "" ? null : org.departmentId,
-        company_name: org.companyName || null,
+        ...orgPayload(org),
         required_date: requiredDate || null,
         priority,
         remarks: remarks || null,
@@ -93,6 +89,13 @@ export function MRConsolidationPage() {
   const submit = () => {
     if (!picked.length) {
       setProblem("Pick at least one material request to consolidate.");
+      return;
+    }
+    // Only the organisation is checked here: the project can come from the requests,
+    // and the server says so by name if neither they nor this form supply one.
+    if (org.organizationId === "") {
+      setTriedOrg(true);
+      setProblem("Select the organisation this requisition belongs to.");
       return;
     }
     setProblem(null);
@@ -153,6 +156,15 @@ export function MRConsolidationPage() {
       <ErrorBanner error={error ?? create.error} />
       {problem && <ErrorBanner error={problem} />}
 
+      <div className="mb-4">
+        {/* No default project: the requests supply theirs when the sheet is built, and
+            the server says so by name if neither they nor this card do. */}
+        <DocumentNumberCard
+          docType="REQUISITION" value={org} ready defaultProject={false} showInvalid={triedOrg}
+          onChange={(patch) => setOrg((current) => ({ ...current, ...patch }))}
+        />
+      </div>
+
       <Card className="mb-4 space-y-5 p-5">
         <p className="rounded-lg bg-surface-2 px-3 py-2 text-xs text-body">
           Lines for the same item are merged into one, and only what is still owed is
@@ -160,7 +172,8 @@ export function MRConsolidationPage() {
           already approved in Inventory — so it goes straight to RFQ.
         </p>
 
-        <OrgFields value={org} onChange={(patch) => setOrg({ ...org, ...patch })} />
+        <OrgFields value={org}
+                   onChange={(patch) => setOrg((current) => ({ ...current, ...patch }))} />
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
           <Field label="Priority">

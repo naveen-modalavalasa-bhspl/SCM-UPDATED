@@ -7,6 +7,7 @@ import {
   CombinationPicker, combinationKey, inStockOptions, pickCombination, type CombinationValue,
 } from "@/shared/combination";
 import { fmtQty, ladderFor, levelsFor, packable, usePackOptions } from "@/shared/packing";
+import { uomDecimals, useUomDecimals } from "@/shared/numberGuard";
 
 /**
  * The LINE ITEMS card — the same Item / Qty / delete row the indent form uses, and the
@@ -48,18 +49,13 @@ const NO_SILENT_STEPPING = {
 };
 
 /**
- * UoMs that cannot be split. Half a box is not a thing anybody can put on a shelf, so
- * the quantity box steps in whole units and refuses a decimal outright rather than
- * accepting 2.5 and letting the backend round it to something the returner never typed.
+ * Whole units only? Read off the UOM master's own "Allows decimal" switch (2026-11-04),
+ * the same table the save enforces — never a hardcoded list of unit names. A line with
+ * no unit yet says nothing; a unit the table does not know is whole, as the guard reads it.
  */
-const WHOLE_UNIT_UOMS = new Set([
-  "NOS", "NO", "NUM", "EA", "EACH", "PCS", "PC", "PIECE", "UNIT", "UNITS",
-  "PACK", "PKT", "PACKET", "BOX", "BOXES", "CTN", "CARTON", "BAG", "BAGS",
-  "BTL", "BOTTLE", "TUBE", "VIAL", "AMP", "STRIP", "ROLL", "SET", "PAIR", "DOZ",
-]);
-
 export function isWholeUnit(uom: string | null | undefined) {
-  return WHOLE_UNIT_UOMS.has(String(uom ?? "").trim().toUpperCase());
+  if (!uom) return false;
+  return (uomDecimals(uom) ?? 0) === 0;
 }
 
 /** What the raiser holds of an item — of one brand / variant / model when the line
@@ -97,6 +93,8 @@ export function ReturnLinesEditor({
    */
   lockedNote?: string | null;
 }) {
+  // Loads the per-UOM decimals table once and re-renders when it lands (isWholeUnit).
+  useUomDecimals(stock[0]?.uom_code ?? null);
   // Which line last tried to pick an item that was already taken. Cleared on the next
   // successful pick, so the warning does not outlive the mistake.
   const [warnedAt, setWarnedAt] = useState<number | null>(null);
@@ -253,6 +251,7 @@ export function ReturnLinesEditor({
                       <Field label={`No. of ${level.name}`}>
                         <Input
                           type="number" min="0" step="1" className={NO_SPINNER}
+                          data-decimals={0}
                           value={String(count)} disabled={disabled}
                           aria-label={`Number of ${level.name}`}
                           {...NO_SILENT_STEPPING}
@@ -285,6 +284,7 @@ export function ReturnLinesEditor({
                 <Field label={index === 0 ? "Qty" : ""}>
                   <Input
                     type="number"
+                    data-uom={holding?.uom ?? ""}
                     min="0"
                     // The shelf quantity is the ceiling: the browser's own number input
                     // then refuses the spinner past it, before any typing is validated.

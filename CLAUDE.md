@@ -111,6 +111,63 @@ A module only creates tables with its own prefix.
 Indent → PO (`indent_id`) → GRN (`po_id`) → Stock → Issue (`grn_id`/`indent_id`).
 Handoffs: `create_po_from_indent`, `create_grn_from_po`, `qc_pass → move_stock`.
 
+### Organisations: chosen once, carried forward, in the number, never NA (2026-11-05)
+
+**The directory** (`platform/org_directory`, `ORG_SYNC_URL` + `ORG_SYNC_API_KEY`) is a feed
+that is not HCM. `mst_organizations` and `mst_org_departments` are read-only copies keyed
+on the feed's id, with **no link between them**: the feed states none, and equal ids
+across the lists mean nothing. Settings > Organisation Masters has a tab for each. A bad
+answer changes nothing (`parse_feed`); a row leaving the feed goes inactive. It runs after
+every HCM sync and from Sync now. `hcm_departments` and Settings > Company are untouched
+and still serve everything outside procurement.
+
+**The rule** (`platform/doc_numbering/scope.py`): on Requisition, Consolidation, RFQ, Quotation,
+Quote Change Request, PO and Despatch Note, organisation and department/project are copied
+from the document before, or selected on this one, or the save is refused.
+`{COMPANY}` is the organisation's first 3 letters and `{PROJECT}` the project, else the
+department, through `org_scope.number_args`, the only place a number's scope is decided.
+A draft takes a new number when its selection moves; submitted, all of it is fixed; on a
+linked document the organisation is fixed from the start; one sheet cannot mix
+organisations. There is deliberately no `{DEPT}` token: a document with only a project
+would print NA in it.
+
+- **A requisition raised by MR approval** has nobody at a form, so it holds `DRAFT-<mr>-<hex>`
+  (`holding_number`) until the buyer selects the organisation, which is when it takes its
+  number, and it cannot be submitted before that.
+- **Older documents are left alone (decided).** No organisation and a real number means
+  its fields, number and rules are exactly as before, on the server (`uses_org`) and on
+  screen (`isOlderDocument`, `legacy`). Their old numbers keep their NA.
+- **A supplier cannot select.** A quotation or despatch note raised from an older RFQ or
+  PO is numbered as it always was and may read NA. Buyer-raised documents off older ones
+  do ask (the award leaves the PO to `PriceComparePage`'s dialog via `OrganisationRequired`).
+- **Outside procurement** (`next_number` with no `company`) nothing changed: GRNs, issues
+  and transfers still use Settings > Company and can read NA without a project.
+- Tests: `org_directory/tests/`, `procurement/tests/test_org_scope.py`,
+  `frontend/.../procurement/tests/orgScope.test.ts`. Migration `d8f2b4a6c1e3`.
+
+### The document number card: fields follow the series (2026-11-05)
+
+Top of a document form: `DocumentNumberCard` (`shared/components`, rules in
+`shared/documentNumber.ts`) over `platform/doc_numbering` (`GET /api/document-numbering/
+{doc_type}/card` and `/preview`). Fields, options and every part of the number are SERVED
+off `sys_doc_series`, so a pattern edit needs no screen edit. Organisation, project and
+department are asked even when a pattern does not print them (`in_number: false`), because
+the next document copies them. `DocumentScopeStrip` is the read-only version for documents
+nobody fills a card for. Rolled out module by module: **Procurement is done**; indents,
+inventory, warehouse, logistics and returns are next and still number as below.
+
+- **The year is worked out from the date.** `next_number` never reads the year on the series
+  row, which nothing updates, and which kept printing an old year after 31 March. A form may
+  pick this year or last (`selectable_fiscal_years`); a linked document never inherits the
+  year (`orgValueCarried`, `number_args(carried=True)`).
+- **What fails silently if narrowed:** a pattern with {FY} has one counter per year
+  (`scope_key_for`, `...|FY:2026-27`), and a yearly reset is skipped on it. Without both,
+  picking last year repeats a number. `d9e3b5c7a1f4` moved existing counters under their year.
+- **Defaults** (`openingValues`) never overwrite what a source supplied: organisation from
+  `ORG_DEFAULT_NAME` (`.env`), else the first with a "please check" tag; project from HCM,
+  then the browser's last choice, then the first with the tag; year today's.
+- A form passes `ready` in the same update that copies its source, or the defaults run first.
+
 ### Fulfilment: one desk, and a signed allocation is terminal (2026-08-21)
 
 **The Fulfilment Queue and Allocation Approvals are ONE screen** — the **Fulfilment
@@ -172,6 +229,56 @@ check; and `create_mr_from_shortfall` deduplicates per indent **line**, not per 
 — per indent was enough while a shortage was raised once, and rounds of serving mean a
 later shortage on the same indent is a different shortage that was being dropped.
 
+### An STR names its SOURCE; each approver's scope decides the act (2026-11-04)
+
+- **Source is required on an STR** (`ind_indents.source_warehouse_id` + name/code
+  snapshot, migration `c7e1a5f3d9b4`): refused on create, on edit and on submit
+  without one (`indents._resolve_str_source`). The list is SERVED,
+  `GET /api/indents/options/str-sources` → `locations.same_rank_points`: the points of
+  posts at the SAME HCM RANK (`hcm_positions.role_id`) on the SAME TIER as the
+  raiser's own point, network-wide, less his own — no role name in code. The tier is
+  needed beside the rank: one rank (Store Keeper) staffs LIPs, MDPs and the main
+  warehouse. "Which point is mine" reads ANY link (`own_linked_points`): an OE / DM /
+  RM is linked to the branch MDP under a non-stocking section, so the shelf rule
+  (`held_location_ids`) would say they hold nothing. The server does NOT re-check the
+  rank on save (decided).
+- **Approval** (`approvals/fulfilment.py`, `StrSourcePanel`, wording in `strDecision.ts`):
+  `GET .../str-source` says whether the source is in the approver's scope
+  (`location_ids_for_user`), the frozen ladder (`levels`, `next_level`, `_is_last_level`),
+  what is already allocated and which of his points could serve it. In scope → **Approve
+  & allocate from source** (`POST .../str-allocate`, through `issue_from_my_stock`,
+  capped by what the point has free; the rest travels on). Outside → **Approve and forward
+  to next level** (reason required). Either way, where the source cannot serve it → **Change
+  source to my point** (reason required, recorded in `ind_str_source_changes`, shown on the
+  route card), then allocate or only forward (`POST .../str-forward`). The STR's "Serve
+  from own stock" button is hidden — one door.
+- **Served in full ends the approval; only a remainder climbs (decided 2026-11-05).**
+  `approve_indent` ends the ladder when nothing is owed. What fails SILENTLY if narrowed:
+  a signed allocation RESERVES but drafts no issue while the STR is in approval
+  (`indents._fulfilment_drafts`), `_settle_indent_approval` leaves the ending to that press,
+  and the end hands over every signed allocation TOGETHER (`_finish_str_approval` →
+  `_draft_str_issues` — the warehouse drafts `allocated − issued` per point, so one at a
+  time the second of two from one point drafts nothing). A rejection or a return
+  withdraws them and frees the stock (`allocations.withdraw_for_indent`). An STR's
+  allocation states `requested_qty` = what it gives, or the remainder would raise a material
+  request before the levels above were asked.
+- **The approval screen edits what is LEFT and signs the WHOLE line** (`signedTotal`).
+  Sending the field alone turned "10, with 6 served" into an approved 4, read as nothing
+  owed, and the 4 still owed vanished. This was true of every indent type. A line may not
+  be signed below what is allocated (`assert_str_approvable`).
+- **Last level, source outside scope, something still owed → refused**
+  (`assert_str_approvable`, decided 2026-11-05; replaces "approved to the source's desk").
+  "Last" is the configured ladder running out, never HCM. The approver changes the source,
+  returns or rejects, and the screen says an admin adds the level on Settings > Approvals
+  Config. A source IN scope still goes to the Fulfilment Desk, where
+  `list_indents(to_serve=True)` shows an approved STR only to logins that can draw from
+  its source (`drawable_warehouse_ids`; None = unrestricted still sees all). The
+  allocation proposal carries `str_source_warehouse_id` and every line opens on it.
+- **Vehicle / SAC** follow the delivery point's TIER, served as `needs_vehicle_and_sac`
+  (bottom rung only) on the indent detail and on `/api/stocking-points/mine` — the form
+  no longer compares the point type to "LIP".
+- Tests: `indents/tests/test_str_source.py`, `approvals/tests/strSourcePanel.test.tsx`.
+
 ### Stock transfers: siblings, a frozen destination, one receiving desk (2026-10-29)
 
 - **A direct STO goes between SIBLINGS.** `whs_warehouses` has no parent column; a
@@ -229,6 +336,29 @@ later shortage on the same indent is a different shortage that was being dropped
   `WriteOffPicker` + pure `auditPick.ts` (whole packs first in "Suggest"; serials never
   auto-picked). Tests: `warehouse/tests/test_audit_writeoff.py`, `inventory/tests/
   auditPick.test.ts`.
+
+### An asked-for quantity may come DOWN, never go up (2026-11-03)
+
+`app/shared/ceiling.py` (`assert_not_raised`, `ceiling_of`). Raising is new demand — a
+new document with its own approval, never a number changed under a signature.
+- **Material request**: `inv_material_request_items.requested_quantity` is set when the
+  MR is raised (both doors submit at once). `revise_mr_items` (approver) and
+  `correct_mr` (raiser after send-back) may lower or remove, never raise, and a
+  correction may not add an item the MR never asked for or swap a line's item.
+- **Requisition**: `pro_requisition_items.requested_quantity` — set at creation when
+  drawn from MRs (`lock=True`), at SUBMIT for a hand-made one (free while DRAFT).
+  `update_requisition` rewrites lines, so ceilings are carried by item + combination
+  (`_req_line_key`); `submit_requisition` reads lines off the table, not `req.items`
+  (stale after an edit).
+- **Quotation amendment**: buyer's `propose_quote_change` and supplier's counter in
+  `accept_quote_change` are capped at the RFQ line quantity (`_rfq_asked`).
+- **Every change is recorded**: `inv_mr_qty_changes` / `pro_requisition_qty_changes`
+  (from, to, ceiling, stage, who, post, why), served at `/quantity-changes` and drawn
+  by the shared `QuantityChanges` card. Screens state the cap before Save (`LinePicker`
+  `original_quantity` + `overCap`, MR detail/correction, quote change modal, supplier
+  counter). Migrations `a7c9e1b3d5f8`, `b9d1f3a5c7e0`. Tests: `shared/tests/
+  test_ceiling.py`, `inventory/tests/test_mr_quantity_ceiling.py`, `procurement/tests/
+  test_quantity_ceiling.py`.
 
 ### An order is received ONCE, and what it still owes is READ (2026-09-08)
 
@@ -835,6 +965,15 @@ items, package levels, codes, Barcode/QR/both, Code128/39, thermal-roll and A4
 presets or a custom size, fields, text size and copies; settings and named presets
 are per USER in the browser (`docLabels.ts`) — no table, by decision. `LabelSticker`
 is the one sticker drawing, used by Box labels too.
+
+**2026-11-02 reversals**: issue/receipt labels now print SERIAL and IMEI units too, but
+only for an item tracked by them (`issue_labels._unit_rows`; an untracked unit with no
+asset/consumable code is still skipped), each row carrying `serial_number` + `imei`.
+The QR carries the details AS TEXT by default (`docLabels.qrDetailsText`, setting `qr`
+DETAILS | LINK; Box labels has the same switch) so any phone camera shows them; the
+signed `/c/<token>` link is the opt-in. Box labels is a cascade — warehouse → item →
+batch → location (`GET /box-labels/facets`; `list_labels` takes `item_id`, `batch_id`,
+`bin_id`, read off the PACK, 0 = none).
 
 **Mixed Issue levels stay** (decided 2026-10-28): a line may hold 4 box codes + 5 strip
 codes; codes are NOT forced to the smallest level. What changed is how they are SHOWN:

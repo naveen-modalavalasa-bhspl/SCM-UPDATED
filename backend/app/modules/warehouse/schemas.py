@@ -7,6 +7,7 @@ status are decided by the service, and accepting them from the client would let 
 caller invent its own document number or mark its own issue approved.
 """
 from app.shared.packing import PACK_ENTRIES, PackEntryIn, describe as describe_packs
+from app.shared.org_scope_schemas import OrgScopeIn, OrgScopeOut
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
@@ -1708,7 +1709,7 @@ class IssueItemWrite(CombinationIn):
     break_bulk: bool = False
 
 
-class IssueWrite(BaseModel):
+class IssueWrite(OrgScopeIn):
     issue_type: IssueType = IssueType.DIRECT
     issue_date: date
     indent_id: int | None = None
@@ -1963,10 +1964,13 @@ class BoxLabelPrintedIn(BaseModel):
 class DocLabelRow(BaseModel):
     """One sticker for a posted issue or an acknowledged receipt (2026-10-28):
     a PACK (carton, box, strip — parent first, `depth` under it) or a UNIT (an asset /
-    consumable code). Never a serial or an IMEI: the maker's label is on the goods."""
+    consumable code, or — for a serial / IMEI tracked item — its serial or IMEI,
+    2026-11-02)."""
     key: str
     kind: str
     code: str
+    serial_number: str | None = None
+    imei: str | None = None
     line_id: int
     item_id: int
     item_code: str | None = None
@@ -2087,7 +2091,7 @@ class TrackingTypeRead(_Read):
     hint: str
 
 
-class IssueRead(_Read):
+class IssueRead(OrgScopeOut, _Read):
     id: int
     issue_no: str
     issue_type: str
@@ -2114,6 +2118,9 @@ class IssueRead(_Read):
     destination_warehouse_name: str | None = None
     #: MAIN / MDP / LIP of the chosen destination point, for its badge.
     destination_warehouse_type: str | None = None
+    #: Whether the destination runs a vehicle and carries an SAC — an LIP only. None
+    #: when the point is unknown (the screen then keeps both rows).
+    destination_needs_vehicle_and_sac: bool | None = None
     #: The Stock Transfer Order this issue executes (2026-10-29). `sto_kind` is DIRECT
     #: for an order raised on its own, STR for the one an STR's allocation produced.
     #: The destination of such an issue is the order's and is frozen on it.
@@ -2137,6 +2144,9 @@ class IssueRead(_Read):
     # Who holds that floor — the floor in-charge(s) this piece was handed to.
     floor_in_charge_names: list[str] = []
     status: str
+    #: What the status pill says. Same as `status` except a split parent CLOSED after
+    #: its floor issues posted, which reads ISSUED (`_decorate_indent_types`).
+    display_status: str | None = None
     total_items: int
     total_qty: Decimal
     total_value: Decimal
@@ -4229,7 +4239,7 @@ class ItemOption(Option):
     location_count: int | None = None
 
 
-class IndentIssueSource(BaseModel):
+class IndentIssueSource(OrgScopeOut):
     indent_id: int
     indent_no: str
     warehouse_id: int
@@ -4249,6 +4259,8 @@ class IndentIssueSource(BaseModel):
     destination_office_id: int | None = None
     destination_office_name: str | None = None
     destination_office_sac: str | None = None
+    #: Only an LIP runs a vehicle and carries an SAC; None when no point resolves.
+    destination_needs_vehicle_and_sac: bool | None = None
     items: list[IssueItemWrite] = []
 
 

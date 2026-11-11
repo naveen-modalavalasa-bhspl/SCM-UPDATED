@@ -1,3 +1,4 @@
+import type { OrgScope } from "./orgScope";
 import type { CombinationValue } from "@/shared/combination";
 import type { PackEntry, PackEntryIn, PackHierarchy } from "@/shared/packing";
 export interface POItem extends CombinationValue {
@@ -60,7 +61,7 @@ export interface POMilestone {
   id: number; seq: number; stage: string; percent: number; due_days: number;
 }
 
-export interface PurchaseOrder {
+export interface PurchaseOrder extends OrgScope {
   id: number;
   po_no: string;
   po_date?: string | null;
@@ -89,6 +90,9 @@ export interface PurchaseOrder {
   facility_name?: string | null;
   project_id?: number | null;
   project_name?: string | null;
+  /** Booked to a department instead of a project (exactly one on a hand-raised order). */
+  department_id?: number | null;
+  department_name?: string | null;
   status: string;
   sub_total: number;
   discount_amount: number;
@@ -131,6 +135,9 @@ export interface PurchaseOrder {
   vendor_status?: string | null;
   vendor_responded_at?: string | null;
   vendor_response_note?: string | null;
+  /** enums.DespatchStatus, derived from the vendor's submitted despatch notes:
+   *  PARTIALLY_DISPATCHED | DISPATCHED, null while nothing has been sent. */
+  despatch_status?: string | null;
   /** Server-calculated: accepted and not yet despatched. */
   amendment_allowed?: boolean;
   /** 0 is the original order; every amendment adds one. */
@@ -183,7 +190,7 @@ export interface POApprovalQtyLine {
   quantity: number;
 }
 
-export interface POListRow {
+export interface POListRow extends OrgScope {
   id: number;
   po_no: string;
   vendor_name?: string | null;
@@ -191,6 +198,9 @@ export interface POListRow {
   status: string;
   /** Two orders can both read SENT_TO_VENDOR while only one has been agreed. */
   vendor_status?: string | null;
+  /** enums.DespatchStatus, derived from the vendor's submitted despatch notes:
+   *  PARTIALLY_DISPATCHED | DISPATCHED, null while nothing has been sent. */
+  despatch_status?: string | null;
   revision_no?: number;
   total_amount: number;
   /** Who the approval engine is waiting on RIGHT NOW, read live by the server.
@@ -208,7 +218,12 @@ export interface POListRow {
  *  raising one, so a term agreed with a vendor prints the same whichever route the
  *  order came in by. Discount and freight are document money, never per line. */
 export interface POHeader {
+  fiscal_year?: string | null;
+  organization_id?: number | null;
+  org_department_id?: number | null;
   project_id?: number | null;
+  /** The alternative to a project — an order is booked to ONE of the two. */
+  department_id?: number | null;
   remarks?: string | null;
   payment_terms?: string | null;
   /** The payment-term master; picking one freezes its milestones on the order. */
@@ -275,6 +290,9 @@ export interface ReqItem extends CombinationValue {
   item_name?: string | null;
   uom_code?: string | null;
   quantity: number;
+  /** The ceiling (2026-11-03): null on a hand-made draft, which its author may still
+   *  change freely; once set the line may be lowered, never raised. */
+  requested_quantity?: number | null;
   ordered_qty: number;
   estimated_rate: number;
   estimated_amount: number;
@@ -283,7 +301,7 @@ export interface ReqItem extends CombinationValue {
   indent_no?: string | null;
 }
 
-export interface ReqListRow {
+export interface ReqListRow extends OrgScope {
   id: number;
   req_no: string;
   req_date?: string | null;
@@ -347,7 +365,7 @@ export interface ConsolidationSource {
   estimated_value: number;
 }
 
-export interface ConsolidationListRow {
+export interface ConsolidationListRow extends OrgScope {
   id: number;
   cons_no: string;
   cons_date?: string | null;
@@ -383,6 +401,9 @@ export interface Consolidation extends ConsolidationListRow {
 }
 
 export interface ConsolidationCreate {
+  organization_id?: number | null;
+  org_department_id?: number | null;
+  fiscal_year?: string | null;
   requisition_ids: number[];
   title?: string | null;
   period_label?: string | null;
@@ -436,6 +457,8 @@ export interface MRCandidate {
 }
 
 export interface ReqFromMRs {
+  organization_id?: number | null;
+  org_department_id?: number | null;
   mr_ids: number[];
   warehouse_id?: number | null;
   project_id?: number | null;
@@ -447,6 +470,8 @@ export interface ReqFromMRs {
 }
 
 export interface ReqCreate {
+  organization_id?: number | null;
+  org_department_id?: number | null;
   warehouse_id?: number | null;
   project_id?: number | null;
   department_id?: number | null;
@@ -497,7 +522,7 @@ export interface RFQVendor {
   live_allocated_quantities?: Record<string, number> | null;
 }
 
-export interface RFQListRow {
+export interface RFQListRow extends OrgScope {
   id: number;
   rfq_no: string;
   title: string | null;
@@ -591,6 +616,8 @@ export interface RFQ extends RFQListRow {
 }
 
 export interface RFQCreate {
+  organization_id?: number | null;
+  org_department_id?: number | null;
   title?: string | null;
   requisition_id?: number | null;
   consolidation_id?: number | null;
@@ -669,7 +696,8 @@ export interface QuoteItem extends CombinationValue {
   required_date?: string | null;
 }
 
-export interface QuoteListRow {
+export interface QuoteListRow extends OrgScope {
+  project_name?: string | null;
   id: number;
   quotation_no: string;
   rfq_id: number;
@@ -742,7 +770,7 @@ export interface QuoteChangeLine {
 
 /** A Change Request: the buyer's ask on a supplier's quotation. Status words the
  *  desk reads: Awaiting supplier / Accepted / Declined / Withdrawn / Superseded. */
-export interface QuoteChangeRequest {
+export interface QuoteChangeRequest extends OrgScope {
   id: number;
   quotation_id: number;
   rfq_id: number;
@@ -966,7 +994,8 @@ export interface DespatchItem extends CombinationValue {
   pack_change_note?: string | null;
 }
 
-export interface DespatchNote {
+export interface DespatchNote extends OrgScope {
+  project_name?: string | null;
   id: number;
   dn_no: string;
   dn_date?: string | null;
@@ -1036,7 +1065,7 @@ export interface VendorPOLine extends CombinationValue {
   pack_options?: PackHierarchy[];
 }
 
-export interface VendorPO {
+export interface VendorPO extends OrgScope {
   id: number;
   po_no: string;
   po_date?: string | null;
@@ -1049,6 +1078,9 @@ export interface VendorPO {
   vendor_status?: string | null;
   vendor_responded_at?: string | null;
   vendor_response_note?: string | null;
+  /** enums.DespatchStatus, derived from the vendor's submitted despatch notes:
+   *  PARTIALLY_DISPATCHED | DISPATCHED, null while nothing has been sent. */
+  despatch_status?: string | null;
   revision_no?: number;
   amendment_reason?: string | null;
   /** The order was issued to this vendor once and has since been amended, so it
@@ -1065,7 +1097,7 @@ export interface VendorPO {
   despatch_notes: DespatchNote[];
 }
 
-export interface VendorPOListRow {
+export interface VendorPOListRow extends OrgScope {
   id: number;
   po_no: string;
   vendor_status?: string | null;
@@ -1075,6 +1107,9 @@ export interface VendorPOListRow {
   status: string;
   total_amount: number;
   despatch_note_count: number;
+  /** enums.DespatchStatus, derived from the vendor's submitted despatch notes:
+   *  PARTIALLY_DISPATCHED | DISPATCHED, null while nothing has been sent. */
+  despatch_status?: string | null;
   under_revision?: boolean;
 }
 

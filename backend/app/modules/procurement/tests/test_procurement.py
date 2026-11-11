@@ -21,7 +21,7 @@ from app.shared.enums import (
     RequisitionStatus,
 )
 from app.shared.models.base import utcnow
-from app.shared.models.master import Item, Uom, Vendor
+from app.shared.models.master import Item, OrgDepartment, Organization, Uom, Vendor
 
 
 async def _world(db, indent_status=IndentStatus.APPROVED.value):
@@ -32,7 +32,11 @@ async def _world(db, indent_status=IndentStatus.APPROVED.value):
     vendor = Vendor(code="V-1", name="Acme", gstin="GST1", is_active=True)
     creator = HcmEmployee(id=4, full_name="Proc User", emp_code="E4", is_active=True, synced_at=utcnow())
     approver = HcmEmployee(id=5, full_name="PO Head", emp_code="E5", is_active=True, synced_at=utcnow())
-    db.add_all([item, vendor, creator, approver])
+    db.add_all([item, vendor, creator, approver,
+                Organization(id=2, code="B-01", name="BAVYA", is_active=True,
+                             synced_at=utcnow()),
+                OrgDepartment(id=2, code="HR-01", name="HUMAN RESOURCES", is_active=True,
+                              synced_at=utcnow())])
     await db.flush()
 
     indent = Indent(indent_no="IND/2026/0001", indent_date=utcnow().date(),
@@ -55,7 +59,8 @@ async def _world(db, indent_status=IndentStatus.APPROVED.value):
 
 
 def _po_data(vendor_id, item_id, indent_item_id):
-    return POCreate(vendor_id=vendor_id,
+    return POCreate(vendor_id=vendor_id, organization_id=2, org_department_id=2,
+                    billing_address="Plant", shipping_address="Store",
                     lines=[POLineIn(item_id=item_id, indent_item_id=indent_item_id,
                                     quantity=10, rate=100, tax_percent=18)])
 
@@ -215,6 +220,8 @@ async def test_split_award_creates_quantity_limited_purchase_orders(db):
     await db.flush()
 
     rfq = RFQ(
+        organization_id=2, organization_code="B-01", organization_name="BAVYA",
+        org_department_id=2, org_department_name="HUMAN RESOURCES",
         rfq_no="RFQ/2026/SPLIT", status=RFQStatus.PUBLISHED.value,
         total_items=1, vendor_count=2,
         created_by_id=creator.id, created_by_name=creator.full_name,
@@ -317,6 +324,8 @@ async def test_split_award_auto_generates_pos_for_each_supplier(db):
 
     rfq = RFQ(
         rfq_no="RFQ/2026/AUTO_PO", status=RFQStatus.PUBLISHED.value,
+        organization_id=2, organization_code="B-01", organization_name="BAVYA",
+        org_department_id=2, org_department_name="HUMAN RESOURCES",
         total_items=1, vendor_count=2, is_price_frozen=True,
         created_by_id=creator.id, created_by_name=creator.full_name,
     )
@@ -417,13 +426,34 @@ async def test_copy_po_blanks_blacklisted_vendor_and_records_source_on_save(db, 
     await db.commit()
     new = await service.create_po(db, POCreate(
         vendor_id=other.id, billing_address="Plant", shipping_address="Store",
-        copied_from_po_id=po.id,
+        copied_from_po_id=po.id, organization_id=2, org_department_id=2,
         lines=[POLineIn(**{k: copy["lines"][0][k]
                            for k in ("item_id", "quantity", "rate", "tax_percent")})],
     ), creator)
     assert new.po_no != po.po_no and new.status == POStatus.DRAFT.value
     assert new.copied_from_po_id == po.id and new.copied_from_po_no == po.po_no
     assert new.indent_id is None
+    assert new.org_department_name == "HUMAN RESOURCES" and new.project_id is None
+
+
+async def test_direct_po_needs_exactly_one_of_project_or_department(db):
+    """2026-11-04: a hand-raised order is booked to a project OR a department."""
+    from app.core.exceptions import ValidationError
+
+    item, vendor, _indent, _ind_item, creator, _ = await _world(db)
+
+    def order(**booking):
+        return POCreate(vendor_id=vendor.id, organization_id=2, billing_address="Plant",
+                        shipping_address="Store", **booking,
+                        lines=[POLineIn(item_id=item.id, quantity=1, rate=10,
+                                        tax_percent=0)])
+
+    with pytest.raises(ValidationError):
+        await service.create_po(db, order(), creator)
+    po = await service.create_po(db, order(org_department_id=2), creator)
+    assert po.org_department_name == "HUMAN RESOURCES"
+    # The department fills the series' project slot — never NA.
+    assert "/NA/" not in po.po_no
 
 
 async def test_edit_draft_po_rewrites_lines_vendor_and_refuses_past_draft(db):

@@ -131,7 +131,6 @@ const PODetailPage = lazy(() => import("@/modules/procurement/pages/PODetailPage
 const POFormPage = lazy(() => import("@/modules/procurement/pages/POFormPage").then((m) => ({ default: m.POFormPage })));
 const POListPage = lazy(() => import("@/modules/procurement/pages/POListPage").then((m) => ({ default: m.POListPage })));
 const POPrintPage = lazy(() => import("@/modules/procurement/pages/POPrintPage").then((m) => ({ default: m.POPrintPage })));
-const PicklistPrintPage = lazy(() => import("@/modules/warehouse/pages/PicklistPrintPage").then((m) => ({ default: m.PicklistPrintPage })));
 const PlatformLinksPage = lazy(() => import("@/modules/integrations").then((m) => ({ default: m.PlatformLinksPage })));
 const PoliciesPage = lazy(() => import("@/modules/admin/pages/PoliciesPage").then((m) => ({ default: m.PoliciesPage })));
 const ProcurementDemandPoolPage = lazy(() => import("@/modules/procurement/pages/ProcurementDemandPoolPage"));
@@ -361,7 +360,7 @@ function AppRoutes() {
         />
         <Route
           path="/warehouse/picklists/:id/print"
-          element={me ? <PicklistPrintPage /> : <Navigate to="/login" replace />}
+          element={me ? <Navigate to="/warehouse/material-issues" replace /> : <Navigate to="/login" replace />}
         />
         <Route
           path="/warehouse/putaway/:id/print"

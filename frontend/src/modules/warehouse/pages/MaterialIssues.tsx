@@ -62,8 +62,6 @@ export default function MaterialIssues({
      "AP39TL9499" and the indent number appeared nowhere on the screen. */
   const sourceOf = (r: Issue): SourceRefCandidate[] => [
     { label: r.indent_type === "STR" ? "STR" : "Indent", no: r.indent_no, to: r.indent_id ? `/indents/${r.indent_id}` : null },
-    // No detail screen for a picklist yet, so this one reads as text.
-    { label: "Picklist", no: r.pick_no },
     {
       label: "Return of",
       no: r.original_issue_no,
@@ -177,7 +175,7 @@ export default function MaterialIssues({
         </span>
       ) : <span className="text-muted text-[11px] uppercase tracking-wider">N/A</span>,
     },
-    { key: "status", header: "Status", render: (r) => <StatusPill status={r.status} /> },
+    { key: "status", header: "Status", render: (r) => <StatusPill status={r.display_status ?? r.status} /> },
     {
       key: "actions",
       header: "",
@@ -255,7 +253,7 @@ export default function MaterialIssues({
         <div className="space-y-1">
           <div className="flex items-center justify-between gap-2">
             <span className="font-mono text-xs font-semibold text-ink">{r.issue_no}</span>
-            <StatusPill status={r.status} />
+            <StatusPill status={r.display_status ?? r.status} />
           </div>
           {r.parent_issue_no && (
             <div className="text-[11px] text-muted">

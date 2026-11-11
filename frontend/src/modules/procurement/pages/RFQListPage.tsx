@@ -148,6 +148,7 @@ export function RFQListPage() {
         </div>
       ),
     },
+    { key: "organisation", header: "Organisation", hideOnNarrow: true, render: (r) => r.organization_name ?? "—" },
     { key: "status", header: "Status", render: (r) => <StatusPill status={r.status} /> },
     {
       key: "with",

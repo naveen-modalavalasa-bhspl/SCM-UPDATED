@@ -58,6 +58,9 @@ export function expiryTone(iso: string | null | undefined): {
 interface BatchProps {
   choices: BatchChoice[];
   value: number | null | undefined;
+  /** The pick stands on stock with NO batch (2026-11-10). `value` is empty then, the
+   *  same as "not chosen yet", so the row says which of the two it is. */
+  unbatched?: boolean;
   onChange: (choice: BatchChoice | null) => void;
   isDisabled?: boolean;
   isBatchTracked: boolean;
@@ -73,10 +76,13 @@ interface BatchProps {
 
 export function BatchPicker({
   choices, value, onChange, isDisabled, isBatchTracked, fallbackNo, fefoHint, isExpired,
+  unbatched = false,
 }: BatchProps) {
   const todayIso = new Date().toISOString().slice(0, 10);
   const validChoices = choices.filter((row) => !(row.expiry && row.expiry < todayIso));
-  const selected = validChoices.find((row) => (row.batchId ?? 0) === (value ?? 0));
+  const selected = value || unbatched
+    ? validChoices.find((row) => (row.batchId ?? 0) === (value ?? 0))
+    : undefined;
   // A batch already on the line that the shelf no longer offers — every unit of it
   // spoken for by another document since the draft was written. It stays selectable
   // only if not expired.
@@ -100,7 +106,8 @@ export function BatchPicker({
       }
       selectedKeys={
         value && rows.some((row) => (row.batchId ?? 0) === value)
-          ? [String(value)] : []
+          ? [String(value)]
+          : unbatched && rows.some((row) => !row.batchId) ? ["0"] : []
       }
       disabledKeys={rows.filter((row) => !row.allowed)
         .map((row) => String(row.batchId ?? 0))}
@@ -112,7 +119,7 @@ export function BatchPicker({
       classNames={{ trigger: "min-h-11 border-line bg-content1" }}
       renderValue={() => (
         <span className="truncate font-mono text-xs">
-          {selected?.batchNo ?? fallbackNo ?? (value ? `Batch ${value}` : "")}
+          {selected?.batchNo ?? fallbackNo ?? (value ? `Batch ${value}` : unbatched ? "Unbatched stock" : "")}
         </span>
       )}
       items={rows}

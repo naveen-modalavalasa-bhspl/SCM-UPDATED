@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Card, ErrorBanner, Field, FormActions, Input, PageHeader, Select, useToast } from "@/shared/components";
+import { Card, DocumentNumberCard, ErrorBanner, Field, FormActions, Input, PageHeader, Select, useToast } from "@/shared/components";
 import { Button } from "../components/ActionButton";
 import { requisitionApi } from "../api";
-import { blankLine, LinePicker, type DraftLine } from "../components/LinePicker";
-import { OrgFields, type OrgValue } from "../components/OrgFields";
+import { blankLine, LinePicker, overCap, type DraftLine } from "../components/LinePicker";
+import { emptyOrgValue, OrgFields, orgMissing, orgPayload, orgValueFrom, type OrgValue } from "../components/OrgFields";
+import { isOlderDocument } from "../orgScope";
 import type { ReqCreate } from "../types";
 import { todayIst } from "@/shared/datetime";
 import { comboFrom, comboPayload } from "@/shared/combination";
@@ -15,10 +16,6 @@ const PRIORITIES = [
   { value: "HIGH", label: "High" },
   { value: "URGENT", label: "Urgent" },
 ];
-
-const EMPTY_ORG: OrgValue = {
-  departmentId: "", warehouseId: "", projectId: "", companyName: "",
-};
 
 /** Raise or edit a requisition. Only a DRAFT is editable — the backend enforces it,
  *  and this screen redirects rather than showing a form that cannot save. */
@@ -30,7 +27,8 @@ export function RequisitionFormPage() {
   const editing = Boolean(id);
 
   const [priority, setPriority] = useState("NORMAL");
-  const [org, setOrg] = useState<OrgValue>(EMPTY_ORG);
+  const [org, setOrg] = useState<OrgValue>(emptyOrgValue());
+  const [triedOrg, setTriedOrg] = useState(false);
   const [requiredDate, setRequiredDate] = useState("");
   const [remarks, setRemarks] = useState("");
   const [lines, setLines] = useState<DraftLine[]>([blankLine()]);
@@ -45,18 +43,16 @@ export function RequisitionFormPage() {
   useEffect(() => {
     if (!existing) return;
     setPriority(existing.priority ?? "NORMAL");
-    setOrg({
-      departmentId: existing.department_id ?? "",
-      warehouseId: existing.warehouse_id ?? "",
-      warehouseName: existing.warehouse_name ?? "",
-      projectId: existing.project_id ?? "",
-      companyName: existing.company_name ?? "",
-    });
+    setOrg(orgValueFrom(existing));
     // The header date, or the first line's where the requisition predates it.
     setRequiredDate(existing.required_date
       ?? existing.items.find((item) => item.required_date)?.required_date ?? "");
     setRemarks(existing.remarks ?? "");
     setLines(existing.items.map((item) => ({
+      // A line with a ceiling (2026-11-03) — drawn from a material request — keeps its
+      // item (the picker locks on an id) and may only be lowered (`original_quantity`).
+      id: item.requested_quantity != null ? item.id : null,
+      original_quantity: item.requested_quantity != null ? String(item.requested_quantity) : undefined,
       item_id: item.item_id,
       item_code: item.item_code,
       item_name: item.item_name,
@@ -69,6 +65,9 @@ export function RequisitionFormPage() {
       combo: comboFrom(item),
     })));
   }, [existing]);
+
+  // Raised before organisations: keeps its old fields, and is asked for nothing new.
+  const legacy = isOlderDocument(existing, existing?.req_no);
 
   const save = useMutation({
     mutationFn: (payload: ReqCreate) =>
@@ -88,13 +87,22 @@ export function RequisitionFormPage() {
       setProblem("Add at least one line with an item and a quantity.");
       return;
     }
+    const over = usable.filter((line) => overCap(line));
+    if (over.length) {
+      setProblem(`${over.map((line) => line.item_code ?? "A line").join(", ")}: more than the material `
+        + "request asked for. A quantity here can be lowered or left as it is, never raised.");
+      return;
+    }
+    const missing = legacy ? null : orgMissing(org);
+    if (missing) {
+      setTriedOrg(true);
+      setProblem(missing);
+      return;
+    }
     setProblem(null);
     save.mutate({
       priority,
-      warehouse_id: org.warehouseId === "" ? null : org.warehouseId,
-      project_id: org.projectId === "" ? null : org.projectId,
-      department_id: org.departmentId === "" ? null : org.departmentId,
-      company_name: org.companyName || null,
+      ...orgPayload(org, legacy),
       required_date: requiredDate || null,
       remarks: remarks || null,
       lines: usable.map((line) => ({
@@ -120,8 +128,19 @@ export function RequisitionFormPage() {
       <ErrorBanner error={save.error} />
       {problem && <ErrorBanner error={problem} />}
 
+      {!legacy && (
+        <div className="mb-4">
+          <DocumentNumberCard
+            docType="REQUISITION" value={org} ready={!editing} showInvalid={triedOrg}
+            savedNumber={existing?.req_no}
+            onChange={(patch) => setOrg((current) => ({ ...current, ...patch }))}
+          />
+        </div>
+      )}
+
       <Card className="space-y-5 p-5">
-        <OrgFields value={org} onChange={(patch) => setOrg({ ...org, ...patch })} />
+        <OrgFields value={org} legacy={legacy}
+                   onChange={(patch) => setOrg((current) => ({ ...current, ...patch }))} />
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
           <Field label="Priority">

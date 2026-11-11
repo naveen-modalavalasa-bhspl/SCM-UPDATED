@@ -1,14 +1,15 @@
 import { useState } from "react";
 import { CombinationTag } from "@/shared/combination";
-import { Check, ShieldAlert, ShoppingCart } from "lucide-react";
+import { ArrowDown, Check, Lock, ShieldAlert, ShoppingCart } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  PageHeader, Button, Card, Field, Input, ResponsiveList, StatusPill, useToast,
-  type Column,
+  PageHeader, Button, Card, Field, Input, QuantityChanges, ResponsiveList, StatusPill,
+  useToast, type Column,
 } from "@/shared/components";
 import {
-  approveMaterialRequest, getMaterialRequest, rejectMaterialRequest,
+  approveMaterialRequest, getMaterialRequest, materialRequestQuantityChanges,
+  rejectMaterialRequest,
   resubmitMaterialRequestCorrection, reviseMaterialRequest, sendBackMaterialRequest,
   sendMaterialRequestFurtherBack,
 } from "../api";
@@ -69,6 +70,14 @@ export function MaterialRequestDetailPage() {
     enabled: Number.isFinite(mrId),
   });
 
+  // Every quantity change since the request was raised (2026-11-03): the numbers the
+  // approval trail above does not carry.
+  const qtyChanges = useQuery({
+    queryKey: ["material-request", mrId, "quantity-changes"],
+    queryFn: () => materialRequestQuantityChanges(mrId),
+    enabled: Number.isFinite(mrId),
+  });
+
   const act = useMutation({
     mutationFn: (approve: boolean) =>
       approve ? approveMaterialRequest(mrId, comments) : rejectMaterialRequest(mrId, comments),
@@ -101,6 +110,7 @@ export function MaterialRequestDetailPage() {
       setEdits({});
       void alerts.success("material_request.revised", { number: data?.mr_no ?? "" });
       qc.invalidateQueries({ queryKey: ["material-request", mrId] });
+      qc.invalidateQueries({ queryKey: ["material-request", mrId, "quantity-changes"] });
       qc.invalidateQueries({ queryKey: ["material-requests"] });
     },
   });
@@ -229,6 +239,10 @@ export function MaterialRequestDetailPage() {
    *  shelf: procurement routinely orders a full case above the shortfall, or trims a
    *  line already part-covered. The allocation screen caps at what is free because
    *  giving away stock you do not have is a different mistake. */
+  /** The ceiling: what the line asked for when raised (2026-11-03). A quantity may
+   *  come down or stay; more is new demand — a new request with its own approval. */
+  const askedFor = (row: MaterialRequestItem) => row.requested_quantity ?? row.quantity;
+
   const problem = (row: MaterialRequestItem): string | null => {
     const raw = edits[row.id];
     if (raw === undefined) return null;
@@ -237,6 +251,9 @@ export function MaterialRequestDetailPage() {
     const value = Number(raw);
     if (raw.trim() === "" || Number.isNaN(value)) return "Enter a number";
     if (value <= 0) return "Must be more than zero — reject instead";
+    if (value > askedFor(row)) {
+      return `Only ${askedFor(row)} ${row.uom_code ?? ""} was asked for — lower it or leave it`.replace(/\s+/g, " ");
+    }
     if (value < row.ordered_quantity) return `${row.ordered_quantity} already ordered`;
     return null;
   };
@@ -270,6 +287,7 @@ export function MaterialRequestDetailPage() {
               numeric keypad on a phone. */}
           <QuantityInput
             decimals={uomDecimals(row.uom_code)}
+            data-uom={row.uom_code ?? ""}
             aria-label={`Quantity for ${row.item_name ?? row.item_code ?? "line"}`}
             aria-invalid={Boolean(issue)}
             value={shown(row)}
@@ -279,9 +297,17 @@ export function MaterialRequestDetailPage() {
           />
           <span className="text-xs text-muted">{row.uom_code ?? ""}</span>
         </div>
-        {issue && <p className="mt-1 text-xs text-danger">{issue}</p>}
-        {!issue && isChanged(row) && (
-          <p className="mt-1 text-xs text-muted">was {row.quantity}</p>
+        {issue ? (
+          <p className="mt-1 text-xs text-danger">{issue}</p>
+        ) : isChanged(row) ? (
+          <p className="mt-1 inline-flex items-center gap-1 rounded-full bg-warn-bg px-2 py-0.5 text-[11px] font-semibold text-warn">
+            <ArrowDown className="h-3 w-3" />
+            {Math.round((row.quantity - Number(edits[row.id])) * 1000) / 1000} less · was {row.quantity}
+          </p>
+        ) : (
+          <p className="mt-1 inline-flex items-center gap-1 text-[11px] text-muted">
+            <Lock className="h-3 w-3" /> Up to {askedFor(row)} · can only be lowered
+          </p>
         )}
       </div>
     );
@@ -467,6 +493,8 @@ export function MaterialRequestDetailPage() {
           <HistoryTimeline rows={history.data!} />
         </Card>
       )}
+
+      <QuantityChanges rows={qtyChanges.data ?? []} loading={qtyChanges.isLoading} />
 
       {open && !mine && (
         <p className="mt-4 text-sm text-muted">

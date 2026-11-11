@@ -1167,6 +1167,12 @@ export interface PickingWrite {
 
 /** `out_issues`. `direction` is `OUT` for an issue and `IN` for a return against one. */
 export interface Issue {
+  /** Whose paper it is on (2026-11-09); null on an issue older than organisations. */
+  organization_id?: number | null;
+  organization_name?: string | null;
+  org_department_id?: number | null;
+  org_department_name?: string | null;
+  fiscal_year?: string | null;
   id: number;
   issue_no: string;
   issue_type: string;
@@ -1195,6 +1201,8 @@ export interface Issue {
   destination_warehouse_id?: number | null;
   destination_warehouse_name?: string | null;
   destination_warehouse_type?: string | null;
+  /** Only an LIP runs a vehicle and carries an SAC; null when the point is unknown. */
+  destination_needs_vehicle_and_sac?: boolean | null;
   /** The Stock Transfer Order this issue executes (2026-10-29). DIRECT = raised on
    *  its own; STR = produced by an STR's allocation. Its destination is frozen. */
   sto_id?: number | null;
@@ -1212,6 +1220,8 @@ export interface Issue {
    *  screen tells the two apart without asking a second question. */
   parent_issue_id?: number | null;
   parent_issue_no?: string | null;
+  /** Status to show: a split parent closed after its floor issues posted reads ISSUED. */
+  display_status?: string | null;
   floor_location_id?: number | null;
   floor_location_name?: string | null;
   /** Who holds that floor — the in-charge(s) a split piece was handed to. */
@@ -1554,6 +1564,12 @@ export interface StockAvailability {
 }
 
 export interface IssueWrite {
+  /** Whose paper it is on (2026-11-09); null on an issue older than organisations. */
+  organization_id?: number | null;
+  organization_name?: string | null;
+  org_department_id?: number | null;
+  org_department_name?: string | null;
+  fiscal_year?: string | null;
   issue_type: string;
   issue_date: string;
   indent_id?: number | null;
@@ -3395,6 +3411,9 @@ export interface DocLabelRow {
   key: string;
   kind: "PACK" | "UNIT";
   code: string;
+  /** A serial / IMEI tracked unit's own numbers (2026-11-02). */
+  serial_number?: string | null;
+  imei?: string | null;
   line_id: number;
   item_id: number;
   item_code?: string | null;

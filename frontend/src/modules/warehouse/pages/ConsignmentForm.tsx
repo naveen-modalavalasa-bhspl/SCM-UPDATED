@@ -1795,6 +1795,7 @@ export default function ConsignmentForm() {
                               <Input
                                 className={`text-right ${needsQty ? "ring-1 ring-warn/50" : ""}`}
                                 type="number"
+                                data-uom={line.uom_code ?? ""}
                                 min={0}
                                 max={remaining}
                                 disabled={pkgLocked}

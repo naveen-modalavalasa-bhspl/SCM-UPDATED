@@ -24,9 +24,10 @@ from app.shared.enums import DocType
 from app.shared.enums import DespatchNoteStatus, PackChangeStatus
 from app.shared.models.base import created_at_col, pk, soft_fk, updated_at_col
 from app.shared.models.combination import CombinationMixin
+from app.shared.models.master import OrgScopeColumns
 
 
-class PurchaseOrder(Base):
+class PurchaseOrder(OrgScopeColumns, Base):
     __tablename__ = "pro_purchase_orders"
     id = pk()
     po_no = Column(String(30), unique=True, nullable=False)
@@ -65,6 +66,10 @@ class PurchaseOrder(Base):
     facility_name = Column(String(200), nullable=True)
     project_id = soft_fk()
     project_name = Column(String(200), nullable=True)     # snapshot
+    # A hand-raised order is booked to a project OR a department, exactly one
+    # (2026-11-04, `_apply_po_header`). Soft FK to hcm_departments + snapshot.
+    department_id = soft_fk()
+    department_name = Column(String(200), nullable=True)  # snapshot
 
     # What the order says besides its lines. Free text on purpose: a term is what was
     # agreed with THIS vendor for THIS order, and every attempt to code them into a
@@ -204,7 +209,7 @@ class POItem(CombinationMixin, Base):
 #  Requisition — what a buyer wants to buy
 # --------------------------------------------------------------------------- #
 
-class Requisition(Base):
+class Requisition(OrgScopeColumns, Base):
     """`pro_requisitions`. Procurement's own demand note.
 
     Not `inv_material_requests`: that one is raised BY the system when an approved
@@ -281,6 +286,11 @@ class RequisitionItem(CombinationMixin, Base):
     item_name = Column(String(300), nullable=True)        # snapshot
     uom_code = Column(String(20), nullable=True)
     quantity = Column(Numeric(16, 3), nullable=False)
+    # The CEILING for this line (2026-11-03): the material request quantity behind it
+    # when the requisition was drawn from MRs, else what the buyer typed when the
+    # requisition was SUBMITTED. NULL on a hand-made draft, which its author may still
+    # change freely. A later edit may lower the quantity or leave it, never raise it.
+    requested_quantity = Column(Numeric(16, 3), nullable=True)
     # How much of `quantity` has reached a PO. Lets a requisition be bought in parts.
     ordered_qty = Column(Numeric(16, 3), nullable=False, default=0)
     estimated_rate = Column(Numeric(16, 2), nullable=False, default=0)
@@ -288,6 +298,34 @@ class RequisitionItem(CombinationMixin, Base):
     required_date = Column(Date, nullable=True)
 
     requisition = relationship("Requisition", back_populates="items")
+
+
+class RequisitionQtyChange(Base):
+    """One quantity change on a requisition line once it had a ceiling (2026-11-03):
+    a draft drawn from material requests being cut, or any line edited after submit.
+    Append-only. Keyed by item (and brand / variant / model) rather than by line id,
+    because a requisition edit rewrites its lines."""
+
+    __tablename__ = "pro_requisition_qty_changes"
+
+    id = pk()
+    requisition_id = Column(BigInteger, ForeignKey("pro_requisitions.id", ondelete="CASCADE"),
+                            index=True, nullable=False)
+    item_id = Column(BigInteger, nullable=False)
+    item_code = Column(String(100), nullable=True)
+    item_name = Column(String(300), nullable=True)
+    uom_code = Column(String(30), nullable=True)
+    combination = Column(String(300), nullable=True)
+    from_qty = Column(Numeric(16, 3), nullable=False)
+    to_qty = Column(Numeric(16, 3), nullable=False)
+    ceiling_qty = Column(Numeric(16, 3), nullable=True)
+    # DRAFT_EDIT (cut before submit, against its MR ceiling)
+    stage = Column(String(20), nullable=False)
+    comments = Column(String(500), nullable=True)
+    changed_by_id = Column(BigInteger, nullable=True)
+    changed_by_name = Column(String(200), nullable=True)
+    changed_by_position = Column(String(200), nullable=True)
+    changed_at = created_at_col()
 
 
 class RequisitionSource(Base):
@@ -323,7 +361,7 @@ Index("ix_pro_req_source_mr", RequisitionSource.mr_id)
 #  RFQ — what went out to vendors
 # --------------------------------------------------------------------------- #
 
-class RFQ(Base):
+class RFQ(OrgScopeColumns, Base):
     __tablename__ = "pro_rfqs"
     id = pk()
     rfq_no = Column(String(30), unique=True, nullable=False)
@@ -452,10 +490,13 @@ class RFQVendor(Base):
 #  Quotation — what a vendor answered
 # --------------------------------------------------------------------------- #
 
-class Quotation(Base):
+class Quotation(OrgScopeColumns, Base):
     __tablename__ = "pro_quotations"
     id = pk()
     quotation_no = Column(String(50), unique=True, nullable=False)
+    # Copied from the document before, so this one reads and lists on its own.
+    project_id = soft_fk()
+    project_name = Column(String(200), nullable=True)     # snapshot
     quotation_type = Column(String(20), nullable=True)
 
     rfq_id = Column(ForeignKey("pro_rfqs.id", ondelete="CASCADE"),
@@ -511,7 +552,7 @@ class Quotation(Base):
                          cascade="all, delete-orphan", lazy="selectin")
 
 
-class QuoteChangeRequest(Base):
+class QuoteChangeRequest(OrgScopeColumns, Base):
     """`pro_quote_change_requests` — the buyer's ask on a supplier's quotation.
 
     An amendment for a quotation, cut from the same cloth as `PORevision` and
@@ -533,6 +574,9 @@ class QuoteChangeRequest(Base):
     # requests must not chase two joins.
     rfq_id = Column(ForeignKey("pro_rfqs.id"), index=True, nullable=False)
     cr_no = Column(String(30), unique=True, nullable=False)   # CR-2026-27/0001
+    # Copied from the document before, so this one reads and lists on its own.
+    project_id = soft_fk()
+    project_name = Column(String(200), nullable=True)     # snapshot
     # DRAFT is never persisted — a proposed request goes straight to the supplier.
     # AWAITING_SUPPLIER -> ACCEPTED | DECLINED, or WITHDRAWN by the buyer, or
     # SUPERSEDED when a different request on the same quote was accepted first.
@@ -619,7 +663,7 @@ class QuotationItem(CombinationMixin, Base):
 #  Despatch note — what the vendor says they put on the vehicle
 # --------------------------------------------------------------------------- #
 
-class DespatchNote(Base):
+class DespatchNote(OrgScopeColumns, Base):
     """`pro_despatch_notes`. The vendor's own statement of a delivery, filed before it
     arrives.
 
@@ -638,6 +682,9 @@ class DespatchNote(Base):
     __tablename__ = "pro_despatch_notes"
     id = pk()
     dn_no = Column(String(30), unique=True, nullable=False)
+    # Copied from the document before, so this one reads and lists on its own.
+    project_id = soft_fk()
+    project_name = Column(String(200), nullable=True)     # snapshot
     dn_date = Column(Date, nullable=True)
 
     # Backward pointer, like every other link in this chain.
@@ -788,7 +835,7 @@ class VendorUser(Base):
 #  always answer "who asked for this" without the aggregation being reversible only
 #  by re-running it.
 
-class PurchaseConsolidation(Base):
+class PurchaseConsolidation(OrgScopeColumns, Base):
     """`pro_consolidations` — many requisitions, one buying sheet.
 
     `PurchaseConsolidation`, not `Consolidation`: `modules/indents` already maps a

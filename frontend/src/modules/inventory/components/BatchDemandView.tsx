@@ -500,6 +500,7 @@ function ItemRow({ item, plan, onChange }: {
                     type="number"
                     min={0}
                     max={freeOn(split.wh, i)}
+                    data-decimals={item.uom_decimals ?? undefined}
                     value={split.qty}
                     onChange={(e) => setSplit(i, { qty: clampSplit(i, split.wh, e.target.value) })}
                     aria-label={`Quantity from source ${i + 1} for ${item.item_name ?? "item"}`}
@@ -623,6 +624,7 @@ function ItemRow({ item, plan, onChange }: {
                             decimals={item.uom_decimals ?? 3}
                             min={0}
                             max={line.pending_qty}
+                            data-decimals={item.uom_decimals ?? undefined}
                             value={plan.edited[line.indent_item_id] ?? fmt(gets)}
                             // Clamped to what this line asked for and to what is
                             // actually being taken off the shelves, so a hand-set

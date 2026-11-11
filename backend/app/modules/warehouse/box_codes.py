@@ -1072,13 +1072,74 @@ async def decorate_packs(db: AsyncSession, rows: list[dict], *, key: str = "code
     return rows
 
 
-async def list_labels(db: AsyncSession, *, status: str | None, warehouse_id: int | None,
-                      search: str | None, page: int, size: int) -> dict:
-    stmt = select(m.BoxLabel)
+def _label_filter(stmt, *, status: str | None, warehouse_id: int | None,
+                  item_id: int | None = None, batch_id: int | None = None,
+                  bin_id: int | None = None):
+    """The Box labels screen narrows warehouse -> item -> batch -> storage location
+    (2026-11-02). Batch and location are read off the PACK, not the label's text
+    snapshot: a box moved to another bay is listed where it stands now. 0 = "none"
+    (no batch / no location), None = any."""
     if status:
         stmt = stmt.where(m.BoxLabel.status == status)
     if warehouse_id:
         stmt = stmt.where(m.BoxLabel.warehouse_id == warehouse_id)
+    if item_id:
+        stmt = stmt.where(m.BoxLabel.item_id == item_id)
+    if batch_id is not None or bin_id is not None:
+        stmt = stmt.join(m.HandlingUnit, m.HandlingUnit.id == m.BoxLabel.handling_unit_id)
+        if batch_id is not None:
+            stmt = stmt.where(m.HandlingUnit.batch_id == batch_id)
+        if bin_id is not None:
+            stmt = stmt.where(m.HandlingUnit.bin_id == bin_id)
+    return stmt
+
+
+async def label_facets(db: AsyncSession, *, status: str | None, warehouse_id: int,
+                       item_id: int | None = None, batch_id: int | None = None) -> dict:
+    """What the next dropdown on the Box labels screen may offer, with how many labels
+    each choice holds: the items with labels at the warehouse, then that item's
+    batches, then the storage locations (within the batch when one is chosen)."""
+    base = _label_filter(select(m.BoxLabel), status=status, warehouse_id=warehouse_id)
+    items = [{"item_id": i, "item_code": c, "item_name": n, "count": int(k)}
+             for i, c, n, k in (await db.execute(
+                 base.with_only_columns(m.BoxLabel.item_id, func.max(m.BoxLabel.item_code),
+                                        func.max(m.BoxLabel.item_name), func.count())
+                 .group_by(m.BoxLabel.item_id)
+                 .order_by(func.max(m.BoxLabel.item_name)))).all()]
+    out = {"items": items, "batches": [], "locations": []}
+    if not item_id:
+        return out
+    joined = (_label_filter(select(m.BoxLabel), status=status, warehouse_id=warehouse_id,
+                            item_id=item_id)
+              .join(m.HandlingUnit, m.HandlingUnit.id == m.BoxLabel.handling_unit_id))
+    batch_counts = (await db.execute(
+        joined.with_only_columns(m.HandlingUnit.batch_id, func.count())
+        .group_by(m.HandlingUnit.batch_id))).all()
+    batches = {b.id: b for b in (await db.execute(select(m.Batch).where(
+        m.Batch.id.in_({b for b, _ in batch_counts if b} or {0})))).scalars().all()}
+    out["batches"] = sorted(({
+        "batch_id": int(b or 0), "batch_no": getattr(batches.get(b), "batch_no", None),
+        "expiry_date": getattr(batches.get(b), "expiry_date", None), "count": int(k),
+    } for b, k in batch_counts), key=lambda r: (r["expiry_date"] is None,
+                                                r["expiry_date"] or "", r["batch_no"] or ""))
+    in_batch = joined.where(m.HandlingUnit.batch_id == batch_id) if batch_id is not None else joined
+    bin_counts = (await db.execute(
+        in_batch.with_only_columns(m.HandlingUnit.bin_id, func.count())
+        .group_by(m.HandlingUnit.bin_id))).all()
+    locations = {loc.id: loc for loc in (await db.execute(select(m.WarehouseLocation).where(
+        m.WarehouseLocation.id.in_({b for b, _ in bin_counts if b} or {0})))).scalars().all()}
+    out["locations"] = sorted(({
+        "bin_id": int(b or 0), "bin_code": getattr(locations.get(b), "code", None),
+        "bin_name": getattr(locations.get(b), "name", None), "count": int(k),
+    } for b, k in bin_counts), key=lambda r: r["bin_code"] or "")
+    return out
+
+
+async def list_labels(db: AsyncSession, *, status: str | None, warehouse_id: int | None,
+                      search: str | None, page: int, size: int, item_id: int | None = None,
+                      batch_id: int | None = None, bin_id: int | None = None) -> dict:
+    stmt = _label_filter(select(m.BoxLabel), status=status, warehouse_id=warehouse_id,
+                         item_id=item_id, batch_id=batch_id, bin_id=bin_id)
     if search:
         like = f"%{search.strip()}%"
         stmt = stmt.where(or_(m.BoxLabel.hu_code.like(like), m.BoxLabel.item_code.like(like),

@@ -59,11 +59,11 @@ def test_monthly_period_changes_across_a_month_boundary():
 
 # ------------------------------ preview ------------------------------ #
 def test_preview_shows_the_next_number_not_the_last():
-    assert preview(series(last_number=41)) == "IND/2026-27/0042"
+    assert preview(series(last_number=41)) == f"IND/{_fiscal_year()}/0042"
 
 
 def test_preview_pads_to_the_pattern_width():
-    assert preview(series(last_number=0)) == "IND/2026-27/0001"
+    assert preview(series(last_number=0)) == f"IND/{_fiscal_year()}/0001"
 
 
 def test_preview_supports_a_custom_pattern():

@@ -31,7 +31,7 @@ from app.core.exceptions import ValidationError
 SHORT_CODE_PATHS = frozenset({
     "item-categories", "general-names", "brands", "manufacturers", "item-classes",
     "item-sub-classes", "dosage-forms", "attributes", "specs", "features",
-    "packaging", "uom", "uom-classes", "boms", "vendor-categories",
+    "packaging", "uom", "boms", "vendor-categories",
 })
 SHORT_CODE = re.compile(r"[A-Z]{3}")
 # Words that make a poor initial: "Bottle of 10" is BOT, not BOO.

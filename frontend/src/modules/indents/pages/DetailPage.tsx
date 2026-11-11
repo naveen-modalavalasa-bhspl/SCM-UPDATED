@@ -9,12 +9,15 @@ import {
   CardBody, Skeleton,
   Table, TableBody, TableCell, TableColumn, TableHeader, TableRow,
 } from "@heroui/react";
-import { PageHeader, Button, Can, Card, ConfirmModal, ErrorBanner, useToast } from "@/shared/components";
+import {
+  PageHeader, Button, Can, Card, ConfirmModal, DocumentScopeStrip, ErrorBanner, useToast,
+} from "@/shared/components";
 import { ReturnTargetSelect, targetLabel } from "../components/ReturnTargetSelect";
 import { alerts } from "@/modules/alerts";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { FlowStepper } from "../components/FlowStepper";
 import { TripDeliveryCard } from "../components/TripDeliveryCard";
+import { StrRouteCard } from "../components/StrRoute";
 import { IndentStatusBadge } from "../components/IndentStatusBadge";
 import { activityLedgerReturnUrlFromState } from "../context/ActivityLedgerUrlState";
 import { allRequestsReturnUrlFromState } from "../context/AllRequestsUrlState";
@@ -300,6 +303,12 @@ export function IndentDetailPage() {
     // it, and this is the last of four fallbacks: an SAC nobody can find is a blank
     // field, never a blank screen.
     ?? nonEmptyText(me?.positions?.find((position) => position.office_id === indent.office_id)?.office_sac);
+  // A warehouse or an MDP takes neither a vehicle nor an SAC (2026-11-04) — the
+  // delivery point's tier is served; unknown keeps both rows, as before. Only an LIP
+  // shows them (2026-11-09): a vehicle saved on an older warehouse / MDP request is
+  // not the delivery point's and is no longer drawn.
+  const showVehicleAndSac = indent.needs_vehicle_and_sac !== false;
+  const isStrDoc = isStrType(indent.indent_type);
   const returnedBy = returnedByFromJourney(journey);
   const correctionOwner = nonEmptyText(indent.correction_owner?.employee_name)
     ?? (indent.correction_owner?.employee_id ? `Employee #${indent.correction_owner.employee_id}` : null);
@@ -375,6 +384,8 @@ export function IndentDetailPage() {
           </div>
         )}
       />
+      {/* Whose paper it is on; says nothing on an indent older than organisations. */}
+      <DocumentScopeStrip doc={indent} className="mb-4" />
 
       {isReturnedForCorrection && (
         <Card className="mb-5 border-warn/40 bg-warn-bg">
@@ -432,6 +443,16 @@ export function IndentDetailPage() {
       </button>
 
       {isRaiser && <TripDeliveryCard indentId={indent.id} shipments={shipments} />}
+
+      {isStrDoc && (
+        <StrRouteCard
+          source={indent.str_source ?? (indent.source_warehouse_name
+            ? { warehouse_name: indent.source_warehouse_name, warehouse_code: indent.source_warehouse_code }
+            : null)}
+          destination={indent.str_destination}
+          changes={indent.str_source_changes}
+        />
+      )}
 
       <div className="grid gap-5 lg:grid-cols-3">
         <Card className="lg:col-span-2">
@@ -498,10 +519,15 @@ export function IndentDetailPage() {
               <Detail label="Position" value={indent.position_name} />
               <Detail label="Department" value={indent.department_name} />
               <Detail label="Deliver to" value={delivery.officeName} />
-              <Detail label="Vehicle" value={delivery.vehicleNumber} />
-              {/* The delivery office's code, not the viewer's: an approver reading
-                  someone else's indent sees the SAC it will be delivered against. */}
-              <Detail label="Service area code (SAC)" value={officeSac} />
+              {isStrDoc && (
+                <Detail label="Source" value={indent.source_warehouse_name} />
+              )}
+              {showVehicleAndSac && <>
+                <Detail label="Vehicle" value={delivery.vehicleNumber} />
+                {/* The delivery office's code, not the viewer's: an approver reading
+                    someone else's indent sees the SAC it will be delivered against. */}
+                <Detail label="Service area code (SAC)" value={officeSac} />
+              </>}
               <Detail label="Priority" value={indent.priority} />
               {indent.current_approver_name && (
                 <Detail label="With" value={indent.current_approver_name} />

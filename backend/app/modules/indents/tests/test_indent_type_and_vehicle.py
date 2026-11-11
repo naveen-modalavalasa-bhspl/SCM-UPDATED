@@ -27,6 +27,9 @@ from app.shared.models.master import Item, Uom
 # than one module, so a column quietly disappearing from the model is invisible until
 # something reads a stale value. Listing them here makes that a test failure.
 EXPECTED_INDENT_COLUMNS = {
+    # Whose paper it is on (2026-11-09, `OrgScopeColumns`).
+    "organization_id", "organization_code", "organization_name",
+    "org_department_id", "org_department_name", "fiscal_year",
     "id", "indent_no", "indent_type", "indent_date", "required_date",
     "requested_by_id", "requested_by_name", "requested_by_code",
     "position_id", "position_name", "department_id", "department_name",
@@ -36,6 +39,9 @@ EXPECTED_INDENT_COLUMNS = {
     "region_id", "region_name",
     "warehouse_id", "warehouse_name",
     "project_id", "project_name", "vehicle_id", "vehicle_number",
+    # A Stock Transfer Request's source point (2026-11-04).
+    "source_warehouse_id", "source_warehouse_name", "source_warehouse_code",
+    "consolidation_id",
     "bom_id", "bom_name", "status", "priority", "total_items", "total_qty",
     "approved_qty", "issued_qty", "ordered_qty", "estimated_value",
     "remarks", "rejected_reason", "current_stage_name", "current_approver_name",
@@ -53,7 +59,7 @@ def test_indent_type_keeps_regular_as_a_member():
     """296 live indents carry REGULAR. Dropping it from the enum would make every one
     of them unfilterable and unserialisable."""
     assert IndentType.REGULAR.value == "REGULAR"
-    assert {t.value for t in IndentType} == {"REGULAR", "MONTHLY"}
+    assert {t.value for t in IndentType} == {"REGULAR", "MONTHLY", "STR"}
 
 
 def test_validate_indent_type_rejects_anything_else():

@@ -53,7 +53,7 @@ import app.main  # noqa: F401  -- imports every model so create_all sees them
 
 from app.platform.rbac.models import Page, Permission, Role, RolePermission
 from app.platform.rbac.page_registry import (
-    ADMIN_ROLE_CODE, sync_pages, sync_permission_labels,
+    ADMIN_ROLE_CODE, retire_permissions, sync_pages, sync_permission_labels,
 )
 from app.platform.rbac.permissions import PAGE_RESOURCE, page_view_code
 from scripts import (
@@ -179,6 +179,10 @@ async def permissions_and_roles() -> None:
         await db.commit()
     async with SessionLocal() as db:
         changed = await sync_permission_labels(db)
+        retired = await retire_permissions(db)
+    for line in retired:
+        print(f"  {line}")
+    changed += retired
     print(f"  permissions in place, {len(roles)} roles, {len(changed)} catalogue change(s)")
 
 

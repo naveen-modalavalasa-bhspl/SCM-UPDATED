@@ -191,6 +191,7 @@ export function PurchaseConsolidationDetailPage() {
                           <div className="ml-auto w-28">
                             <Input
                               type="number"
+                              data-uom={line.uom_code ?? ""}
                               value={edits[line.id] ?? ""}
                               max={Number(line.max_allowed_qty ?? line.quantity)}
                               onChange={(e) => setEdits({ ...edits, [line.id]: e.target.value })}
@@ -239,6 +240,12 @@ export function PurchaseConsolidationDetailPage() {
               <div className="mt-4 grid grid-cols-2 gap-4 border-t border-line/60 pt-4">
                 <RailStat label="Requisitions" value={doc.source_count} />
                 <RailStat label="Item lines" value={doc.total_items} />
+                {doc.organization_name && (
+                  <RailStat label="Organisation" value={doc.organization_name} />
+                )}
+                {doc.org_department_name && (
+                  <RailStat label="Department" value={doc.org_department_name} />
+                )}
               </div>
             </SectionCard>
 

@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { FilePen, Save } from "lucide-react";
-import { ErrorBanner, Field, Input, Select, useToast } from "@/shared/components";
+import { DocumentNumberCard, ErrorBanner, Field, Input, Select, useToast } from "@/shared/components";
 import { Button } from "./ActionButton";
 import { api } from "@/shared/api/client";
 import { todayIst } from "@/shared/datetime";
@@ -137,6 +137,15 @@ export function POCorrectionForm({ po, onSaved, onCancel, mode = "correction" }:
         </div>
         <ErrorBanner error={save.error} />
         {problem && <ErrorBanner error={problem} />}
+
+        {!header.legacy && (
+          <DocumentNumberCard
+            docType="po" value={header} exclusive savedNumber={po.po_no}
+            locks={{ all: header.bookingLocked, organisation: header.orgLocked }}
+            source={po.rfq_no ? { label: po.rfq_no, to: po.rfq_id ? `/procurement/rfqs/${po.rfq_id}` : undefined } : null}
+            onChange={(patch) => setHeader((current) => ({ ...current, ...patch }))}
+          />
+        )}
 
         <div className="grid grid-cols-1 gap-4 rounded-xl bg-white p-3 ring-1 ring-indigo-100 sm:grid-cols-2">
           <Field label="Vendor" required>

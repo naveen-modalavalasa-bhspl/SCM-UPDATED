@@ -165,6 +165,15 @@ export interface IssueGroup {
   /** What THIS document could take of it altogether, summed over the locations it is
    *  allowed to draw on. Never larger than `warehouseTotal`. */
   warehouseDrawable: number | null;
+  /** Of `warehouseTotal`, what nobody has reserved (`item_available_qty`). */
+  warehouseFree: number | null;
+  /** Of `warehouseTotal`, what is held for THIS document — its indent's reservation
+   *  plus a direct issue's own hold. */
+  heldForThis: number | null;
+  /** Of `warehouseTotal`, what other documents have reserved: the rest. */
+  heldByOthers: number | null;
+  /** Every source row of the item here (expired excluded), for the per-batch view. */
+  stockRows: IssueStockSource[];
 
   /** Where INVENTORY put the hold for this ask — the sources carrying a reservation
    *  belonging to this document's own indent. */
@@ -245,6 +254,10 @@ export function groupIssueLines(
         spare: [],
         warehouseTotal: null,
         warehouseDrawable: null,
+        warehouseFree: null,
+        heldForThis: null,
+        heldByOthers: null,
+        stockRows: [],
         allocated: [],
         releasing: [],
         codedSwap: new Set<number>(),
@@ -322,6 +335,21 @@ export function groupIssueLines(
     group.warehouseDrawable = all.length
       ? round(all.reduce((sum, row) => sum + num(row.drawable_qty), 0))
       : null;
+    // The three parts of the shelf, item-wise (2026-11-03): free to anybody, held for
+    // this document, held by other documents. Free and total are served per item;
+    // what this document holds is a sum over its rows; the rest is everybody else's.
+    group.stockRows = all;
+    if (all.length) {
+      const total = num(all[0].item_total_qty);
+      const free = Math.min(num(all[0].item_available_qty), total);
+      const mine = round(all.reduce(
+        (sum, row) => sum + num(row.own_reserved_qty) + num(row.issue_hold_qty ?? 0), 0));
+      group.warehouseFree = free;
+      group.heldForThis = Math.min(mine, round(total - free));
+      group.heldByOthers = Math.max(round(total - free - group.heldForThis), 0);
+    } else {
+      group.warehouseFree = group.heldForThis = group.heldByOthers = null;
+    }
     const taken = new Set(group.splits.map((s) => sourceKey(s.line.batch_id, s.line.bin_id)));
     const rows = all;
     // Where inventory put the hold. `own_reserved_qty` is this document's own indent's
@@ -333,7 +361,7 @@ export function groupIssueLines(
     group.allocated = [];
     // The FEFO plan for the ask: the batches it needs, earliest expiry first.
     group.plan = fefoPlan(rows, Math.max(group.requested, group.issued));
-    group.required = new Set(group.plan.flatMap((step) => step.batches.map((b) => b.batchId as number)));
+    group.required = new Set(group.plan.flatMap((step) => step.batches.map((b) => b.batchId ?? 0)));
     const firstBatch = group.plan[0]?.batches[0];
     group.earliest = firstBatch
       ? { batchId: firstBatch.batchId as number, batchNo: firstBatch.batchNo, expiry: firstBatch.expiry,
@@ -626,8 +654,11 @@ export interface FefoStep {
  */
 export function fefoPlan(sources: IssueStockSource[], ask: number): FefoStep[] {
   const today = new Date().toISOString().slice(0, 10);
+  // Stock with no batch (and batches with no expiry) is usable too (2026-11-10): it
+  // sorts after every dated batch, so FEFO still reaches it last. Such stock may well
+  // carry unit codes; it is the batch, not the codes, that it lacks.
   const usable = batchChoices(sources).filter(
-    (choice) => choice.batchId && choice.drawable > 0 && !(choice.expiry && choice.expiry < today));
+    (choice) => choice.drawable > 0 && !(choice.expiry && choice.expiry < today));
   const tiers = new Map<string, BatchChoice[]>();
   for (const choice of usable) {
     const key = choice.expiry ?? "";
@@ -648,6 +679,36 @@ export function fefoPlan(sources: IssueStockSource[], ask: number): FefoStep[] {
     left = round(left - take);
   }
   return plan;
+}
+
+/**
+ * The batches ONE pick may choose from, one at a time (2026-11-10): the earliest FEFO
+ * tier the OTHER picks of this item have not already used up — never the next one
+ * while the first still has stock, even when the ask needs more than it holds. The
+ * next tier is offered to the next pick once this one has taken all of the first.
+ * Batches of one expiry date stay together (FEFO cannot tell them apart). The batch the
+ * pick already holds is always kept, so a saved pick never renders empty. Keys are
+ * batch ids, 0 for stock with no batch. `null`: no plan, so nothing narrows.
+ */
+export function batchesForPick(group: IssueGroup, splitIndex: number): Set<number> | null {
+  if (!group.plan.length) return null;
+  const others = new Map<number, number>();
+  for (const split of group.splits) {
+    if (split.index === splitIndex) continue;
+    const key = split.line.batch_id ?? 0;
+    others.set(key, round((others.get(key) ?? 0) + split.issued));
+  }
+  const offered = new Set<number>();
+  for (const step of group.plan) {
+    const used = round(step.batches.reduce((sum, b) => sum + (others.get(b.batchId ?? 0) ?? 0), 0));
+    if (round(step.drawable - used) > 0) {
+      step.batches.forEach((b) => offered.add(b.batchId ?? 0));
+      break;
+    }
+  }
+  const own = group.splits.find((split) => split.index === splitIndex)?.line.batch_id;
+  if (own) offered.add(own);
+  return offered;
 }
 
 /** The first FEFO tier this item's picks leave short while a later tier is used —
