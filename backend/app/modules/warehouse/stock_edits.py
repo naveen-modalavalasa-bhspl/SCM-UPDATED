@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -89,12 +89,54 @@ async def _pending_targets(db: AsyncSession, target: str, ids: list[int]) -> dic
     return {r[0]: r[1] for r in rows}
 
 
+async def _ensure_unbatched_stock(db: AsyncSession, warehouse_id: int | None = None) -> None:
+    """Ensures that any stock held with batch_id == 0 has a corresponding 'Unbatched'
+    batch in stk_batches, and links the stock and unlinked serials to it."""
+    stmt = select(Stock).where(or_(Stock.batch_id == 0, Stock.batch_id.is_(None)), Stock.total_qty > 0)
+    if warehouse_id is not None:
+        stmt = stmt.where(Stock.warehouse_id == warehouse_id)
+    unbatched_stocks = (await db.execute(stmt)).scalars().all()
+    if not unbatched_stocks:
+        return
+
+    changed = False
+    for stock in unbatched_stocks:
+        batch = await db.scalar(select(m.Batch).where(
+            m.Batch.item_id == stock.item_id, m.Batch.batch_no == "Unbatched"))
+        if not batch:
+            item = await db.get(Item, stock.item_id)
+            batch = m.Batch(
+                batch_no="Unbatched",
+                item_id=stock.item_id,
+                item_code=getattr(item, "code", None),
+                item_name=getattr(item, "name", None),
+                initial_qty=stock.total_qty,
+                status="ACTIVE",
+            )
+            db.add(batch)
+            await db.flush()
+        stock.batch_id = batch.id
+        stock.batch_no = "Unbatched"
+        changed = True
+
+        await db.execute(
+            update(m.SerialNumber)
+            .where(m.SerialNumber.item_id == stock.item_id,
+                   m.SerialNumber.warehouse_id == stock.warehouse_id,
+                   or_(m.SerialNumber.batch_id.is_(None), m.SerialNumber.batch_id == 0))
+            .values(batch_id=batch.id)
+        )
+    if changed:
+        await db.flush()
+
+
 async def list_items(db: AsyncSession, params: PageParams, warehouse_id: int, user, *,
                      search: str | None = None) -> dict:
     """One row per item the point holds — the editor's first screen. How many units
     and batches sit behind each, so the buttons can say what they open, and the
     item's tracking flags, so the unit editor shows only the identifiers it carries."""
     await _visible_warehouse(db, warehouse_id, user)
+    await _ensure_unbatched_stock(db, warehouse_id)
     conds = [Stock.warehouse_id == warehouse_id]
     if search and search.strip():
         like = f"%{search.strip()}%"
@@ -188,6 +230,7 @@ async def list_batches(db: AsyncSession, params: PageParams, warehouse_id: int, 
                        search: str | None = None, item_id: int | None = None) -> dict:
     """Every batch the point holds stock of, with how much."""
     await _visible_warehouse(db, warehouse_id, user)
+    await _ensure_unbatched_stock(db, warehouse_id)
     held = (
         select(Stock.batch_id, func.sum(Stock.total_qty).label("qty"))
         .where(Stock.warehouse_id == warehouse_id, Stock.batch_id != 0)
@@ -362,11 +405,16 @@ async def _apply(db: AsyncSession, edit: m.StockEdit, user) -> None:
                     select(Stock).where(Stock.batch_id == row.id))).scalars():
                 stock.batch_no = row.batch_no
                 stock.expiry_date = row.expiry_date
+            if new.get("expiry_date"):
+                item = await db.get(Item, row.item_id)
+                if item and not item.has_expiry:
+                    item.has_expiry = True
     await db.flush()
 
 
 async def create_edit(db: AsyncSession, data, user) -> m.StockEdit:
     warehouse = await _visible_warehouse(db, data.warehouse_id, user)
+    await _ensure_unbatched_stock(db, data.warehouse_id)
     if not (data.reason or "").strip():
         raise ValidationError("Say why these values are being corrected")
     if not data.lines:

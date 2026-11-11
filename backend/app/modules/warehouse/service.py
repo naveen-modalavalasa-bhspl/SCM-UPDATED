@@ -3634,16 +3634,16 @@ async def cancel_receipt(db: AsyncSession, receipt_id: int, reason: str | None,
 
 async def _ensure_batch(db: AsyncSession, receipt: m.Receipt,
                         line: m.ReceiptItem) -> m.Batch | None:
-    """Creates the `stk_batches` row for a batch-tracked line, once.
+    """Creates the `stk_batches` row for a line, defaulting to 'Unbatched' when
+    no batch is provided so all held stock carries a batch row and can be managed.
 
     Batches are keyed on (batch_no, item) rather than per receipt: the same batch can
     arrive across two deliveries, and giving it two ids would split its expiry.
     """
-    if not line.batch_no:
-        return None
+    batch_no = (line.batch_no or "").strip() or "Unbatched"
 
     existing = await db.scalar(select(m.Batch).where(
-        m.Batch.batch_no == line.batch_no, m.Batch.item_id == line.item_id))
+        m.Batch.batch_no == batch_no, m.Batch.item_id == line.item_id))
     if existing:
         if line.mfg_date and not existing.mfg_date:
             existing.mfg_date = line.mfg_date
@@ -3652,7 +3652,7 @@ async def _ensure_batch(db: AsyncSession, receipt: m.Receipt,
         return existing
 
     batch = m.Batch(
-        batch_no=line.batch_no, item_id=line.item_id,
+        batch_no=batch_no, item_id=line.item_id,
         item_code=line.item_code, item_name=line.item_name,
         vendor_id=receipt.vendor_id, vendor_name=receipt.vendor_name,
         mfg_date=line.mfg_date, expiry_date=line.expiry_date,
@@ -3762,6 +3762,7 @@ async def _prepare_receipt_line(
     batch = await _ensure_batch(db, receipt, line)
     if batch is not None:
         line.batch_id = batch.id
+        line.batch_no = batch.batch_no
 
     wh = await _warehouse(db, receipt.warehouse_id)
     if wh.is_bin_managed:
