@@ -127,14 +127,15 @@ export function QuoteChangeRequestModal({ quote, onClose }: {
     || Number(d.discount_percent) !== Number(d.item.discount_percent ?? 0)
     || comboChanged(d);
 
-  /** The RFQ's quantity is the ceiling (2026-11-03): an amendment may ask for it or
-   *  less, never more. The server refuses the same; this says it before Send. */
+  /** The RFQ's quantity (2026-11-11): an amendment may go above it, but only with a
+   *  reason on that line. The server refuses the same; this says it before Send. */
   const qtyCap = (d: DraftLine) => d.item.requested_quantity ?? null;
   const qtyAbove = (d: DraftLine) =>
     d.included && qtyCap(d) != null && Number(d.quantity) > Number(qtyCap(d));
+  const missingReason = (d: DraftLine) => qtyAbove(d) && !d.note.trim();
 
-  // Any included line with a rate increase blocks the send.
-  const hasRateViolation = touched.some(rateIncreased) || touched.some(qtyAbove);
+  // A rate increase, or a higher quantity with no reason, blocks the send.
+  const hasRateViolation = touched.some(rateIncreased) || touched.some(missingReason);
   const hasUnchanged = touched.some((d) => !changed(d));
 
   const canSend = !propose.isPending && !quantityInvalid
@@ -320,17 +321,28 @@ export function QuoteChangeRequestModal({ quote, onClose }: {
                             </label>
                           </div>
 
-                          {/* Quantity above the RFQ */}
+                          {/* Quantity above the RFQ: allowed, with a reason on this line */}
                           {qtyAbove(d) && (
-                            <div className="mt-2 flex items-center gap-1.5 rounded-lg bg-danger/10 px-2.5 py-1.5">
-                              <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-danger" />
-                              <span className="text-[11px] font-semibold text-danger">
-                                The RFQ asked for {qtyCap(d)} {d.item.uom_code ?? ""} — ask for that or less, never more
-                              </span>
+                            <div className="mt-2 rounded-lg bg-warn/10 px-2.5 py-2">
+                              <p className="flex items-center gap-1.5 text-[11px] font-semibold text-warn">
+                                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                                More than the {qtyCap(d)} {d.item.uom_code ?? ""} the RFQ asked for — say why
+                              </p>
+                              <input
+                                type="text"
+                                className={`mt-1.5 h-9 w-full rounded-md border px-2 text-sm outline-none focus:ring-2 ${
+                                  missingReason(d)
+                                    ? "border-danger bg-danger/5 focus:border-danger focus:ring-danger/20"
+                                    : "border-line bg-content1 focus:border-brand focus:ring-brand/20"} text-ink`}
+                                value={d.note}
+                                onChange={(e) => update(d.quotation_item_id, { note: e.target.value })}
+                                placeholder="Reason for the higher quantity (required)"
+                                aria-label="Reason for the higher quantity"
+                              />
                             </div>
                           )}
                           {d.included && !qtyAbove(d) && qtyCap(d) != null && (
-                            <p className="mt-1 text-[10px] text-muted">Qty up to {qtyCap(d)} (the RFQ's) · can only be lowered</p>
+                            <p className="mt-1 text-[10px] text-muted">The RFQ asked for {qtyCap(d)} · going above it needs a reason</p>
                           )}
 
                           {/* Rate-increase error */}
@@ -406,7 +418,9 @@ export function QuoteChangeRequestModal({ quote, onClose }: {
             <div className="flex items-start gap-2 rounded-xl border border-danger/30 bg-danger/[0.05] px-3 py-2.5">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-danger" />
               <p className="text-xs text-danger">
-                One or more lines propose a rate higher than the supplier's quote. Lower the rate or uncheck those lines.
+                {touched.some(rateIncreased)
+                  ? "One or more lines propose a rate higher than the supplier's quote. Lower the rate or uncheck those lines."
+                  : "A line asks for more than the RFQ's quantity. Give the reason on that line."}
               </p>
             </div>
           )}

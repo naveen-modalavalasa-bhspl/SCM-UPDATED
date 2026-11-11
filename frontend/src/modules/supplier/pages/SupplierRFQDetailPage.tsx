@@ -263,9 +263,9 @@ export function SupplierRFQDetailPage() {
   const [decideNote, setDecideNote] = useState("");
   const [decide, setDecide] = useState<"ACCEPT" | "DECLINE" | null>(null);
   const [counterMode, setCounterMode] = useState(false);
-  const [counterEdits, setCounterEdits] = useState<Record<number, { qty: string; rate: string; discount: string }>>({});
-  /** What the RFQ asked for on a quotation line — a counter may offer that or less,
-   *  never more (2026-11-03). The server refuses the same. */
+  const [counterEdits, setCounterEdits] = useState<Record<number, { qty: string; rate: string; discount: string; note?: string }>>({});
+  /** What the RFQ asked for on a quotation line. A counter may offer more, but only
+   *  with a reason on that line (2026-11-11). The server refuses the same. */
   const rfqAsked = (quotationItemId: number): number | null => {
     const item = quote?.items.find((row) => row.id === quotationItemId);
     const asked = item?.requested_quantity;
@@ -467,18 +467,29 @@ export function SupplierRFQDetailPage() {
                               decimals={uomDecimals(line.uom_code)} min={0}
                               value={edit.qty}
                               data-uom={line.uom_code ?? ""}
-                              max={rfqAsked(line.quotation_item_id) ?? undefined}
                               onChange={(raw) => setCounterEdits({ ...counterEdits, [line.quotation_item_id]: { ...edit, qty: raw } })}
                               className={`h-9 w-full rounded-md border bg-white px-2 text-xs text-ink outline-none ${
                                 counterOver(line.quotation_item_id, edit.qty)
                                   ? "border-danger focus:border-danger" : "border-line focus:border-brand"}`}
                             />
                           {rfqAsked(line.quotation_item_id) != null && (
-                            <p className={`mt-1 text-[10px] ${counterOver(line.quotation_item_id, edit.qty) ? "font-semibold text-danger" : "text-muted"}`}>
+                            <p className={`mt-1 text-[10px] ${counterOver(line.quotation_item_id, edit.qty) ? "font-semibold text-warn" : "text-muted"}`}>
                               {counterOver(line.quotation_item_id, edit.qty)
-                                ? `The RFQ asked for ${rfqAsked(line.quotation_item_id)} — offer that or less`
-                                : `Up to ${rfqAsked(line.quotation_item_id)} (the RFQ's quantity)`}
+                                ? `More than the ${rfqAsked(line.quotation_item_id)} the RFQ asked for — say why below`
+                                : `The RFQ asked for ${rfqAsked(line.quotation_item_id)} · more needs a reason`}
                             </p>
+                          )}
+                          {counterOver(line.quotation_item_id, edit.qty) && (
+                            <input
+                              type="text"
+                              value={edit.note ?? line.note ?? ""}
+                              onChange={(e) => setCounterEdits({ ...counterEdits, [line.quotation_item_id]: { ...edit, note: e.target.value } })}
+                              placeholder="Reason for the higher quantity (required)"
+                              aria-label="Reason for the higher quantity"
+                              className={`mt-1 h-9 w-full rounded-md border bg-white px-2 text-xs text-ink outline-none ${
+                                (edit.note ?? line.note ?? "").trim()
+                                  ? "border-line focus:border-brand" : "border-danger focus:border-danger"}`}
+                            />
                           )}
                         </div>
                         <div>
@@ -528,7 +539,8 @@ export function SupplierRFQDetailPage() {
                   className="bg-brand text-white hover:bg-brand/90"
                   disabled={answerCr.isPending || otpCode.trim().length < 5
                     || openCr.lines.some((l) => counterOver(l.quotation_item_id,
-                      counterEdits[l.quotation_item_id]?.qty ?? String(l.proposed_quantity)))}
+                      counterEdits[l.quotation_item_id]?.qty ?? String(l.proposed_quantity))
+                      && !(counterEdits[l.quotation_item_id]?.note ?? l.note ?? "").trim())}
                   onClick={() => {
                     const counterLinesPayload = openCr.lines.map((l) => {
                       const ed = counterEdits[l.quotation_item_id];
@@ -542,6 +554,9 @@ export function SupplierRFQDetailPage() {
                         proposed_quantity: Number(ed?.qty ?? l.proposed_quantity),
                         proposed_rate: Number(ed?.rate ?? l.proposed_rate),
                         proposed_discount_percent: Number(ed?.discount ?? l.proposed_discount_percent),
+                        // The reason for a quantity above the RFQ's: the supplier's own,
+                        // else the buyer's on that line (2026-11-11).
+                        note: (ed?.note ?? l.note ?? "").trim() || undefined,
                         ...comboPayload(combo),
                       };
                     });
