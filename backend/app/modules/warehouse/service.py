@@ -6895,7 +6895,10 @@ async def create_stock_movement_order(
     # abbreviation this system already uses for a Stock TRANSFER Order, which is an
     # inter-warehouse document with a different table, a different screen and a
     # different meaning. An SMO now reads SMO.
-    order_no = await next_number(db, WarehouseDocType.STOCK_MOVEMENT_ORDER.value)
+    # Whose paper it is on (2026-11-11): selected, opening on the default organisation.
+    scope = await org_scope.resolve_free(db, data)
+    order_no = await next_number(db, WarehouseDocType.STOCK_MOVEMENT_ORDER.value,
+                                 **(org_scope.args_of(scope) if scope else {}))
     moved: list[dict] = []
     # Read once: the code toggle cannot differ between two lines of one order.
     code_config = await codeformat.code_settings(db)
@@ -6984,6 +6987,8 @@ async def create_stock_movement_order(
             **row.get("combination", combinations.NONE),
         ) for row in moved],
     )
+    if scope:
+        org_scope.stamp_with_project(order, scope)
     db.add(order)
     await db.flush()
 

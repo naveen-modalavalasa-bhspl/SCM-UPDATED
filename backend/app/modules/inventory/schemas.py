@@ -544,7 +544,7 @@ class AdjustmentItemIn(BaseModel):
     remarks: str | None = None
 
 
-class AdjustmentIn(BaseModel):
+class AdjustmentIn(OrgScopeIn):
     warehouse_id: int
     # Validated against AdjustmentReason in the service, not typed as the enum here, so
     # a bad value comes back as the app's own error shape rather than a Pydantic 422.
@@ -589,8 +589,11 @@ class AdjustmentItemOut(BaseModel):
     remarks: str | None = None
 
 
-class AdjustmentListRow(BaseModel):
+class AdjustmentListRow(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
+    #: The project its number is drawn under (2026-11-11).
+    project_id: int | None = None
+    project_name: str | None = None
     id: int
     adjustment_no: str
     warehouse_id: int

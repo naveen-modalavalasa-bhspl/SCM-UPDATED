@@ -359,3 +359,27 @@ def stamp_with_project(document, values: dict) -> None:
                      if k not in ("project_id", "project_name")})
     document.project_id = values.get("project_id")
     document.project_name = values.get("project_name")
+
+
+async def resolve_free(db: AsyncSession, data, *, keep=None) -> dict | None:
+    """A standalone document's organisation / project / department (2026-11-11) — a stock
+    audit, a stock correction, a movement: nothing before it, so all of it is SELECTED,
+    opening on the configured default organisation. None when the request names no
+    organisation and none is configured: the caller keeps its old numbering, so a caller
+    that predates the number card still gets a number."""
+    default = await default_organisation(db)
+    chosen = getattr(data, "organization_id", None) or getattr(keep, "organization_id", None)
+    if not (chosen or default):
+        return None
+    return await resolve_selection(
+        db, organization_id=chosen or default.id,
+        org_department_id=getattr(data, "org_department_id", None),
+        project_id=getattr(data, "project_id", None),
+        fiscal_year=getattr(data, "fiscal_year", None), keep=keep)
+
+
+def args_of(values: dict) -> dict:
+    """`next_number` arguments for a resolved selection, read as `number_args` reads a
+    document."""
+    from types import SimpleNamespace
+    return number_args(SimpleNamespace(department_name=None, **values))

@@ -1494,7 +1494,7 @@ doc_registry.register(DocType.FORWARD_ISSUE.value, "out_issues")
 # Stock corrections (2026-10-01)
 # ---------------------------------------------------------------------------
 
-class StockEdit(Base):
+class StockEdit(OrgScopeColumns, Base):
     """`whs_stock_edits`. A request to correct what held stock IS — a batch's number
     or dates, a unit's serial / IMEI / code — signed on the STOCK_EDIT ladder before
     anything is written. Quantities never move, so `stk_ledger` is untouched."""
@@ -1502,6 +1502,9 @@ class StockEdit(Base):
 
     id = pk()
     edit_no = Column(String(50), unique=True, nullable=False)
+    # The project its NUMBER is drawn under (2026-11-11).
+    project_id = soft_fk()
+    project_name = Column(String(200), nullable=True)
     warehouse_id = Column(BigInteger, index=True, nullable=False)
     warehouse_name = Column(String(200), nullable=True)
     status = Column(String(30), index=True, nullable=False)

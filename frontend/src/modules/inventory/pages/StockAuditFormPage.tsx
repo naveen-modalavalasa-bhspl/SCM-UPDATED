@@ -8,8 +8,11 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import {
-  Button, Card, ErrorBanner, Field, Input, PageHeader, Select,
+  Button, Card, DocumentNumberCard, ErrorBanner, Field, Input, PageHeader, Select,
 } from "@/shared/components";
+import {
+  docNumberPayload, emptyDocNumberValue, type DocNumberValue,
+} from "@/shared/documentNumber";
 import { alerts } from "@/modules/alerts";
 import { claimError, isAnnouncedGlobally } from "@/shared/api/errors";
 import {
@@ -148,8 +151,15 @@ export default function StockAuditFormPage() {
   ].filter(Boolean) as string[];
   const ready = blockers.length === 0;
 
+  // Organisation, project / department and year (2026-11-11): selected here, opening
+  // on the defaults the card fills, so the number never prints NA.
+  const [scope, setScope] = useState<DocNumberValue>(emptyDocNumberValue);
+  const [scopeTouched, setScopeTouched] = useState(false);
+  /** The card's selection for the save; marks the card so a missing field shows. */
+  const scopePayload = () => { setScopeTouched(true); return docNumberPayload(scope); };
   const submit = useMutation({
     mutationFn: () => createStockAdjustment({
+      ...scopePayload(),
       warehouse_id: wh,
       reason,
       remarks: remarks.trim() || null,
@@ -240,6 +250,10 @@ export default function StockAuditFormPage() {
         title="New stock audit"
         back={{ to: "/inventory/adjustments", label: "Back to Stock audits" }}
       />
+      <div className="mb-5">
+        <DocumentNumberCard docType="adj" value={scope} ready exclusive showInvalid={scopeTouched}
+                            onChange={(patch) => setScope((current) => ({ ...current, ...patch }))} />
+      </div>
 
       <div className="mb-4 flex items-start gap-3 rounded-2xl border border-bad/20 bg-gradient-to-r from-bad-bg/70 to-content1 px-4 py-3">
         <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-bad text-white"><TrendingDown className="h-4 w-4" /></span>

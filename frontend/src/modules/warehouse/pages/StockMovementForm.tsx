@@ -1,4 +1,9 @@
-import { Button, Can, Card, ErrorBanner, Field, Input, PageHeader, Select } from "@/shared/components";
+import {
+  Button, Can, Card, DocumentNumberCard, ErrorBanner, Field, Input, PageHeader, Select,
+} from "@/shared/components";
+import {
+  docNumberPayload, emptyDocNumberValue, type DocNumberValue,
+} from "@/shared/documentNumber";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -91,8 +96,15 @@ export default function StockMovementForm() {
     queryFn: () => listStorageTypes(),
   });
 
+  // Organisation, project / department and year (2026-11-11): selected here, opening
+  // on the defaults the card fills, so the number never prints NA.
+  const [scope, setScope] = useState<DocNumberValue>(emptyDocNumberValue);
+  const [scopeTouched, setScopeTouched] = useState(false);
+  /** The card's selection for the save; marks the card so a missing field shows. */
+  const scopePayload = () => { setScopeTouched(true); return docNumberPayload(scope); };
   const save = useMutation({
     mutationFn: () => createStockMovementOrder({
+      ...scopePayload(),
       warehouse_id: warehouseId,
       reason,
       items: lines.map(({ _key, _destCode, _destName, ...line }) => line),
@@ -251,6 +263,10 @@ export default function StockMovementForm() {
           </>
         }
       />
+      <div className="mb-5">
+        <DocumentNumberCard docType="STOCK_MOVEMENT_ORDER" value={scope} ready exclusive showInvalid={scopeTouched}
+                            onChange={(patch) => setScope((current) => ({ ...current, ...patch }))} />
+      </div>
 
       <ErrorBanner error={save.error} />
       {touched && isInvalid && (

@@ -1539,7 +1539,7 @@ class StockMovementOrderItemWrite(CombinationIn):
         return self
 
 
-class StockMovementOrderWrite(BaseModel):
+class StockMovementOrderWrite(OrgScopeIn):
     warehouse_id: int
     reason: str | None = Field(default=None, max_length=500)
     items: list[StockMovementOrderItemWrite] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
@@ -4767,7 +4767,7 @@ class StockEditLineIn(BaseModel):
     changes: dict[str, str | None] = Field(max_length=10)
 
 
-class StockEditIn(BaseModel):
+class StockEditIn(OrgScopeIn):
     warehouse_id: int
     reason: str = Field(max_length=500)
     remarks: str | None = None
@@ -4791,8 +4791,11 @@ class StockEditItemRead(BaseModel):
     changes: dict
 
 
-class StockEditListRow(BaseModel):
+class StockEditListRow(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
+    #: The project its number is drawn under (2026-11-11).
+    project_id: int | None = None
+    project_name: str | None = None
     id: int
     edit_no: str
     warehouse_id: int
