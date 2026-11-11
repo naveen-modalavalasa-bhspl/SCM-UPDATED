@@ -11603,7 +11603,11 @@ async def _issue_scope(db: AsyncSession, data, source) -> tuple[dict | None, dic
     values = {field: picked[field] for field in (*org_scope.SCOPE_FIELDS, "fiscal_year")}
     return values, {"company": picked["organization_name"],
                     "project": picked["project_name"] or picked["org_department_name"],
-                    "fiscal_year": picked["fiscal_year"]}
+                    "fiscal_year": picked["fiscal_year"],
+                    "company_code": picked["organization_code"],
+                    "project_id": picked["project_id"],
+                    "org_department_id": (None if picked["project_id"]
+                                          else picked["org_department_id"])}
 
 
 async def _build_issue(db: AsyncSession, data: s.IssueWrite, user, *,

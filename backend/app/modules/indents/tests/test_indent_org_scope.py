@@ -59,7 +59,7 @@ async def test_a_department_hcm_names_is_used_and_fixed(db):
     _world, pilot, item = await _setup(db)
 
     indent = await service.create_indent(db, _new(item.id), pilot)
-    assert indent.indent_no.startswith(f"BAV/OPE/{_fiscal_year()}/IND")
+    assert indent.indent_no.startswith(f"B-01/D-05/{_fiscal_year()}/IND")
     assert "NA" not in indent.indent_no
     assert indent.organization_name == "BAVYA" and indent.org_department_id == 5
 
@@ -76,7 +76,7 @@ async def test_a_project_hcm_names_wins_and_is_fixed(db):
     await db.commit()
 
     indent = await service.create_indent(db, _new(item.id), pilot)
-    assert indent.indent_no.startswith(f"BAV/104/{_fiscal_year()}/IND")
+    assert indent.indent_no.startswith(f"B-01/P-104/{_fiscal_year()}/IND")
     assert indent.project_id == 77 and indent.org_department_id is None
 
 
@@ -87,9 +87,9 @@ async def test_with_nothing_in_hcm_one_of_the_two_is_picked(db):
     with pytest.raises(ValidationError, match="project or the department"):
         await service.create_indent(db, _new(item.id), pilot)
     by_project = await service.create_indent(db, _new(item.id, project_id=77), pilot)
-    assert by_project.indent_no.startswith("BAV/104/")
+    assert by_project.indent_no.startswith("B-01/P-104/")
     by_department = await service.create_indent(db, _new(item.id, org_department_id=6), pilot)
-    assert by_department.indent_no.startswith("BAV/STO/")
+    assert by_department.indent_no.startswith("B-01/D-06/")
 
 
 async def test_the_configured_organisation_is_fixed(db):
@@ -116,11 +116,11 @@ async def test_a_draft_renumbers_when_its_selection_moves(db):
     _world, pilot, item = await _setup(db, department_name="Accounts")
     indent = await service.create_indent(db, _new(item.id, org_department_id=6), pilot)
     first = indent.indent_no
-    assert first.startswith("BAV/STO/")
+    assert first.startswith("B-01/D-06/")
 
     updated = await service.update_indent(
         db, indent.id, IndentUpdate(project_id=77, org_department_id=None, required_date=indent.required_date), pilot)
-    assert updated.indent_no.startswith("BAV/104/") and updated.indent_no != first
+    assert updated.indent_no.startswith("B-01/P-104/") and updated.indent_no != first
     assert updated.org_department_id is None
 
     # Saving the same selection again burns no number.
@@ -148,7 +148,8 @@ async def test_an_issue_copies_an_organised_source_and_leaves_an_older_one_alone
     values, args = await _issue_scope(db, SimpleNamespace(fiscal_year=None), organised)
     assert values["organization_name"] == "BAVYA"
     assert values["fiscal_year"] == _fiscal_year()          # its own year, not the source's
-    assert args == {"company": "BAVYA", "project": "104", "fiscal_year": _fiscal_year()}
+    assert args["company"] == "BAVYA" and args["project"] == "104"
+    assert args["fiscal_year"] == _fiscal_year()
 
     older = SimpleNamespace(organization_id=None)
     assert await _issue_scope(db, SimpleNamespace(), older) == (None, None)
@@ -167,3 +168,5 @@ async def test_a_direct_issue_selects_and_never_prints_na(db):
     values, args = await _issue_scope(db, data, None)
     assert values["organization_id"] == BAVYA
     assert args["company"] == "BAVYA" and args["project"] == "104"
+    # The number prints the CODES (2026-11-11): the organisation's and the project's.
+    assert args["company_code"] == "B-01" and args["project_id"] == 77
