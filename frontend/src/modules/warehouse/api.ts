@@ -577,6 +577,8 @@ export const rejectIssue = (id: number, comments = "") =>
 
 /** Posts the movement — this is the point stock actually leaves the shelf. */
 export const postIssue = (id: number) => post<Issue>(`${BASE}/issues/${id}/issue`);
+/** Issue every floor piece of a SPLIT issue at once — all or nothing (2026-11-10). */
+export const postSplitIssue = (id: number) => post<Issue>(`${BASE}/issues/${id}/issue-split`);
 
 /** One child issue per warehouse floor holding stock for the parent's items. */
 export interface IssueSplitResult {

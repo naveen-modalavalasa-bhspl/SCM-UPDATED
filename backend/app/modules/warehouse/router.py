@@ -847,6 +847,13 @@ async def post_issue(issue_id: int, db: AsyncSession = Depends(get_db),
     return await service.post_issue(db, issue_id, user)
 
 
+@router.post("/issues/{issue_id}/issue-split", response_model=s.IssueDetail)
+async def post_split_issue(issue_id: int, db: AsyncSession = Depends(get_db),
+                           user=Depends(require_permission(ISSUE_POST))):
+    """Issue every floor piece of a split issue at once — all or nothing."""
+    return await service.post_split_issue(db, issue_id, user)
+
+
 @router.put("/issues/{issue_id}/serials", response_model=s.IssueDetail)
 async def set_issue_serials(issue_id: int, body: s.IssueSerialsIn,
                             db: AsyncSession = Depends(get_db),

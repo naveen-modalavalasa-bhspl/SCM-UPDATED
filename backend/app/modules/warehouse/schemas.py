@@ -2181,6 +2181,8 @@ class IssueDetail(IssueRead):
     # True only for the person an approved issue is with, or someone above them on the
     # HCM reporting line. `post_issue` and `set_issue_serials` enforce the same rule.
     can_issue_from_stock: bool = False
+    #: A SPLIT parent whose floor pieces this login may issue all at once.
+    can_issue_split: bool = False
     # Swap auto-assigned asset/consumable codes: the issuer, or anyone who approved it.
     can_swap_codes: bool = False
     # Whoever submitted it for approval (the workflow's starter), shown as "Submitted

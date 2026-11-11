@@ -10810,6 +10810,10 @@ async def get_issue(db: AsyncSession, issue_id: int, user=None) -> m.MaterialIss
             issue.status == IssueStatus.APPROVED.value and not issue.is_stock_posted
             and await _may_issue(db, issue, user, holders))
     setattr(issue, "can_swap_codes", issue.can_issue_from_stock)
+    # A split parent issues all its floor pieces at once, for its raiser and approvers.
+    setattr(issue, "can_issue_split",
+            issue.status == IssueStatus.SPLIT.value
+            and await _may_issue_parent(db, issue, user))
     setattr(issue, "can_acknowledge", await _receiver_confirmed(db, issue))
     setattr(issue, "is_stock_transfer", await is_stock_transfer_issue(db, issue.id))
     if issue.floor_location_id:
@@ -13491,7 +13495,7 @@ def _ledger_packs(line, qty) -> str | None:
     return text if _d(qty) == _d(line.issued_qty) else f"Part of {text}"
 
 
-async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
+async def _post_issue_core(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
     """Takes the stock off the shelf. The only step here that moves anything."""
     issue = await get_issue(db, issue_id)
     _guard(issue.status, {IssueStatus.APPROVED.value}, "issue stock against", "issue")
@@ -13830,8 +13834,68 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                              "qc_status": issue.qc_status,
                              "total_qty": str(issue.total_qty)})
     await _sync_split_parent(db, issue.parent_issue_id, user)
+    return issue
+
+
+async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
+    """Issue one approved issue from stock: `_post_issue_core`, then commit."""
+    await _post_issue_core(db, issue_id, user)
     await db.commit()
     return await get_issue(db, issue_id)
+
+
+async def post_split_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
+    """Issue a SPLIT parent from stock: every floor piece not yet issued, at once
+    (2026-11-10). All or nothing — each piece runs exactly the checks and stock moves
+    of its own "Issue from stock", inside ONE transaction; the first piece refused rolls
+    every one of them back and is named, so the person fixes it (picks its serials,
+    say) and presses again. The parent closes itself when its last piece is issued
+    (`_sync_split_parent`). Pieces already issued are left alone.
+
+    Who: the parent's raiser and its approvers — the people who could issue all of it
+    before the split. Each piece's own gate (`_may_issue`) admits exactly them."""
+    parent = await get_issue(db, issue_id)
+    if parent.status != IssueStatus.SPLIT.value:
+        raise ValidationError(
+            f"{parent.issue_no} is not split across floors. Use Issue from stock on it.")
+    if not await _may_issue_parent(db, parent, user):
+        raise PermissionError_(
+            f"Only whoever raised or approved {parent.issue_no} can issue all of its "
+            "floor pieces at once. Each floor's in-charge issues their own piece.")
+    pieces = (await db.execute(
+        select(m.MaterialIssue.id, m.MaterialIssue.issue_no).where(
+            m.MaterialIssue.parent_issue_id == parent.id,
+            m.MaterialIssue.status == IssueStatus.APPROVED.value,
+            m.MaterialIssue.is_stock_posted.is_(False),
+        ).order_by(m.MaterialIssue.id))).all()
+    if not pieces:
+        raise ValidationError(f"Every floor piece of {parent.issue_no} is already issued.")
+    actor_id = getattr(user, "id", None)
+    for piece_id, piece_no in pieces:
+        try:
+            await _post_issue_core(db, piece_id, user)
+        except AppException as exc:
+            await db.rollback()
+            raise ValidationError(
+                f"Nothing was issued. {piece_no} cannot be issued yet: {exc.message} "
+                f"Open {piece_no}, fix it, and press Issue from stock on "
+                f"{parent.issue_no} again.") from exc
+    await write_audit(db, entity="out_issues", entity_id=parent.id,
+                      entity_no=parent.issue_no, action=AuditAction.UPDATE, actor=user,
+                      after={"issued_pieces": [no for _id, no in pieces],
+                             "by": actor_id},
+                      summary=f"Issued {len(pieces)} floor piece(s) of {parent.issue_no}")
+    await db.commit()
+    return await get_issue(db, issue_id)
+
+
+async def _may_issue_parent(db: AsyncSession, parent, user) -> bool:
+    """The parent's raiser, or anyone who approved it."""
+    if user is None:
+        return False
+    if parent.created_by_id and parent.created_by_id == getattr(user, "id", None):
+        return True
+    return await _issue_approved_by(db, parent.id, user)
 
 
 def _validate_issue_return(issue: m.MaterialIssue, original: m.MaterialIssue) -> None:
