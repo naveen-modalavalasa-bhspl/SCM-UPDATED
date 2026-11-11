@@ -131,22 +131,28 @@ async def test_a_loose_pick_is_placed_fefo_and_never_on_a_fixed_picks_stock():
 
 
 async def test_whoever_raised_the_parent_may_issue_its_floor_pieces(monkeypatch):
+    """Raised = created it, or SUBMITTED it (an allocation drafts the issue under the
+    approver's name, so the person who raised it is the one who submitted it)."""
     async def no(*_args, **_kwargs):
         return False
 
     monkeypatch.setattr(service, "_may_act_as_issue_holder", no)
     monkeypatch.setattr(service, "_issue_approved_by", no)
 
-    class _Scalar:
+    class _Db:
+        async def get(self, _model, _id):
+            return SimpleNamespace(id=5, created_by_id=7)     # drafted under the approver
+
         async def scalar(self, _stmt):
-            return 42          # the parent's created_by_id
+            return 42                                         # who submitted it
 
     piece = SimpleNamespace(id=9, parent_issue_id=5)
-    assert await service._may_issue(_Scalar(), piece, SimpleNamespace(id=42), []) is True
-    assert await service._may_issue(_Scalar(), piece, SimpleNamespace(id=43), []) is False
+    assert await service._may_issue(_Db(), piece, SimpleNamespace(id=7), []) is True
+    assert await service._may_issue(_Db(), piece, SimpleNamespace(id=42), []) is True
+    assert await service._may_issue(_Db(), piece, SimpleNamespace(id=43), []) is False
     # Not a piece of a split: the parent's raiser is no reason at all.
     whole = SimpleNamespace(id=9, parent_issue_id=None)
-    assert await service._may_issue(_Scalar(), whole, SimpleNamespace(id=42), []) is False
+    assert await service._may_issue(_Db(), whole, SimpleNamespace(id=42), []) is False
 
 
 class _Session:

@@ -1307,6 +1307,11 @@ export interface ApprovalEvent {
 
 /** `out_issue_items`. */
 export interface IssueItem extends CombinationValue {
+  /** On a SPLIT parent: the floor piece and line that carry this line now (2026-11-11). */
+  piece_issue_id?: number | null;
+  piece_issue_no?: string | null;
+  piece_line_id?: number | null;
+  piece_is_posted?: boolean;
   id: number;
   issue_id: number;
   line_no: number;

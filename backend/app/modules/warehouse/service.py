@@ -10779,9 +10779,47 @@ async def _decorate_can_approve(db: AsyncSession, doc, doc_type: str, user):
     return doc
 
 
+async def _decorate_split_pieces(db: AsyncSession, parent: m.MaterialIssue) -> None:
+    """On a SPLIT parent, each line names the floor-piece line that carries it now, and
+    shows that piece's serials (2026-11-11). The split copies each pick onto exactly one
+    piece line (`_plan_floor_split`), so the parent's raiser can pick a line's serials
+    from the parent: the screen lists and saves them against the PIECE line, through
+    the piece's own checks. A parent line several pieces share (a pick that named no
+    location) is left unmatched, and its serials are picked on each piece."""
+    pieces = (await db.execute(
+        select(m.MaterialIssue.id).where(
+            m.MaterialIssue.parent_issue_id == parent.id,
+            m.MaterialIssue.status != IssueStatus.CANCELLED.value,
+        ).order_by(m.MaterialIssue.id))).scalars().all()
+    matches: dict[int, list] = {}
+    for piece_id in pieces:
+        piece = await _load(db, m.MaterialIssue, piece_id, "Issue", m.MaterialIssue.items)
+        piece = await _decorate_issue_serials(db, piece)
+        for piece_line in piece.items:
+            for line in parent.items:
+                if (piece_line.item_id == line.item_id
+                        and (piece_line.indent_item_id or 0) == (line.indent_item_id or 0)
+                        and (not line.batch_id or piece_line.batch_id == line.batch_id)
+                        and (not line.bin_id or piece_line.bin_id == line.bin_id)):
+                    matches.setdefault(line.id, []).append((piece, piece_line))
+    for line in parent.items:
+        found = matches.get(line.id, [])
+        if len(found) != 1:
+            continue
+        piece, piece_line = found[0]
+        setattr(line, "piece_issue_id", piece.id)
+        setattr(line, "piece_issue_no", piece.issue_no)
+        setattr(line, "piece_line_id", piece_line.id)
+        setattr(line, "piece_is_posted", bool(piece.is_stock_posted))
+        setattr(line, "serial_numbers", getattr(piece_line, "serial_numbers", None) or [])
+        setattr(line, "unit_keys", getattr(piece_line, "unit_keys", None) or [])
+
+
 async def get_issue(db: AsyncSession, issue_id: int, user=None) -> m.MaterialIssue:
     issue = await _load(db, m.MaterialIssue, issue_id, "Issue", m.MaterialIssue.items)
     issue = await _decorate_issue_serials(db, issue)
+    if issue.status == IssueStatus.SPLIT.value:
+        await _decorate_split_pieces(db, issue)
     # How many decimals each line's unit allows, served onto the line so the form
     # can refuse a typed fraction for a whole-unit item (NOS, Box…) before save,
     # the same rule `_apply_issue_lines` enforces on the server (SCM_0080).
@@ -12466,9 +12504,8 @@ async def _may_issue(db: AsyncSession, issue, user, holders) -> bool:
         return True
     parent_id = getattr(issue, "parent_issue_id", None)
     if parent_id:
-        parent_raiser = await db.scalar(select(m.MaterialIssue.created_by_id).where(
-            m.MaterialIssue.id == parent_id))
-        if parent_raiser and parent_raiser == getattr(user, "id", None):
+        parent = await db.get(m.MaterialIssue, parent_id)
+        if parent is not None and await _raised_by(db, parent, user):
             return True
     return False
 
@@ -13889,11 +13926,28 @@ async def post_split_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialI
     return await get_issue(db, issue_id)
 
 
+async def _raised_by(db: AsyncSession, issue, user) -> bool:
+    """Did this person raise the issue? Who created it, or who SUBMITTED it (2026-11-11):
+    an issue drafted from an approved allocation is created under the approver's name,
+    and the person who raised it is the one who submitted it — the "Submitted by" the
+    screen shows."""
+    user_id = getattr(user, "id", None)
+    if user_id is None:
+        return False
+    if getattr(issue, "created_by_id", None) == user_id:
+        return True
+    started = await db.scalar(
+        select(WfInstance.started_by_id)
+        .where(WfInstance.doc_id == issue.id, WfInstance.doc_type.in_(ISSUE_DOC_TYPES))
+        .order_by(WfInstance.id.desc()).limit(1))
+    return started == user_id
+
+
 async def _may_issue_parent(db: AsyncSession, parent, user) -> bool:
     """The parent's raiser, or anyone who approved it."""
     if user is None:
         return False
-    if parent.created_by_id and parent.created_by_id == getattr(user, "id", None):
+    if await _raised_by(db, parent, user):
         return True
     return await _issue_approved_by(db, parent.id, user)
 
