@@ -572,6 +572,12 @@ export interface StorageTypeWrite {
 
 /** `inb_receipts`. `receipt_type` separates a gate entry from a purchase GRN. */
 export interface Receipt {
+  /** Whose paper it is on (2026-11-11); null on one older than organisations. */
+  organization_id?: number | null;
+  organization_name?: string | null;
+  org_department_id?: number | null;
+  org_department_name?: string | null;
+  fiscal_year?: string | null;
   id: number;
   grn_no: string;
   receipt_type: string;
@@ -748,6 +754,12 @@ export interface ReceiptItemWrite extends CombinationValue {
 }
 
 export interface ReceiptWrite {
+  /** Whose paper it is on (2026-11-11); null on one older than organisations. */
+  organization_id?: number | null;
+  organization_name?: string | null;
+  org_department_id?: number | null;
+  org_department_name?: string | null;
+  fiscal_year?: string | null;
   receipt_type: string;
   grn_date: string;
   po_id?: number | null;
@@ -777,6 +789,12 @@ export interface ReceiptWrite {
 
 /** `inb_inspections`. */
 export interface Inspection {
+  /** Copied from its GRN (2026-11-11); null on one older than organisations. */
+  organization_id?: number | null;
+  organization_name?: string | null;
+  org_department_id?: number | null;
+  org_department_name?: string | null;
+  fiscal_year?: string | null;
   id: number;
   inspection_no: string;
   inspection_date: string;
@@ -945,6 +963,12 @@ export interface OutboundInspectionWrite {
 
 /** `whs_warehouse_items` — one putaway task per received line. */
 export interface Putaway extends CombinationValue {
+  /** Copied from its GRN (2026-11-11); null on one older than organisations. */
+  organization_id?: number | null;
+  organization_name?: string | null;
+  org_department_id?: number | null;
+  org_department_name?: string | null;
+  fiscal_year?: string | null;
   /** A Storage container is mapped for the item (2026-10-27); not: the screen warns. */
   storage_defined?: boolean;
   id: number;

@@ -718,7 +718,7 @@ class ReceiptItemWrite(CombinationIn):
         return v
 
 
-class ReceiptWrite(BaseModel):
+class ReceiptWrite(OrgScopeIn):
     receipt_type: ReceiptType = ReceiptType.PURCHASE
     grn_date: date
     po_id: int | None = None
@@ -821,7 +821,7 @@ class ReceiptItemRead(CombinationOut, _Read):
         return self
 
 
-class ReceiptRead(_Read):
+class ReceiptRead(OrgScopeOut, _Read):
     id: int
     grn_no: str
     receipt_type: str
@@ -1127,7 +1127,7 @@ class InspectionItemRead(CombinationOut, _Read):
     rejected_pack_breakdown: list[dict] | None = None
 
 
-class InspectionRead(_Read):
+class InspectionRead(OrgScopeOut, _Read):
     id: int
     inspection_no: str
     inspection_date: date
@@ -1240,7 +1240,7 @@ class OutboundInspectionDetail(OutboundInspectionRead):
 # Putaway
 # ---------------------------------------------------------------------------
 
-class PutawayRead(CombinationOut, _Read):
+class PutawayRead(OrgScopeOut, CombinationOut, _Read):
     """The task plus the labels the queue screen shows. The `*_name` fields are
     filled by the service from the masters, because `whs_warehouse_items` carries
     only ids — it is a work queue, not a document."""

@@ -2432,6 +2432,101 @@ async def _dispatch_for_receipt(
     return dispatch
 
 
+async def _receipt_scope_source(db: AsyncSession, *, despatch_note_id, po_id, transfer,
+                                dispatch):
+    """The document before a receipt that carries an organisation (2026-11-11): its
+    despatch note, else its PO, else the STO / the issue a transfer arrival came from.
+    None when nothing before it carries one — an older PO, or no source at all — and
+    then the receipt selects its own."""
+    from app.modules.procurement.models import DespatchNote, PurchaseOrder
+    candidates = []
+    if despatch_note_id:
+        candidates.append(await db.get(DespatchNote, despatch_note_id))
+    if po_id:
+        candidates.append(await db.get(PurchaseOrder, po_id))
+    if transfer is not None:
+        candidates.append(transfer)
+    if dispatch is not None:
+        issue_id = await db.scalar(select(m.DispatchItem.issue_id).where(
+            m.DispatchItem.dispatch_id == dispatch.id,
+            m.DispatchItem.issue_id.is_not(None)).limit(1))
+        if issue_id:
+            candidates.append(await db.get(m.MaterialIssue, issue_id))
+    return next((doc for doc in candidates
+                 if doc is not None and org_scope.uses_org(doc)), None)
+
+
+async def receipt_scope_source(db: AsyncSession, *, po_id: int | None = None,
+                               despatch_note_id: int | None = None,
+                               transfer_id: int | None = None,
+                               dispatch_id: int | None = None) -> dict | None:
+    """What a receipt form shows LOCKED on its number card (2026-11-11): the
+    organisation and department of the document before it, or None when that document
+    carries none (an older PO) or there is none, and the form selects them itself.
+    The very rule `_apply_receipt_scope` applies on save."""
+    from app.modules.inventory.models import StockTransferOrder
+    transfer = await db.get(StockTransferOrder, transfer_id) if transfer_id else None
+    dispatch = await db.get(m.Dispatch, dispatch_id) if dispatch_id else None
+    source = await _receipt_scope_source(
+        db, despatch_note_id=despatch_note_id, po_id=po_id, transfer=transfer,
+        dispatch=dispatch)
+    if source is None:
+        return None
+    return {field: getattr(source, field, None) for field in org_scope.SCOPE_FIELDS} | {
+        "project_id": getattr(source, "project_id", None),
+        "project_name": getattr(source, "project_name", None),
+        "source_no": (getattr(source, "dn_no", None) or getattr(source, "po_no", None)
+                      or getattr(source, "sto_no", None) or getattr(source, "issue_no", None)),
+    }
+
+
+async def _apply_receipt_scope(db: AsyncSession, receipt, data, source) -> bool:
+    """Whose paper a material inward / GRN is on (2026-11-11). Copied from the document
+    before it when that carries an organisation — organisation and department fixed,
+    the receipt's own project kept (it decides whose stock this becomes), the source's
+    taken when the receipt names none. Otherwise SELECTED on the form, opening on the
+    defaults. The year is the receipt's own. Returns False — the old numbering — only
+    when nothing is named and no default organisation is configured."""
+    if source is not None:
+        values = {field: getattr(source, field, None) for field in org_scope.SCOPE_FIELDS}
+        values["fiscal_year"] = org_scope.assert_fiscal_year(
+            getattr(data, "fiscal_year", None), held=getattr(receipt, "fiscal_year", None))
+        org_scope.stamp(receipt, values)
+        if not receipt.project_id and getattr(source, "project_id", None):
+            receipt.project_id = source.project_id
+            receipt.project_name = getattr(source, "project_name", None)
+        org_scope.assert_complete(receipt)
+        return True
+    default = await org_scope.default_organisation(db)
+    chosen = getattr(data, "organization_id", None) or getattr(receipt, "organization_id", None)
+    if not (chosen or default):
+        return False
+    picked = await org_scope.resolve_selection(
+        db, organization_id=chosen or default.id,
+        org_department_id=getattr(data, "org_department_id", None),
+        project_id=getattr(data, "project_id", None),
+        fiscal_year=getattr(data, "fiscal_year", None),
+        keep=receipt if getattr(receipt, "id", None) else None)
+    org_scope.stamp(receipt, {key: value for key, value in picked.items()
+                              if key not in ("project_id", "project_name")})
+    receipt.project_id, receipt.project_name = picked["project_id"], picked["project_name"]
+    return True
+
+
+def _carried_scope(source) -> tuple[dict | None, dict | None]:
+    """QC and put-away (2026-11-11): organisation and department copied from the receipt
+    they come from, their own year (today's), and the number drawn from the receipt.
+    (None, None) for a receipt older than organisations — the old numbering."""
+    if source is None or not org_scope.uses_org(source):
+        return None, None
+    from app.shared.numbering import _fiscal_year
+    values = {field: getattr(source, field, None) for field in org_scope.SCOPE_FIELDS}
+    values["fiscal_year"] = _fiscal_year()
+    args = org_scope.number_args(source, carried=True)
+    args["fiscal_year"] = values["fiscal_year"]
+    return values, args
+
+
 async def create_receipt(db: AsyncSession, data: s.ReceiptWrite, user) -> m.Receipt:
     wh = await _warehouse(db, data.warehouse_id)
     is_gate_entry = data.receipt_type == ReceiptType.GATE_ENTRY
@@ -2464,8 +2559,8 @@ async def create_receipt(db: AsyncSession, data: s.ReceiptWrite, user) -> m.Rece
         # `project` is already loaded above for the snapshot columns, so this costs
         # nothing. Where a receipt genuinely names no project the number renders NA in
         # that slot, which is the truth rather than a guess.
-        grn_no=await next_number(db, WarehouseDocType.RECEIPT.value,
-                                 project=getattr(project, "name", None)),
+        # Numbered below, once its organisation / project is known (2026-11-11).
+        grn_no="",
         receipt_type=data.receipt_type.value,
         grn_date=data.grn_date,
         po_id=data.po_id,
@@ -2489,11 +2584,7 @@ async def create_receipt(db: AsyncSession, data: s.ReceiptWrite, user) -> m.Rece
         vehicle_no=data.vehicle_no,
         transporter_name=data.transporter_name,
         lr_no=data.lr_no,
-        gate_entry_no=(
-            data.gate_entry_no
-            or (await next_number(db, WarehouseDocType.GATE_ENTRY.value)
-                if is_gate_entry else None)
-        ),
+        gate_entry_no=data.gate_entry_no,
         gate_entry_at=utcnow() if is_gate_entry else None,
         status=(ReceiptStatus.GATE_ENTRY if is_gate_entry else ReceiptStatus.DRAFT).value,
         received_by_id=getattr(user, "id", None),
@@ -2502,6 +2593,18 @@ async def create_receipt(db: AsyncSession, data: s.ReceiptWrite, user) -> m.Rece
         created_by_id=getattr(user, "id", None),
         created_by_name=_name(user),
     )
+    # Whose paper it is on, then the numbers it prints (2026-11-11). The project goes
+    # INTO the number: `BHS/MED/2026-27/REC0007` says whose it is without opening it.
+    source = await _receipt_scope_source(
+        db, despatch_note_id=data.despatch_note_id, po_id=data.po_id,
+        transfer=transfer, dispatch=dispatch)
+    organised = await _apply_receipt_scope(db, receipt, data, source)
+    args = (org_scope.number_args(receipt) if organised
+            else {"project": getattr(project, "name", None)})
+    receipt.grn_no = await next_number(db, WarehouseDocType.RECEIPT.value, **args)
+    if is_gate_entry and not receipt.gate_entry_no:
+        receipt.gate_entry_no = await next_number(
+            db, WarehouseDocType.GATE_ENTRY.value, **(args if organised else {}))
     db.add(receipt)
     await db.flush()
 
@@ -2524,6 +2627,10 @@ async def update_receipt(db: AsyncSession, receipt_id: int, data: s.ReceiptWrite
         raise ValidationError("A receipt must contain at least one item")
 
     before = {"status": receipt.status, "total_received_qty": str(receipt.total_received_qty)}
+    # A receipt raised before organisations keeps its fields and its number.
+    organised_before = org_scope.uses_org(receipt)
+    if organised_before:
+        org_scope.remember_number_args(receipt)
     wh = await _warehouse(db, data.warehouse_id)
     transfer = await _transfer_for_receipt(
         db,
@@ -2568,8 +2675,20 @@ async def update_receipt(db: AsyncSession, receipt_id: int, data: s.ReceiptWrite
     receipt.vehicle_no = data.vehicle_no
     receipt.transporter_name = data.transporter_name
     receipt.lr_no = data.lr_no
-    receipt.gate_entry_no = data.gate_entry_no
+    receipt.gate_entry_no = data.gate_entry_no or receipt.gate_entry_no
     receipt.remarks = data.remarks
+    if organised_before:
+        # Copied again from the document before (fixed), or the selection as edited;
+        # a draft takes new numbers when its selection moved (2026-11-11).
+        source = await _receipt_scope_source(
+            db, despatch_note_id=data.despatch_note_id, po_id=data.po_id,
+            transfer=transfer, dispatch=dispatch)
+        await _apply_receipt_scope(db, receipt, data, source)
+        if receipt.receipt_type == ReceiptType.GATE_ENTRY.value and receipt.gate_entry_no:
+            await org_scope.renumber(db, receipt, WarehouseDocType.GATE_ENTRY.value,
+                                     "gate_entry_no", "inb_receipts", user)
+        await org_scope.renumber(db, receipt, WarehouseDocType.RECEIPT.value, "grn_no",
+                                 "inb_receipts", user)
 
     # Both sides must agree: the payload says this is still gate work, and the row has
     # not already been promoted. A converted GRN cannot be relaxed by re-sending the
@@ -3120,7 +3239,10 @@ async def convert_gate_entry(db: AsyncSession, receipt_id: int, user) -> m.Recei
         "grn_no": receipt.grn_no,
     }
     receipt.receipt_type = ReceiptType.PURCHASE.value
-    receipt.grn_no = await next_number(db, WarehouseDocType.RECEIPT.value)
+    # The GRN keeps the inward's organisation / project (2026-11-11).
+    receipt.grn_no = await next_number(
+        db, WarehouseDocType.RECEIPT.value,
+        **(org_scope.number_args(receipt) if org_scope.uses_org(receipt) else {}))
     receipt.grn_date = ist_today()
     receipt.status = ReceiptStatus.DRAFT.value
     await write_audit(
@@ -3749,8 +3871,11 @@ async def _build_putaway_task(db: AsyncSession, receipt: m.Receipt, line: m.Rece
     item = await _item_snapshot(db, line.item_id)
     task = m.PutawayTask(
         # From the receipt it belongs to — see the note on the GRN number.
-        putaway_no=await next_number(db, WarehouseDocType.PUTAWAY.value,
-                                     project=receipt.project_name),
+        putaway_no=(await next_number(db, WarehouseDocType.PUTAWAY.value,
+                                      **_carried_scope(receipt)[1])
+                    if _carried_scope(receipt)[1] is not None else
+                    await next_number(db, WarehouseDocType.PUTAWAY.value,
+                                      project=receipt.project_name)),
         grn_id=receipt.id, grn_item_id=line.id,
         warehouse_id=receipt.warehouse_id,
         item_id=line.item_id, batch_id=line.batch_id or None,
@@ -3772,6 +3897,9 @@ async def _build_putaway_task(db: AsyncSession, receipt: m.Receipt, line: m.Rece
         assigned_to=getattr(user, "id", None),
         is_active=True,
     )
+    values, _args = _carried_scope(receipt)
+    if values is not None:
+        org_scope.stamp(task, values)
     db.add(task)
     await db.flush()
     return task
@@ -4198,8 +4326,11 @@ async def _raise_inspection_for(
         # greenlet to run in. Handing it an empty list loads it up front.
         items=[],
         # From the receipt it belongs to — see the note on the GRN number.
-        inspection_no=await next_number(db, WarehouseDocType.INSPECTION.value,
-                                        project=receipt.project_name),
+        inspection_no=(await next_number(db, WarehouseDocType.INSPECTION.value,
+                                         **_carried_scope(receipt)[1])
+                       if _carried_scope(receipt)[1] is not None else
+                       await next_number(db, WarehouseDocType.INSPECTION.value,
+                                         project=receipt.project_name)),
         inspection_date=ist_today(),
         receipt_id=receipt.id, grn_no=receipt.grn_no,
         warehouse_id=receipt.warehouse_id, warehouse_name=receipt.warehouse_name,
@@ -4208,6 +4339,9 @@ async def _raise_inspection_for(
         status=InspectionStatus.DRAFT.value,
         inspector_id=getattr(user, "id", None), inspector_name=_name(user),
     )
+    values, _args = _carried_scope(receipt)
+    if values is not None:
+        org_scope.stamp(inspection, values)
     db.add(inspection)
     await db.flush()
 
@@ -4458,8 +4592,11 @@ async def create_inspection(db: AsyncSession, data: s.InspectionWrite, user) -> 
     inspection = m.Inspection(
         items=[],   # see create_issue: keeps _apply_*_lines()'s clear() off a lazy load
         # From the receipt it belongs to — see the note on the GRN number.
-        inspection_no=await next_number(db, WarehouseDocType.INSPECTION.value,
-                                        project=receipt.project_name),
+        inspection_no=(await next_number(db, WarehouseDocType.INSPECTION.value,
+                                         **_carried_scope(receipt)[1])
+                       if _carried_scope(receipt)[1] is not None else
+                       await next_number(db, WarehouseDocType.INSPECTION.value,
+                                         project=receipt.project_name)),
         inspection_date=data.inspection_date,
         receipt_id=data.receipt_id,
         grn_no=receipt.grn_no if receipt else None,
@@ -4475,6 +4612,9 @@ async def create_inspection(db: AsyncSession, data: s.InspectionWrite, user) -> 
         inspector_name=_name(user),
         remarks=data.remarks,
     )
+    values, _args = _carried_scope(receipt)
+    if values is not None:
+        org_scope.stamp(inspection, values)
     db.add(inspection)
     await db.flush()
 
@@ -5372,10 +5512,13 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
     task.completed_at = utcnow()
     task.qty = qty
     if remainder > ZERO:
-        db.add(m.PutawayTask(
+        remainder_task = m.PutawayTask(
             # From the receipt it belongs to — see the note on the GRN number.
-        putaway_no=await next_number(db, WarehouseDocType.PUTAWAY.value,
-                                     project=receipt.project_name),
+            putaway_no=(await next_number(db, WarehouseDocType.PUTAWAY.value,
+                                          **_carried_scope(receipt)[1])
+                        if _carried_scope(receipt)[1] is not None else
+                        await next_number(db, WarehouseDocType.PUTAWAY.value,
+                                          project=receipt.project_name)),
             grn_id=task.grn_id,
             grn_item_id=task.grn_item_id,
             warehouse_id=task.warehouse_id,
@@ -5404,7 +5547,11 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
             assigned_to=task.assigned_to,
             is_active=True,
             remarks=f"Remainder from {task.putaway_no}",
-        ))
+        )
+        values, _args = _carried_scope(receipt)
+        if values is not None:
+            org_scope.stamp(remainder_task, values)
+        db.add(remainder_task)
 
     await write_audit(db, entity="whs_warehouse_items", entity_id=task.id,
                       entity_no=task.putaway_no, action=AuditAction.UPDATE, actor=user,
