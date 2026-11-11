@@ -4900,7 +4900,8 @@ async def propose_quote_change(db: AsyncSession, quotation_id: int,
     # Above what the RFQ asked for only with a reason on the line (2026-11-11).
     _assert_amendment_within_rfq(
         [{"quotation_item_id": line.quotation_item_id,
-          "proposed_quantity": line.proposed_quantity} for line in data.lines],
+          "proposed_quantity": line.proposed_quantity,
+          "note": line.note} for line in data.lines],
         by_id, await _rfq_asked(db, quote))
 
     cr = QuoteChangeRequest(
