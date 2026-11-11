@@ -4,9 +4,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/react";
 import { Boxes, Check, Layers, PenLine, RefreshCw, X } from "lucide-react";
 import {
-  Button, Can, Card, Field, FilterBar, FilterDateRange, FilterMenu, Input, PageHeader,
-  ResponsiveList, Select, StatusPill, type Column,
+  Button, Can, Card, DocumentNumberCard, Field, FilterBar, FilterDateRange, FilterMenu, Input,
+  PageHeader, ResponsiveList, Select, StatusPill, type Column,
 } from "@/shared/components";
+import {
+  docNumberPayload, emptyDocNumberValue, type DocNumberValue,
+} from "@/shared/documentNumber";
 import { TONE_APPROVE, TONE_MINT, TONE_REJECT } from "@/shared/components/tones";
 import { alerts } from "@/modules/alerts";
 import {
@@ -170,8 +173,15 @@ export function StockEditsPage() {
     Object.values(drafts).filter((d) => d.itemId === itemId && d.target === target).length;
   const pending = Object.entries(drafts).filter(([, d]) => changedFields(d).length);
 
+  // Organisation, project / department and year (2026-11-11): selected here, opening
+  // on the defaults the card fills, so the number never prints NA.
+  const [scope, setScope] = useState<DocNumberValue>(emptyDocNumberValue);
+  const [scopeTouched, setScopeTouched] = useState(false);
+  /** The card's selection for the save; marks the card so a missing field shows. */
+  const scopePayload = () => { setScopeTouched(true); return docNumberPayload(scope); };
   const create = useMutation({
     mutationFn: () => createStockEdit({
+      ...scopePayload(),
       warehouse_id: Number(warehouseId), reason: reason.trim(), remarks: remarks.trim() || null,
       lines: pending.map(([, d]) => ({
         target_type: d.target, target_id: d.id,
@@ -297,6 +307,8 @@ export function StockEditsPage() {
         <ModalContent>
           <ModalHeader>New stock correction</ModalHeader>
           <ModalBody className="space-y-3">
+            <DocumentNumberCard docType="stock_edit" value={scope} ready exclusive showInvalid={scopeTouched}
+                            onChange={(patch) => setScope((current) => ({ ...current, ...patch }))} />
             <div className="grid gap-3 sm:grid-cols-2">
               <Field label="Warehouse">
                 <Select value={warehouseId} onChange={(v) => void changeWarehouse(v)}

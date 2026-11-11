@@ -194,3 +194,25 @@ async def test_a_project_without_a_code_prints_its_name(db):
     drawn = await numbering.next_number(db, "po", company="BAVYA", project="Medak Phase",
                                         company_code="B-01", project_id=88)
     assert drawn.startswith("B-01/MED/")
+
+
+@pytest.mark.asyncio
+async def test_a_standalone_document_selects_and_never_prints_na(db, monkeypatch):
+    """Stock audit, stock correction and movement order (2026-11-11): nothing before
+    them, so the organisation and the project / department are selected."""
+    from app.platform.doc_numbering import scope as org_scope
+    nothing = SimpleNamespace(organization_id=None, org_department_id=None,
+                              project_id=None, fiscal_year=None)
+    monkeypatch.setattr(settings, "ORG_DEFAULT_NAME", None)
+    assert await org_scope.resolve_free(db, nothing) is None      # the old numbering
+
+    await _directory(db)
+    monkeypatch.setattr(settings, "ORG_DEFAULT_NAME", "BAVYA")
+    with pytest.raises(Exception, match="project or the department"):
+        await org_scope.resolve_free(db, nothing)
+    values = await org_scope.resolve_free(
+        db, SimpleNamespace(organization_id=None, org_department_id=None, project_id=77,
+                            fiscal_year=None))
+    assert values["organization_id"] == 2 and values["project_name"] == "104"
+    args = org_scope.args_of(values)
+    assert args["company_code"] == "B-01" and args["project_id"] == 77

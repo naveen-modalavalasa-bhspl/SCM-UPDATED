@@ -32,6 +32,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.platform.doc_numbering import scope as org_scope
 from app.core.exceptions import NotFoundError, PermissionError_, ValidationError
 from app.core.pagination import PageParams
 from app.modules.inventory import service as inv_service
@@ -411,8 +412,11 @@ async def create_edit(db: AsyncSession, data, user) -> m.StockEdit:
                 f"{len(clash)} of these is already on {', '.join(sorted(set(clash.values())))}, "
                 "awaiting approval. Let that one be decided first.")
 
+    # Whose paper it is on (2026-11-11): selected, opening on the default organisation.
+    scope = await org_scope.resolve_free(db, data)
     edit = m.StockEdit(
-        edit_no=await next_number(db, "stock_edit"),
+        edit_no=await next_number(db, "stock_edit",
+                                  **(org_scope.args_of(scope) if scope else {})),
         warehouse_id=warehouse.id, warehouse_name=warehouse.name,
         status=StockEditStatus.PENDING_APPROVAL.value,
         reason=data.reason.strip()[:500], remarks=data.remarks,
@@ -420,6 +424,8 @@ async def create_edit(db: AsyncSession, data, user) -> m.StockEdit:
         created_by_name=getattr(user, "full_name", None),
         items=built,
     )
+    if scope:
+        org_scope.stamp_with_project(edit, scope)
     db.add(edit)
     await db.flush()
 

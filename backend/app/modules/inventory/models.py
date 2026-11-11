@@ -425,7 +425,7 @@ class MRQtyChange(Base):
     changed_at = created_at_col()
 
 
-class StockAdjustment(Base):
+class StockAdjustment(OrgScopeColumns, Base):
     """Stock adjustment with reason (damage, expiry, count variance, found).
 
     Must go through move_stock() so a ledger row is written. Large adjustments
@@ -433,7 +433,10 @@ class StockAdjustment(Base):
     """
     __tablename__ = "inv_adjustments"
     id = pk()
-    adjustment_no = Column(String(30), unique=True, nullable=False)
+    adjustment_no = Column(String(50), unique=True, nullable=False)
+    # The project its NUMBER is drawn under (2026-11-11); its lines keep their own.
+    project_id = soft_fk()
+    project_name = Column(String(200), nullable=True)
     warehouse_id = Column(BigInteger, index=True, nullable=False)
     warehouse_name = Column(String(200), nullable=True)
     reason = Column(String(50), nullable=False)   # DAMAGE, EXPIRY, COUNT_VARIANCE, FOUND, etc.
