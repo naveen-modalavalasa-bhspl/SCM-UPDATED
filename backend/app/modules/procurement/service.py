@@ -4837,15 +4837,23 @@ async def _rfq_asked(db: AsyncSession, quote) -> dict[int, Decimal]:
 
 
 def _assert_amendment_within_rfq(lines: list[dict], by_id: dict, asked: dict) -> None:
-    """A proposed or countered quantity may be the RFQ's or less, never more."""
+    """A proposed or countered quantity may go above what the RFQ asked for, but only
+    with a reason on that line (2026-11-11; until then it could only come down). The
+    reason is the line's `note`, kept on the change request with the numbers."""
     for entry in lines:
         line = by_id.get(entry.get("quotation_item_id"))
         if line is None or entry.get("proposed_quantity") is None:
             continue
-        qty_ceiling.assert_not_raised(
-            entry["proposed_quantity"], asked.get(line.id),
-            label=line.item_code or line.item_name or "Line",
-            uom=getattr(line, "uom_code", None), asked="was asked for on the RFQ")
+        ceiling = asked.get(line.id)
+        if ceiling is None or _d(entry["proposed_quantity"]) <= _d(ceiling):
+            continue
+        if not str(entry.get("note") or "").strip():
+            uom = getattr(line, "uom_code", None) or ""
+            raise ValidationError(
+                f"{line.item_code or line.item_name or 'Line'}: "
+                f"{_d(entry['proposed_quantity']).normalize():f} {uom} is more than the "
+                f"{_d(ceiling).normalize():f} {uom} the RFQ asked for. Give a reason on "
+                "this line for the higher quantity.".replace("  ", " "))
 
 
 async def propose_quote_change(db: AsyncSession, quotation_id: int,
@@ -4889,7 +4897,7 @@ async def propose_quote_change(db: AsyncSession, quotation_id: int,
             proposed_combo[incoming.quotation_item_id] = await combinations.resolve(
                 db, line.item_id, incoming, label=line.item_code or line.item_name or "")
 
-    # Down or left, never above what the RFQ asked for (2026-11-03).
+    # Above what the RFQ asked for only with a reason on the line (2026-11-11).
     _assert_amendment_within_rfq(
         [{"quotation_item_id": line.quotation_item_id,
           "proposed_quantity": line.proposed_quantity} for line in data.lines],
@@ -5030,7 +5038,7 @@ async def accept_quote_change(db: AsyncSession, vendor_id: int, cr_id: int,
                 item_data.update(_proposed_combo_fields(await combinations.resolve(
                     db, line.item_id, item_data,
                     label=line.item_code or line.item_name or "")))
-        # The supplier's counter is held to the same ceiling as the buyer's ask.
+        # The supplier's counter follows the same rule as the buyer's ask.
         _assert_amendment_within_rfq(parsed_counter, by_id, await _rfq_asked(db, quote))
         cr.supplier_counter_lines = parsed_counter
         for item_data in parsed_counter:

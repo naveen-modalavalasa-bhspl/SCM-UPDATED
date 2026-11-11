@@ -72,13 +72,20 @@ async def test_a_draft_drawn_from_requests_may_be_cut_never_raised(db):
 
 
 @pytest.mark.filterwarnings("ignore")
-def test_a_quotation_amendment_stays_within_the_rfq():
+def test_a_quotation_amendment_above_the_rfq_needs_a_reason():
+    """Since 2026-11-11 an amendment may go above the RFQ's quantity, with a reason."""
     line = SimpleNamespace(id=1, item_code="IT-1", item_name="Bolt", uom_code="NOS")
     by_id, asked = {1: line}, {1: Decimal("10")}
     service._assert_amendment_within_rfq(
         [{"quotation_item_id": 1, "proposed_quantity": 8}], by_id, asked)
     service._assert_amendment_within_rfq(
         [{"quotation_item_id": 1, "proposed_quantity": 10}], by_id, asked)
-    with pytest.raises(ValidationError, match="asked for on the RFQ"):
+    with pytest.raises(ValidationError, match="Give a reason on this line"):
         service._assert_amendment_within_rfq(
             [{"quotation_item_id": 1, "proposed_quantity": 12}], by_id, asked)
+    with pytest.raises(ValidationError, match="Give a reason on this line"):
+        service._assert_amendment_within_rfq(
+            [{"quotation_item_id": 1, "proposed_quantity": 12, "note": "   "}], by_id, asked)
+    service._assert_amendment_within_rfq(
+        [{"quotation_item_id": 1, "proposed_quantity": 12,
+          "note": "Site added two more rooms"}], by_id, asked)
