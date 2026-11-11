@@ -283,6 +283,21 @@ export const despatchNoteOptions = (poId: number) =>
 
 /** The vendor's paperwork and per-line batch/expiry, in the shape this form needs.
  *  Header and lines in one call — at the gate they are one act. */
+/** The organisation a receipt copies from the document before it — its despatch note,
+ *  PO or transfer — or null when that carries none and the receipt selects its own. */
+export interface ReceiptScopeSource {
+  organization_id: number; organization_code?: string | null; organization_name: string;
+  org_department_id?: number | null; org_department_name?: string | null;
+  project_id?: number | null; project_name?: string | null; source_no?: string | null;
+}
+export const receiptScope = (params: {
+  po_id?: number | null; despatch_note_id?: number | null; dispatch_id?: number | null;
+}) => get<ReceiptScopeSource | null>(`${BASE}/options/receipt-scope`, {
+  po_id: params.po_id || undefined,
+  despatch_note_id: params.despatch_note_id || undefined,
+  dispatch_id: params.dispatch_id || undefined,
+});
+
 export const getDespatchPrefill = (noteId: number, receiptId?: number | null) =>
   get<DespatchPrefill>(`${BASE}/options/despatch-prefill`, {
     note_id: noteId, receipt_id: receiptId ?? undefined,

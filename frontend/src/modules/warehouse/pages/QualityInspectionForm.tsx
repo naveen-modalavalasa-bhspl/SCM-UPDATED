@@ -1,5 +1,6 @@
 import {
-  Button, Can, ConfirmModal, ErrorBanner, Field, Input, PackageCheckModal, PageHeader, Select, StatusPill,
+  Button, Can, ConfirmModal, DocumentScopeStrip, ErrorBanner, Field, Input, PackageCheckModal,
+  PageHeader, Select, StatusPill,
 } from "@/shared/components";
 import {
   type PackEntry, baseOf, checkFrom, checkSummary, expandPacks, shrinkWithin, splitByCheck,
@@ -703,6 +704,8 @@ export default function QualityInspectionForm({
           </>
         }
       />
+      {/* Copied from its GRN (2026-11-11); nothing on an older one. */}
+      {doc && <DocumentScopeStrip doc={{ ...doc, project_name: grn?.project_name ?? null }} number={doc.inspection_no} className="mb-4" />}
 
       <ErrorBanner error={save.error ?? pullReceipt.error} />
 

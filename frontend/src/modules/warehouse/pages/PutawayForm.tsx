@@ -8,7 +8,9 @@ import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
 import { AlertTriangle, ArrowLeft, ScanLine } from "lucide-react";
-import { Button, Can, Card, ConfirmModal, ErrorBanner, Field, Input, PageHeader, StatusPill } from "@/shared/components";
+import {
+  Button, Can, Card, ConfirmModal, DocumentScopeStrip, ErrorBanner, Field, Input, PageHeader, StatusPill,
+} from "@/shared/components";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { LocationPicker } from "../components/LocationPicker";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
@@ -240,6 +242,8 @@ export default function PutawayForm() {
           </>
         }
       />
+      {/* Copied from its GRN (2026-11-11); nothing on an older one. */}
+      {task && <DocumentScopeStrip doc={task} number={task.putaway_no} className="mb-4" />}
 
       <ErrorBanner error={error ?? start.error} />
 

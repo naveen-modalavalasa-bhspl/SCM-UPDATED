@@ -62,7 +62,7 @@ RATE = Numeric(16, 4)
 # Inward — gate entry, GRN
 # ---------------------------------------------------------------------------
 
-class Receipt(Base):
+class Receipt(OrgScopeColumns, Base):
     """`inb_receipts`. One row is a gate entry first and a GRN afterwards;
     `receipt_type` says which, so the vehicle and paperwork are captured once."""
     __tablename__ = "inb_receipts"
@@ -232,7 +232,7 @@ class ReceiptItem(CombinationMixin, Base):
 # Quality
 # ---------------------------------------------------------------------------
 
-class Inspection(Base):
+class Inspection(OrgScopeColumns, Base):
     """`inb_inspections`. `inspection_type` separates incoming QC from the outward
     check before a consignment leaves — one table, two points in the flow."""
     __tablename__ = "inb_inspections"
@@ -307,7 +307,7 @@ class InspectionItem(CombinationMixin, Base):
 # Putaway
 # ---------------------------------------------------------------------------
 
-class PutawayTask(CombinationMixin, Base):
+class PutawayTask(OrgScopeColumns, CombinationMixin, Base):
     """`whs_warehouse_items`. One task per received line, because putting away is
     done a pallet at a time and a task covering eight lines cannot be half done.
 

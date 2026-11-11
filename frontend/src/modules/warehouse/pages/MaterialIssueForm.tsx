@@ -1702,7 +1702,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
       {direction === "OUT" && !olderScope && (linkedScope || !form.indent_id) && (
         <div className="mb-5">
           <DocumentNumberCard
-            docType="wh_issue" value={scope} exclusive
+            docType="WH_ISSUE" value={scope} exclusive
             ready={!editing && !linkedScope}
             locks={scopeLocks}
             source={linkedScope ? { label: linkedScope } : null}
