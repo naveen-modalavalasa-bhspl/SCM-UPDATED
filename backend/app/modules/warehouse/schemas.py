@@ -1745,6 +1745,12 @@ class IssueWrite(OrgScopeIn):
 
 
 class IssueItemRead(CombinationOut, _Read):
+    #: On a SPLIT parent (2026-11-11): the floor piece and line that carry this line now.
+    #: Its serials are listed and saved against that piece line.
+    piece_issue_id: int | None = None
+    piece_issue_no: str | None = None
+    piece_line_id: int | None = None
+    piece_is_posted: bool = False
     id: int
     issue_id: int
     line_no: int
