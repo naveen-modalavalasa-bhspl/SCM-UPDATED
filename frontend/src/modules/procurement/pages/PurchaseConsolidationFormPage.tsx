@@ -7,6 +7,7 @@ import { Button } from "../components/ActionButton";
 import { fmtDate } from "@/shared/datetime";
 import { consolidationApi } from "../api";
 import { SelectAllBar } from "../components/SelectAllBar";
+import { PickBox, PickedTag, pickRevision } from "../components/PickBox";
 import { money } from "./RequisitionListPage";
 import type { ReqListRow } from "../types";
 
@@ -89,13 +90,8 @@ export function PurchaseConsolidationFormPage() {
       key: "pick",
       header: "",
       render: (r) => (
-        <input
-          type="checkbox"
-          className="h-5 w-5"
-          checked={chosen.includes(r.id)}
-          onChange={() => toggle(r.id)}
-          aria-label={`Include ${r.req_no}`}
-        />
+        <PickBox checked={chosen.includes(r.id)} onToggle={() => toggle(r.id)}
+                 label={`Include ${r.req_no}`} />
       ),
     },
     {
@@ -103,7 +99,9 @@ export function PurchaseConsolidationFormPage() {
       header: "Requisition",
       render: (r) => (
         <div className="min-w-0">
-          <div className="font-mono text-xs font-semibold text-ink">{r.req_no}</div>
+          <div className={`font-mono text-xs font-semibold ${chosen.includes(r.id) ? "text-brand" : "text-ink"}`}>
+            {r.req_no}<PickedTag show={chosen.includes(r.id)} />
+          </div>
           <div className="text-[11px] text-muted">{r.warehouse_name ?? "—"}</div>
         </div>
       ),
@@ -217,21 +215,23 @@ export function PurchaseConsolidationFormPage() {
           columns={columns}
           keyOf={(r) => r.id}
           loading={isLoading}
+          // SCM_0158: the desktop table caches its rows; without a revision that moves
+          // with the selection, a tick changed the counter and never the box.
+          revision={pickRevision(page, chosen)}
           page={page}
           totalPages={totalPages}
           onPageChange={setPage}
           empty="Nothing to consolidate — every approved requisition is already on a sheet."
           renderCard={(r) => (
-            <label className="flex items-start gap-3">
-              <input
-                type="checkbox"
-                className="mt-1 h-5 w-5"
-                checked={chosen.includes(r.id)}
-                onChange={() => toggle(r.id)}
-              />
-              <div className="min-w-0 flex-1 space-y-1">
+            <div className={`-m-1 flex items-start gap-2 rounded-xl p-1 transition-colors ${
+              chosen.includes(r.id) ? "bg-brand-050/70" : ""}`}>
+              <PickBox checked={chosen.includes(r.id)} onToggle={() => toggle(r.id)}
+                       label={`Include ${r.req_no}`} />
+              <div className="min-w-0 flex-1 space-y-1 pt-2">
                 <div className="flex items-start justify-between gap-2">
-                  <span className="font-mono text-xs font-semibold text-ink">{r.req_no}</span>
+                  <span className={`font-mono text-xs font-semibold ${chosen.includes(r.id) ? "text-brand" : "text-ink"}`}>
+                    {r.req_no}<PickedTag show={chosen.includes(r.id)} />
+                  </span>
                   <StatusPill status={r.status} />
                 </div>
                 <div className="text-sm text-body">{r.warehouse_name ?? "—"}</div>
@@ -240,7 +240,7 @@ export function PurchaseConsolidationFormPage() {
                   {money(r.estimated_value)}
                 </div>
               </div>
-            </label>
+            </div>
           )}
         />
       </Card>

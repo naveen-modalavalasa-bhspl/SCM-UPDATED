@@ -551,6 +551,11 @@ export interface MaterialRequestListRow {
   priority: string;
   required_by?: string | null;
   current_approver_name?: string | null;
+  /** SCM_0155: where the request is, for every status — served, never composed here.
+   *  "Procurement" + "On REQ0012" once approved, where `current_approver_name` is
+   *  blank; "Anita Rao" + "Waiting for approval" while it is in approval. */
+  with_text?: string | null;
+  with_note?: string | null;
   /** Whether this login, under the position it is currently wearing, is the rung this
    *  request is waiting on. One person often holds two rungs of the same ladder, so
    *  being named the approver is not the same as being able to sign right now. */

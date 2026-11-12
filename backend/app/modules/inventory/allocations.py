@@ -1339,6 +1339,11 @@ async def apply_to_stock(db: AsyncSession, alloc: Allocation, user,
                 # project that asked for the material, not to whoever approved.
                 "project_id": ctx.get("project_id"),
                 "project_name": ctx.get("project_name"),
+                # SCM_0155: the indent's own date and urgency, handed down by the
+                # caller (inventory may not read `ind_indents`, rule 5). The MR list's
+                # "Needed by" read blank on every request raised this way.
+                "required_by": ctx.get("required_by"),
+                "priority": ctx.get("priority"),
                 "requester_position_id": getattr(user, "active_position_id", None),
             })
 

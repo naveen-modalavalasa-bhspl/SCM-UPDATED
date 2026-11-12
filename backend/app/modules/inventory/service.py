@@ -38,7 +38,7 @@ from app.shared.scope import rung_for, scope_condition
 from app.shared.enums import (
     AdjustmentReason, ApprovalAction, AuditAction, DocType, IndentStatus,
     InstanceStatus, MRStatus,
-    Priority, RefType, ReservationStatus, ScopeRung, StockDirection, UserRole as RoleCode,
+    Priority, RequisitionStatus, RefType, ReservationStatus, ScopeRung, StockDirection, UserRole as RoleCode,
 )
 from app.shared.models.base import utcnow
 from app.shared.models.master import Item, Project, Uom
@@ -1517,6 +1517,7 @@ async def get_mr(db: AsyncSession, mr_id: int, user=None) -> MaterialRequest:
     )).scalar_one_or_none()
     if not mr:
         raise NotFoundError(f"Material request {mr_id} not found")
+    await _attach_mr_with(db, [mr])
     # The RUNG the request is sitting on, not the person holding it. A name answers
     # "who signs next"; the screen's badge asks "where is this", and the ladder rung is
     # what an approver recognises across five regions holding the same post. Read off
@@ -1641,6 +1642,85 @@ async def mark_mrs_received(db: AsyncSession,
     return closed
 
 
+# Requisitions that no longer carry an MR's demand: a rejected or cancelled one lets
+# the MR go back to waiting, so it must not be named as where the MR is.
+_DEAD_REQUISITION_STATUSES = (RequisitionStatus.REJECTED.value,
+                              RequisitionStatus.CANCELLED.value)
+
+
+def mr_with(status: str, *, pending: list[str] | None = None,
+            approver: str | None = None, raiser: str | None = None,
+            requisitions: list[str] | None = None) -> tuple[str, str | None]:
+    """WHERE a material request is, as (who, what is happening) — SCM_0155.
+
+    The register's "With" column read `current_approver_name`, a snapshot that exists
+    only while a request is in approval and is cleared the moment it is approved, so
+    every request past approval — the ones procurement is actually working — read
+    "—". This answers for every status, in the words the desk uses:
+
+        PENDING_APPROVAL   "Anita Rao"     · "Waiting for approval"
+        APPROVED           "Procurement"   · "On REQ0012" / "Waiting for a requisition"
+        ORDERED            "Procurement"   · "Ordered · REQ0012"
+        RECEIVED           "Completed"     · "Goods received"
+
+    Pure: the caller reads the approval queue and the requisitions, once per page.
+    """
+    names = ", ".join(pending or []) or approver
+    reqs = ", ".join(requisitions or [])
+    if status == MRStatus.DRAFT.value:
+        return raiser or "Raiser", "Draft — not sent yet"
+    if status == MRStatus.PENDING_APPROVAL.value:
+        return names or "Approver", "Waiting for approval"
+    if status == MRStatus.RETURNED_FOR_CORRECTION.value:
+        return approver or raiser or "Raiser", "Sent back for a fix"
+    if status == MRStatus.APPROVED.value:
+        return "Procurement", (f"On {reqs}" if reqs else "Waiting for a requisition")
+    if status == MRStatus.ORDERED.value:
+        return "Procurement", (f"Ordered · {reqs}" if reqs else "Ordered")
+    if status == MRStatus.RECEIVED.value:
+        return "Completed", "Goods received"
+    if status == MRStatus.REJECTED.value:
+        return "—", "Rejected"
+    if status == MRStatus.CANCELLED.value:
+        return "—", "Cancelled"
+    return names or "—", None
+
+
+async def _attach_mr_with(db: AsyncSession, rows) -> None:
+    """`mr_with` for a screenful, in two reads: the live approval queue (the engine's
+    batch call, never one query per row) and the requisitions each MR feeds.
+
+    Procurement sits AFTER inventory in the chain (rule 5), so its tables are read by
+    raw SQL, the way this module already reads `ind_indent_items`. Both doors are
+    read: `pro_requisition_sources` (an MR folded into a requisition with others) and
+    the older one-to-one `pro_requisitions.source_mr_id`.
+    """
+    rows = list(rows or [])
+    if not rows:
+        return
+    ids = [row.id for row in rows]
+    waiting = await engine.pending_approver_names(db, DocType.MR.value, ids)
+    feeds: dict[int, list[str]] = {}
+    params = {"ids": ids, "dead": list(_DEAD_REQUISITION_STATUSES)}
+    for sql in (
+        "SELECT s.mr_id AS mr_id, r.req_no AS req_no FROM pro_requisition_sources s "
+        "JOIN pro_requisitions r ON r.id = s.requisition_id "
+        "WHERE s.mr_id IN :ids AND r.status NOT IN :dead",
+        "SELECT r.source_mr_id AS mr_id, r.req_no AS req_no FROM pro_requisitions r "
+        "WHERE r.source_mr_id IN :ids AND r.status NOT IN :dead",
+    ):
+        for row in (await db.execute(text(sql).bindparams(
+                bindparam("ids", expanding=True), bindparam("dead", expanding=True)),
+                params)).mappings().all():
+            names = feeds.setdefault(int(row["mr_id"]), [])
+            if row["req_no"] and row["req_no"] not in names:
+                names.append(row["req_no"])
+    for row in rows:
+        row.with_text, row.with_note = mr_with(
+            row.status, pending=waiting.get(row.id), approver=row.current_approver_name,
+            raiser=row.requested_by_name, requisitions=feeds.get(row.id))
+
+
 async def list_mrs(db: AsyncSession, params: PageParams, status: str | None = None,
                    indent_id: int | None = None, user=None) -> dict:
     stmt = select(MaterialRequest)
@@ -1654,7 +1734,9 @@ async def list_mrs(db: AsyncSession, params: PageParams, status: str | None = No
         stmt = stmt.where(MaterialRequest.status == status)
     if indent_id is not None:
         stmt = stmt.where(MaterialRequest.indent_id == indent_id)
-    return await paginate(db, stmt.order_by(MaterialRequest.created_at.desc()), params)
+    page = await paginate(db, stmt.order_by(MaterialRequest.created_at.desc()), params)
+    await _attach_mr_with(db, page.get("items"))
+    return page
 
 
 async def create_mr_from_shortfall(db: AsyncSession, indent_id: int | None,

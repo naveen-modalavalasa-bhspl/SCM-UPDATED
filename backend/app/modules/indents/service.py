@@ -7341,6 +7341,11 @@ async def create_allocation_for_indent(db: AsyncSession, indent: Indent,
             "department_id": indent.department_id,
             "project_id": indent.project_id,
             "project_name": indent.project_name,
+            # SCM_0155: a shortage this allocation raises as a material request is
+            # needed when the INDENT is needed, and as urgently. Without these the
+            # automatic MR carried no "Needed by" at all.
+            "required_by": indent.required_date,
+            "priority": indent.priority,
             "remarks": remarks,
             # The code-level ALLOCATION fallback is the allocator's reporting
             # manager. Without this, a perfectly healthy hierarchy was skipped and
@@ -7607,7 +7612,10 @@ async def act_on_allocation(db: AsyncSession, allocation_id: int, action: str, u
     alloc = await allocations.act(
         db, allocation_id, action, user, comments,
         ctx={"project_id": getattr(indent, "project_id", None),
-             "project_name": getattr(indent, "project_name", None)},
+             "project_name": getattr(indent, "project_name", None),
+             # SCM_0155: carried onto the material request a shortfall raises.
+             "required_by": getattr(indent, "required_date", None),
+             "priority": getattr(indent, "priority", None)},
         on_approved=_fulfilment_drafts,
         revisions=revisions,
     )

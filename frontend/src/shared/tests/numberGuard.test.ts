@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import {
-  charAllowed, installNumberGuard, ruleFor, setUomDecimals, textAllowed, uomDecimals,
+  charAllowed, installNumberGuard, leadingPoint, ruleFor, setUomDecimals, textAllowed, uomDecimals,
 } from "../numberGuard";
 
 /** Quantity boxes refuse what the save would refuse, as it is typed (2026-11-03). */
@@ -75,9 +75,16 @@ describe("in the page", () => {
   });
 
   it("a whole-unit quantity refuses the point; a measured one accepts it", () => {
-    expect(press(box({ type: "number", "data-uom": "NOS" }), ".")).toBe(false);
-    expect(press(box({ type: "number", "data-uom": "KG" }), ".")).toBe(true);
-    expect(press(box({ type: "number", "data-decimals": "0" }), ".")).toBe(false);
+    // After a digit: a point into an EMPTY box is refused for every unit (SCM_0156).
+    const typed = (attrs: Record<string, string>) => {
+      const el = box(attrs);
+      el.value = "5";
+      return el;
+    };
+    expect(press(typed({ type: "number", "data-uom": "NOS" }), ".")).toBe(false);
+    expect(press(typed({ type: "number", "data-uom": "KG" }), ".")).toBe(true);
+    expect(press(typed({ type: "number", "data-decimals": "0" }), ".")).toBe(false);
+    expect(press(box({ type: "number", "data-uom": "KG" }), ".")).toBe(false);
   });
 
   it("the point is allowed ONLY where a UOM type says so (2026-11-03)", () => {
@@ -102,5 +109,28 @@ describe("in the page", () => {
 
   it("plain text boxes are left alone", () => {
     expect(press(box({ type: "text" }), "a")).toBe(true);
+  });
+});
+
+describe("no quantity starts with a point (SCM_0156)", () => {
+  it("refuses a pasted .5 but takes 0.5 and a half-typed 5.", () => {
+    const rule = { decimals: 3, negative: false };
+    expect(textAllowed(".5", rule)).toBe(false);
+    expect(textAllowed("0.5", rule)).toBe(true);
+    expect(textAllowed("5.", rule)).toBe(true);
+  });
+  it("refuses a point typed into an empty box", () => {
+    const box = document.createElement("input");
+    box.type = "text";
+    box.value = "";
+    expect(leadingPoint(box, ".")).toBe(true);
+    box.value = "5";
+    box.setSelectionRange(1, 1);
+    expect(leadingPoint(box, ".")).toBe(false);
+  });
+  it("leaves a box that writes the zero itself alone", () => {
+    const box = document.createElement("input");
+    box.dataset.leadingZero = "auto";
+    expect(leadingPoint(box, ".")).toBe(false);
   });
 });
