@@ -2,7 +2,10 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2 } from "lucide-react";
-import { Button, Card, Field, Input, PageHeader, Select } from "@/shared/components";
+import { Button, Card, DocumentNumberCard, Field, Input, PageHeader, Select } from "@/shared/components";
+import {
+  docNumberPayload, emptyDocNumberValue, type DocNumberValue,
+} from "@/shared/documentNumber";
 import { todayIst } from "@/shared/datetime";
 import { createMaterialRequest, getCatalogItems } from "../api";
 import { alerts } from "@/modules/alerts";
@@ -38,6 +41,12 @@ export function MaterialRequestFormPage() {
   const [priority, setPriority] = useState("NORMAL");
   const [requiredBy, setRequiredBy] = useState("");
   const [remarks, setRemarks] = useState("");
+  // Whose paper it is on (2026-11-12): organisation, project or department, and year,
+  // selected here and printed in the number — the same card a stock audit and a
+  // direct issue open with. It opens on the default organisation and the person's
+  // own project, each flagged "please check" until somebody looks at it.
+  const [scope, setScope] = useState<DocNumberValue>(emptyDocNumberValue);
+  const [scopeTouched, setScopeTouched] = useState(false);
 
   const { data: catalog = [] } = useQuery({
     queryKey: ["catalog-items"],
@@ -60,6 +69,7 @@ export function MaterialRequestFormPage() {
   const save = useMutation({
     mutationFn: () =>
       createMaterialRequest({
+        ...docNumberPayload(scope),
         items: ready.map((l) => ({
           item_id: Number(l.item_id),
           quantity: Number(l.quantity),
@@ -88,7 +98,7 @@ export function MaterialRequestFormPage() {
             </Button>
             <Button className={TONE_MINT}
               disabled={!ready.length || duplicated.size > 0 || save.isPending}
-              onClick={() => save.mutate()}
+              onClick={() => { setScopeTouched(true); save.mutate(); }}
             >
               {save.isPending ? "Raising…" : "Raise request"}
             </Button>
@@ -100,6 +110,11 @@ export function MaterialRequestFormPage() {
         For material the warehouse cannot serve. It goes straight into approval, the
         same as one raised automatically off a short indent.
       </p>
+
+      <div className="mb-5">
+        <DocumentNumberCard docType="mr" value={scope} ready exclusive showInvalid={scopeTouched}
+                            onChange={(patch) => setScope((current) => ({ ...current, ...patch }))} />
+      </div>
 
       <Card className="p-4">
         <div className="mb-3 flex items-center justify-between">
@@ -202,7 +217,7 @@ export function MaterialRequestFormPage() {
         </Button>
         <Button className={TONE_MINT}
           disabled={!ready.length || duplicated.size > 0 || save.isPending}
-          onClick={() => save.mutate()}
+          onClick={() => { setScopeTouched(true); save.mutate(); }}
         >
           <Plus size={16} /> Raise request
         </Button>
