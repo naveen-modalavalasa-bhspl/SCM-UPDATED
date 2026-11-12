@@ -11,11 +11,11 @@ import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import {
   approveOutboundInspection, rejectOutboundInspection,
-  completeOutboundInspection, createOutboundInspection, employeeOptions, getOutboundInspection,
+  completeOutboundInspection, createOutboundInspection, getOutboundInspection,
   getIssue, inspectableIssueOptions,
   updateOutboundInspection, warehouseOptions,
 } from "../api";
-import { fmtQty, num, percent, today } from "../format";
+import { fmtQty, num, today } from "../format";
 import { PackageCheckModal } from "@/shared/components";
 import type { InnerCheck } from "@/shared/components/PackageCheckModal";
 import { PackQty, baseOf, shrinkWithin } from "@/shared/packing";
@@ -28,6 +28,8 @@ import type {
 import { usePointLabel } from "../usePointLabel";
 import { TONE_APPROVE, TONE_REJECT } from "@/shared/components/tones";
 import { CombinationTag } from "@/shared/combination";
+import { useAuth } from "@/shared/auth/AuthContext";
+import { qcRate } from "../qcSummary";
 
 /**
  * Inspect a receipt line by line.
@@ -83,6 +85,7 @@ export default function OutboundQualityInspectionForm({
   const nav = useNavigate();
   const qc = useQueryClient();
   const editing = !!id && id !== "new";
+  const { me } = useAuth();
   /* Absolute: this screen is mounted at two depths, so `".."` resolved against the
    * matched route and Back landed somewhere different depending on the entry URL. */
   const listPath = basePath ?? "/warehouse/qc-outward";
@@ -566,7 +569,6 @@ export default function OutboundQualityInspectionForm({
         <QtyInput
           uom={savedLine(i)?.uom_code ?? (delivery?.items ?? []).find((x) => x.id === l.issue_item_id)?.uom_code}
           ariaLabel={`Inspected quantity, line ${i + 1}`}
-          uom={savedLine(i)?.uom_code ?? (delivery?.items ?? []).find((x) => x.id === l.issue_item_id)?.uom_code}
           value={l.inspected_qty}
           disabled={locked}
           onChange={(v) => patchLine(i, { inspected_qty: v })}
@@ -589,7 +591,6 @@ export default function OutboundQualityInspectionForm({
         <QtyInput
           uom={savedLine(i)?.uom_code ?? (delivery?.items ?? []).find((x) => x.id === l.issue_item_id)?.uom_code}
           ariaLabel={`Accepted quantity, line ${i + 1}`}
-          uom={savedLine(i)?.uom_code ?? (delivery?.items ?? []).find((x) => x.id === l.issue_item_id)?.uom_code}
           value={l.accepted_qty}
           max={num(l.inspected_qty)}
           disabled={locked}
@@ -608,7 +609,6 @@ export default function OutboundQualityInspectionForm({
           <QtyInput
             uom={savedLine(i)?.uom_code ?? (delivery?.items ?? []).find((x) => x.id === l.issue_item_id)?.uom_code}
             ariaLabel={`Rejected quantity, line ${i + 1}`}
-            uom={savedLine(i)?.uom_code ?? (delivery?.items ?? []).find((x) => x.id === l.issue_item_id)?.uom_code}
             value={l.rejected_qty}
             max={num(l.inspected_qty)}
             disabled={locked}
@@ -629,7 +629,6 @@ export default function OutboundQualityInspectionForm({
         <QtyInput
           uom={savedLine(i)?.uom_code ?? (delivery?.items ?? []).find((x) => x.id === l.issue_item_id)?.uom_code}
           ariaLabel={`Rejected quantity, line ${i + 1}`}
-          uom={savedLine(i)?.uom_code ?? (delivery?.items ?? []).find((x) => x.id === l.issue_item_id)?.uom_code}
           value={l.rejected_qty}
           max={num(l.inspected_qty)}
           disabled={locked}
@@ -802,7 +801,9 @@ export default function OutboundQualityInspectionForm({
           )}
           <MetaRow
             label="Pass rate"
-            value={<span className="tabular">{percent(doc.passed_items, doc.total_items)}%</span>}
+            // By quantity, as served (SCM_0165) — passed LINES over all lines read 0 % on
+            // a line that kept most of itself.
+            value={<span className="tabular">{qcRate(doc.pass_rate ?? null)}</span>}
           />
         </MetaCard>
       )}
@@ -846,15 +847,13 @@ export default function OutboundQualityInspectionForm({
               placeholder="Warehouse"
             />
           </Field>
-          <Field label="Inspector">
-            <Lookup
-              name="employees"
-              load={employeeOptions}
-              value={form.inspector_id ?? ""}
-              isDisabled={locked}
-              onChange={(v) => set("inspector_id", v === "" ? null : v)}
-              placeholder="Inspector"
-            />
+          {/* SCM_0160, as SCM_0097 inward: the inspector is whoever is signed in and
+            * doing the check. The picker here listed every employee in HCM and a
+            * signed sheet could carry anybody's name; the server now records the
+            * signed-in user on create and keeps them on every edit, so this is shown,
+            * never chosen. */}
+          <Field label="Inspector" hint={editing ? "Recorded when this check was started." : "You — the signed-in user."}>
+            <Input value={(editing ? doc?.inspector_name : me?.employee?.name) ?? "—"} disabled />
           </Field>
         </div>
       </Section>

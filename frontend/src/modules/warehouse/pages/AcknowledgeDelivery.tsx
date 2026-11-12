@@ -213,7 +213,6 @@ export default function AcknowledgeDelivery() {
         <QtyInput
           uom={g.lines[0].uom_code}
           ariaLabel={`Received quantity for ${g.lines[0].item_code ?? g.lines[0].item_id}`}
-          uom={g.lines[0].uom_code}
           value={receivedOf(g.lines)}
           max={sentOf(g.lines)}
           disabled={done}
@@ -276,7 +275,6 @@ export default function AcknowledgeDelivery() {
         <QtyInput
           uom={l.uom_code}
           ariaLabel={`Received quantity for ${l.item_code ?? l.item_id}`}
-          uom={l.uom_code}
           value={delivered[l.id] ?? num(l.quantity)}
           max={num(l.quantity)}
           disabled={done}

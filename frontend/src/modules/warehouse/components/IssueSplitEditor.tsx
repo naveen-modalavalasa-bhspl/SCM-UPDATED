@@ -1112,7 +1112,6 @@ function PickRow(props: PickProps) {
               <QtyInput
                 decimals={0}
                 ariaLabel={`Packages to issue from pick ${position + 1}`}
-                decimals={0}
                 value={packsHeld}
                 disabled={locked}
                 invalid={overDrawn}

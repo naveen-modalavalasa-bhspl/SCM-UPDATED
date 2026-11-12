@@ -1330,6 +1330,10 @@ class DespatchNoteOut(OrgScopeOut):
     remarks: str | None = None
     submitted_at: datetime | None = None
     created_at: datetime
+    # SCM_0162: when the note last changed — the only time a CANCELLED note carries,
+    # and the "last saved" stamp on a draft. Served so the status line under each
+    # note can say WHEN, not just what.
+    updated_at: datetime | None = None
     items: list[DespatchItemOut] = []
 
 

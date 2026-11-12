@@ -20,7 +20,9 @@ import {
   getReceipt, grnOptions,
   updateInspection, warehouseOptions,
 } from "../api";
-import { fmtQty, num, percent, today } from "../format";
+import { fmtQty, num, today } from "../format";
+import { deriveResult, qcRate, qcSentence, summarizeQc } from "../qcSummary";
+import { QcResultBadge, QcVerdictPanel, QcVerdictStrip } from "../components/QcVerdict";
 import { resolveAcceptedUnits } from "../qcUnits";
 import { alerts } from "@/modules/alerts";
 import { useAuth } from "@/shared/auth/AuthContext";
@@ -43,24 +45,12 @@ import { CombinationTag, comboFrom } from "@/shared/combination";
  * reading is not something a vendor can be held to.
  */
 
-const RESULTS = [
-  { value: "PENDING", label: "Pending" },
-  { value: "PASSED", label: "Passed" },
-  { value: "FAILED", label: "Failed" },
-  { value: "PARTIAL", label: "Partial" },
-];
 
 /** The GRN picker on this screen, narrowed server-side to deliveries still awaiting QC.
  *  Declared out here so the `Lookup` gets a stable function and does not refetch on
  *  every keystroke of the rest of the form. */
 const awaitingQcOptions = (search?: string) => grnOptions(search, undefined, true);
 
-const deriveResult = (inspected: number, accepted: number): InspectionItemWrite["result"] => {
-  if (inspected <= 0) return "PENDING";
-  if (accepted >= inspected) return "PASSED";
-  if (accepted <= 0) return "FAILED";
-  return "PARTIAL";
-};
 
 const parseCodes = (arr: any): string[] | null => {
   if (!arr) return null;
@@ -361,33 +351,38 @@ export default function QualityInspectionForm({
           accepted_qty: accepted,
           rejected_qty: rejected,
           ...(packsAgree ? {} : { accepted_pack_breakdown: null, rejected_pack_breakdown: null }),
-          // An explicitly chosen result wins; otherwise it follows the split.
-          result: patch.result ?? deriveResult(inspected, accepted),
+          // SCM_0164: the result FOLLOWS the split, always — the server derives it the
+          // same way on save. A hand-picked "Passed" over two rejected units was the
+          // line saying one thing and its quantities another.
+          result: deriveResult(inspected, accepted),
         };
       }),
     }));
 
-  /** A line is seeded PENDING when the receipt raises the inspection, and the server
-   *  derives its real result from the accepted/inspected split on save
-   *  (`_derive_result`). Counting the stored PENDING as neither pass nor fail is how
-   *  the confirm modal announced "0 pass, 0 fail" over a full sheet of accepted lines.
-   *  Count what the save is about to write, by the same rule. */
+  /** A line's result, live: always its own split (SCM_0164), which is what the save
+   *  writes — the server derives it the same way. A line seeded PENDING with a full
+   *  split is counted as what it is about to be, not as nothing; that is how the
+   *  confirm dialog once announced "0 pass, 0 fail" over a sheet of accepted lines. */
   const resultOf = (line: InspectionItemWrite) =>
-    line.result && line.result !== "PENDING"
-      ? line.result
-      : deriveResult(num(line.inspected_qty), num(line.accepted_qty));
+    deriveResult(num(line.inspected_qty), num(line.accepted_qty));
 
-  const totals = useMemo(
-    () => ({
-      lines: form.items.length,
-      passed: form.items.filter((l) => resultOf(l) === "PASSED").length,
-      failed: form.items.filter((l) => resultOf(l) === "FAILED").length,
-      partial: form.items.filter((l) => resultOf(l) === "PARTIAL").length,
-      inspected: form.items.reduce((s, l) => s + num(l.inspected_qty), 0),
-      rejected: form.items.reduce((s, l) => s + num(l.rejected_qty), 0),
-    }),
+  /** Every total on this screen, by QUANTITY (SCM_0164 / 0165 / 0166) — the panel,
+   *  the strip under the lines, the Document card and the confirm dialog all read it,
+   *  so none of them can disagree with another. See `../qcSummary`. */
+  const summary = useMemo(
+    () => summarizeQc(form.items.map((line) => ({ ...line, result: resultOf(line) }))),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [form.items],
   );
+  /** The unit, named only when every line shares one: "10 PCS" is a fact, "10 units"
+   *  over a box of strips and a carton of bottles is not. */
+  const sharedUom = useMemo(() => {
+    const uoms = new Set(form.items.map((line, i) =>
+      savedLine(i)?.uom_code ?? deliveryMeta.get(line.receipt_item_id ?? 0)?.uom ?? ""));
+    const [only] = uoms;
+    return uoms.size === 1 && only ? only : undefined;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.items, deliveryMeta, doc]);
 
   const locked = !!doc && doc.status !== "DRAFT" && doc.status !== "IN_PROGRESS";
 
@@ -513,7 +508,6 @@ export default function QualityInspectionForm({
         <QtyInput
           uom={savedLine(i)?.uom_code ?? deliveryMeta.get(l.receipt_item_id ?? 0)?.uom}
           ariaLabel={`Inspected quantity, line ${i + 1}`}
-          uom={savedLine(i)?.uom_code ?? deliveryMeta.get(l.receipt_item_id ?? 0)?.uom}
           value={l.inspected_qty}
           disabled={locked}
           onChange={(v) => patchLine(i, { inspected_qty: v })}
@@ -534,7 +528,6 @@ export default function QualityInspectionForm({
             <QtyInput
               uom={savedLine(i)?.uom_code ?? deliveryMeta.get(l.receipt_item_id ?? 0)?.uom}
               ariaLabel={`Accepted quantity, line ${i + 1}`}
-              uom={savedLine(i)?.uom_code ?? deliveryMeta.get(l.receipt_item_id ?? 0)?.uom}
               value={l.accepted_qty}
               max={num(l.inspected_qty)}
               disabled={locked}
@@ -568,7 +561,6 @@ export default function QualityInspectionForm({
         <QtyInput
           uom={savedLine(i)?.uom_code ?? deliveryMeta.get(l.receipt_item_id ?? 0)?.uom}
           ariaLabel={`Rejected quantity, line ${i + 1}`}
-          uom={savedLine(i)?.uom_code ?? deliveryMeta.get(l.receipt_item_id ?? 0)?.uom}
           value={l.rejected_qty}
           max={num(l.inspected_qty)}
           disabled={locked}
@@ -579,16 +571,10 @@ export default function QualityInspectionForm({
     {
       key: "result",
       header: "Result",
-      width: "w-36",
-      render: (l, i) => (
-        <Select
-          value={l.result}
-          onChange={(v) => patchLine(i, { result: v as InspectionItemWrite["result"] })}
-          options={RESULTS}
-          isDisabled={locked}
-          ariaLabel={`Result, line ${i + 1}`}
-        />
-      ),
+      width: "w-32",
+      // Shown, not picked (SCM_0164): it follows the accepted / rejected split, as the
+      // save does. A dropdown here let a line read "Passed" over rejected units.
+      render: (l) => <QcResultBadge result={resultOf(l)} />,
     },
     {
       key: "defect",
@@ -714,9 +700,19 @@ export default function QualityInspectionForm({
           <MetaRow label="Number" value={<span className="font-mono">{doc.inspection_no}</span>} />
           <MetaRow label="Status" value={<StatusPill status={doc.status} />} />
           <MetaRow label="Type" value={doc.inspection_type} />
+          {/* SCM_0165: accepted ÷ inspected QUANTITY, live off the lines on screen. It
+              was passed LINES ÷ all lines off the last save, so a new inspection read
+              0 % and a line keeping 8 of 10 counted as nothing passed. */}
           <MetaRow
             label="Pass rate"
-            value={<span className="tabular">{percent(doc.passed_items, doc.total_items)}%</span>}
+            value={<span className={`tabular font-semibold ${summary.passRate === null ? "text-muted"
+              : summary.rejected > 0 ? "text-warn" : "text-ok"}`}>{qcRate(summary.passRate)}</span>}
+          />
+          <MetaRow
+            label="Rejected quantity"
+            value={<span className={`tabular font-semibold ${summary.rejected > 0 ? "text-bad" : "text-muted"}`}>
+              {fmtQty(summary.rejected)}{sharedUom ? ` ${sharedUom}` : ""}
+            </span>}
           />
         </MetaCard>
       )}
@@ -789,7 +785,16 @@ export default function QualityInspectionForm({
         </div>
       </Section>
 
-      <Section title="Lines" hint="Result follows the accepted/rejected split unless you override it.">
+      {/* SCM_0164 / 0165 / 0166: how the inspection is going, by quantity, live as the
+          numbers are typed — before the lines, because it is the first thing asked. */}
+      {form.items.length > 0 && (
+        <div className="mb-4">
+          <QcVerdictPanel summary={summary} uom={sharedUom}
+                          title={locked ? "Inspection result" : "Inspection so far"} />
+        </div>
+      )}
+
+      <Section title="Lines" hint="Each line's result follows its accepted and rejected quantities.">
         <LinesEditor
           rows={form.items}
           columns={columns}
@@ -798,21 +803,14 @@ export default function QualityInspectionForm({
           minTableWidth="min-w-[1280px]"
           keyOf={(_, i) => i}
           onRemove={locked ? undefined : (i) => set("items", form.items.filter((_, x) => x !== i))}
-          rowTone={(l) => (l.result === "FAILED" ? "bg-bad-bg/40" : undefined)}
+          rowTone={(l) => {
+            const result = resultOf(l);
+            return result === "FAILED" ? "bg-bad-bg/40" : result === "PARTIAL" ? "bg-warn-bg/40" : undefined;
+          }}
           empty="Pick a GRN above to pull its lines in."
-          footer={
-            <div className="flex flex-wrap justify-end gap-x-6 gap-y-1 text-sm">
-              <span className="text-muted">{totals.lines} lines</span>
-              <span className="text-ok">Passed <b className="tabular">{totals.passed}</b></span>
-              <span className={totals.failed > 0 ? "text-bad" : "text-muted"}>
-                Failed <b className="tabular">{totals.failed}</b>
-              </span>
-              <span className="text-ink">Inspected <b className="tabular">{fmtQty(totals.inspected)}</b></span>
-              <span className={totals.rejected > 0 ? "text-bad" : "text-muted"}>
-                Rejected <b className="tabular">{fmtQty(totals.rejected)}</b>
-              </span>
-            </div>
-          }
+          // SCM_0166: every line in exactly one bucket — Partial included, which the
+          // old Passed / Failed pair left out — beside the quantities they came from.
+          footer={<QcVerdictStrip summary={summary} uom={sharedUom} />}
         />
       </Section>
 
@@ -982,19 +980,22 @@ export default function QualityInspectionForm({
         isOpen={confirming}
         title="Complete this inspection?"
         message={
-          <>
-            The result is written back onto the GRN lines: {totals.passed} pass, {totals.failed} fail
-            {totals.partial > 0 && <>, {totals.partial} partial</>}, <b>{fmtQty(totals.rejected)}</b>{" "}
-            rejected. The inspection can no longer be edited.
-            {totals.failed > 0 && (
-              <Chip size="sm" variant="flat" color="danger" className="ml-2">
-                Failed lines will block the receipt from posting in full
+          <div className="space-y-3">
+            <p className="font-semibold text-ink">{qcSentence(summary, sharedUom ?? "units")}</p>
+            <QcVerdictStrip summary={summary} uom={sharedUom} />
+            <p>
+              The result is written back onto the GRN lines and the inspection can no
+              longer be edited.
+            </p>
+            {summary.rejected > 0 && (
+              <Chip size="sm" variant="flat" color="danger">
+                {fmtQty(summary.rejected)}{sharedUom ? ` ${sharedUom}` : ""} rejected will not go into stock
               </Chip>
             )}
-          </>
+          </div>
         }
         confirmLabel="Complete"
-        danger={totals.failed > 0}
+        danger={summary.failed > 0}
         busy={complete.isPending}
         error={complete.error}
         onConfirm={() => complete.mutate()}

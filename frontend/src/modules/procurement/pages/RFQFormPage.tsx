@@ -10,7 +10,7 @@ import { consolidationApi, requisitionApi, rfqApi } from "../api";
 import { blankLine, LinePicker, type DraftLine } from "../components/LinePicker";
 import { emptyOrgValue, OrgFields, orgMissing, orgPayload, orgValueCarried, orgValueFrom, type OrgValue } from "../components/OrgFields";
 import { departmentOf, isOlderDocument } from "../orgScope";
-import { todayIst } from "@/shared/datetime";
+import { fmtDate, todayIst } from "@/shared/datetime";
 import { comboFrom, comboPayload } from "@/shared/combination";
 
 interface MasterVendor {
@@ -208,6 +208,22 @@ export function RFQFormPage() {
     || (existing?.organization_id && (existing.requisition_id || existing.consolidation_id)),
   );
 
+  // SCM_0172: the date box greys out past days, but a TYPED date went straight
+  // through it and the RFQ was raised already closed. Said under the field, and Save
+  // stays off until it is fixed. A date this RFQ was already saved with is left alone
+  // until somebody changes it — same rule the server applies on edit.
+  const today = todayIst();
+  const dueDateError = dueDate && dueDate < today && dueDate !== (existing?.due_date ?? "")
+    ? `This date has passed. Pick today (${fmtDate(today)}) or later.`
+    : null;
+  const pastLine = lines.find((line) => !line.id && line.item_id !== ""
+    && line.required_date && line.required_date < today);
+  const dateProblem = dueDateError
+    ? "The closing date has already passed."
+    : pastLine
+      ? `"Needed by" for ${pastLine.item_name || pastLine.item_code || "a line"} has already passed.`
+      : null;
+
   const save = useMutation({
     mutationFn: () => {
       const usable = lines.filter((l) => l.item_id !== "" && Number(l.quantity) > 0);
@@ -248,6 +264,10 @@ export function RFQFormPage() {
   });
 
   const submit = () => {
+    if (dateProblem) {
+      setProblem(`${dateProblem} Pick today or a later date.`);
+      return;
+    }
     const usable = lines.filter((l) => l.item_id !== "" && Number(l.quantity) > 0);
     if (!usable.length) {
       setProblem("Add at least one line with an item and a quantity.");
@@ -372,9 +392,10 @@ export function RFQFormPage() {
             <Input value={title} onChange={(e) => setTitle(e.target.value)}
                    placeholder="What is being bought" />
           </Field>
-          <Field label="Closes on" hint="After this date vendors can read but not quote.">
+          <Field label="Closes on" hint="After this date vendors can read but not quote."
+                 error={dueDateError}>
             {/* A closing date behind us shuts the RFQ the moment it is raised. */}
-            <Input type="date" min={todayIst()} value={dueDate}
+            <Input type="date" min={today} value={dueDate} isInvalid={!!dueDateError}
                    onChange={(e) => setDueDate(e.target.value)} />
           </Field>
           <Field label="Terms">
@@ -486,7 +507,8 @@ export function RFQFormPage() {
 
         <FormActions>
           <Button variant="subtle" onClick={() => nav("/procurement/rfqs")}>Cancel</Button>
-          <Button disabled={save.isPending} onClick={submit}>
+          <Button disabled={save.isPending || !!dateProblem} onClick={submit}
+                  title={dateProblem ?? undefined}>
             {editing ? "Save changes" : "Create RFQ"}
           </Button>
         </FormActions>

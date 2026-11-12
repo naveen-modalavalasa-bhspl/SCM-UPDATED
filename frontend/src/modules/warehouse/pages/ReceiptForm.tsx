@@ -1206,7 +1206,6 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           {/* Typed even on a packed line (2026-10-21): the packs follow it, inside the
               line's own hierarchy, and the Serial / IMEI rows are sized off it. */}
           <QtyInput
-            uom={l.uom_code}
             ariaLabel={`Received quantity, line ${i + 1}`}
             uom={savedLine(i)?.uom_code ?? l.uom_code}
             value={l.received_qty}
@@ -1290,7 +1289,6 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       width: "w-28",
       render: (l, i) => (
         <QtyInput
-          uom={l.uom_code}
           ariaLabel={`Accepted quantity, line ${i + 1}`}
           uom={savedLine(i)?.uom_code ?? l.uom_code}
           value={l.accepted_qty ?? 0}
