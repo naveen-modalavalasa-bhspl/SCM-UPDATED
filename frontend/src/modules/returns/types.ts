@@ -1,3 +1,4 @@
+import type { ScopedDoc } from "@/shared/useDocNumberScope";
 import type { CombinationValue } from "@/shared/combination";
 /** Returns — types mirror the backend schemas field for field. Backend names win. */
 
@@ -97,7 +98,7 @@ export interface ReturnSentBack {
   from_stage: string | null;
 }
 
-export interface StockReturn {
+export interface StockReturn extends ScopedDoc {
   id: number;
   return_no: string;
   status: ReturnStatus;
@@ -609,7 +610,7 @@ export interface ReturnLineWrite extends CombinationValue {
 }
 
 /** One indent a return may be raised against — the raiser's own, past approval. */
-export interface IndentOption {
+export interface IndentOption extends ScopedDoc {
   id: number;
   indent_no: string;
   indent_date: string | null;
@@ -680,6 +681,12 @@ export interface ReturnReasonRow {
 }
 
 export interface ReturnWrite {
+  /** The number card's selection (2026-11-12) — `docNumberPayload`. Against an indent
+   *  that carries an organisation the server copies the indent's instead. */
+  organization_id?: number | null;
+  project_id?: number | null;
+  org_department_id?: number | null;
+  fiscal_year?: string | null;
   /** Shorthand for "all of it, for this reason"; the form sends `reasons` instead. */
   reason?: string | null;
   /** Why it is going back, by quantity. Must add up to the quantity returned. */

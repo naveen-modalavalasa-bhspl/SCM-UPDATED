@@ -4,8 +4,8 @@ import { ArrowDown, Check, Lock, ShieldAlert, ShoppingCart } from "lucide-react"
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  PageHeader, Button, Card, Field, Input, QuantityChanges, ResponsiveList, StatusPill,
-  useToast, type Column,
+  PageHeader, Button, Card, DocumentScopeStrip, Field, Input, QuantityChanges, ResponsiveList,
+  StatusPill, useToast, type Column,
 } from "@/shared/components";
 import {
   approveMaterialRequest, getMaterialRequest, materialRequestQuantityChanges,
@@ -357,6 +357,10 @@ export function MaterialRequestDetailPage() {
           ? <StatusPill status={`Pending at ${data.current_stage_name}`} />
           : <StatusPill status={data.status} />}
       />
+
+      {/* Whose paper it is on (2026-11-12) — read-only; says nothing on an older
+          request raised before organisations, or one raised automatically. */}
+      <DocumentScopeStrip doc={data} number={data.mr_no} className="mb-4" />
 
       <Card className="mb-4 p-4">
         <dl className="grid gap-3 text-sm sm:grid-cols-3">

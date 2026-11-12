@@ -1,3 +1,4 @@
+import type { ScopedDoc } from "@/shared/useDocNumberScope";
 import { api } from "@/shared/api/client";
 import type { Paginated } from "@/shared/types";
 import type { GRN, GRNCreate, GRNListRow, Issue, MovementRow, StockRow } from "./types";
@@ -297,6 +298,13 @@ export const indentLookupApi = {
     })
       .then((r) => r.data.items)
       .catch(() => [] as IndentOption[]),
+  /** One indent's scope (2026-11-12): the transport form's number card shows it locked
+   *  when a leg moves an organised indent. Null when it cannot be read — the card then
+   *  stays open and the server still copies what it can. */
+  scope: (id: number) =>
+    api.get<ScopedDoc & { id: number; indent_no: string }>(`/api/indents/${id}`)
+      .then((r) => r.data)
+      .catch(() => null),
 };
 
 // --------------------------------------------------------------------------- //

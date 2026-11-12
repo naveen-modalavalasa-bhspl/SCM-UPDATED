@@ -18354,10 +18354,14 @@ async def _create_manual_return(db: AsyncSession, data: s.ReturnWrite,
         vendor = await _match_manual_vendor(
             db, vendor_name, data.vendor_code, data.vendor_gstin)
     wh = await db.get(Warehouse, data.warehouse_id) if data.warehouse_id else None
+    # Whose paper it is on (2026-11-12): nothing before a manual return, so all of it
+    # is SELECTED on the number card. No card (an older client) → the old numbering.
+    scope_values, scope_args = await org_scope.carry_or_select(db, data, None)
 
     doc = m.PurchaseReturn(
         items=[],   # see create_issue: keeps _apply_*_lines()'s clear() off a lazy load
-        return_no=await next_number(db, WarehouseDocType.PURCHASE_RETURN.value),
+        return_no=await next_number(db, WarehouseDocType.PURCHASE_RETURN.value,
+                                    **(scope_args or {})),
         return_date=data.return_date,
         # No purchase transaction behind it — that is what makes it manual. The typed
         # number, if any, is kept as a reference and is never resolved to a document.
@@ -18374,6 +18378,8 @@ async def _create_manual_return(db: AsyncSession, data: s.ReturnWrite,
         created_by_id=getattr(user, "id", None), created_by_name=_name(user),
         **_manual_vendor_fields(data),
     )
+    if scope_values:
+        org_scope.stamp_with_project(doc, scope_values)
     db.add(doc)
     await db.flush()
 
@@ -18421,10 +18427,17 @@ async def create_return(db: AsyncSession, data: s.ReturnWrite, user) -> m.Purcha
     if (data.vendor_id or source_vendor_id) and vendor is None:
         raise NotFoundError(f"Vendor {data.vendor_id or source_vendor_id} not found")
     wh = await db.get(Warehouse, data.warehouse_id) if data.warehouse_id else None
+    # Whose paper it is on (2026-11-12): COPIED from the GRN, else the PO, whichever
+    # carries an organisation — the goods go back under the paper they came in on.
+    # Off an older GRN / PO with none, the number card selects it, as on a manual one.
+    source = next((paper for paper in (receipt, po)
+                   if paper is not None and org_scope.uses_org(paper)), None)
+    scope_values, scope_args = await org_scope.carry_or_select(db, data, source)
 
     doc = m.PurchaseReturn(
         items=[],   # see create_issue: keeps _apply_*_lines()'s clear() off a lazy load
-        return_no=await next_number(db, WarehouseDocType.PURCHASE_RETURN.value),
+        return_no=await next_number(db, WarehouseDocType.PURCHASE_RETURN.value,
+                                    **(scope_args or {})),
         return_date=data.return_date,
         po_id=data.po_id or (receipt.po_id if receipt else None) or (po.id if po else None),
         po_no=(po.po_no if po else None) or (receipt.po_no if receipt else None),
@@ -18438,6 +18451,8 @@ async def create_return(db: AsyncSession, data: s.ReturnWrite, user) -> m.Purcha
         status=ReturnStatus.DRAFT.value,
         created_by_id=getattr(user, "id", None), created_by_name=_name(user),
     )
+    if scope_values:
+        org_scope.stamp_with_project(doc, scope_values)
     db.add(doc)
     await db.flush()
 
@@ -22624,9 +22639,14 @@ async def purchase_return_source_detail(db: AsyncSession, *,
     warehouse_id = None
     warehouse_name = None
     source_no = ""
+    # The document the return's organisation is COPIED from, when it carries one
+    # (2026-11-12) — the same choice `create_return` makes, so the card shows locked
+    # exactly what the save will stamp.
+    paper = None
     # ---- GRN ----
     if source_type == "GRN":
         receipt = await _load(db, m.Receipt, source_id, "Purchase Invoice/GRN", m.Receipt.items)
+        paper = receipt
         source_no = receipt.grn_no
         purchase.grn_id = receipt.id
         purchase.grn_no = receipt.grn_no
@@ -22715,6 +22735,7 @@ async def purchase_return_source_detail(db: AsyncSession, *,
     elif source_type == "PO":
         from app.modules.procurement.models import PurchaseOrder, POItem
         po = await _get(db, PurchaseOrder, source_id, "Purchase Order")
+        paper = po
         source_no = po.po_no
         purchase.po_id = po.id
         purchase.po_no = po.po_no
@@ -22912,6 +22933,11 @@ async def purchase_return_source_detail(db: AsyncSession, *,
         "total_original_qty": total_orig,
         "total_previously_returned": total_prev,
         "total_returnable_qty": total_ret,
+        # Whose paper the return goes back on — null fields off an older source, which
+        # the number card then asks for (2026-11-12).
+        **({field: getattr(paper, field, None)
+            for field in (*org_scope.SCOPE_FIELDS, "project_id", "project_name")}
+           if paper is not None and org_scope.uses_org(paper) else {}),
     }
 
 

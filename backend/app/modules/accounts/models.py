@@ -11,9 +11,10 @@ from app.core.database import Base
 from app.platform.workflow import doc_registry
 from app.shared.enums import DocType, VendorPaymentStatus
 from app.shared.models.base import created_at_col, pk, soft_fk, updated_at_col
+from app.shared.models.master import OrgScopeColumns
 
 
-class VendorPayment(Base):
+class VendorPayment(OrgScopeColumns, Base):
     """`acc_vendor_payments` — money paid (or about to be) against one PO milestone.
 
     Recorded by the accounts desk, signed on the VENDOR_PAYMENT ladder. Only a PAID row
@@ -22,7 +23,8 @@ class VendorPayment(Base):
     """
     __tablename__ = "acc_vendor_payments"
     id = pk()
-    payment_no = Column(String(30), unique=True, nullable=False)
+    # 50, the width every document number has once it is built from codes (2026-11-12).
+    payment_no = Column(String(50), unique=True, nullable=False)
 
     po_id = Column(ForeignKey("pro_purchase_orders.id"), index=True, nullable=False)
     po_no = Column(String(50), nullable=True)                  # snapshot
@@ -32,6 +34,9 @@ class VendorPayment(Base):
     vendor_id = Column(ForeignKey("mst_vendors.id"), index=True, nullable=False)
     vendor_name = Column(String(200), nullable=True)           # snapshot
     project_id = soft_fk()
+    # The PO's project, by name, for the number (2026-11-12) — the id alone above
+    # predates the number card.
+    project_name = Column(String(200), nullable=True)
 
     amount = Column(Numeric(16, 2), nullable=False)
     paid_on = Column(Date, nullable=False)

@@ -1143,6 +1143,15 @@ async def _out(db: AsyncSession, doc: StockTransferOrder, user=None,
     return {
         "id": doc.id,
         "return_no": doc.sto_no,
+        # Whose paper it is on (2026-11-12) — read by the scope strip on the detail.
+        "organization_id": doc.organization_id,
+        "organization_code": doc.organization_code,
+        "organization_name": doc.organization_name,
+        "org_department_id": doc.org_department_id,
+        "org_department_name": doc.org_department_name,
+        "fiscal_year": doc.fiscal_year,
+        "project_id": doc.project_id,
+        "project_name": doc.project_name,
         "status": doc.status,
         "phase": phase,
         "kind": _kind(doc),
@@ -1972,11 +1981,17 @@ async def create_return(db: AsyncSession, data, user, *, commit: bool = True,
     if destination_id == source_id:
         raise ValidationError("A return has to go somewhere other than where it is.")
 
+    # Whose paper it is on (2026-11-12): COPIED from the indent it answers when that
+    # indent carries an organisation; otherwise selected on the number card. Raised
+    # with neither (an older client, an older indent) → the old numbering.
+    from app.platform.doc_numbering import scope as org_scope
+    scope_values, scope_args = await org_scope.carry_or_select(db, data, indent)
+
     doc = StockTransferOrder(
         # Empty list up front so `_apply_lines`'s clear() does not trigger a lazy load
         # on a row that has no identity yet.
         items=[],
-        sto_no=await next_number(db, NUMBER_SERIES),
+        sto_no=await next_number(db, NUMBER_SERIES, **(scope_args or {})),
         from_warehouse_id=source_id,
         from_warehouse_name=context["from_warehouse_name"],
         to_warehouse_id=destination_id,
@@ -1991,6 +2006,8 @@ async def create_return(db: AsyncSession, data, user, *, commit: bool = True,
                       kind=data.kind.value, intent=data.intent.value,
                       indent=_indent_payload(indent), reasons=reason_rows),
     )
+    if scope_values:
+        org_scope.stamp_with_project(doc, scope_values)
     db.add(doc)
     await db.flush()
 
@@ -2539,6 +2556,13 @@ async def returnable_indents(db: AsyncSession, params: PageParams, user, *,
         "total_qty": _d(row.total_qty),
         "project_name": row.project_name,
         "position_name": row.position_name,
+        # Whose paper the return is on when raised against this indent (2026-11-12):
+        # the form's number card shows these locked, as `create_return` copies them.
+        "project_id": row.project_id,
+        "organization_id": row.organization_id,
+        "organization_name": row.organization_name,
+        "org_department_id": row.org_department_id,
+        "org_department_name": row.org_department_name,
     } for row in rows]
     return page
 

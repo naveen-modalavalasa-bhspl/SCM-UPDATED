@@ -4,9 +4,15 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.shared.org_scope_schemas import OrgScopeIn, OrgScopeOut
 
-class PaymentIn(BaseModel):
-    """Record one payment against one milestone of one PO."""
+
+class PaymentIn(OrgScopeIn):
+    """Record one payment against one milestone of one PO.
+
+    The number card (2026-11-12): a payment against an organised PO COPIES the PO's
+    organisation and project and only its year is picked; against an older PO they are
+    selected here. Sent with none of them, it keeps the old numbering."""
     po_id: int
     milestone_id: int
     amount: Decimal = Field(gt=0, max_digits=16, decimal_places=2)
@@ -32,10 +38,12 @@ class DocumentOut(BaseModel):
     created_at: datetime | None = None
 
 
-class PaymentOut(BaseModel):
+class PaymentOut(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     payment_no: str
+    project_id: int | None = None
+    project_name: str | None = None
     po_id: int
     po_no: str | None = None
     milestone_id: int
@@ -80,11 +88,12 @@ class MilestoneOut(BaseModel):
     state: str              # NOT_DUE | DUE | OVERDUE | PART_PAID | PAID | CONFIRM
 
 
-class PoPaymentsOut(BaseModel):
+class PoPaymentsOut(OrgScopeOut):
     """Everything accounts (and the PO desk) needs about one order's money."""
     po_id: int
     po_no: str
     po_status: str
+    project_id: int | None = None
     vendor_id: int
     vendor_name: str | None = None
     project_name: str | None = None

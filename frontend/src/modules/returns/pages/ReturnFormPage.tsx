@@ -3,7 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CalendarDays, FileText, Layers, PackageCheck } from "lucide-react";
 import {
-  Button, ErrorBanner, Field, Input, PageHeader, Select, StatusPill,
+  Button, DocumentNumberCard, ErrorBanner, Field, Input, PageHeader, Select, StatusPill,
   TONE_DEEP_MINT, TONE_MINT, TONE_PINK,
 } from "@/shared/components";
 import { returnsApi } from "../api";
@@ -25,6 +25,7 @@ import {
   type ReturnLineWrite, type ReturnWrite, type StagedAttachment,
 } from "../types";
 import { comboFrom, comboPayload } from "@/shared/combination";
+import { useDocNumberScope } from "@/shared/useDocNumberScope";
 
 /**
  * Raise or edit a return.
@@ -261,6 +262,15 @@ export default function ReturnFormPage() {
 
   const stock = stockPage?.items ?? [];
   const indents = indentPage?.items ?? [];
+  // Whose paper the return is on (2026-11-12): COPIED from the indent it answers when
+  // that indent carries an organisation, else selected here — `carry_or_select`.
+  const scopeIndent = indents.find((row) => row.id === pickedIndentId) ?? null;
+  const numberScope = useDocNumberScope({
+    editing: returnId !== null,
+    saved: existing,
+    carried: scopeIndent?.organization_id ? scopeIndent : null,
+    carriedLabel: scopeIndent?.indent_no,
+  });
   const readOnly = existing ? !existing.can_edit : false;
 
   /**
@@ -432,6 +442,7 @@ export default function ReturnFormPage() {
   ];
 
   const body = (): ReturnWrite => ({
+    ...numberScope.payload(),
     reasons: reasonRowsPayload(rows),
     reason_note: reasonNote.trim() || null,
     // null, not omitted: clearing the picker on an edit has to CLEAR the link, and the
@@ -521,6 +532,18 @@ export default function ReturnFormPage() {
         * frame the rest of the form sits inside, and one strip because five facts do not
         * need five text boxes. */}
       <RaiserStrip raiser={raiser} className="mb-5" />
+
+      {!numberScope.older && (
+        <div className="mb-5">
+          <DocumentNumberCard
+            docType="ret" value={numberScope.value} exclusive
+            ready={numberScope.ready} locks={numberScope.locks} source={numberScope.source}
+            showInvalid={numberScope.touched}
+            savedNumber={returnId !== null ? existing?.return_no ?? null : null}
+            onChange={numberScope.onChange}
+          />
+        </div>
+      )}
 
       {/* A return that has left the raiser drops the rail entirely and lets the steps
         * claim the width. Neither of the rail's cards has anything to say about a

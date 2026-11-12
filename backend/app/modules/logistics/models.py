@@ -25,6 +25,7 @@ from app.modules.logistics.enums import (
     TripStopStatus,
 )
 from app.shared.models.base import created_at_col, pk, soft_fk, updated_at_col
+from app.shared.models.master import OrgScopeColumns
 
 QTY = Numeric(16, 3)
 MONEY = Numeric(16, 2)
@@ -136,7 +137,7 @@ class IssueItem(Base):
 # logistics in front of warehouse in the import chain.
 # ---------------------------------------------------------------------------
 
-class TransportRequest(Base):
+class TransportRequest(OrgScopeColumns, Base):
     """`lgs_transport_requests` — one consignment's worth of transport."""
     __tablename__ = "lgs_transport_requests"
 

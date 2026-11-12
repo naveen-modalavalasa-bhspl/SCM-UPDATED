@@ -5,6 +5,7 @@ import {
   Button,
   Card,
   ConfirmModal,
+  DocumentNumberCard,
   ErrorBanner,
   Field,
   Input,
@@ -44,6 +45,7 @@ import type {
 } from "../types";
 import { CombinationTag } from "@/shared/combination";
 import { guardNumberKeys } from "@/shared/quantity";
+import { useDocNumberScope } from "@/shared/useDocNumberScope";
 
 /**
  * Warehouse → Vendor Purchase Return — the Storekeeper's single screen.
@@ -312,6 +314,17 @@ export default function PurchaseReturnForm() {
 
   const locked = !!existing && existing.status !== "DRAFT";
 
+  // Whose paper the return goes back on (2026-11-12): COPIED from the GRN / PO it was
+  // picked from when that carries an organisation — the goods go back under the paper
+  // they came in on — else selected here, as on a manual return. `carry_or_select`.
+  const numberScope = useDocNumberScope({
+    editing: isEdit,
+    saved: existing,
+    carried: !manualEntry && detail?.organization_id ? detail : null,
+    carriedLabel: detail?.source_no,
+    sourceLoading: !manualEntry && !!pickedSource && detailLoading,
+  });
+
   // Each mode owns its own selection. Switching clears it rather than carrying it
   // across: a document chosen from the list, still selected under an empty number box,
   // reads as though the box had found it — and the reverse leaves a list row
@@ -470,6 +483,7 @@ export default function PurchaseReturnForm() {
   const draftPayload = (): PurchaseReturnWrite =>
     manualEntry
       ? {
+          ...numberScope.payload(),
           return_date: returnDate,
           is_manual: true,
           // `source_ref_no` is deliberately not posted: the box that captured it was
@@ -483,6 +497,7 @@ export default function PurchaseReturnForm() {
           items: buildItems(),
         }
       : {
+          ...numberScope.payload(),
           return_date: returnDate,
           grn_id: purchase?.grn_id ?? (pickedSource?.type === "GRN" ? pickedSource.id : null),
           po_id: purchase?.po_id ?? (pickedSource?.type === "PO" ? pickedSource.id : null),
@@ -679,6 +694,18 @@ export default function PurchaseReturnForm() {
       />
 
       {error && <ErrorBanner error={error} />}
+
+      {!numberScope.older && (
+        <div className="mb-5">
+          <DocumentNumberCard
+            docType="PURCHASE_RETURN" value={numberScope.value} exclusive
+            ready={numberScope.ready} locks={numberScope.locks} source={numberScope.source}
+            showInvalid={numberScope.touched}
+            savedNumber={isEdit ? existing?.return_no ?? null : null}
+            onChange={numberScope.onChange}
+          />
+        </div>
+      )}
 
       {locked && (
         <Card className="mb-4 border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">

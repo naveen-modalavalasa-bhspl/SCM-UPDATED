@@ -1820,8 +1820,13 @@ async def _raise_mr(db: AsyncSession, indent_id: int | None, indent_no: str | No
     `act_on_mr` is approving two different shapes and the ladder only governs one
     of them.
     """
+    from app.platform.doc_numbering import scope as org_scope
+    # A direct request's number follows its number card (2026-11-12): `number_args`
+    # is what `create_mr_manual` resolved from the selection. Everything else keeps the
+    # numbering it always had.
     mr = MaterialRequest(
-        mr_no=await next_number(db, "mr", project=ctx.get("project_name")),
+        mr_no=await next_number(db, "mr", **(ctx.get("number_args")
+                                             or {"project": ctx.get("project_name")})),
         mr_date=utcnow().date(),
         indent_id=indent_id, indent_no=indent_no,
         requested_by_id=getattr(user, "id", None),
@@ -1837,6 +1842,8 @@ async def _raise_mr(db: AsyncSession, indent_id: int | None, indent_no: str | No
         remarks=ctx.get("remarks") or (
             f"Raised automatically for {indent_no}" if indent_no else None),
     )
+    if ctx.get("org_scope"):
+        org_scope.stamp_with_project(mr, ctx["org_scope"])
     db.add(mr)
     await db.flush()
 
@@ -2021,9 +2028,33 @@ async def create_mr_manual(db: AsyncSession, data: dict, user) -> MaterialReques
     # Named from the master, so the number and the snapshot cannot disagree. The
     # login's own name stands in only when the project IS the login's and the master
     # has no row for it — a mirror that has not been loaded must not blank the name.
+    # The number card on the direct form (2026-11-12): a project picked there is the
+    # request's own. An MR raised against an indent keeps the INDENT's project — the
+    # card is not on the allocation screen, and the indent already said whose it is.
+    if not indent_id and data.get("project_id"):
+        project_id = data["project_id"]
     project_name = await _project_name_of(db, project_id)
     if project_name is None and project_id == getattr(user, "project_id", None):
         project_name = getattr(user, "project_name", None)
+
+    # Organisation, project or department, and year → the number. Selected on the
+    # card, else the default organisation with the project worked out above. None when
+    # there is no organisation to use or nothing to number it under: the request then
+    # keeps the numbering it always had rather than being refused.
+    from app.platform.doc_numbering import scope as org_scope
+    department_only = bool(data.get("org_department_id")) and not data.get("project_id")
+    selection = SimpleNamespace(
+        organization_id=data.get("organization_id"),
+        org_department_id=data.get("org_department_id"),
+        project_id=None if department_only else project_id,
+        fiscal_year=data.get("fiscal_year"))
+    scope = None
+    if selection.organization_id or selection.project_id or selection.org_department_id:
+        scope = await org_scope.resolve_free(db, selection)
+    if scope and department_only:
+        # Picked a department, which clears the project on the card: the MR is the
+        # department's, not the login's project's.
+        project_id, project_name = None, None
 
     resolved = []
     for line in lines:
@@ -2054,6 +2085,8 @@ async def create_mr_manual(db: AsyncSession, data: dict, user) -> MaterialReques
         "priority": data.get("priority"),
         "required_by": data.get("required_by"),
         "remarks": data.get("remarks"),
+        "org_scope": scope,
+        "number_args": org_scope.args_of(scope) if scope else None,
         # Same key the automatic path passes, so the ladder resolves the raiser's
         # reporting line identically whichever door the request came through.
         "requester_position_id": getattr(user, "active_position_id", None),

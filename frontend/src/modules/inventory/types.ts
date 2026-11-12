@@ -551,6 +551,13 @@ export interface MaterialRequestListRow {
   priority: string;
   required_by?: string | null;
   current_approver_name?: string | null;
+  /** Whose paper it is on (2026-11-12) — null on a request raised before the number
+   *  card, and on one raised automatically off an allocation. */
+  organization_id?: number | null;
+  organization_name?: string | null;
+  org_department_name?: string | null;
+  project_name?: string | null;
+  fiscal_year?: string | null;
   /** SCM_0155: where the request is, for every status — served, never composed here.
    *  "Procurement" + "On REQ0012" once approved, where `current_approver_name` is
    *  blank; "Anita Rao" + "Waiting for approval" while it is in approval. */

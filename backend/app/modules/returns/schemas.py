@@ -14,7 +14,7 @@ from app.shared.limits import (  # request-size guards, see the module
     MAX_DOCUMENT_LINES,
 )
 from app.shared.masters.combinations import CombinationIn, CombinationOut
-
+from app.shared.org_scope_schemas import OrgScopeIn, OrgScopeOut
 
 class ReturnLineIn(CombinationIn):
     item_id: int
@@ -66,7 +66,7 @@ class ReturnReasonOut(BaseModel):
     note: str | None = None
 
 
-class ReturnWrite(BaseModel):
+class ReturnWrite(OrgScopeIn):
     """What the raiser fills in. Source, destination, and the whole identity block are
     derived server-side — see `service._raiser_context`. A browser cannot claim to be
     returning somebody else's stock from somebody else's office."""
@@ -246,11 +246,15 @@ class DecisionOut(BaseModel):
     objections: int = 0
 
 
-class ReturnOut(BaseModel):
+class ReturnOut(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
     return_no: str
+    #: The project its number is drawn under (2026-11-12) — copied from the indent it
+    #: answers, or selected on the number card.
+    project_id: int | None = None
+    project_name: str | None = None
     status: str
     # DECISION, ENDORSE, FIELD or LOGISTICS — which stage is holding it, in that order.
     # The first three are all PENDING_APPROVAL so the status alone cannot separate them,
