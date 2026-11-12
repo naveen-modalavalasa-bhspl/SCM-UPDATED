@@ -42,10 +42,17 @@ export function useDocNumberScope({ editing, saved, carried, carriedLabel, sourc
     ? `${carried.organization_id}|${carried.project_id ?? ""}|${carried.org_department_id ?? ""}`
     : "";
 
-  // A saved document: its own answer, once it arrives.
+  // A saved document: its own answer, once it arrives. Keyed on the VALUES, not the
+  // object: a caller handing over a fresh object each render must not re-copy (and
+  // re-render) forever.
+  const savedKey = saved
+    ? [saved.organization_id, saved.project_id, saved.org_department_id, saved.fiscal_year]
+        .map((part) => part ?? "").join("|")
+    : null;
   useEffect(() => {
     if (editing && saved) setValue(docNumberValueFrom(saved));
-  }, [editing, saved]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editing, savedKey]);
 
   // A new document: copy from the source when it has an organisation; back to an open
   // card when the source is cleared or changed to one that has none.
