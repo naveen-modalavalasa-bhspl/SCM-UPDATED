@@ -172,11 +172,32 @@ class _Session:
         self.rolled_back = True
 
 
-def _split_parent_stubs(monkeypatch, refuse=None):
+class _ExpiringParent:
+    """A loaded parent as SQLAlchemy leaves it after a rollback: reading a column then
+    reloads it lazily, which an async session cannot do (MissingGreenlet) — a 500."""
+
+    def __init__(self, session):
+        self._session = session
+        self.id, self.status, self.created_by_id = 5, "SPLIT", 42
+
+    @property
+    def issue_no(self):
+        if self._session.rolled_back:
+            raise RuntimeError("MissingGreenlet: greenlet_spawn has not been called")
+        return "WHI0110"
+
+
+def _split_parent_stubs(monkeypatch, refuse=None, family_refuses=None, session=None):
     issued = []
 
     async def parent(_db, _issue_id):
+        if session is not None:
+            return _ExpiringParent(session)
         return SimpleNamespace(id=5, issue_no="WHI0110", status="SPLIT", created_by_id=42)
+
+    async def family(_db, _parent, **_kwargs):
+        if family_refuses:
+            raise service.ValidationError(family_refuses)
 
     async def allowed(*_args):
         return True
@@ -193,6 +214,9 @@ def _split_parent_stubs(monkeypatch, refuse=None):
     monkeypatch.setattr(service, "_may_issue_parent", allowed)
     monkeypatch.setattr(service, "_post_issue_core", core)
     monkeypatch.setattr(service, "write_audit", nothing)
+    # The pieces-together FEFO check reads the shelf; it has its own DB-backed tests
+    # (test_floor_piece_fefo.py). Here it only passes, or refuses on request.
+    monkeypatch.setattr(service, "_assert_split_family_fefo", family)
     return issued
 
 
@@ -211,3 +235,24 @@ async def test_one_piece_not_ready_issues_nothing_and_is_named(monkeypatch):
     assert "Nothing was issued" in caught.value.message
     assert "WHI0110-003" in caught.value.message and "serial numbers" in caught.value.message
     assert db.rolled_back and not db.committed
+
+
+async def test_a_refused_piece_is_named_not_a_500_after_the_rollback(monkeypatch):
+    """The 500 on "Issue all floor pieces": the refusal read the parent's number AFTER
+    rolling back, when the row can no longer be read. It is read before now."""
+    db = _Session([(1, "WHI0110-001"), (2, "WHI0110-002")])
+    _split_parent_stubs(monkeypatch, refuse=1, session=db)
+    with pytest.raises(service.ValidationError) as caught:
+        await service.post_split_issue(db, 5, SimpleNamespace(id=42))
+    assert "WHI0110-001 cannot be issued yet" in caught.value.message
+    assert "Issue from stock on WHI0110 again" in caught.value.message
+    assert db.rolled_back and not db.committed
+
+
+async def test_pieces_that_together_skip_an_older_batch_issue_nothing(monkeypatch):
+    issued = _split_parent_stubs(
+        monkeypatch, family_refuses="Across the floor pieces of WHI0110: take 12/11 first.")
+    db = _Session([(1, "WHI0110-001"), (2, "WHI0110-002")])
+    with pytest.raises(service.ValidationError, match="Across the floor pieces"):
+        await service.post_split_issue(db, 5, SimpleNamespace(id=42))
+    assert issued == [] and not db.committed
