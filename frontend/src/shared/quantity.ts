@@ -100,7 +100,19 @@ export function sanitizeQuantityInput(raw: string, decimals = 3): string {
   const [whole, ...rest] = cleaned.split(".");
   if (decimals <= 0) return whole;
   if (rest.length === 0) return whole;
-  return `${whole}.${rest.join("").slice(0, decimals)}`;
+  // SCM_0156: a quantity never starts with a point. ".5" is written "0.5" — the
+  // leading zero is what makes the number readable at a glance on a printed sheet,
+  // and a bare "." is not a quantity at all.
+  return `${whole || "0"}.${rest.join("").slice(0, decimals)}`;
+}
+
+/** SCM_0156: the edit a keystroke or a paste was MEANT as, when the only thing wrong
+ *  with it is a missing leading zero — "." into an empty box is "0.". Null when the
+ *  edit is wrong for another reason (a letter, a second point…) and is simply refused. */
+export function leadingZeroFix(next: string, decimals = 3): string | null {
+  if (decimals <= 0 || !next.startsWith(".")) return null;
+  const fixed = sanitizeQuantityInput(next, decimals);
+  return fixed === `0${next}` ? fixed : null;
 }
 
 /**
@@ -155,7 +167,11 @@ export function quantityProblem(raw: string | undefined, bounds: QuantityBounds 
   if (text === "") return required ? `Enter a quantity from ${range}.` : null;
   if (text.startsWith("-")) return "Cannot enter a negative number.";
   const value = Number(text);
-  if (!/^\d*(\.\d*)?$/.test(text) || text === "." || !Number.isFinite(value)) {
+  if (text.startsWith(".")) {
+    // SCM_0156: said in words, not lumped in with "invalid".
+    return `Start with a digit — write 0${text}, not ${text}.`;
+  }
+  if (!/^\d+(\.\d*)?$/.test(text) || !Number.isFinite(value)) {
     return `Enter a valid number from ${range}.`;
   }
   if (decimals <= 0 && text.includes(".")) {
@@ -186,7 +202,7 @@ export function quantityProblem(raw: string | undefined, bounds: QuantityBounds 
  */
 export function guardNumberKeys(event: {
   key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean;
-  preventDefault: () => void; currentTarget: { min?: string; step?: string };
+  preventDefault: () => void; currentTarget: { min?: string; step?: string; value?: string };
 }): void {
   if (event.ctrlKey || event.metaKey || event.altKey) return;
   const { key } = event;
@@ -197,4 +213,7 @@ export function guardNumberKeys(event: {
   if (key === "e" || key === "E" || key === "+") event.preventDefault();
   else if (key === "-" && minimum >= 0) event.preventDefault();
   else if ((key === "." || key === ",") && wholeOnly) event.preventDefault();
+  // SCM_0156: no quantity starts with a point. A number box reports "" both when it
+  // is empty and while it holds a half-typed "-", so a point is refused on either.
+  else if ((key === "." || key === ",") && !event.currentTarget.value) event.preventDefault();
 }

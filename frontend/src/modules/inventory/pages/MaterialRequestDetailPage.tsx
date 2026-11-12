@@ -374,7 +374,11 @@ export function MaterialRequestDetailPage() {
           </div>
           <div>
             <dt className="text-muted">With</dt>
-            <dd className="text-ink">{data.current_approver_name ?? "—"}</dd>
+            {/* SCM_0155: where the request is now, for every status (served). */}
+            <dd className="text-ink">
+              {data.with_text ?? data.current_approver_name ?? "—"}
+              {data.with_note && <span className="block text-xs text-muted">{data.with_note}</span>}
+            </dd>
           </div>
         </dl>
         {data.remarks && <p className="mt-3 text-sm text-muted">{data.remarks}</p>}
