@@ -1,6 +1,11 @@
 import {
-  Button, Can, ConfirmModal, ErrorBanner, Field, Input, PackageCheckModal, PageHeader, Select, StatusPill,
+  Button, Can, ConfirmModal, DocumentNumberCard, ErrorBanner, Field, Input, PackageCheckModal,
+  PageHeader, Select, StatusPill,
 } from "@/shared/components";
+import {
+  docNumberPayload, docNumberValueFrom, emptyDocNumberValue, type DocNumberLocks,
+  type DocNumberValue,
+} from "@/shared/documentNumber";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -21,7 +26,8 @@ import {
   completeReceipt, convertReceiptToGrn, createReceipt, forwardArrival,
   despatchNoteOptions, dispatchReceiptSource, gateEntryOptions, getDespatchPrefill,
   getPoLines, getReceipt, getReceiptRouting, incomingDispatchOptions, itemOptions, poOptions,
-  routeParkedReceipt, submitReceipt, myWarehouseOptions, updateReceipt, uploadAttachment, vendorOptions,
+  receiptScope, routeParkedReceipt, submitReceipt, myWarehouseOptions, updateReceipt,
+  uploadAttachment, vendorOptions,
 } from "../api";
 
 import { fmtMoney, fmtQty, num, rate2, today } from "../format";
@@ -168,6 +174,11 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     items: [],
   });
   const [touched, setTouched] = useState(false);
+  // Organisation, project / department and year (2026-11-11): copied from the PO,
+  // despatch note or transfer when it carries them, else selected here, opening on the
+  // defaults. `olderScope`: a receipt older than organisations keeps its number as it was.
+  const [scope, setScope] = useState<DocNumberValue>(emptyDocNumberValue);
+  const [olderScope, setOlderScope] = useState(false);
   const [vendorName, setVendorName] = useState<string>("");
   const [sourceGateId, setSourceGateId] = useState<number | null>(null);
 
@@ -214,6 +225,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
   /** Loading a saved receipt back into the editable shape. */
   useEffect(() => {
     if (!doc) return;
+    setScope(docNumberValueFrom(doc));
+    setOlderScope(!doc.organization_id);
     setForm({
       receipt_type: doc.receipt_type,
       grn_date: doc.grn_date,
@@ -685,6 +698,32 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
   }, [form.items]);
 
   const locked = !!doc && !["DRAFT", "GATE_ENTRY"].includes(doc.status);
+  // What the document before this one fixes: the same rule the save applies.
+  const hasSource = !!(form.po_id || form.despatch_note_id || form.dispatch_id);
+  const scopeSource = useQuery({
+    queryKey: ["receipt-scope", form.po_id, form.despatch_note_id, form.dispatch_id],
+    queryFn: () => receiptScope(form),
+    enabled: hasSource && !olderScope,
+  });
+  const carried = hasSource ? scopeSource.data ?? null : null;
+  useEffect(() => {
+    if (!carried) return;
+    setScope((current) => ({
+      ...current,
+      organizationId: carried.organization_id, organizationName: carried.organization_name,
+      orgDepartmentId: carried.org_department_id ?? "",
+      departmentName: carried.org_department_name ?? "",
+      ...(current.projectId === "" && carried.project_id
+        ? { projectId: carried.project_id, projectName: carried.project_name ?? "" } : {}),
+    }));
+    if (!form.project_id && carried.project_id) {
+      setForm((f) => ({ ...f, project_id: carried.project_id ?? null }));
+    }
+  }, [carried]); // eslint-disable-line react-hooks/exhaustive-deps
+  const scopeLocks: DocNumberLocks = locked ? { all: true }
+    : carried ? { organisation: true, department: true } : {};
+  /** The receipt as it is saved: the card first, the form's own project wins. */
+  const withScope = (): ReceiptWrite => (olderScope ? form : { ...docNumberPayload(scope), ...form });
   /* Filing a document is the same grant as saving one: POST /attachments is gated
    * on receipt.create, so offering "Attach a file" without it ends in a refusal
    * banner for an action the screen itself invited. Save is already <Can>-gated;
@@ -794,12 +833,12 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       validateQuantities();
       validateSerialLines();
       const saved = await (async () => {
-        if (editing) return updateReceipt(Number(id), form);
+        if (editing) return updateReceipt(Number(id), withScope());
         if (sourceGateId) {
-          await updateReceipt(sourceGateId, form);
+          await updateReceipt(sourceGateId, withScope());
           return convertReceiptToGrn(sourceGateId);
         }
-        return createReceipt(form);
+        return createReceipt(withScope());
       })();
       // Files picked before the record existed. Uploaded here rather than dropped,
       // and inside the mutation so a failure shows on the same banner as the save.
@@ -836,7 +875,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       // box cleared since the last save fails on the server's parser rather than here.
       if (!locked) validateQuantities();
       validateSerialLines();
-      if (!locked) await updateReceipt(Number(id), form);
+      if (!locked) await updateReceipt(Number(id), withScope());
       return what === "submit" ? submitReceipt(Number(id)) : completeReceipt(Number(id));
     },
     onSuccess: (result, what) => {
@@ -1521,6 +1560,25 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           </>
         }
       />
+      {!olderScope && (
+        <div className="mb-5">
+          <DocumentNumberCard
+            docType={isGrn ? "RECEIPT" : "GATE_ENTRY"} value={scope} exclusive
+            ready={!editing && (!hasSource || !scopeSource.isFetching)}
+            locks={scopeLocks}
+            source={carried?.source_no ? { label: carried.source_no } : null}
+            showInvalid={touched}
+            savedNumber={editing ? (isGrn ? doc?.grn_no : doc?.gate_entry_no ?? doc?.grn_no) ?? null : null}
+            onChange={(patch) => {
+              setScope((current) => ({ ...current, ...patch }));
+              // The receipt's project IS the card's project: one value, kept in step.
+              if ("projectId" in patch) {
+                setForm((f) => ({ ...f, project_id: patch.projectId === "" ? null : patch.projectId ?? null }));
+              }
+            }}
+          />
+        </div>
+      )}
 
       <ErrorBanner error={(!locked && (touched || lineProblems.size > 0) ? problemMessage : null) ?? save.error ?? gateEntry.error ?? convert.error ?? forward.error ?? consignment.error ?? route.error} />
 

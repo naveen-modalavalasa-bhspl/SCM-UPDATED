@@ -121,12 +121,19 @@ def number_args(document, *, carried: bool = False) -> dict:
     has none. An older document's HCM department still counts: its children have to
     be numbered from something. `carried`: `document` is the source of a new document
     that has no year of its own yet, so the source's year must not be used."""
+    project_name = getattr(document, "project_name", None)
     return {
         "company": document.organization_name,
-        "project": (getattr(document, "project_name", None)
+        "project": (project_name
                     or document.org_department_name
                     or getattr(document, "department_name", None)),
         "fiscal_year": None if carried else getattr(document, "fiscal_year", None),
+        # The CODES the number prints (2026-11-11): the organisation's snapshot, and the
+        # project — else the department — looked up by id when the number is drawn.
+        "company_code": getattr(document, "organization_code", None),
+        "project_id": getattr(document, "project_id", None) if project_name else None,
+        "org_department_id": (None if project_name
+                              else getattr(document, "org_department_id", None)),
     }
 
 
@@ -166,8 +173,12 @@ def assert_lockable(document, label: str, *, is_draft: bool, source_has_org: boo
                               "was raised from and cannot be changed here.")
 
 
-def _as_printed(args: dict) -> tuple[str, str, str]:
-    return (slug(args["company"], SCOPE_SLUG_LEN), slug(args["project"], SCOPE_SLUG_LEN),
+def _as_printed(args: dict) -> tuple:
+    """Whether two selections number alike: the same organisation, project or
+    department and year — compared by what identifies them, not by printed letters."""
+    return (args.get("company_code") or slug(args["company"], SCOPE_SLUG_LEN),
+            args.get("project_id"), args.get("org_department_id"),
+            slug(args["project"], SCOPE_SLUG_LEN),
             args.get("fiscal_year") or _fiscal_year())
 
 
@@ -348,3 +359,27 @@ def stamp_with_project(document, values: dict) -> None:
                      if k not in ("project_id", "project_name")})
     document.project_id = values.get("project_id")
     document.project_name = values.get("project_name")
+
+
+async def resolve_free(db: AsyncSession, data, *, keep=None) -> dict | None:
+    """A standalone document's organisation / project / department (2026-11-11) — a stock
+    audit, a stock correction, a movement: nothing before it, so all of it is SELECTED,
+    opening on the configured default organisation. None when the request names no
+    organisation and none is configured: the caller keeps its old numbering, so a caller
+    that predates the number card still gets a number."""
+    default = await default_organisation(db)
+    chosen = getattr(data, "organization_id", None) or getattr(keep, "organization_id", None)
+    if not (chosen or default):
+        return None
+    return await resolve_selection(
+        db, organization_id=chosen or default.id,
+        org_department_id=getattr(data, "org_department_id", None),
+        project_id=getattr(data, "project_id", None),
+        fiscal_year=getattr(data, "fiscal_year", None), keep=keep)
+
+
+def args_of(values: dict) -> dict:
+    """`next_number` arguments for a resolved selection, read as `number_args` reads a
+    document."""
+    from types import SimpleNamespace
+    return number_args(SimpleNamespace(department_name=None, **values))

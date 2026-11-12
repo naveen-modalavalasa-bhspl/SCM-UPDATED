@@ -718,7 +718,7 @@ class ReceiptItemWrite(CombinationIn):
         return v
 
 
-class ReceiptWrite(BaseModel):
+class ReceiptWrite(OrgScopeIn):
     receipt_type: ReceiptType = ReceiptType.PURCHASE
     grn_date: date
     po_id: int | None = None
@@ -821,7 +821,7 @@ class ReceiptItemRead(CombinationOut, _Read):
         return self
 
 
-class ReceiptRead(_Read):
+class ReceiptRead(OrgScopeOut, _Read):
     id: int
     grn_no: str
     receipt_type: str
@@ -1127,7 +1127,7 @@ class InspectionItemRead(CombinationOut, _Read):
     rejected_pack_breakdown: list[dict] | None = None
 
 
-class InspectionRead(_Read):
+class InspectionRead(OrgScopeOut, _Read):
     id: int
     inspection_no: str
     inspection_date: date
@@ -1240,7 +1240,7 @@ class OutboundInspectionDetail(OutboundInspectionRead):
 # Putaway
 # ---------------------------------------------------------------------------
 
-class PutawayRead(CombinationOut, _Read):
+class PutawayRead(OrgScopeOut, CombinationOut, _Read):
     """The task plus the labels the queue screen shows. The `*_name` fields are
     filled by the service from the masters, because `whs_warehouse_items` carries
     only ids — it is a work queue, not a document."""
@@ -1539,7 +1539,7 @@ class StockMovementOrderItemWrite(CombinationIn):
         return self
 
 
-class StockMovementOrderWrite(BaseModel):
+class StockMovementOrderWrite(OrgScopeIn):
     warehouse_id: int
     reason: str | None = Field(default=None, max_length=500)
     items: list[StockMovementOrderItemWrite] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
@@ -1745,6 +1745,12 @@ class IssueWrite(OrgScopeIn):
 
 
 class IssueItemRead(CombinationOut, _Read):
+    #: On a SPLIT parent (2026-11-11): the floor piece and line that carry this line now.
+    #: Its serials are listed and saved against that piece line.
+    piece_issue_id: int | None = None
+    piece_issue_no: str | None = None
+    piece_line_id: int | None = None
+    piece_is_posted: bool = False
     id: int
     issue_id: int
     line_no: int
@@ -2181,6 +2187,8 @@ class IssueDetail(IssueRead):
     # True only for the person an approved issue is with, or someone above them on the
     # HCM reporting line. `post_issue` and `set_issue_serials` enforce the same rule.
     can_issue_from_stock: bool = False
+    #: A SPLIT parent whose floor pieces this login may issue all at once.
+    can_issue_split: bool = False
     # Swap auto-assigned asset/consumable codes: the issuer, or anyone who approved it.
     can_swap_codes: bool = False
     # Whoever submitted it for approval (the workflow's starter), shown as "Submitted
@@ -4759,7 +4767,7 @@ class StockEditLineIn(BaseModel):
     changes: dict[str, str | None] = Field(max_length=10)
 
 
-class StockEditIn(BaseModel):
+class StockEditIn(OrgScopeIn):
     warehouse_id: int
     reason: str = Field(max_length=500)
     remarks: str | None = None
@@ -4783,8 +4791,11 @@ class StockEditItemRead(BaseModel):
     changes: dict
 
 
-class StockEditListRow(BaseModel):
+class StockEditListRow(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
+    #: The project its number is drawn under (2026-11-11).
+    project_id: int | None = None
+    project_name: str | None = None
     id: int
     edit_no: str
     warehouse_id: int

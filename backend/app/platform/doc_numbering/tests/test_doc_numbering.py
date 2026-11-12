@@ -155,12 +155,12 @@ async def test_preview_says_what_is_missing_and_never_na(db):
 
     by_project = await service.preview(db, "po", organization_id=2, project_id=77,
                                        org_department_id=2, fiscal_year="2026-27")
-    assert by_project["number"] == "BAV/104/2026-27/PO####"
+    assert by_project["number"] == "B-01/P-104/2026-27/PO####"
     assert by_project["scope_source"] == "project"
 
     by_department = await service.preview(db, "po", organization_id=2, org_department_id=2,
                                           fiscal_year="2025-26")
-    assert by_department["number"] == "BAV/HUM/2025-26/PO####"
+    assert by_department["number"] == "B-01/HR-01/2025-26/PO####"
     assert by_department["scope_source"] == "department"
     assert {part["kind"]: part["field"] for part in by_department["parts"]}["project"] == "department"
 
@@ -171,5 +171,48 @@ async def test_preview_prints_exactly_what_the_save_draws(db):
     await _series(db)
     preview = await service.preview(db, "po", organization_id=2, project_id=77,
                                     fiscal_year=numbering._fiscal_year())
-    drawn = await numbering.next_number(db, "po", company="BAVYA", project="104")
+    drawn = await numbering.next_number(db, "po", company="BAVYA", project="104",
+                                        company_code="B-01", project_id=77)
     assert preview["number"].replace("####", "0001") == drawn
+
+
+def test_a_code_prints_as_written_and_a_missing_one_falls_back():
+    """Numbers print CODES (2026-11-11), cleaned and capped; no code means the name."""
+    assert numbering.code_token("ap-104-mmu") == "AP-104-MMU"
+    assert numbering.code_token(" B/1 ") == "B1"
+    assert numbering.code_token("--X--Y--") == "X-Y"
+    assert numbering.code_token("ABCDEFGHIJKLMNOP") == "ABCDEFGHIJKL"
+    assert numbering.code_token(None) is None and numbering.code_token(" - ") is None
+
+
+@pytest.mark.asyncio
+async def test_a_project_without_a_code_prints_its_name(db):
+    from app.shared.models.master import Project
+    await _series(db)
+    db.add(Project(id=88, code="", name="Medak Phase", is_active=True))
+    await db.flush()
+    drawn = await numbering.next_number(db, "po", company="BAVYA", project="Medak Phase",
+                                        company_code="B-01", project_id=88)
+    assert drawn.startswith("B-01/MED/")
+
+
+@pytest.mark.asyncio
+async def test_a_standalone_document_selects_and_never_prints_na(db, monkeypatch):
+    """Stock audit, stock correction and movement order (2026-11-11): nothing before
+    them, so the organisation and the project / department are selected."""
+    from app.platform.doc_numbering import scope as org_scope
+    nothing = SimpleNamespace(organization_id=None, org_department_id=None,
+                              project_id=None, fiscal_year=None)
+    monkeypatch.setattr(settings, "ORG_DEFAULT_NAME", None)
+    assert await org_scope.resolve_free(db, nothing) is None      # the old numbering
+
+    await _directory(db)
+    monkeypatch.setattr(settings, "ORG_DEFAULT_NAME", "BAVYA")
+    with pytest.raises(Exception, match="project or the department"):
+        await org_scope.resolve_free(db, nothing)
+    values = await org_scope.resolve_free(
+        db, SimpleNamespace(organization_id=None, org_department_id=None, project_id=77,
+                            fiscal_year=None))
+    assert values["organization_id"] == 2 and values["project_name"] == "104"
+    args = org_scope.args_of(values)
+    assert args["company_code"] == "B-01" and args["project_id"] == 77

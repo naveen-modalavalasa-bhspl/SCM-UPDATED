@@ -62,7 +62,7 @@ RATE = Numeric(16, 4)
 # Inward — gate entry, GRN
 # ---------------------------------------------------------------------------
 
-class Receipt(Base):
+class Receipt(OrgScopeColumns, Base):
     """`inb_receipts`. One row is a gate entry first and a GRN afterwards;
     `receipt_type` says which, so the vehicle and paperwork are captured once."""
     __tablename__ = "inb_receipts"
@@ -232,7 +232,7 @@ class ReceiptItem(CombinationMixin, Base):
 # Quality
 # ---------------------------------------------------------------------------
 
-class Inspection(Base):
+class Inspection(OrgScopeColumns, Base):
     """`inb_inspections`. `inspection_type` separates incoming QC from the outward
     check before a consignment leaves — one table, two points in the flow."""
     __tablename__ = "inb_inspections"
@@ -307,7 +307,7 @@ class InspectionItem(CombinationMixin, Base):
 # Putaway
 # ---------------------------------------------------------------------------
 
-class PutawayTask(CombinationMixin, Base):
+class PutawayTask(OrgScopeColumns, CombinationMixin, Base):
     """`whs_warehouse_items`. One task per received line, because putting away is
     done a pallet at a time and a task covering eight lines cannot be half done.
 
@@ -1494,7 +1494,7 @@ doc_registry.register(DocType.FORWARD_ISSUE.value, "out_issues")
 # Stock corrections (2026-10-01)
 # ---------------------------------------------------------------------------
 
-class StockEdit(Base):
+class StockEdit(OrgScopeColumns, Base):
     """`whs_stock_edits`. A request to correct what held stock IS — a batch's number
     or dates, a unit's serial / IMEI / code — signed on the STOCK_EDIT ladder before
     anything is written. Quantities never move, so `stk_ledger` is untouched."""
@@ -1502,6 +1502,9 @@ class StockEdit(Base):
 
     id = pk()
     edit_no = Column(String(50), unique=True, nullable=False)
+    # The project its NUMBER is drawn under (2026-11-11).
+    project_id = soft_fk()
+    project_name = Column(String(200), nullable=True)
     warehouse_id = Column(BigInteger, index=True, nullable=False)
     warehouse_name = Column(String(200), nullable=True)
     status = Column(String(30), index=True, nullable=False)

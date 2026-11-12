@@ -273,7 +273,7 @@ class Allocation(Base):
     id = pk()
     allocation_no = Column(String(30), unique=True, nullable=False)
     indent_id = Column(BigInteger, index=True, nullable=False)
-    indent_no = Column(String(30), nullable=True)
+    indent_no = Column(String(50), nullable=True)
     status = Column(String(30), nullable=False)
     allocated_by_id = soft_fk()
     allocated_by_name = Column(String(200), nullable=True)
@@ -337,7 +337,7 @@ class MaterialRequest(Base):
     mr_date = Column(Date, nullable=True)
     # backward pointer to the indent that ran short (business flow: each doc points back)
     indent_id = Column(BigInteger, index=True, nullable=True)
-    indent_no = Column(String(30), nullable=True)
+    indent_no = Column(String(50), nullable=True)
     requested_by_id = soft_fk()
     requested_by_name = Column(String(200), nullable=True)
     department_id = soft_fk()
@@ -425,7 +425,7 @@ class MRQtyChange(Base):
     changed_at = created_at_col()
 
 
-class StockAdjustment(Base):
+class StockAdjustment(OrgScopeColumns, Base):
     """Stock adjustment with reason (damage, expiry, count variance, found).
 
     Must go through move_stock() so a ledger row is written. Large adjustments
@@ -433,7 +433,10 @@ class StockAdjustment(Base):
     """
     __tablename__ = "inv_adjustments"
     id = pk()
-    adjustment_no = Column(String(30), unique=True, nullable=False)
+    adjustment_no = Column(String(50), unique=True, nullable=False)
+    # The project its NUMBER is drawn under (2026-11-11); its lines keep their own.
+    project_id = soft_fk()
+    project_name = Column(String(200), nullable=True)
     warehouse_id = Column(BigInteger, index=True, nullable=False)
     warehouse_name = Column(String(200), nullable=True)
     reason = Column(String(50), nullable=False)   # DAMAGE, EXPIRY, COUNT_VARIANCE, FOUND, etc.
@@ -518,7 +521,7 @@ class StockTransferOrder(OrgScopeColumns, Base):
     """
     __tablename__ = "inv_sto"
     id = pk()
-    sto_no = Column(String(30), unique=True, nullable=False)
+    sto_no = Column(String(50), unique=True, nullable=False)
     # The project the NUMBER is drawn under (2026-11-09) — selected on a direct STO,
     # copied from the STR on one that serves an STR. Not `from_project_id` /
     # `to_project_id`, which say whose STOCK moves.

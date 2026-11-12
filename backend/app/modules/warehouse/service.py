@@ -2432,6 +2432,101 @@ async def _dispatch_for_receipt(
     return dispatch
 
 
+async def _receipt_scope_source(db: AsyncSession, *, despatch_note_id, po_id, transfer,
+                                dispatch):
+    """The document before a receipt that carries an organisation (2026-11-11): its
+    despatch note, else its PO, else the STO / the issue a transfer arrival came from.
+    None when nothing before it carries one — an older PO, or no source at all — and
+    then the receipt selects its own."""
+    from app.modules.procurement.models import DespatchNote, PurchaseOrder
+    candidates = []
+    if despatch_note_id:
+        candidates.append(await db.get(DespatchNote, despatch_note_id))
+    if po_id:
+        candidates.append(await db.get(PurchaseOrder, po_id))
+    if transfer is not None:
+        candidates.append(transfer)
+    if dispatch is not None:
+        issue_id = await db.scalar(select(m.DispatchItem.issue_id).where(
+            m.DispatchItem.dispatch_id == dispatch.id,
+            m.DispatchItem.issue_id.is_not(None)).limit(1))
+        if issue_id:
+            candidates.append(await db.get(m.MaterialIssue, issue_id))
+    return next((doc for doc in candidates
+                 if doc is not None and org_scope.uses_org(doc)), None)
+
+
+async def receipt_scope_source(db: AsyncSession, *, po_id: int | None = None,
+                               despatch_note_id: int | None = None,
+                               transfer_id: int | None = None,
+                               dispatch_id: int | None = None) -> dict | None:
+    """What a receipt form shows LOCKED on its number card (2026-11-11): the
+    organisation and department of the document before it, or None when that document
+    carries none (an older PO) or there is none, and the form selects them itself.
+    The very rule `_apply_receipt_scope` applies on save."""
+    from app.modules.inventory.models import StockTransferOrder
+    transfer = await db.get(StockTransferOrder, transfer_id) if transfer_id else None
+    dispatch = await db.get(m.Dispatch, dispatch_id) if dispatch_id else None
+    source = await _receipt_scope_source(
+        db, despatch_note_id=despatch_note_id, po_id=po_id, transfer=transfer,
+        dispatch=dispatch)
+    if source is None:
+        return None
+    return {field: getattr(source, field, None) for field in org_scope.SCOPE_FIELDS} | {
+        "project_id": getattr(source, "project_id", None),
+        "project_name": getattr(source, "project_name", None),
+        "source_no": (getattr(source, "dn_no", None) or getattr(source, "po_no", None)
+                      or getattr(source, "sto_no", None) or getattr(source, "issue_no", None)),
+    }
+
+
+async def _apply_receipt_scope(db: AsyncSession, receipt, data, source) -> bool:
+    """Whose paper a material inward / GRN is on (2026-11-11). Copied from the document
+    before it when that carries an organisation — organisation and department fixed,
+    the receipt's own project kept (it decides whose stock this becomes), the source's
+    taken when the receipt names none. Otherwise SELECTED on the form, opening on the
+    defaults. The year is the receipt's own. Returns False — the old numbering — only
+    when nothing is named and no default organisation is configured."""
+    if source is not None:
+        values = {field: getattr(source, field, None) for field in org_scope.SCOPE_FIELDS}
+        values["fiscal_year"] = org_scope.assert_fiscal_year(
+            getattr(data, "fiscal_year", None), held=getattr(receipt, "fiscal_year", None))
+        org_scope.stamp(receipt, values)
+        if not receipt.project_id and getattr(source, "project_id", None):
+            receipt.project_id = source.project_id
+            receipt.project_name = getattr(source, "project_name", None)
+        org_scope.assert_complete(receipt)
+        return True
+    default = await org_scope.default_organisation(db)
+    chosen = getattr(data, "organization_id", None) or getattr(receipt, "organization_id", None)
+    if not (chosen or default):
+        return False
+    picked = await org_scope.resolve_selection(
+        db, organization_id=chosen or default.id,
+        org_department_id=getattr(data, "org_department_id", None),
+        project_id=getattr(data, "project_id", None),
+        fiscal_year=getattr(data, "fiscal_year", None),
+        keep=receipt if getattr(receipt, "id", None) else None)
+    org_scope.stamp(receipt, {key: value for key, value in picked.items()
+                              if key not in ("project_id", "project_name")})
+    receipt.project_id, receipt.project_name = picked["project_id"], picked["project_name"]
+    return True
+
+
+def _carried_scope(source) -> tuple[dict | None, dict | None]:
+    """QC and put-away (2026-11-11): organisation and department copied from the receipt
+    they come from, their own year (today's), and the number drawn from the receipt.
+    (None, None) for a receipt older than organisations — the old numbering."""
+    if source is None or not org_scope.uses_org(source):
+        return None, None
+    from app.shared.numbering import _fiscal_year
+    values = {field: getattr(source, field, None) for field in org_scope.SCOPE_FIELDS}
+    values["fiscal_year"] = _fiscal_year()
+    args = org_scope.number_args(source, carried=True)
+    args["fiscal_year"] = values["fiscal_year"]
+    return values, args
+
+
 async def create_receipt(db: AsyncSession, data: s.ReceiptWrite, user) -> m.Receipt:
     wh = await _warehouse(db, data.warehouse_id)
     is_gate_entry = data.receipt_type == ReceiptType.GATE_ENTRY
@@ -2464,8 +2559,8 @@ async def create_receipt(db: AsyncSession, data: s.ReceiptWrite, user) -> m.Rece
         # `project` is already loaded above for the snapshot columns, so this costs
         # nothing. Where a receipt genuinely names no project the number renders NA in
         # that slot, which is the truth rather than a guess.
-        grn_no=await next_number(db, WarehouseDocType.RECEIPT.value,
-                                 project=getattr(project, "name", None)),
+        # Numbered below, once its organisation / project is known (2026-11-11).
+        grn_no="",
         receipt_type=data.receipt_type.value,
         grn_date=data.grn_date,
         po_id=data.po_id,
@@ -2489,11 +2584,7 @@ async def create_receipt(db: AsyncSession, data: s.ReceiptWrite, user) -> m.Rece
         vehicle_no=data.vehicle_no,
         transporter_name=data.transporter_name,
         lr_no=data.lr_no,
-        gate_entry_no=(
-            data.gate_entry_no
-            or (await next_number(db, WarehouseDocType.GATE_ENTRY.value)
-                if is_gate_entry else None)
-        ),
+        gate_entry_no=data.gate_entry_no,
         gate_entry_at=utcnow() if is_gate_entry else None,
         status=(ReceiptStatus.GATE_ENTRY if is_gate_entry else ReceiptStatus.DRAFT).value,
         received_by_id=getattr(user, "id", None),
@@ -2502,6 +2593,18 @@ async def create_receipt(db: AsyncSession, data: s.ReceiptWrite, user) -> m.Rece
         created_by_id=getattr(user, "id", None),
         created_by_name=_name(user),
     )
+    # Whose paper it is on, then the numbers it prints (2026-11-11). The project goes
+    # INTO the number: `BHS/MED/2026-27/REC0007` says whose it is without opening it.
+    source = await _receipt_scope_source(
+        db, despatch_note_id=data.despatch_note_id, po_id=data.po_id,
+        transfer=transfer, dispatch=dispatch)
+    organised = await _apply_receipt_scope(db, receipt, data, source)
+    args = (org_scope.number_args(receipt) if organised
+            else {"project": getattr(project, "name", None)})
+    receipt.grn_no = await next_number(db, WarehouseDocType.RECEIPT.value, **args)
+    if is_gate_entry and not receipt.gate_entry_no:
+        receipt.gate_entry_no = await next_number(
+            db, WarehouseDocType.GATE_ENTRY.value, **(args if organised else {}))
     db.add(receipt)
     await db.flush()
 
@@ -2524,6 +2627,10 @@ async def update_receipt(db: AsyncSession, receipt_id: int, data: s.ReceiptWrite
         raise ValidationError("A receipt must contain at least one item")
 
     before = {"status": receipt.status, "total_received_qty": str(receipt.total_received_qty)}
+    # A receipt raised before organisations keeps its fields and its number.
+    organised_before = org_scope.uses_org(receipt)
+    if organised_before:
+        org_scope.remember_number_args(receipt)
     wh = await _warehouse(db, data.warehouse_id)
     transfer = await _transfer_for_receipt(
         db,
@@ -2568,8 +2675,20 @@ async def update_receipt(db: AsyncSession, receipt_id: int, data: s.ReceiptWrite
     receipt.vehicle_no = data.vehicle_no
     receipt.transporter_name = data.transporter_name
     receipt.lr_no = data.lr_no
-    receipt.gate_entry_no = data.gate_entry_no
+    receipt.gate_entry_no = data.gate_entry_no or receipt.gate_entry_no
     receipt.remarks = data.remarks
+    if organised_before:
+        # Copied again from the document before (fixed), or the selection as edited;
+        # a draft takes new numbers when its selection moved (2026-11-11).
+        source = await _receipt_scope_source(
+            db, despatch_note_id=data.despatch_note_id, po_id=data.po_id,
+            transfer=transfer, dispatch=dispatch)
+        await _apply_receipt_scope(db, receipt, data, source)
+        if receipt.receipt_type == ReceiptType.GATE_ENTRY.value and receipt.gate_entry_no:
+            await org_scope.renumber(db, receipt, WarehouseDocType.GATE_ENTRY.value,
+                                     "gate_entry_no", "inb_receipts", user)
+        await org_scope.renumber(db, receipt, WarehouseDocType.RECEIPT.value, "grn_no",
+                                 "inb_receipts", user)
 
     # Both sides must agree: the payload says this is still gate work, and the row has
     # not already been promoted. A converted GRN cannot be relaxed by re-sending the
@@ -3120,7 +3239,10 @@ async def convert_gate_entry(db: AsyncSession, receipt_id: int, user) -> m.Recei
         "grn_no": receipt.grn_no,
     }
     receipt.receipt_type = ReceiptType.PURCHASE.value
-    receipt.grn_no = await next_number(db, WarehouseDocType.RECEIPT.value)
+    # The GRN keeps the inward's organisation / project (2026-11-11).
+    receipt.grn_no = await next_number(
+        db, WarehouseDocType.RECEIPT.value,
+        **(org_scope.number_args(receipt) if org_scope.uses_org(receipt) else {}))
     receipt.grn_date = ist_today()
     receipt.status = ReceiptStatus.DRAFT.value
     await write_audit(
@@ -3512,16 +3634,16 @@ async def cancel_receipt(db: AsyncSession, receipt_id: int, reason: str | None,
 
 async def _ensure_batch(db: AsyncSession, receipt: m.Receipt,
                         line: m.ReceiptItem) -> m.Batch | None:
-    """Creates the `stk_batches` row for a batch-tracked line, once.
+    """Creates the `stk_batches` row for a line, defaulting to 'Unbatched' when
+    no batch is provided so all held stock carries a batch row and can be managed.
 
     Batches are keyed on (batch_no, item) rather than per receipt: the same batch can
     arrive across two deliveries, and giving it two ids would split its expiry.
     """
-    if not line.batch_no:
-        return None
+    batch_no = (line.batch_no or "").strip() or "Unbatched"
 
     existing = await db.scalar(select(m.Batch).where(
-        m.Batch.batch_no == line.batch_no, m.Batch.item_id == line.item_id))
+        m.Batch.batch_no == batch_no, m.Batch.item_id == line.item_id))
     if existing:
         if line.mfg_date and not existing.mfg_date:
             existing.mfg_date = line.mfg_date
@@ -3530,7 +3652,7 @@ async def _ensure_batch(db: AsyncSession, receipt: m.Receipt,
         return existing
 
     batch = m.Batch(
-        batch_no=line.batch_no, item_id=line.item_id,
+        batch_no=batch_no, item_id=line.item_id,
         item_code=line.item_code, item_name=line.item_name,
         vendor_id=receipt.vendor_id, vendor_name=receipt.vendor_name,
         mfg_date=line.mfg_date, expiry_date=line.expiry_date,
@@ -3640,6 +3762,7 @@ async def _prepare_receipt_line(
     batch = await _ensure_batch(db, receipt, line)
     if batch is not None:
         line.batch_id = batch.id
+        line.batch_no = batch.batch_no
 
     wh = await _warehouse(db, receipt.warehouse_id)
     if wh.is_bin_managed:
@@ -3749,8 +3872,11 @@ async def _build_putaway_task(db: AsyncSession, receipt: m.Receipt, line: m.Rece
     item = await _item_snapshot(db, line.item_id)
     task = m.PutawayTask(
         # From the receipt it belongs to — see the note on the GRN number.
-        putaway_no=await next_number(db, WarehouseDocType.PUTAWAY.value,
-                                     project=receipt.project_name),
+        putaway_no=(await next_number(db, WarehouseDocType.PUTAWAY.value,
+                                      **_carried_scope(receipt)[1])
+                    if _carried_scope(receipt)[1] is not None else
+                    await next_number(db, WarehouseDocType.PUTAWAY.value,
+                                      project=receipt.project_name)),
         grn_id=receipt.id, grn_item_id=line.id,
         warehouse_id=receipt.warehouse_id,
         item_id=line.item_id, batch_id=line.batch_id or None,
@@ -3772,6 +3898,9 @@ async def _build_putaway_task(db: AsyncSession, receipt: m.Receipt, line: m.Rece
         assigned_to=getattr(user, "id", None),
         is_active=True,
     )
+    values, _args = _carried_scope(receipt)
+    if values is not None:
+        org_scope.stamp(task, values)
     db.add(task)
     await db.flush()
     return task
@@ -4198,8 +4327,11 @@ async def _raise_inspection_for(
         # greenlet to run in. Handing it an empty list loads it up front.
         items=[],
         # From the receipt it belongs to — see the note on the GRN number.
-        inspection_no=await next_number(db, WarehouseDocType.INSPECTION.value,
-                                        project=receipt.project_name),
+        inspection_no=(await next_number(db, WarehouseDocType.INSPECTION.value,
+                                         **_carried_scope(receipt)[1])
+                       if _carried_scope(receipt)[1] is not None else
+                       await next_number(db, WarehouseDocType.INSPECTION.value,
+                                         project=receipt.project_name)),
         inspection_date=ist_today(),
         receipt_id=receipt.id, grn_no=receipt.grn_no,
         warehouse_id=receipt.warehouse_id, warehouse_name=receipt.warehouse_name,
@@ -4208,6 +4340,9 @@ async def _raise_inspection_for(
         status=InspectionStatus.DRAFT.value,
         inspector_id=getattr(user, "id", None), inspector_name=_name(user),
     )
+    values, _args = _carried_scope(receipt)
+    if values is not None:
+        org_scope.stamp(inspection, values)
     db.add(inspection)
     await db.flush()
 
@@ -4458,8 +4593,11 @@ async def create_inspection(db: AsyncSession, data: s.InspectionWrite, user) -> 
     inspection = m.Inspection(
         items=[],   # see create_issue: keeps _apply_*_lines()'s clear() off a lazy load
         # From the receipt it belongs to — see the note on the GRN number.
-        inspection_no=await next_number(db, WarehouseDocType.INSPECTION.value,
-                                        project=receipt.project_name),
+        inspection_no=(await next_number(db, WarehouseDocType.INSPECTION.value,
+                                         **_carried_scope(receipt)[1])
+                       if _carried_scope(receipt)[1] is not None else
+                       await next_number(db, WarehouseDocType.INSPECTION.value,
+                                         project=receipt.project_name)),
         inspection_date=data.inspection_date,
         receipt_id=data.receipt_id,
         grn_no=receipt.grn_no if receipt else None,
@@ -4475,6 +4613,9 @@ async def create_inspection(db: AsyncSession, data: s.InspectionWrite, user) -> 
         inspector_name=_name(user),
         remarks=data.remarks,
     )
+    values, _args = _carried_scope(receipt)
+    if values is not None:
+        org_scope.stamp(inspection, values)
     db.add(inspection)
     await db.flush()
 
@@ -5372,10 +5513,13 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
     task.completed_at = utcnow()
     task.qty = qty
     if remainder > ZERO:
-        db.add(m.PutawayTask(
+        remainder_task = m.PutawayTask(
             # From the receipt it belongs to — see the note on the GRN number.
-        putaway_no=await next_number(db, WarehouseDocType.PUTAWAY.value,
-                                     project=receipt.project_name),
+            putaway_no=(await next_number(db, WarehouseDocType.PUTAWAY.value,
+                                          **_carried_scope(receipt)[1])
+                        if _carried_scope(receipt)[1] is not None else
+                        await next_number(db, WarehouseDocType.PUTAWAY.value,
+                                          project=receipt.project_name)),
             grn_id=task.grn_id,
             grn_item_id=task.grn_item_id,
             warehouse_id=task.warehouse_id,
@@ -5404,7 +5548,11 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
             assigned_to=task.assigned_to,
             is_active=True,
             remarks=f"Remainder from {task.putaway_no}",
-        ))
+        )
+        values, _args = _carried_scope(receipt)
+        if values is not None:
+            org_scope.stamp(remainder_task, values)
+        db.add(remainder_task)
 
     await write_audit(db, entity="whs_warehouse_items", entity_id=task.id,
                       entity_no=task.putaway_no, action=AuditAction.UPDATE, actor=user,
@@ -6748,7 +6896,10 @@ async def create_stock_movement_order(
     # abbreviation this system already uses for a Stock TRANSFER Order, which is an
     # inter-warehouse document with a different table, a different screen and a
     # different meaning. An SMO now reads SMO.
-    order_no = await next_number(db, WarehouseDocType.STOCK_MOVEMENT_ORDER.value)
+    # Whose paper it is on (2026-11-11): selected, opening on the default organisation.
+    scope = await org_scope.resolve_free(db, data)
+    order_no = await next_number(db, WarehouseDocType.STOCK_MOVEMENT_ORDER.value,
+                                 **(org_scope.args_of(scope) if scope else {}))
     moved: list[dict] = []
     # Read once: the code toggle cannot differ between two lines of one order.
     code_config = await codeformat.code_settings(db)
@@ -6837,6 +6988,8 @@ async def create_stock_movement_order(
             **row.get("combination", combinations.NONE),
         ) for row in moved],
     )
+    if scope:
+        org_scope.stamp_with_project(order, scope)
     db.add(order)
     await db.flush()
 
@@ -10779,9 +10932,47 @@ async def _decorate_can_approve(db: AsyncSession, doc, doc_type: str, user):
     return doc
 
 
+async def _decorate_split_pieces(db: AsyncSession, parent: m.MaterialIssue) -> None:
+    """On a SPLIT parent, each line names the floor-piece line that carries it now, and
+    shows that piece's serials (2026-11-11). The split copies each pick onto exactly one
+    piece line (`_plan_floor_split`), so the parent's raiser can pick a line's serials
+    from the parent: the screen lists and saves them against the PIECE line, through
+    the piece's own checks. A parent line several pieces share (a pick that named no
+    location) is left unmatched, and its serials are picked on each piece."""
+    pieces = (await db.execute(
+        select(m.MaterialIssue.id).where(
+            m.MaterialIssue.parent_issue_id == parent.id,
+            m.MaterialIssue.status != IssueStatus.CANCELLED.value,
+        ).order_by(m.MaterialIssue.id))).scalars().all()
+    matches: dict[int, list] = {}
+    for piece_id in pieces:
+        piece = await _load(db, m.MaterialIssue, piece_id, "Issue", m.MaterialIssue.items)
+        piece = await _decorate_issue_serials(db, piece)
+        for piece_line in piece.items:
+            for line in parent.items:
+                if (piece_line.item_id == line.item_id
+                        and (piece_line.indent_item_id or 0) == (line.indent_item_id or 0)
+                        and (not line.batch_id or piece_line.batch_id == line.batch_id)
+                        and (not line.bin_id or piece_line.bin_id == line.bin_id)):
+                    matches.setdefault(line.id, []).append((piece, piece_line))
+    for line in parent.items:
+        found = matches.get(line.id, [])
+        if len(found) != 1:
+            continue
+        piece, piece_line = found[0]
+        setattr(line, "piece_issue_id", piece.id)
+        setattr(line, "piece_issue_no", piece.issue_no)
+        setattr(line, "piece_line_id", piece_line.id)
+        setattr(line, "piece_is_posted", bool(piece.is_stock_posted))
+        setattr(line, "serial_numbers", getattr(piece_line, "serial_numbers", None) or [])
+        setattr(line, "unit_keys", getattr(piece_line, "unit_keys", None) or [])
+
+
 async def get_issue(db: AsyncSession, issue_id: int, user=None) -> m.MaterialIssue:
     issue = await _load(db, m.MaterialIssue, issue_id, "Issue", m.MaterialIssue.items)
     issue = await _decorate_issue_serials(db, issue)
+    if issue.status == IssueStatus.SPLIT.value:
+        await _decorate_split_pieces(db, issue)
     # How many decimals each line's unit allows, served onto the line so the form
     # can refuse a typed fraction for a whole-unit item (NOS, Box…) before save,
     # the same rule `_apply_issue_lines` enforces on the server (SCM_0080).
@@ -10810,6 +11001,10 @@ async def get_issue(db: AsyncSession, issue_id: int, user=None) -> m.MaterialIss
             issue.status == IssueStatus.APPROVED.value and not issue.is_stock_posted
             and await _may_issue(db, issue, user, holders))
     setattr(issue, "can_swap_codes", issue.can_issue_from_stock)
+    # A split parent issues all its floor pieces at once, for its raiser and approvers.
+    setattr(issue, "can_issue_split",
+            issue.status == IssueStatus.SPLIT.value
+            and await _may_issue_parent(db, issue, user))
     setattr(issue, "can_acknowledge", await _receiver_confirmed(db, issue))
     setattr(issue, "is_stock_transfer", await is_stock_transfer_issue(db, issue.id))
     if issue.floor_location_id:
@@ -11561,7 +11756,11 @@ async def _issue_scope(db: AsyncSession, data, source) -> tuple[dict | None, dic
     values = {field: picked[field] for field in (*org_scope.SCOPE_FIELDS, "fiscal_year")}
     return values, {"company": picked["organization_name"],
                     "project": picked["project_name"] or picked["org_department_name"],
-                    "fiscal_year": picked["fiscal_year"]}
+                    "fiscal_year": picked["fiscal_year"],
+                    "company_code": picked["organization_code"],
+                    "project_id": picked["project_id"],
+                    "org_department_id": (None if picked["project_id"]
+                                          else picked["org_department_id"])}
 
 
 async def _build_issue(db: AsyncSession, data: s.IssueWrite, user, *,
@@ -12462,9 +12661,8 @@ async def _may_issue(db: AsyncSession, issue, user, holders) -> bool:
         return True
     parent_id = getattr(issue, "parent_issue_id", None)
     if parent_id:
-        parent_raiser = await db.scalar(select(m.MaterialIssue.created_by_id).where(
-            m.MaterialIssue.id == parent_id))
-        if parent_raiser and parent_raiser == getattr(user, "id", None):
+        parent = await db.get(m.MaterialIssue, parent_id)
+        if parent is not None and await _raised_by(db, parent, user):
             return True
     return False
 
@@ -13491,7 +13689,7 @@ def _ledger_packs(line, qty) -> str | None:
     return text if _d(qty) == _d(line.issued_qty) else f"Part of {text}"
 
 
-async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
+async def _post_issue_core(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
     """Takes the stock off the shelf. The only step here that moves anything."""
     issue = await get_issue(db, issue_id)
     _guard(issue.status, {IssueStatus.APPROVED.value}, "issue stock against", "issue")
@@ -13830,8 +14028,85 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                              "qc_status": issue.qc_status,
                              "total_qty": str(issue.total_qty)})
     await _sync_split_parent(db, issue.parent_issue_id, user)
+    return issue
+
+
+async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
+    """Issue one approved issue from stock: `_post_issue_core`, then commit."""
+    await _post_issue_core(db, issue_id, user)
     await db.commit()
     return await get_issue(db, issue_id)
+
+
+async def post_split_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
+    """Issue a SPLIT parent from stock: every floor piece not yet issued, at once
+    (2026-11-10). All or nothing — each piece runs exactly the checks and stock moves
+    of its own "Issue from stock", inside ONE transaction; the first piece refused rolls
+    every one of them back and is named, so the person fixes it (picks its serials,
+    say) and presses again. The parent closes itself when its last piece is issued
+    (`_sync_split_parent`). Pieces already issued are left alone.
+
+    Who: the parent's raiser and its approvers — the people who could issue all of it
+    before the split. Each piece's own gate (`_may_issue`) admits exactly them."""
+    parent = await get_issue(db, issue_id)
+    if parent.status != IssueStatus.SPLIT.value:
+        raise ValidationError(
+            f"{parent.issue_no} is not split across floors. Use Issue from stock on it.")
+    if not await _may_issue_parent(db, parent, user):
+        raise PermissionError_(
+            f"Only whoever raised or approved {parent.issue_no} can issue all of its "
+            "floor pieces at once. Each floor's in-charge issues their own piece.")
+    pieces = (await db.execute(
+        select(m.MaterialIssue.id, m.MaterialIssue.issue_no).where(
+            m.MaterialIssue.parent_issue_id == parent.id,
+            m.MaterialIssue.status == IssueStatus.APPROVED.value,
+            m.MaterialIssue.is_stock_posted.is_(False),
+        ).order_by(m.MaterialIssue.id))).all()
+    if not pieces:
+        raise ValidationError(f"Every floor piece of {parent.issue_no} is already issued.")
+    actor_id = getattr(user, "id", None)
+    for piece_id, piece_no in pieces:
+        try:
+            await _post_issue_core(db, piece_id, user)
+        except AppException as exc:
+            await db.rollback()
+            raise ValidationError(
+                f"Nothing was issued. {piece_no} cannot be issued yet: {exc.message} "
+                f"Open {piece_no}, fix it, and press Issue from stock on "
+                f"{parent.issue_no} again.") from exc
+    await write_audit(db, entity="out_issues", entity_id=parent.id,
+                      entity_no=parent.issue_no, action=AuditAction.UPDATE, actor=user,
+                      after={"issued_pieces": [no for _id, no in pieces],
+                             "by": actor_id},
+                      summary=f"Issued {len(pieces)} floor piece(s) of {parent.issue_no}")
+    await db.commit()
+    return await get_issue(db, issue_id)
+
+
+async def _raised_by(db: AsyncSession, issue, user) -> bool:
+    """Did this person raise the issue? Who created it, or who SUBMITTED it (2026-11-11):
+    an issue drafted from an approved allocation is created under the approver's name,
+    and the person who raised it is the one who submitted it — the "Submitted by" the
+    screen shows."""
+    user_id = getattr(user, "id", None)
+    if user_id is None:
+        return False
+    if getattr(issue, "created_by_id", None) == user_id:
+        return True
+    started = await db.scalar(
+        select(WfInstance.started_by_id)
+        .where(WfInstance.doc_id == issue.id, WfInstance.doc_type.in_(ISSUE_DOC_TYPES))
+        .order_by(WfInstance.id.desc()).limit(1))
+    return started == user_id
+
+
+async def _may_issue_parent(db: AsyncSession, parent, user) -> bool:
+    """The parent's raiser, or anyone who approved it."""
+    if user is None:
+        return False
+    if await _raised_by(db, parent, user):
+        return True
+    return await _issue_approved_by(db, parent.id, user)
 
 
 def _validate_issue_return(issue: m.MaterialIssue, original: m.MaterialIssue) -> None:

@@ -2736,7 +2736,10 @@ async def create_stock_adjustment(db: AsyncSession, data, user) -> StockAdjustme
             await hooks.fire_adjustment_validate(db, data.warehouse_id, item_data, qty)
         plans.append((item_data, item, system_qty, physical_qty, qty))
 
-    adj_no = await next_number(db, "adj")
+    # Whose paper it is on (2026-11-11): selected, opening on the default organisation.
+    from app.platform.doc_numbering import scope as org_scope
+    scope = await org_scope.resolve_free(db, data)
+    adj_no = await next_number(db, "adj", **(org_scope.args_of(scope) if scope else {}))
     adjustment = StockAdjustment(
         adjustment_no=adj_no,
         warehouse_id=data.warehouse_id,
@@ -2747,6 +2750,8 @@ async def create_stock_adjustment(db: AsyncSession, data, user) -> StockAdjustme
         created_by_id=getattr(user, "id", None),
         created_by_name=getattr(user, "full_name", None),
     )
+    if scope:
+        org_scope.stamp_with_project(adjustment, scope)
     db.add(adjustment)
     await db.flush()
 

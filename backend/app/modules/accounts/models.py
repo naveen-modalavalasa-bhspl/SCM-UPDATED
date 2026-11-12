@@ -25,7 +25,7 @@ class VendorPayment(Base):
     payment_no = Column(String(30), unique=True, nullable=False)
 
     po_id = Column(ForeignKey("pro_purchase_orders.id"), index=True, nullable=False)
-    po_no = Column(String(30), nullable=True)                  # snapshot
+    po_no = Column(String(50), nullable=True)                  # snapshot
     milestone_id = Column(ForeignKey("pro_po_payment_milestones.id"), index=True,
                           nullable=False)
     stage = Column(String(30), nullable=False)                 # snapshot

@@ -32,7 +32,7 @@ import {
   issueApprovalHistory,  postIssue, projectOptions,
   occupancyPreview,
   itemHandlingUnits,
-  previewIssueSplit, returnableIssueOptions, rejectIssue, setIssueSerials, splitIssue,
+  postSplitIssue, previewIssueSplit, returnableIssueOptions, rejectIssue, setIssueSerials, splitIssue,
   submitIssue, updateIssue,
   warehouseOptions,
   issueStockSources, listSerials,
@@ -288,7 +288,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   const [pickedSto, setPickedSto] = useState<StoIssueOption | null>(null);
   const stoRows = useRef(new Map<number, StoIssueOption>());
   const [confirming, setConfirming] = useState<
-    "submit" | "approve" | "reject" | "post" | "split" | "ack" | "cancel" | null
+    "submit" | "approve" | "reject" | "post" | "split" | "postSplit" | "ack" | "cancel" | null
   >(null);
   const [reason, setReason] = useState("");
   // Labels print once the stock is posted (2026-10-28): the whole issue or chosen items.
@@ -819,10 +819,23 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   const awaitingIssue = doc?.status === "APPROVED" && !doc?.is_stock_posted;
   const unitsHidden = direction === "OUT"
     && (!doc || doc.status === "DRAFT" || doc.status === "PENDING_APPROVAL");
-  const serialsLocked = unitsHidden || (locked && !(awaitingIssue && doc?.can_issue_from_stock));
+  // A SPLIT parent (2026-11-11): its raiser or approver picks a line's serials here,
+  // and they are listed and saved against the floor-piece line that carries it now.
+  const pieceOf = (i: number | null) => {
+    const saved = i === null ? undefined : savedLine(i);
+    return saved?.piece_issue_id && saved.piece_line_id
+      ? { issueId: saved.piece_issue_id, lineId: saved.piece_line_id, posted: !!saved.piece_is_posted }
+      : null;
+  };
+  const activePiece = pieceOf(serialLine);
+  const splitParentOpen = doc?.status === "SPLIT" && !!doc?.can_issue_split;
+  const splitPick = doc?.status === "SPLIT" && !!doc?.can_issue_split && !!activePiece && !activePiece.posted;
+  const serialsLocked = unitsHidden
+    || (locked && !((awaitingIssue && doc?.can_issue_from_stock) || splitPick));
   // Asset/consumable codes are auto-assigned and swappable: on a draft, and once
   // approved by the issuer OR anyone who approved it (`can_swap_codes`).
-  const codesLocked = locked && (unitsHidden || !(awaitingIssue && doc?.can_swap_codes));
+  const codesLocked = locked
+    && (unitsHidden || !((awaitingIssue && doc?.can_swap_codes) || splitPick));
   // Pack hierarchies of every item on the issue, in one call (2026-10-08).
   const packOptions = usePackOptions(form.items.map((line) => line.item_id));
   /** Is this line's item issued in a container (2026-10-27)? A serial or IMEI line of
@@ -882,8 +895,8 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   });
 
   const saveSerials = useMutation({
-    mutationFn: (line: { id: number; serial_numbers: string[] }) =>
-      setIssueSerials(Number(id), [line]),
+    mutationFn: ({ issueId, ...line }: { id: number; serial_numbers: string[]; issueId?: number }) =>
+      setIssueSerials(issueId ?? Number(id), [line]),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["wh-issue", id] });
     },
@@ -1184,6 +1197,14 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     queryFn: () => previewIssueSplit(Number(id)),
     enabled: confirming === "split" && editing,
     staleTime: 0,
+  });
+  const postSplit = useMutation({
+    mutationFn: () => postSplitIssue(Number(id)),
+    onSuccess: () => {
+      setConfirming(null);
+      qc.invalidateQueries({ queryKey: ["wh-issue", id] });
+      qc.invalidateQueries({ queryKey: [`wh-issues-${direction}`] });
+    },
   });
   const split = useMutation({
     mutationFn: () => splitIssue(Number(id)),
@@ -1488,6 +1509,12 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                 </Button>
               </Can>
             )}
+            {/* A split parent: its raiser or approver issues every floor piece at once. */}
+            {editing && doc?.status === "SPLIT" && doc?.can_issue_split && (
+              <Can do="issue.issue">
+                <Button onClick={() => setConfirming("postSplit")}>Issue from stock</Button>
+              </Can>
+            )}
             {/* The manager's other option on the same approved issue: hand it to the
                 floors instead of doing it themselves. Only on a parent — a child is
                 already one floor's share and splitting it again means nothing. */}
@@ -1675,7 +1702,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
       {direction === "OUT" && !olderScope && (linkedScope || !form.indent_id) && (
         <div className="mb-5">
           <DocumentNumberCard
-            docType="wh_issue" value={scope} exclusive
+            docType="WH_ISSUE" value={scope} exclusive
             ready={!editing && !linkedScope}
             locks={scopeLocks}
             source={linkedScope ? { label: linkedScope } : null}
@@ -2130,8 +2157,10 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
           indentId={form.indent_id}
           binManaged={isBinManaged}
           locked={locked}
-          unitsLocked={serialsLocked}
-          codesLocked={codesLocked}
+          // A split parent opens each line's picker; a piece already issued shows it
+          // read-only there (`serialsLocked` / `codesLocked`, per open line).
+          unitsLocked={serialsLocked && !splitParentOpen}
+          codesLocked={codesLocked && !splitParentOpen}
           unitsHidden={unitsHidden}
           onPickUnits={setSerialLine}
           onSourcePicked={(index, line) => { void fillCodesFor(index, line); }}
@@ -2285,7 +2314,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
             itemId={activeSerialLine?.item_id}
             batchId={sourceId(activeSerialLine?.batch_id)}
             binId={isBinManaged ? sourceId(activeSerialLine?.bin_id) : undefined}
-            issueId={editing ? Number(id) : undefined}
+            issueId={activePiece?.issueId ?? (editing ? Number(id) : undefined)}
             quantity={serialLine === null ? 0 : num(line?.issued_qty)}
             initial={serialLine === null ? [] : line?.serial_numbers ?? []}
             uom={serialLine === null ? null : savedLine(serialLine)?.uom_code ?? null}
@@ -2293,8 +2322,10 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
             onSave={(codes) => {
               if (serialLine === null) return;
               patchLine(serialLine, { serial_numbers: codes });
-              const lineId = savedLine(serialLine)?.id;
-              if (locked && lineId) saveSerials.mutate({ id: lineId, serial_numbers: codes });
+              const lineId = activePiece?.lineId ?? savedLine(serialLine)?.id;
+              if (locked && lineId) {
+                saveSerials.mutate({ id: lineId, serial_numbers: codes, issueId: activePiece?.issueId });
+              }
             }}
           />
         );
@@ -2322,8 +2353,8 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         warehouseId={form.warehouse_id}
         batchId={sourceId(activeSerialLine?.batch_id)}
         binId={isBinManaged ? sourceId(activeSerialLine?.bin_id) : undefined}
-        issueId={editing ? Number(id) : undefined}
-        issueLineId={activeSerialLine?.id}
+        issueId={activePiece?.issueId ?? (editing ? Number(id) : undefined)}
+        issueLineId={activePiece?.lineId ?? activeSerialLine?.id}
         itemLabel={(() => {
           if (serialLine === null) return "";
           const name = savedLine(serialLine)?.item_name ?? form.items[serialLine]?.item_name ?? `Line ${serialLine + 1}`;
@@ -2335,8 +2366,10 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
           patchLine(serialLine, { serial_numbers: serials });
           // On a draft the serials ride along with the next save. On an approved
           // issue there is no save left to ride, so they go to the server now.
-          const lineId = savedLine(serialLine)?.id;
-          if (locked && lineId) saveSerials.mutate({ id: lineId, serial_numbers: serials });
+          const lineId = activePiece?.lineId ?? savedLine(serialLine)?.id;
+          if (locked && lineId) {
+            saveSerials.mutate({ id: lineId, serial_numbers: serials, issueId: activePiece?.issueId });
+          }
         }}
       />
 
@@ -2459,6 +2492,20 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
           </div>
         )}
       </ConfirmModal>
+
+      <ConfirmModal
+        isOpen={confirming === "postSplit"}
+        title="Issue every floor piece now?"
+        message={`Every floor piece of ${doc?.issue_no ?? "this issue"} not yet issued leaves the `
+          + "warehouse now, each from its own lots. All or nothing: if any piece is not ready "
+          + "(serial numbers not picked, stock no longer there), nothing is issued and that "
+          + "piece is named — open it, fix it, and press again."}
+        confirmLabel="Issue from stock"
+        busy={postSplit.isPending}
+        error={postSplit.error}
+        onConfirm={() => postSplit.mutate()}
+        onClose={() => { setConfirming(null); postSplit.reset(); }}
+      />
 
       <ConfirmModal
         isOpen={confirming === "post"}

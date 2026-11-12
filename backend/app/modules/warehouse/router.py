@@ -847,6 +847,13 @@ async def post_issue(issue_id: int, db: AsyncSession = Depends(get_db),
     return await service.post_issue(db, issue_id, user)
 
 
+@router.post("/issues/{issue_id}/issue-split", response_model=s.IssueDetail)
+async def post_split_issue(issue_id: int, db: AsyncSession = Depends(get_db),
+                           user=Depends(require_permission(ISSUE_POST))):
+    """Issue every floor piece of a split issue at once — all or nothing."""
+    return await service.post_split_issue(db, issue_id, user)
+
+
 @router.put("/issues/{issue_id}/serials", response_model=s.IssueDetail)
 async def set_issue_serials(issue_id: int, body: s.IssueSerialsIn,
                             db: AsyncSession = Depends(get_db),
@@ -1945,6 +1952,17 @@ async def incoming_dispatch_options(warehouse_id: int = Query(...),
                                     db: AsyncSession = Depends(get_db),
                                     _=Depends(require_permission(RECEIPT_VIEW))):
     return await service.incoming_dispatch_options(db, warehouse_id, search)
+
+
+@router.get("/options/receipt-scope")
+async def receipt_scope(po_id: int | None = None, despatch_note_id: int | None = None,
+                        transfer_id: int | None = None, dispatch_id: int | None = None,
+                        db: AsyncSession = Depends(get_db),
+                        _=Depends(require_permission(RECEIPT_VIEW))):
+    """The organisation a receipt copies from the document before it, or null."""
+    return await service.receipt_scope_source(
+        db, po_id=po_id, despatch_note_id=despatch_note_id, transfer_id=transfer_id,
+        dispatch_id=dispatch_id)
 
 
 @router.get("/options/dispatch-receipt-source", response_model=s.DispatchReceiptSource)
