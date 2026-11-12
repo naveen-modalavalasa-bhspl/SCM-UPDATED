@@ -5,6 +5,7 @@ import { fmtDate, fmtQty } from "../format";
 import type { Inspection, OutboundInspection } from "../types";
 import { PrintTemplate, type PrintColumn } from "@/shared/components";
 import { combinationLabel } from "@/shared/combination";
+import { qcQty, qcRate } from "../qcSummary";
 
 export function InspectionPrintPage() {
   const { id } = useParams();
@@ -47,7 +48,13 @@ export function InspectionPrintPage() {
     { label: "Inspector", value: inspection.inspector_name || "—" },
     { label: isOutgoing ? "Material Issue No" : "GRN No", value: isOutgoing ? inspection.issue_no : inspection.grn_no || "—", mono: true },
     { label: "Passed Items", value: inspection.passed_items?.toString() || "0" },
+    // SCM_0164: a partly rejected line is neither passed nor failed — say so, and
+    // print the quantities the pass rate is made of.
+    { label: "Partial Items", value: (inspection.partial_items ?? 0).toString() },
     { label: "Failed Items", value: inspection.failed_items?.toString() || "0" },
+    { label: "Accepted / Inspected", value: `${qcQty(Number(inspection.accepted_qty ?? 0))} / ${qcQty(Number(inspection.inspected_qty ?? 0))}` },
+    { label: "Rejected Qty", value: qcQty(Number(inspection.rejected_qty ?? 0)) },
+    { label: "Pass Rate", value: qcRate(inspection.pass_rate ?? null) },
   ];
 
   if (!isOutgoing) {

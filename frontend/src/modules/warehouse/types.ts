@@ -809,6 +809,13 @@ export interface Inspection {
   total_items: number;
   passed_items: number;
   failed_items: number;
+  /** By QUANTITY, derived on read (SCM_0164 / 0165 / 0166) — see `qcSummary.ts`. */
+  inspected_qty?: number | string | null;
+  accepted_qty?: number | string | null;
+  rejected_qty?: number | string | null;
+  partial_items?: number | null;
+  pending_items?: number | null;
+  pass_rate?: number | null;
   inspector_id?: number | null;
   inspector_name?: string | null;
   remarks?: string | null;
@@ -899,6 +906,13 @@ export interface OutboundInspection {
   total_items: number;
   passed_items: number;
   failed_items: number;
+  /** By QUANTITY, derived on read (SCM_0165) — see `qcSummary.ts`. */
+  inspected_qty?: number | string | null;
+  accepted_qty?: number | string | null;
+  rejected_qty?: number | string | null;
+  partial_items?: number | null;
+  pending_items?: number | null;
+  pass_rate?: number | null;
   inspector_id?: number | null;
   inspector_name?: string | null;
   remarks?: string | null;
