@@ -130,7 +130,16 @@ export function RFQListPage() {
   });
   const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / SIZE));
 
-  const columns: Column<RFQListRow>[] = [
+  // SCM_0173: "Pending with" only means something while an RFQ is in approval. On a
+  // draft, a tender out with vendors or an award it can only ever read "—", so the
+  // column is shown only when the register is narrowed to RFQs in approval — the
+  // "In approval" status (one value or a set made of nothing else) or the "Waiting
+  // for me" tile, which lists only RFQs sitting in this login's approval queue.
+  const statusSet = status ? status.split(",").map((value) => value.trim()).filter(Boolean) : [];
+  const showPendingWith = pendingForMe
+    || (statusSet.length > 0 && statusSet.every((value) => value === "PENDING_APPROVAL"));
+
+  const allColumns: Column<RFQListRow>[] = [
     {
       key: "rfq",
       header: "RFQ",
@@ -154,9 +163,10 @@ export function RFQListPage() {
       key: "with",
       header: "Pending with",
       hideOnNarrow: true,
+      // Live from the approval engine; the snapshot behind it is only a fallback.
       render: (r) => (r.pending_with?.length
         ? r.pending_with.join(", ")
-        : (r.current_approver_name ?? "—")),
+        : (r.current_approver_name ?? "Awaiting approver")),
     },
     {
       key: "responses",
@@ -219,6 +229,9 @@ export function RFQListPage() {
       },
     },
   ];
+  const columns = showPendingWith
+    ? allColumns
+    : allColumns.filter((column) => column.key !== "with");
 
   // SCM_0058: req no, project, warehouse, value, how much of it there is and how
   // long it has been sitting — the same facts the Requisitions register already
@@ -412,6 +425,16 @@ export function RFQListPage() {
                 {r.response_count} of {r.vendor_count} replied
                 {r.due_date ? ` · closes ${fmtDate(r.due_date)}` : ""}
               </div>
+              {showPendingWith && (
+                <div className="text-xs text-body">
+                  Pending with{" "}
+                  <span className="font-medium text-ink">
+                    {r.pending_with?.length
+                      ? r.pending_with.join(", ")
+                      : (r.current_approver_name ?? "Awaiting approver")}
+                  </span>
+                </div>
+              )}
             </div>
           )}
         />

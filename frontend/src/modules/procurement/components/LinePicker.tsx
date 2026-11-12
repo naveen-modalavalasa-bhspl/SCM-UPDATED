@@ -272,9 +272,15 @@ export function LinePicker({
           )}
           {showDate && (
             <div className={showRate ? "sm:col-span-2" : "sm:col-span-3"}>
-              <Field label={index === 0 ? "Needed by" : ""}>
+              <Field
+                label={index === 0 ? "Needed by" : ""}
+                // SCM_0172: a typed date slips past `min`; say so on the line itself.
+                error={!line.id && line.required_date && line.required_date < todayIst()
+                  ? "Date has passed" : null}
+              >
                 <Input
                   type="date"
+                  isInvalid={!line.id && !!line.required_date && line.required_date < todayIst()}
                   // Only on a line still being drafted: an existing line is disabled
                   // anyway, and a saved date that has since passed must keep showing
                   // the date it was given rather than being cleared by the picker.

@@ -1142,6 +1142,16 @@ class InspectionRead(OrgScopeOut, _Read):
     total_items: int
     passed_items: int
     failed_items: int
+    # SCM_0164 / 0165 / 0166: the same inspection by QUANTITY, derived on read
+    # (`service.inspection_quantity_summary`), never stored. The three LINE counts above
+    # put a partly rejected line in neither bucket; these are what a pass rate and a
+    # "rejected" total are made of. None on a row nothing has summarised.
+    inspected_qty: Decimal | None = None
+    accepted_qty: Decimal | None = None
+    rejected_qty: Decimal | None = None
+    partial_items: int | None = None
+    pending_items: int | None = None
+    pass_rate: float | None = None
     inspector_id: int | None = None
     inspector_name: str | None = None
     remarks: str | None = None
@@ -1220,6 +1230,16 @@ class OutboundInspectionRead(_Read):
     total_items: int
     passed_items: int
     failed_items: int
+    # SCM_0164 / 0165 / 0166: the same inspection by QUANTITY, derived on read
+    # (`service.inspection_quantity_summary`), never stored. The three LINE counts above
+    # put a partly rejected line in neither bucket; these are what a pass rate and a
+    # "rejected" total are made of. None on a row nothing has summarised.
+    inspected_qty: Decimal | None = None
+    accepted_qty: Decimal | None = None
+    rejected_qty: Decimal | None = None
+    partial_items: int | None = None
+    pending_items: int | None = None
+    pass_rate: float | None = None
     inspector_id: int | None = None
     inspector_name: str | None = None
     remarks: str | None = None
