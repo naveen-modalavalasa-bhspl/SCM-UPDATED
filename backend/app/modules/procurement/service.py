@@ -12,7 +12,8 @@ import secrets
 from decimal import Decimal
 from types import SimpleNamespace
 
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from sqlalchemy import exists, false, func, select, true, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -3552,7 +3553,35 @@ async def _validate_rfq_source_quantities(db: AsyncSession, lines,
                 f"document quantity ({maximum})")
 
 
+#: The business runs on India time, and so does every date box on the screens
+#: (`todayIst` in shared/datetime.ts). Comparing against the server's UTC date would
+#: refuse a perfectly good "today" for the first 5 h 30 min of every Indian day.
+_BUSINESS_TZ = ZoneInfo("Asia/Kolkata")
+
+
+def _business_today() -> date:
+    return datetime.now(_BUSINESS_TZ).date()
+
+
+def assert_rfq_due_date(due_date: date | None, *, today: date | None = None) -> None:
+    """SCM_0172: an RFQ may not close before the day it is raised or edited.
+
+    A closing date behind us shuts the tender the moment it goes out — no supplier
+    can quote on it. The date box on the form already greys out past days, but a
+    typed date went straight through it and nothing here asked. Empty stays allowed:
+    "no closing date" is a tender left open, which is a decision, not a mistake.
+    """
+    if due_date is None:
+        return
+    today = today or _business_today()
+    if due_date < today:
+        raise ValidationError(
+            f"The closing date {due_date:%d %b %Y} has already passed. Pick today "
+            f"({today:%d %b %Y}) or a later date.")
+
+
 async def create_rfq(db: AsyncSession, data: RFQCreate, user) -> RFQ:
+    assert_rfq_due_date(data.due_date)
     requisition = None
     if data.requisition_id:
         requisition = await get_requisition(db, data.requisition_id)
@@ -4056,6 +4085,11 @@ async def update_rfq(db: AsyncSession, rfq_id: int, data: RFQUpdate, user) -> RF
     # Read before the loop overwrites it, for the reason `_place_names` gives about
     # grandfathering: 9 live RFQs sit on an LIP address they were raised with.
     kept_warehouse_id = rfq.warehouse_id
+    # Checked only when the date MOVES: an older draft already holding a date that has
+    # since passed must still be editable for its other fields, and the buyer is told
+    # about that date the moment they change it.
+    if data.due_date is not None and data.due_date != rfq.due_date:
+        assert_rfq_due_date(data.due_date)
     for field in ("title", "due_date", "terms", "warehouse_id", "project_id"):
         value = getattr(data, field)
         if value is not None:

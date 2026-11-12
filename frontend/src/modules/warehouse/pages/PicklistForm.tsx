@@ -318,7 +318,6 @@ export default function PicklistForm() {
       render: (l) => (
         <QtyInput
           ariaLabel={`Picked quantity for ${l.item_code ?? l.item_id}`}
-          uom={l.uom_code}
           value={picked[l.id] ?? num(l.picked_qty)}
           max={num(l.required_qty)}
           disabled={!working || l.status === "PICKED"}

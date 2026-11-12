@@ -4314,6 +4314,69 @@ def _derive_result(inspected: Decimal, accepted: Decimal) -> str:
     return InspectionResult.PARTIAL.value
 
 
+def inspection_quantity_summary(lines) -> dict:
+    """What an inspection found, by QUANTITY — SCM_0164 / 0165 / 0166.
+
+    `passed_items` / `failed_items` count LINES, and a line that kept 8 of 10 is
+    neither: it is PARTIAL, which no figure on any screen counted. One partly rejected
+    item therefore read "0/1 passed", 0 failed, a 0 % pass rate, and no rejected
+    quantity anywhere — every number true, and together saying nothing happened.
+
+    `lines` is any iterable of objects with `inspected_qty`, `accepted_qty`,
+    `rejected_qty` and `result`. A line still stored PENDING is judged off its own
+    split, by the same rule the save uses (`_derive_result`), so a sheet being worked
+    and a sheet completed are counted alike. `pass_rate` is accepted / inspected as a
+    percentage to one decimal, and None while nothing has been inspected — 0 % would
+    read as "everything failed".
+    """
+    inspected = accepted = rejected = ZERO
+    counts = {result.value: 0 for result in InspectionResult}
+    for line in lines:
+        line_inspected = _d(line.inspected_qty)
+        line_accepted = min(_d(line.accepted_qty), line_inspected)
+        inspected += line_inspected
+        accepted += line_accepted
+        rejected += _d(line.rejected_qty)
+        result = (line.result if line.result != InspectionResult.PENDING.value
+                  else _derive_result(line_inspected, line_accepted))
+        counts[result] = counts.get(result, 0) + 1
+    return {
+        "inspected_qty": inspected,
+        "accepted_qty": accepted,
+        "rejected_qty": rejected,
+        "partial_items": counts[InspectionResult.PARTIAL.value],
+        "pending_items": counts[InspectionResult.PENDING.value],
+        "pass_rate": (round(float(accepted / inspected * 100), 1)
+                      if inspected > ZERO else None),
+    }
+
+
+def _set_summary(inspection, summary: dict) -> None:
+    """Transient attributes, read by the response schema — nothing is stored."""
+    for key, value in summary.items():
+        setattr(inspection, key, value)
+
+
+async def _attach_inspection_summaries(db: AsyncSession, rows, item_model) -> None:
+    """`inspection_quantity_summary` for a screenful of inspections, in ONE query.
+
+    Five columns per line of the page's own inspections, never the item rows
+    themselves, so a list of 20 sheets costs one indexed read on `inspection_id`.
+    """
+    rows = list(rows or [])
+    if not rows:
+        return
+    by_inspection: dict[int, list] = {row.id: [] for row in rows}
+    for line in (await db.execute(
+        select(item_model.inspection_id, item_model.inspected_qty,
+               item_model.accepted_qty, item_model.rejected_qty, item_model.result)
+        .where(item_model.inspection_id.in_(list(by_inspection)))
+    )).all():
+        by_inspection[line.inspection_id].append(line)
+    for row in rows:
+        _set_summary(row, inspection_quantity_summary(by_inspection[row.id]))
+
+
 async def _raise_inspection_for(
     db: AsyncSession,
     receipt: m.Receipt,
@@ -4395,7 +4458,9 @@ async def list_inspections(db: AsyncSession, params: PageParams, *,
         stmt = stmt.where(or_(
             m.Inspection.inspection_no.ilike(like), m.Inspection.grn_no.ilike(like),
             m.Inspection.vendor_name.ilike(like)))
-    return await paginate(db, stmt.order_by(m.Inspection.id.desc()), params)
+    page = await paginate(db, stmt.order_by(m.Inspection.id.desc()), params)
+    await _attach_inspection_summaries(db, page.get("items"), m.InspectionItem)
+    return page
 
 
 async def get_inspection(db: AsyncSession, inspection_id: int, user=None) -> m.Inspection:
@@ -4403,9 +4468,11 @@ async def get_inspection(db: AsyncSession, inspection_id: int, user=None) -> m.I
                              m.Inspection.items)
     # FIXED — see `_assert_in_scope`. `whs_inspections` has no owner column, so the
     # warehouse is the only dimension; that is the same one `list_inspections` uses.
-    return await _assert_in_scope(db, user, m.Inspection, inspection,
-                                  warehouse_col=m.Inspection.warehouse_id,
-                                  label="Inspection")
+    inspection = await _assert_in_scope(db, user, m.Inspection, inspection,
+                                        warehouse_col=m.Inspection.warehouse_id,
+                                        label="Inspection")
+    _set_summary(inspection, inspection_quantity_summary(inspection.items))
+    return inspection
 
 
 async def _apply_inspection_lines(db: AsyncSession, inspection: m.Inspection,
@@ -4496,8 +4563,12 @@ async def _apply_inspection_lines(db: AsyncSession, inspection: m.Inspection,
             )
         accepted = min(_d(line.accepted_qty), inspected)
         rejected = inspected - accepted
-        result = (line.result.value if line.result != InspectionResult.PENDING
-                  else _derive_result(inspected, accepted))
+        # SCM_0164: the result FOLLOWS the split, always. A hand-picked "Passed" over a
+        # line that rejected two units was saved as asked, so the sheet said passed
+        # while the stock said two came back — and every total built on the result
+        # disagreed with every total built on the quantities. No result a split could
+        # be "overridden" to is anything but one of the two contradicting the other.
+        result = _derive_result(inspected, accepted)
         serials = [value.strip() for value in (line.serial_numbers or []) if value.strip()]
         if len(serials) != len(set(serials)):
             raise ValidationError(f"{item.code}: accepted serial numbers must be unique")
@@ -28922,6 +28993,7 @@ async def get_outbound_inspection(db: AsyncSession, inspection_id: int) -> m.Out
                              m.OutboundInspection.items)
     setattr(inspection, "is_stock_transfer",
             await is_stock_transfer_issue(db, inspection.issue_id))
+    _set_summary(inspection, inspection_quantity_summary(inspection.items))
     # Each line's packs, for what was inspected (2026-10-22).
     packs = await wh_packing.issue_line_packs(
         db, {it.issue_item_id: _d(it.inspected_qty) for it in inspection.items
@@ -29168,8 +29240,13 @@ async def create_outbound_inspection(db: AsyncSession, data: s.OutboundInspectio
         warehouse_id=data.warehouse_id or (issue.warehouse_id if issue else None),
         warehouse_name=wh.name if wh else (issue.warehouse_name if issue else None),
         status=InspectionStatus.DRAFT.value,
-        inspector_id=data.inspector_id or getattr(user, "id", None),
-        inspector_name=_name(user) if not data.inspector_id else None,
+        # SCM_0160, the outward twin of SCM_0097: the inspector is the signed-in user,
+        # with their name. The form used to offer every employee in HCM and the save
+        # took whoever was picked — with NO name when one was — so a signed outward
+        # check could carry anybody's id and nobody's name. `data.inspector_id` is
+        # still accepted from older clients and deliberately ignored.
+        inspector_id=getattr(user, "id", None),
+        inspector_name=_name(user),
         remarks=data.remarks,
     )
     db.add(inspection)
@@ -29192,7 +29269,12 @@ async def update_outbound_inspection(db: AsyncSession, inspection_id: int, data:
 
     before = {"status": inspection.status, "failed_items": inspection.failed_items}
     inspection.inspection_date = data.inspection_date
-    inspection.inspector_id = data.inspector_id or inspection.inspector_id
+    # The inspector recorded at creation stands (SCM_0160, as SCM_0097 inward): an
+    # edit never re-points it. Only a sheet that somehow carries nobody is given the
+    # person editing it, so a signed check is never anonymous.
+    if inspection.inspector_id is None:
+        inspection.inspector_id = getattr(user, "id", None)
+        inspection.inspector_name = _name(user)
     inspection.remarks = data.remarks
     inspection.status = InspectionStatus.IN_PROGRESS.value
 
@@ -29443,7 +29525,9 @@ async def list_outbound_inspections(db: AsyncSession, params: PageParams,
                 m.OutboundInspection.warehouse_name.ilike(like),
             )
         )
-    return await paginate(db, stmt.order_by(m.OutboundInspection.created_at.desc()), params)
+    page = await paginate(db, stmt.order_by(m.OutboundInspection.created_at.desc()), params)
+    await _attach_inspection_summaries(db, page.get("items"), m.OutboundInspectionItem)
+    return page
 
 
 # ---------------- Stock Transfer's scoped grants (require_permission_or) ----------------
