@@ -594,6 +594,8 @@ RETURN_PERMISSION_BY_DOC_TYPE: dict[str, str] = {
     DocType.PO.value: perms.PO_APPROVE,
     DocType.GRN.value: perms.GRN_QC,
     DocType.DISPATCH.value: perms.DISPATCH_APPROVE,
+    DocType.QC_OUTWARD.value: perms.QC_OUTWARD_APPROVE,
+    DocType.STOCK_MOVEMENT_ORDER.value: perms.MOVEMENT_APPROVE,
     DocType.STOCK_TRANSFER.value: perms.STOCK_TRANSFER_APPROVE,
     # Only a LADDER key — the instance of an STR is an INDENT (see DocType), so this
     # entry only answers the config screen's "who signs this" question.

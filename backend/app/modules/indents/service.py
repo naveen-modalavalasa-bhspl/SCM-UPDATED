@@ -6826,7 +6826,7 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
         raise NotFoundError(f"Indent {indent_id} not found")
 
     committed = await _committed_by_line(db, indent_id)
-    on_order = await _on_order_by_line(db, indent_id)
+    on_order = await _on_order_by_line(db, indent_id, user)
 
     # Read-only, so it never refuses. Every row in the fulfilment queue opens THIS
     # screen — one row, one destination — and the screen says what state the indent is
@@ -7124,7 +7124,8 @@ async def _reconcile_indent_mr_receipts(db: AsyncSession, indent_id: int) -> Non
         pass
 
 
-async def _on_order_by_line(db: AsyncSession, indent_id: int) -> dict[int, Decimal]:
+async def _on_order_by_line(db: AsyncSession, indent_id: int,
+                            user=None) -> dict[int, Decimal]:
     """Quantity per indent line already handed to procurement as a material request.
 
     The Fulfilment Queue subtracts this before it offers an indent for allocation
@@ -7135,8 +7136,17 @@ async def _on_order_by_line(db: AsyncSession, indent_id: int) -> dict[int, Decim
     would have been bought and issued.
 
     Same status filter as the queue: a rejected or cancelled request is not on order.
+
+    What has already arrived in stock comes off the request, so a later round can
+    allocate it. Only stock the ALLOCATOR can draw counts (`user`'s own stocking points
+    and their reportees', when they have any). Counted company-wide, a unit sitting at
+    a point they cannot reach made a line that had gone to procurement look unserved,
+    so they could keep submitting allocations that give nothing (IND/2026-27/00169).
+    Without a `user`, or for a desk that holds no point of its own, every point counts,
+    as before.
     """
     await _reconcile_indent_mr_receipts(db, indent_id)
+    drawable = (await locations.location_ids_for_user(db, user)) if user is not None else set()
     rows = (await db.execute(
         select(
             MaterialRequestItem.indent_item_id,
@@ -7156,13 +7166,16 @@ async def _on_order_by_line(db: AsyncSession, indent_id: int) -> dict[int, Decim
         if not line_id:
             continue
         q = _d(quantity)
-        stock_qty = (await db.scalar(
+        stock_stmt = (
             select(func.coalesce(func.sum(Stock.available_qty), 0))
             .where(
                 Stock.item_id == item_id,
                 or_(Stock.expiry_date.is_(None), Stock.expiry_date >= ist_today()),
             )
-        )) or ZERO
+        )
+        if drawable:
+            stock_stmt = stock_stmt.where(Stock.warehouse_id.in_(drawable))
+        stock_qty = (await db.scalar(stock_stmt)) or ZERO
         result[int(line_id)] = max(ZERO, q - _d(stock_qty))
     return result
 
@@ -7292,13 +7305,31 @@ async def create_allocation_for_indent(db: AsyncSession, indent: Indent,
     # to procurement, but any other door into the allocation form — a saved URL, the
     # own-stock path, the batch screen — still passed, and `allow_additional` then let
     # `ensure_no_active` wave a second allocation through for quantity already bought.
-    on_order = await _on_order_by_line(db, indent.id)
+    on_order = await _on_order_by_line(db, indent.id, user)
     still_owed = any(
         owed_quantity(line)
         > _d(line.allocated_quantity) + on_order.get(line.id, Decimal("0"))
         for line in indent.items
     )
     _reject_over_allocation(indent, decisions, on_order)
+
+    # "Give nothing" is a real decision, but only the first one: it is what sends the
+    # short lines to procurement. Once an allocation is already signed for this indent,
+    # another one that gives nothing adds no stock and no information, and (approved on
+    # submit when the allocator holds the point) just stacks empty approved documents -
+    # ALL0089 and ALL0090 on IND/2026-27/00169.
+    if not any(_d(d.get("quantity")) > ZERO for d in decisions):
+        signed = (await db.execute(
+            select(Allocation.allocation_no)
+            .where(Allocation.indent_id == indent.id,
+                   Allocation.status.in_(allocations.SETTLED_ALLOCATION_STATUSES))
+            .order_by(Allocation.id).limit(1)
+        )).scalar_one_or_none()
+        if signed:
+            raise ValidationError(
+                f"Nothing to allocate: every line is 0 and {signed} is already approved "
+                "for this indent. Allocate a quantity from a point that holds stock, or "
+                "leave the rest with procurement.")
 
     # Which approval event this is. Every source point inside the raiser's own
     # reporting subtree means he is serving his own stock, and the point owner — not
