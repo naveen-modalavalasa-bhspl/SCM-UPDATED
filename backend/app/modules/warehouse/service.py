@@ -10245,7 +10245,8 @@ def _fefo_expiry_date(value) -> str:
 
 
 async def _open_issue_pins(db: AsyncSession, warehouse_id: int, item_ids,
-                           *, exclude_issue_id: int | None = None):
+                           *, exclude_issue_id: int | None = None,
+                           exclude_issue_ids=None):
     """What OTHER open issues have explicitly picked here, indent line by indent line.
 
     Returns ({(indent, indent line, bin, batch): qty}, {(item, bin, batch): qty}). Those
@@ -10272,6 +10273,10 @@ async def _open_issue_pins(db: AsyncSession, warehouse_id: int, item_ids,
     )
     if exclude_issue_id:
         stmt = stmt.where(m.MaterialIssue.id != exclude_issue_id)
+    if exclude_issue_ids:
+        # A split family checked as one document (`_assert_split_family_fefo`): the
+        # pieces' own picks are the document's, not another issue's claim on the shelf.
+        stmt = stmt.where(m.MaterialIssue.id.notin_(list(exclude_issue_ids)))
     for indent_id, line_id, item_id, bin_id, batch_id, qty in (await db.execute(stmt)).all():
         if not (bin_id or batch_id) or not indent_id:
             continue
@@ -10367,8 +10372,93 @@ def line_combo_label(line) -> str:
                                         get("model_name")) if part) or "that brand"
 
 
+async def _fefo_floor_bins(db: AsyncSession, issue) -> set[int] | None:
+    """The locations a FLOOR PIECE's FEFO is judged over, or None for the whole
+    warehouse (2026-11-12).
+
+    A floor piece (a child of a split issue) can only take stock standing on its own
+    floor, so judging it against the whole warehouse asked it to take first a batch
+    that only its SIBLING can reach. With two items whose older batches sit on
+    opposite floors, each piece waited on the other and neither could ever issue —
+    nor could the parent's "Issue all floor pieces". Its floor is every location
+    whose outermost rung is `floor_location_id`, plus no-location stock (bin 0) and
+    the warehouse's Unlocated location, which stand on no floor.
+
+    FEFO across the floors is not dropped: `_assert_split_family_fefo` asks it of
+    the pieces TOGETHER, warehouse-wide, when a piece is edited and when the whole
+    family is issued at once.
+    """
+    if not (getattr(issue, "parent_issue_id", None)
+            and getattr(issue, "floor_location_id", None) and issue.warehouse_id):
+        return None
+    index = await _location_index(db, issue.warehouse_id)
+    floor_id = int(issue.floor_location_id)
+    bins = {int(bin_id) for bin_id in index if _floor_of(index, bin_id)[0] == floor_id}
+    bins |= {0, floor_id}
+    unplaced = await unlocated.find_location(db, issue.warehouse_id)
+    if unplaced is not None:
+        bins.add(int(unplaced.id))
+    return bins
+
+
+async def _assert_split_family_fefo(db: AsyncSession, parent: m.MaterialIssue, *,
+                                    override: tuple[int, list] | None = None) -> None:
+    """FEFO over a split issue's pieces TAKEN TOGETHER, across the whole warehouse
+    (2026-11-12).
+
+    Each floor piece is FEFO-checked only on its own floor (`_fefo_floor_bins`), so on
+    its own nothing stops the pieces between them leaving an older batch behind — the
+    piece on floor 1 takes the newer batch of an item while the older one on floor 2
+    is on no piece at all. This closes that: every piece not yet issued, read as one
+    document, against today's shelf. Already-issued pieces are left out — their goods
+    have gone, so the batches they took are no longer on the shelf to be skipped.
+
+    `override` is (piece id, its lines) for a piece being saved, so its NEW picks are
+    judged rather than the ones on the table. Run when a piece is edited and by
+    "Issue all floor pieces" — never by one piece's own Issue from stock, which is a
+    floor's own business and must not wait on another floor.
+    """
+    pieces = (await db.execute(
+        select(m.MaterialIssue).where(
+            m.MaterialIssue.parent_issue_id == parent.id,
+            m.MaterialIssue.status.notin_(UNSERVED_ISSUE_STATUSES),
+            m.MaterialIssue.is_stock_posted.is_(False),
+        ).options(selectinload(m.MaterialIssue.items))
+    )).scalars().all()
+    lines: list[s.IssueItemWrite] = []
+    ids: set[int] = set()
+    for piece in pieces:
+        ids.add(piece.id)
+        if override is not None and piece.id == override[0]:
+            lines.extend(override[1])
+            continue
+        lines.extend(
+            s.IssueItemWrite(
+                item_id=line.item_id, indent_item_id=line.indent_item_id,
+                item_code=line.item_code,
+                requested_qty=_d(line.requested_qty), issued_qty=_d(line.issued_qty),
+                batch_id=line.batch_id or None, bin_id=line.bin_id or None,
+            )
+            # Built exactly as `_post_issue_core` builds a posted piece's lines, so the
+            # family and each piece are asked the same question of the same picks.
+            for line in piece.items if _d(line.issued_qty) > ZERO)
+    if override is not None and override[0] not in ids:
+        ids.add(override[0])
+        lines.extend(override[1])
+    if not lines:
+        return
+    parent_no = parent.issue_no
+    try:
+        await _assert_issue_sources(db, parent, lines, family_issue_ids=ids)
+    except ValidationError as exc:
+        raise ValidationError(
+            f"Across the floor pieces of {parent_no}: {exc.message} The pieces between "
+            "them must take the earliest-expiring stock first.") from exc
+
+
 async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
-                                lines: list[s.IssueItemWrite]) -> None:
+                                lines: list[s.IssueItemWrite], *,
+                                family_issue_ids: set[int] | None = None) -> None:
     """Is every pick on this document one the shelf can actually serve?
 
     Two questions, asked together because they are answered off the same two reads and
@@ -10467,13 +10557,16 @@ async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
     # What THIS document holds itself — a direct issue reserves its picks the moment
     # it is saved (`_hold_direct_issue_stock`), and an edit to the same picks must not
     # be refused for want of the stock it is already holding.
-    if issue.id:
+    # A split family checked as one (`family_issue_ids`) holds what its pieces hold.
+    hold_ids = (set(family_issue_ids) if family_issue_ids is not None
+                else ({issue.id} if issue.id else set()))
+    if hold_ids:
         for item_id, bin_id, batch_id, c_brand, c_variant, c_model, qty in (await db.execute(
             select(Reservation.item_id, Reservation.bin_id, Reservation.batch_id,
                    Stock.brand_id, Stock.variant_id, Stock.model_id, func.sum(Reservation.quantity))
             .join(Stock, Stock.id == Reservation.stock_id)
             .where(Reservation.ref_type == InventoryRefType.ISSUE_HOLD.value,
-                   Reservation.ref_id == issue.id,
+                   Reservation.ref_id.in_(hold_ids),
                    Reservation.status == ReservationStatus.ACTIVE.value)
             .group_by(Reservation.item_id, Reservation.bin_id, Reservation.batch_id,
                       Stock.brand_id, Stock.variant_id, Stock.model_id)
@@ -10502,7 +10595,8 @@ async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
     # Other indents' quantity holds here, less what their open issues have pinned.
     others: dict[tuple, Decimal] = {}
     _pins, pinned_slots = await _open_issue_pins(
-        db, issue.warehouse_id, item_ids, exclude_issue_id=getattr(issue, "id", None))
+        db, issue.warehouse_id, item_ids, exclude_issue_id=getattr(issue, "id", None),
+        exclude_issue_ids=family_issue_ids)
     own_pairs = pairs or set()
     for (item_id, bin_id, batch_id, ref_id, ref_line_id, c_brand, c_variant, c_model,
          qty) in (await db.execute(
@@ -10537,9 +10631,17 @@ async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
     # Per brand / variant / model too (2026-10-23): FEFO is asked within the
     # combination a line names — an older batch of ANOTHER brand is not one this line
     # could have taken first.
+    #
+    # A FLOOR PIECE is judged on its own floor only (`_fefo_floor_bins`, 2026-11-12):
+    # stock on another floor is its sibling's to take, never this piece's to take
+    # first. Whole warehouse for everything else, and for a split family checked as
+    # one (`family_issue_ids`).
+    fefo_bins = None if family_issue_ids is not None else await _fefo_floor_bins(db, issue)
     drawable_by_batch: dict[tuple, Decimal] = defaultdict(Decimal)
     for source, indent_only in ((on_hand, False), (own, False), (others, True)):
-        for (s_item, _s_bin, s_batch, *s_combo), qty in source.items():
+        for (s_item, s_bin, s_batch, *s_combo), qty in source.items():
+            if fefo_bins is not None and s_bin not in fefo_bins:
+                continue
             if s_batch and (not indent_only or s_item in indent_items):
                 drawable_by_batch[(s_item, tuple(s_combo), s_batch)] += qty
     fefo_ids = {b for (_i, _c, b), q in drawable_by_batch.items() if q > ZERO}
@@ -10789,6 +10891,12 @@ async def _apply_issue_lines(db: AsyncSession, issue: m.MaterialIssue,
     # the draft, while the batch and the location are still the storekeeper's to
     # change — after approval they are frozen. See `_assert_issue_sources`.
     await _assert_issue_sources(db, issue, lines)
+    # A floor piece being edited: its floor passed above; now the pieces TOGETHER,
+    # warehouse-wide, so an edit cannot move the family off the oldest stock.
+    if issue.parent_issue_id and issue.floor_location_id and issue.id:
+        parent = await db.get(m.MaterialIssue, issue.parent_issue_id)
+        if parent is not None and parent.status == IssueStatus.SPLIT.value:
+            await _assert_split_family_fefo(db, parent, override=(issue.id, lines))
 
     # How finely each line's unit divides — the rule indents and approvals already
     # apply (`shared/uom`). Nobody hands over 9.5 Nos; the issue form accepted it and
@@ -14136,15 +14244,24 @@ async def post_split_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialI
     if not pieces:
         raise ValidationError(f"Every floor piece of {parent.issue_no} is already issued.")
     actor_id = getattr(user, "id", None)
+    # Read BEFORE anything can roll back. A rollback expires every loaded row, and
+    # reading `parent.issue_no` after it reloads it lazily — which an async session
+    # cannot do (MissingGreenlet). The refusal below then crashed as a 500 instead of
+    # telling the person which piece to fix and why.
+    parent_no = parent.issue_no
+    # The pieces TOGETHER first, warehouse-wide (2026-11-12): each piece is then
+    # checked on its own floor only, as it is when a floor issues its own piece.
+    await _assert_split_family_fefo(db, parent)
     for piece_id, piece_no in pieces:
         try:
             await _post_issue_core(db, piece_id, user)
         except AppException as exc:
+            message = exc.message
             await db.rollback()
             raise ValidationError(
-                f"Nothing was issued. {piece_no} cannot be issued yet: {exc.message} "
+                f"Nothing was issued. {piece_no} cannot be issued yet: {message} "
                 f"Open {piece_no}, fix it, and press Issue from stock on "
-                f"{parent.issue_no} again.") from exc
+                f"{parent_no} again.") from exc
     await write_audit(db, entity="out_issues", entity_id=parent.id,
                       entity_no=parent.issue_no, action=AuditAction.UPDATE, actor=user,
                       after={"issued_pieces": [no for _id, no in pieces],
