@@ -1,3 +1,4 @@
+import type { ScopedDoc } from "@/shared/useDocNumberScope";
 import type { CombinationValue } from "@/shared/combination";
 /**
  * Warehouse module types.
@@ -2124,7 +2125,7 @@ export interface AcknowledgeWrite {
 /* ------------------------------------------------------- purchase returns -- */
 
 /** `pro_returns`. Enriched with auto-fetched vendor snapshot — never typed. */
-export interface PurchaseReturn {
+export interface PurchaseReturn extends ScopedDoc {
   id: number;
   return_no: string;
   return_date: string;
@@ -2555,6 +2556,11 @@ export interface PurchaseReturnWrite {
   vendor_state?: string | null;
   vendor_pincode?: string | null;
   vendor_gstin?: string | null;
+  /** The number card's selection (2026-11-12) — `docNumberPayload`. */
+  organization_id?: number | null;
+  project_id?: number | null;
+  org_department_id?: number | null;
+  fiscal_year?: string | null;
 }
 
 /** Return reasons — served, never hard-coded. */
@@ -2648,7 +2654,7 @@ export interface PurchaseReturnSourceLookup {
   message?: string | null;
 }
 
-export interface PurchaseReturnSourceDetail {
+export interface PurchaseReturnSourceDetail extends ScopedDoc {
   source_type: string;
   source_id: number;
   source_no: string;

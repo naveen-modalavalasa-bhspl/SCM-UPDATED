@@ -795,7 +795,7 @@ class DispatchEvent(Base):
 # Purchase returns
 # ---------------------------------------------------------------------------
 
-class PurchaseReturn(Base):
+class PurchaseReturn(OrgScopeColumns, Base):
     """`pro_returns`. Owned here rather than in procurement because the goods
     physically leave a warehouse, and it is the store that sends them back."""
     __tablename__ = "pro_returns"
@@ -803,6 +803,10 @@ class PurchaseReturn(Base):
     id = pk()
     return_no = Column(String(50), nullable=False, unique=True)
     return_date = Column(Date, nullable=False)
+    # Whose paper it is on (2026-11-12): copied from its GRN / PO, or selected on the
+    # number card for a manual return. The project goes into the number.
+    project_id = soft_fk()
+    project_name = Column(String(200), nullable=True)
 
     po_id = Column(BigInteger, nullable=True)
     po_no = Column(String(50), nullable=True)

@@ -1715,10 +1715,19 @@ async def create_tr(db: AsyncSession, data, user) -> TransportRequest:
                 if not contact_ph and creator.mobile:
                     contact_ph = creator.mobile.strip()
 
+    # Whose paper it is on (2026-11-12): COPIED from the indent it moves when that
+    # indent carries an organisation; otherwise what the Transport form's number card
+    # selected. Raised with neither — every automatic door (a dispatch, a return leg,
+    # a trip) — it keeps the numbering it always had.
+    from app.modules.indents.models import Indent as _Indent
+    from app.platform.doc_numbering import scope as org_scope
+    moved = await db.get(_Indent, data.indent_id) if data.indent_id else None
+    scope_values, scope_args = await org_scope.carry_or_select(db, data, moved)
+
     doc = TransportRequest(
         # Same project the shipment is filed under, below.
         tr_no=await next_number(db, DocType.TRANSPORT_REQUEST.value.lower(),
-                                project=data.project_name),
+                                **(scope_args or {"project": data.project_name})),
         tr_date=data.tr_date or date.today(),
         mode=data.mode.upper(),
         # WHAT it travels on, checked against the arrangement made under it. The
@@ -1774,6 +1783,8 @@ async def create_tr(db: AsyncSession, data, user) -> TransportRequest:
         doc.carrier_id, doc.carrier_name = vendor.id, vendor.name
     _apply_lines(doc, data.lines)
 
+    if scope_values:
+        org_scope.stamp_with_project(doc, scope_values)
     db.add(doc)
     await db.flush()
     await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.tr_no,

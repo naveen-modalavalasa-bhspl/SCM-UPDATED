@@ -2652,7 +2652,7 @@ class ReturnItemWrite(BaseModel):
     returnable_qty: Decimal | None = None
 
 
-class ReturnWrite(BaseModel):
+class ReturnWrite(OrgScopeIn):
     return_date: date
     po_id: int | None = None
     grn_id: int | None = None
@@ -2710,7 +2710,10 @@ class ReturnItemRead(CombinationOut, _Read):
     returnable_qty: Decimal | None = None
 
 
-class ReturnRead(_Read):
+class ReturnRead(OrgScopeOut, _Read):
+    #: The project its number is drawn under (2026-11-12).
+    project_id: int | None = None
+    project_name: str | None = None
     id: int
     return_no: str
     return_date: date
@@ -3132,6 +3135,15 @@ class PurchaseReturnSourceDetail(BaseModel):
     total_original_qty: Decimal = Decimal("0")
     total_previously_returned: Decimal = Decimal("0")
     total_returnable_qty: Decimal = Decimal("0")
+    # The source's organisation and project (2026-11-12), copied onto the return and
+    # shown locked on its number card. All null off an older GRN / PO.
+    organization_id: int | None = None
+    organization_code: str | None = None
+    organization_name: str | None = None
+    org_department_id: int | None = None
+    org_department_name: str | None = None
+    project_id: int | None = None
+    project_name: str | None = None
 
 
 #: How a purchase return physically travels back to the supplier, in the order the

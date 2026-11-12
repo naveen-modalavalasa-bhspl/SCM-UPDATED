@@ -296,7 +296,7 @@ function PoPaymentsDrawer({ poId, onClose }: { poId: number; onClose: () => void
           </div>
         )}
         {data && (
-          <RecordPaymentModal poId={poId} poNo={data.po_no} milestone={paying}
+          <RecordPaymentModal poId={poId} poNo={data.po_no} po={data} milestone={paying}
             modes={meta.data?.modes ?? ["NEFT", "RTGS", "IMPS", "UPI", "CHEQUE", "DD", "CASH"]}
             invoices={data.documents.filter((d) => d.doc_category === "INVOICE")}
             saving={record.isPending} error={record.error}
