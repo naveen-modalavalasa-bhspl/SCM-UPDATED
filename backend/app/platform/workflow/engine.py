@@ -12,7 +12,7 @@ Engine functions flush but do not commit — the calling module owns the transac
 import logging
 from types import SimpleNamespace
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import PermissionError_, ValidationError
@@ -614,6 +614,14 @@ def _reliable_actor_position(link: dict | None, actor_id: int | None) -> int | N
 async def _latest_approved_action(
     db: AsyncSession, instance: Instance, sequence: int,
 ) -> Action | None:
+    # A rung rebuilt from the recorded path (`_history_chain`) carries its signer: the
+    # original wf_actions rows of a hierarchy approval all sit under one stage number,
+    # so looking them up by the rebuilt rung number would name the wrong person.
+    signed = ((_link_by_sequence(instance, sequence) or {}).get("signed_by"))
+    if signed:
+        return SimpleNamespace(
+            id=int(signed["action_id"]), actor_id=int(signed["employee_id"]),
+            actor_name=signed.get("name"), stage_sequence=sequence)
     return (await db.execute(
         select(Action)
         .where(
@@ -1152,6 +1160,91 @@ async def _resume_sequence_after(db: AsyncSession, instance: Instance,
     return int(instance.current_sequence)
 
 
+async def _history_chain(db: AsyncSession,
+                         instance: Instance) -> tuple[list[dict], int] | None:
+    """The approval path of a document that climbed the reporting hierarchy, as a ladder.
+
+    Such a document has no `resolved_chain` - the climb is decided one approval at a
+    time - so there is nothing to return it along. This rebuilds the path it ACTUALLY
+    took: one rung per person who approved it, then the rung it sits on now, then the
+    rungs the climb would still reach. Returns `(chain, current_sequence)`, or None when
+    the document is not on a reporting-hierarchy stage or has nobody holding it.
+
+    Reads only. `return_for_correction` is what freezes the result onto the instance.
+    """
+    stage = await _get_stage(db, instance.workflow_id, instance.current_sequence)
+    if stage is None or stage.approver_type != ApproverType.REPORTING_MANAGER.value:
+        return None
+    pending_ids = list((await db.execute(
+        select(Pending.approver_id).where(
+            Pending.instance_id == instance.id,
+            Pending.stage_sequence == instance.current_sequence,
+        ).order_by(Pending.id)
+    )).scalars().all())
+    if not pending_ids:
+        return None
+
+    floor = await _chain_epoch_floor(db, instance)
+    signed = (await db.execute(
+        select(Action).where(
+            Action.instance_id == instance.id,
+            Action.action == ApprovalAction.APPROVED.value,
+            Action.id > floor,
+        ).order_by(Action.id)
+    )).scalars().all()
+    chain: list[dict] = []
+    for row in signed:
+        if row.actor_id is None or row.actor_id == instance.started_by_id:
+            continue
+        chain.append({
+            "sequence": len(chain) + 1, "position_id": None,
+            "position_name": row.actor_position, "role_id": None,
+            "role_name": row.actor_position or row.stage_name or "Approver",
+            "approver_ids": [int(row.actor_id)], "approver_names": [row.actor_name],
+            "signed_by": {"action_id": int(row.id), "employee_id": int(row.actor_id),
+                          "name": row.actor_name},
+        })
+
+    holders = [e for e in [await hcm_service.get_employee(db, i) for i in pending_ids]
+               if e is not None]
+    if not holders:
+        return None
+    current_sequence = len(chain) + 1
+    chain.append({
+        "sequence": current_sequence, "position_id": None, "position_name": None,
+        "role_id": None, "role_name": instance.current_stage_name or stage.name,
+        "approver_ids": [h.id for h in holders],
+        "approver_names": [h.full_name for h in holders],
+    })
+
+    # What the climb would still reach, so the document keeps going up after resubmit.
+    if instance.current_stage_name != FINAL_REPORTING_STAGE_NAME:
+        position_id = (await db.execute(
+            select(HcmPositionAssignment.position_id).where(
+                HcmPositionAssignment.employee_id == holders[0].id,
+                HcmPositionAssignment.is_active.is_(True),
+            ).order_by(HcmPositionAssignment.is_primary.desc())
+        )).scalars().first()
+        current = await hcm_service.get_position(db, position_id) if position_id else None
+        while current and current.parent_position_id:
+            above = await hcm_service.get_position(db, current.parent_position_id)
+            if not above:
+                break
+            above_holders = await _holders_for_positions(
+                db, [above.id], instance.started_by_id)
+            if above_holders:
+                chain.append({
+                    "sequence": len(chain) + 1, "position_id": above.id,
+                    "position_name": above.name, "role_id": None,
+                    "role_name": (FINAL_REPORTING_STAGE_NAME
+                                  if above.parent_position_id is None else above.name),
+                    "approver_ids": [h.id for h in above_holders],
+                    "approver_names": [h.full_name for h in above_holders],
+                })
+            current = above
+    return chain, current_sequence
+
+
 async def get_return_targets(db, doc_type: str, doc_id: int,
                              context: dict | None = None) -> list[dict]:
     """What a 'Send back to' picker offers: earlier steps, lowest first, with the one
@@ -1159,6 +1252,17 @@ async def get_return_targets(db, doc_type: str, doc_id: int,
 
     Empty when the document is not in a ladder approval or is already returned."""
     instance = await _load_instance(db, doc_type, doc_id)
+    if (instance is not None and instance.status == InstanceStatus.IN_PROGRESS.value
+            and not instance.resolved_chain):
+        built = await _history_chain(db, instance)
+        if built is not None:
+            # A stand-in, never attached to the session: previewing must not freeze
+            # anything onto the real instance.
+            instance = SimpleNamespace(
+                id=instance.id, status=instance.status,
+                started_by_id=instance.started_by_id,
+                started_by_name=instance.started_by_name,
+                resolved_chain=built[0], current_sequence=built[1])
     if (instance is None or instance.status != InstanceStatus.IN_PROGRESS.value
             or not instance.resolved_chain or _correction_from_instance(instance)):
         return []
@@ -1195,7 +1299,18 @@ async def return_for_correction(
     context = context or {}
     instance = await _load_active_instance_for_update(db, doc_type, doc_id)
     if not instance.resolved_chain:
-        raise ValidationError("Return for correction requires a resolved approval ladder")
+        built = await _history_chain(db, instance)
+        if built is None:
+            raise ValidationError(
+                "Return for correction requires a resolved approval ladder")
+        # A hierarchy approval: freeze the path it took so far onto the instance, and
+        # from here it is returned, corrected and resubmitted exactly like a ladder.
+        chain, current_sequence = built
+        await db.execute(update(Pending).where(Pending.instance_id == instance.id)
+                         .values(stage_sequence=current_sequence))
+        instance.resolved_chain = chain
+        instance.current_sequence = current_sequence
+        await db.flush()
     if _correction_from_instance(instance):
         raise ValidationError("This document is already returned for correction")
 
