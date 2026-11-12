@@ -4314,6 +4314,69 @@ def _derive_result(inspected: Decimal, accepted: Decimal) -> str:
     return InspectionResult.PARTIAL.value
 
 
+def inspection_quantity_summary(lines) -> dict:
+    """What an inspection found, by QUANTITY — SCM_0164 / 0165 / 0166.
+
+    `passed_items` / `failed_items` count LINES, and a line that kept 8 of 10 is
+    neither: it is PARTIAL, which no figure on any screen counted. One partly rejected
+    item therefore read "0/1 passed", 0 failed, a 0 % pass rate, and no rejected
+    quantity anywhere — every number true, and together saying nothing happened.
+
+    `lines` is any iterable of objects with `inspected_qty`, `accepted_qty`,
+    `rejected_qty` and `result`. A line still stored PENDING is judged off its own
+    split, by the same rule the save uses (`_derive_result`), so a sheet being worked
+    and a sheet completed are counted alike. `pass_rate` is accepted / inspected as a
+    percentage to one decimal, and None while nothing has been inspected — 0 % would
+    read as "everything failed".
+    """
+    inspected = accepted = rejected = ZERO
+    counts = {result.value: 0 for result in InspectionResult}
+    for line in lines:
+        line_inspected = _d(line.inspected_qty)
+        line_accepted = min(_d(line.accepted_qty), line_inspected)
+        inspected += line_inspected
+        accepted += line_accepted
+        rejected += _d(line.rejected_qty)
+        result = (line.result if line.result != InspectionResult.PENDING.value
+                  else _derive_result(line_inspected, line_accepted))
+        counts[result] = counts.get(result, 0) + 1
+    return {
+        "inspected_qty": inspected,
+        "accepted_qty": accepted,
+        "rejected_qty": rejected,
+        "partial_items": counts[InspectionResult.PARTIAL.value],
+        "pending_items": counts[InspectionResult.PENDING.value],
+        "pass_rate": (round(float(accepted / inspected * 100), 1)
+                      if inspected > ZERO else None),
+    }
+
+
+def _set_summary(inspection, summary: dict) -> None:
+    """Transient attributes, read by the response schema — nothing is stored."""
+    for key, value in summary.items():
+        setattr(inspection, key, value)
+
+
+async def _attach_inspection_summaries(db: AsyncSession, rows, item_model) -> None:
+    """`inspection_quantity_summary` for a screenful of inspections, in ONE query.
+
+    Five columns per line of the page's own inspections, never the item rows
+    themselves, so a list of 20 sheets costs one indexed read on `inspection_id`.
+    """
+    rows = list(rows or [])
+    if not rows:
+        return
+    by_inspection: dict[int, list] = {row.id: [] for row in rows}
+    for line in (await db.execute(
+        select(item_model.inspection_id, item_model.inspected_qty,
+               item_model.accepted_qty, item_model.rejected_qty, item_model.result)
+        .where(item_model.inspection_id.in_(list(by_inspection)))
+    )).all():
+        by_inspection[line.inspection_id].append(line)
+    for row in rows:
+        _set_summary(row, inspection_quantity_summary(by_inspection[row.id]))
+
+
 async def _raise_inspection_for(
     db: AsyncSession,
     receipt: m.Receipt,
@@ -4395,7 +4458,9 @@ async def list_inspections(db: AsyncSession, params: PageParams, *,
         stmt = stmt.where(or_(
             m.Inspection.inspection_no.ilike(like), m.Inspection.grn_no.ilike(like),
             m.Inspection.vendor_name.ilike(like)))
-    return await paginate(db, stmt.order_by(m.Inspection.id.desc()), params)
+    page = await paginate(db, stmt.order_by(m.Inspection.id.desc()), params)
+    await _attach_inspection_summaries(db, page.get("items"), m.InspectionItem)
+    return page
 
 
 async def get_inspection(db: AsyncSession, inspection_id: int, user=None) -> m.Inspection:
@@ -4403,9 +4468,11 @@ async def get_inspection(db: AsyncSession, inspection_id: int, user=None) -> m.I
                              m.Inspection.items)
     # FIXED — see `_assert_in_scope`. `whs_inspections` has no owner column, so the
     # warehouse is the only dimension; that is the same one `list_inspections` uses.
-    return await _assert_in_scope(db, user, m.Inspection, inspection,
-                                  warehouse_col=m.Inspection.warehouse_id,
-                                  label="Inspection")
+    inspection = await _assert_in_scope(db, user, m.Inspection, inspection,
+                                        warehouse_col=m.Inspection.warehouse_id,
+                                        label="Inspection")
+    _set_summary(inspection, inspection_quantity_summary(inspection.items))
+    return inspection
 
 
 async def _apply_inspection_lines(db: AsyncSession, inspection: m.Inspection,
@@ -4496,8 +4563,12 @@ async def _apply_inspection_lines(db: AsyncSession, inspection: m.Inspection,
             )
         accepted = min(_d(line.accepted_qty), inspected)
         rejected = inspected - accepted
-        result = (line.result.value if line.result != InspectionResult.PENDING
-                  else _derive_result(inspected, accepted))
+        # SCM_0164: the result FOLLOWS the split, always. A hand-picked "Passed" over a
+        # line that rejected two units was saved as asked, so the sheet said passed
+        # while the stock said two came back — and every total built on the result
+        # disagreed with every total built on the quantities. No result a split could
+        # be "overridden" to is anything but one of the two contradicting the other.
+        result = _derive_result(inspected, accepted)
         serials = [value.strip() for value in (line.serial_numbers or []) if value.strip()]
         if len(serials) != len(set(serials)):
             raise ValidationError(f"{item.code}: accepted serial numbers must be unique")
@@ -10174,7 +10245,8 @@ def _fefo_expiry_date(value) -> str:
 
 
 async def _open_issue_pins(db: AsyncSession, warehouse_id: int, item_ids,
-                           *, exclude_issue_id: int | None = None):
+                           *, exclude_issue_id: int | None = None,
+                           exclude_issue_ids=None):
     """What OTHER open issues have explicitly picked here, indent line by indent line.
 
     Returns ({(indent, indent line, bin, batch): qty}, {(item, bin, batch): qty}). Those
@@ -10201,6 +10273,10 @@ async def _open_issue_pins(db: AsyncSession, warehouse_id: int, item_ids,
     )
     if exclude_issue_id:
         stmt = stmt.where(m.MaterialIssue.id != exclude_issue_id)
+    if exclude_issue_ids:
+        # A split family checked as one document (`_assert_split_family_fefo`): the
+        # pieces' own picks are the document's, not another issue's claim on the shelf.
+        stmt = stmt.where(m.MaterialIssue.id.notin_(list(exclude_issue_ids)))
     for indent_id, line_id, item_id, bin_id, batch_id, qty in (await db.execute(stmt)).all():
         if not (bin_id or batch_id) or not indent_id:
             continue
@@ -10296,8 +10372,93 @@ def line_combo_label(line) -> str:
                                         get("model_name")) if part) or "that brand"
 
 
+async def _fefo_floor_bins(db: AsyncSession, issue) -> set[int] | None:
+    """The locations a FLOOR PIECE's FEFO is judged over, or None for the whole
+    warehouse (2026-11-12).
+
+    A floor piece (a child of a split issue) can only take stock standing on its own
+    floor, so judging it against the whole warehouse asked it to take first a batch
+    that only its SIBLING can reach. With two items whose older batches sit on
+    opposite floors, each piece waited on the other and neither could ever issue —
+    nor could the parent's "Issue all floor pieces". Its floor is every location
+    whose outermost rung is `floor_location_id`, plus no-location stock (bin 0) and
+    the warehouse's Unlocated location, which stand on no floor.
+
+    FEFO across the floors is not dropped: `_assert_split_family_fefo` asks it of
+    the pieces TOGETHER, warehouse-wide, when a piece is edited and when the whole
+    family is issued at once.
+    """
+    if not (getattr(issue, "parent_issue_id", None)
+            and getattr(issue, "floor_location_id", None) and issue.warehouse_id):
+        return None
+    index = await _location_index(db, issue.warehouse_id)
+    floor_id = int(issue.floor_location_id)
+    bins = {int(bin_id) for bin_id in index if _floor_of(index, bin_id)[0] == floor_id}
+    bins |= {0, floor_id}
+    unplaced = await unlocated.find_location(db, issue.warehouse_id)
+    if unplaced is not None:
+        bins.add(int(unplaced.id))
+    return bins
+
+
+async def _assert_split_family_fefo(db: AsyncSession, parent: m.MaterialIssue, *,
+                                    override: tuple[int, list] | None = None) -> None:
+    """FEFO over a split issue's pieces TAKEN TOGETHER, across the whole warehouse
+    (2026-11-12).
+
+    Each floor piece is FEFO-checked only on its own floor (`_fefo_floor_bins`), so on
+    its own nothing stops the pieces between them leaving an older batch behind — the
+    piece on floor 1 takes the newer batch of an item while the older one on floor 2
+    is on no piece at all. This closes that: every piece not yet issued, read as one
+    document, against today's shelf. Already-issued pieces are left out — their goods
+    have gone, so the batches they took are no longer on the shelf to be skipped.
+
+    `override` is (piece id, its lines) for a piece being saved, so its NEW picks are
+    judged rather than the ones on the table. Run when a piece is edited and by
+    "Issue all floor pieces" — never by one piece's own Issue from stock, which is a
+    floor's own business and must not wait on another floor.
+    """
+    pieces = (await db.execute(
+        select(m.MaterialIssue).where(
+            m.MaterialIssue.parent_issue_id == parent.id,
+            m.MaterialIssue.status.notin_(UNSERVED_ISSUE_STATUSES),
+            m.MaterialIssue.is_stock_posted.is_(False),
+        ).options(selectinload(m.MaterialIssue.items))
+    )).scalars().all()
+    lines: list[s.IssueItemWrite] = []
+    ids: set[int] = set()
+    for piece in pieces:
+        ids.add(piece.id)
+        if override is not None and piece.id == override[0]:
+            lines.extend(override[1])
+            continue
+        lines.extend(
+            s.IssueItemWrite(
+                item_id=line.item_id, indent_item_id=line.indent_item_id,
+                item_code=line.item_code,
+                requested_qty=_d(line.requested_qty), issued_qty=_d(line.issued_qty),
+                batch_id=line.batch_id or None, bin_id=line.bin_id or None,
+            )
+            # Built exactly as `_post_issue_core` builds a posted piece's lines, so the
+            # family and each piece are asked the same question of the same picks.
+            for line in piece.items if _d(line.issued_qty) > ZERO)
+    if override is not None and override[0] not in ids:
+        ids.add(override[0])
+        lines.extend(override[1])
+    if not lines:
+        return
+    parent_no = parent.issue_no
+    try:
+        await _assert_issue_sources(db, parent, lines, family_issue_ids=ids)
+    except ValidationError as exc:
+        raise ValidationError(
+            f"Across the floor pieces of {parent_no}: {exc.message} The pieces between "
+            "them must take the earliest-expiring stock first.") from exc
+
+
 async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
-                                lines: list[s.IssueItemWrite]) -> None:
+                                lines: list[s.IssueItemWrite], *,
+                                family_issue_ids: set[int] | None = None) -> None:
     """Is every pick on this document one the shelf can actually serve?
 
     Two questions, asked together because they are answered off the same two reads and
@@ -10396,13 +10557,16 @@ async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
     # What THIS document holds itself — a direct issue reserves its picks the moment
     # it is saved (`_hold_direct_issue_stock`), and an edit to the same picks must not
     # be refused for want of the stock it is already holding.
-    if issue.id:
+    # A split family checked as one (`family_issue_ids`) holds what its pieces hold.
+    hold_ids = (set(family_issue_ids) if family_issue_ids is not None
+                else ({issue.id} if issue.id else set()))
+    if hold_ids:
         for item_id, bin_id, batch_id, c_brand, c_variant, c_model, qty in (await db.execute(
             select(Reservation.item_id, Reservation.bin_id, Reservation.batch_id,
                    Stock.brand_id, Stock.variant_id, Stock.model_id, func.sum(Reservation.quantity))
             .join(Stock, Stock.id == Reservation.stock_id)
             .where(Reservation.ref_type == InventoryRefType.ISSUE_HOLD.value,
-                   Reservation.ref_id == issue.id,
+                   Reservation.ref_id.in_(hold_ids),
                    Reservation.status == ReservationStatus.ACTIVE.value)
             .group_by(Reservation.item_id, Reservation.bin_id, Reservation.batch_id,
                       Stock.brand_id, Stock.variant_id, Stock.model_id)
@@ -10431,7 +10595,8 @@ async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
     # Other indents' quantity holds here, less what their open issues have pinned.
     others: dict[tuple, Decimal] = {}
     _pins, pinned_slots = await _open_issue_pins(
-        db, issue.warehouse_id, item_ids, exclude_issue_id=getattr(issue, "id", None))
+        db, issue.warehouse_id, item_ids, exclude_issue_id=getattr(issue, "id", None),
+        exclude_issue_ids=family_issue_ids)
     own_pairs = pairs or set()
     for (item_id, bin_id, batch_id, ref_id, ref_line_id, c_brand, c_variant, c_model,
          qty) in (await db.execute(
@@ -10466,9 +10631,17 @@ async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
     # Per brand / variant / model too (2026-10-23): FEFO is asked within the
     # combination a line names — an older batch of ANOTHER brand is not one this line
     # could have taken first.
+    #
+    # A FLOOR PIECE is judged on its own floor only (`_fefo_floor_bins`, 2026-11-12):
+    # stock on another floor is its sibling's to take, never this piece's to take
+    # first. Whole warehouse for everything else, and for a split family checked as
+    # one (`family_issue_ids`).
+    fefo_bins = None if family_issue_ids is not None else await _fefo_floor_bins(db, issue)
     drawable_by_batch: dict[tuple, Decimal] = defaultdict(Decimal)
     for source, indent_only in ((on_hand, False), (own, False), (others, True)):
-        for (s_item, _s_bin, s_batch, *s_combo), qty in source.items():
+        for (s_item, s_bin, s_batch, *s_combo), qty in source.items():
+            if fefo_bins is not None and s_bin not in fefo_bins:
+                continue
             if s_batch and (not indent_only or s_item in indent_items):
                 drawable_by_batch[(s_item, tuple(s_combo), s_batch)] += qty
     fefo_ids = {b for (_i, _c, b), q in drawable_by_batch.items() if q > ZERO}
@@ -10718,6 +10891,12 @@ async def _apply_issue_lines(db: AsyncSession, issue: m.MaterialIssue,
     # the draft, while the batch and the location are still the storekeeper's to
     # change — after approval they are frozen. See `_assert_issue_sources`.
     await _assert_issue_sources(db, issue, lines)
+    # A floor piece being edited: its floor passed above; now the pieces TOGETHER,
+    # warehouse-wide, so an edit cannot move the family off the oldest stock.
+    if issue.parent_issue_id and issue.floor_location_id and issue.id:
+        parent = await db.get(m.MaterialIssue, issue.parent_issue_id)
+        if parent is not None and parent.status == IssueStatus.SPLIT.value:
+            await _assert_split_family_fefo(db, parent, override=(issue.id, lines))
 
     # How finely each line's unit divides — the rule indents and approvals already
     # apply (`shared/uom`). Nobody hands over 9.5 Nos; the issue form accepted it and
@@ -14065,15 +14244,24 @@ async def post_split_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialI
     if not pieces:
         raise ValidationError(f"Every floor piece of {parent.issue_no} is already issued.")
     actor_id = getattr(user, "id", None)
+    # Read BEFORE anything can roll back. A rollback expires every loaded row, and
+    # reading `parent.issue_no` after it reloads it lazily — which an async session
+    # cannot do (MissingGreenlet). The refusal below then crashed as a 500 instead of
+    # telling the person which piece to fix and why.
+    parent_no = parent.issue_no
+    # The pieces TOGETHER first, warehouse-wide (2026-11-12): each piece is then
+    # checked on its own floor only, as it is when a floor issues its own piece.
+    await _assert_split_family_fefo(db, parent)
     for piece_id, piece_no in pieces:
         try:
             await _post_issue_core(db, piece_id, user)
         except AppException as exc:
+            message = exc.message
             await db.rollback()
             raise ValidationError(
-                f"Nothing was issued. {piece_no} cannot be issued yet: {exc.message} "
+                f"Nothing was issued. {piece_no} cannot be issued yet: {message} "
                 f"Open {piece_no}, fix it, and press Issue from stock on "
-                f"{parent.issue_no} again.") from exc
+                f"{parent_no} again.") from exc
     await write_audit(db, entity="out_issues", entity_id=parent.id,
                       entity_no=parent.issue_no, action=AuditAction.UPDATE, actor=user,
                       after={"issued_pieces": [no for _id, no in pieces],
@@ -28922,6 +29110,7 @@ async def get_outbound_inspection(db: AsyncSession, inspection_id: int) -> m.Out
                              m.OutboundInspection.items)
     setattr(inspection, "is_stock_transfer",
             await is_stock_transfer_issue(db, inspection.issue_id))
+    _set_summary(inspection, inspection_quantity_summary(inspection.items))
     # Each line's packs, for what was inspected (2026-10-22).
     packs = await wh_packing.issue_line_packs(
         db, {it.issue_item_id: _d(it.inspected_qty) for it in inspection.items
@@ -29168,8 +29357,13 @@ async def create_outbound_inspection(db: AsyncSession, data: s.OutboundInspectio
         warehouse_id=data.warehouse_id or (issue.warehouse_id if issue else None),
         warehouse_name=wh.name if wh else (issue.warehouse_name if issue else None),
         status=InspectionStatus.DRAFT.value,
-        inspector_id=data.inspector_id or getattr(user, "id", None),
-        inspector_name=_name(user) if not data.inspector_id else None,
+        # SCM_0160, the outward twin of SCM_0097: the inspector is the signed-in user,
+        # with their name. The form used to offer every employee in HCM and the save
+        # took whoever was picked — with NO name when one was — so a signed outward
+        # check could carry anybody's id and nobody's name. `data.inspector_id` is
+        # still accepted from older clients and deliberately ignored.
+        inspector_id=getattr(user, "id", None),
+        inspector_name=_name(user),
         remarks=data.remarks,
     )
     db.add(inspection)
@@ -29192,7 +29386,12 @@ async def update_outbound_inspection(db: AsyncSession, inspection_id: int, data:
 
     before = {"status": inspection.status, "failed_items": inspection.failed_items}
     inspection.inspection_date = data.inspection_date
-    inspection.inspector_id = data.inspector_id or inspection.inspector_id
+    # The inspector recorded at creation stands (SCM_0160, as SCM_0097 inward): an
+    # edit never re-points it. Only a sheet that somehow carries nobody is given the
+    # person editing it, so a signed check is never anonymous.
+    if inspection.inspector_id is None:
+        inspection.inspector_id = getattr(user, "id", None)
+        inspection.inspector_name = _name(user)
     inspection.remarks = data.remarks
     inspection.status = InspectionStatus.IN_PROGRESS.value
 
@@ -29443,7 +29642,9 @@ async def list_outbound_inspections(db: AsyncSession, params: PageParams,
                 m.OutboundInspection.warehouse_name.ilike(like),
             )
         )
-    return await paginate(db, stmt.order_by(m.OutboundInspection.created_at.desc()), params)
+    page = await paginate(db, stmt.order_by(m.OutboundInspection.created_at.desc()), params)
+    await _attach_inspection_summaries(db, page.get("items"), m.OutboundInspectionItem)
+    return page
 
 
 # ---------------- Stock Transfer's scoped grants (require_permission_or) ----------------

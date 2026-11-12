@@ -1015,6 +1015,8 @@ export interface DespatchNote extends OrgScope {
   remarks?: string | null;
   submitted_at?: string | null;
   created_at: string;
+  /** Last change — the only stamp a CANCELLED note has (SCM_0162). */
+  updated_at?: string | null;
   items: DespatchItem[];
 }
 

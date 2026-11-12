@@ -1120,7 +1120,6 @@ function PickRow(props: PickProps) {
               <CellLabel>Issue qty ({packWord(2).split(" ")[1]})</CellLabel>
               <QtyInput
                 ariaLabel={`Packages to issue from pick ${position + 1}`}
-                decimals={0}
                 value={packsHeld}
                 disabled={locked}
                 invalid={overDrawn}
