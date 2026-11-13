@@ -58,7 +58,8 @@ from app.modules.warehouse.enums import (
     ConsignmentRefType, DispatchEventType, DispatchSourceType, DispatchStatus, DispatchType, InspectionResult, InspectionStatus,
     InspectionType, IssueDirection, IssueStatus, IssueType, PackageStatus,
     PickLineStatus,
-    PickingStatus, PutawayStatus, PutawayType, QcStatus, ReceiptStatus, ReceiptType,
+    PickingStatus, PutawayStatus, PutawayType, QcStatus, ReadingScope, ReceiptStatus, ReceiptType,
+    RejectionDirection, RejectionOutcome,
     PURCHASE_RETURN_PHASES,
     REPLACEMENT_DOCUMENT_META, REPLACEMENT_PHOTO_SUFFIXES,
     REQUIRED_REPLACEMENT_DOCUMENTS, ReplacementDocument,
@@ -4797,6 +4798,51 @@ async def update_inspection(db: AsyncSession, inspection_id: int, data: s.Inspec
     return await get_inspection(db, inspection_id)
 
 
+async def _write_rejection_outcomes(
+    db: AsyncSession, inspection, direction: str, codes_by_item: dict[int, list[dict]],
+    *, receipt_id: int | None = None, issue_id: int | None = None,
+) -> None:
+    """The register of everything QC turned away (SCM_REJ).
+
+    One `whs_rejection_outcomes` row per rejected LINE, written the moment the verdict
+    lands. Before this a rejected unit went to `whs_serial_numbers` as MAINTENANCE
+    with a remark, and every path stopped there: no screen listed it, no decision ever
+    closed it, and the bulk quantity a sheet rejected surfaced nowhere at all.
+
+    The quantities and codes here are SNAPSHOTS of the inspection line, so the
+    register reads the same after the receipt line is rebuilt or the issue closes.
+    Idempotent: re-running the same verdict replaces this inspection's rows rather
+    than duplicating them.
+    """
+    await db.execute(delete(m.RejectionOutcome).where(
+        m.RejectionOutcome.inspection_id == inspection.id,
+        m.RejectionOutcome.direction == direction,
+    ))
+    for line in inspection.items:
+        rejected = _d(line.rejected_qty)
+        if rejected <= ZERO:
+            continue
+        db.add(m.RejectionOutcome(
+            inspection_id=inspection.id,
+            inspection_item_id=line.id,
+            inspection_no=inspection.inspection_no,
+            direction=direction,
+            receipt_id=receipt_id,
+            issue_id=issue_id,
+            warehouse_id=inspection.warehouse_id,
+            warehouse_name=inspection.warehouse_name,
+            item_id=line.item_id,
+            item_code=line.item_code,
+            item_name=line.item_name,
+            uom_code=line.uom_code,
+            batch_no=line.batch_no,
+            rejected_qty=rejected,
+            rejection_reason=line.defect_type,
+            unit_codes=codes_by_item.get(line.id),
+        ))
+    await db.flush()
+
+
 async def complete_inspection(db: AsyncSession, inspection_id: int, user) -> m.Inspection:
     """Writes the outcome back onto the receipt lines.
 
@@ -4815,6 +4861,10 @@ async def complete_inspection(db: AsyncSession, inspection_id: int, user) -> m.I
     if pending:
         raise ValidationError(
             f"{len(pending)} line(s) are still pending. Record a result on every line first.")
+
+    # The unit codes this sheet turned away, per inspection line — the rejection
+    # register reads them, never the receipt (which keeps only the accepted half).
+    rejected_codes_by_item: dict[int, list[dict]] = {}
 
     if inspection.receipt_id:
         receipt = await get_receipt(db, inspection.receipt_id)
@@ -4846,6 +4896,10 @@ async def complete_inspection(db: AsyncSession, inspection_id: int, user) -> m.I
             rejected_imeis = [
                 imei for imei in original_imeis if imei not in set(accepted_imeis)
             ]
+            if rejected_serials or rejected_imeis:
+                rejected_codes_by_item[verdict.id] = (
+                    [{"code": code, "kind": "serial"} for code in rejected_serials]
+                    + [{"code": code, "kind": "imei"} for code in rejected_imeis])
             line.accepted_qty = _d(verdict.accepted_qty)
             line.rejected_qty = _d(verdict.rejected_qty)
             line.qc_status = verdict.result
@@ -4905,6 +4959,12 @@ async def complete_inspection(db: AsyncSession, inspection_id: int, user) -> m.I
     # is the one whose name belongs on the printed report.
     inspection.inspector_id = getattr(user, "id", None)
     inspection.inspector_name = _name(user)
+
+    # Every line this sheet turned away enters the rejection register (SCM_REJ), one
+    # row per line, PENDING a decision on Stock Segregation > Rejected.
+    await _write_rejection_outcomes(
+        db, inspection, RejectionDirection.INWARD.value, rejected_codes_by_item,
+        receipt_id=inspection.receipt_id)
 
     await write_audit(db, entity="inb_inspections", entity_id=inspection.id,
                       entity_no=inspection.inspection_no, action=AuditAction.UPDATE, actor=user,

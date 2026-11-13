@@ -75,6 +75,40 @@ class InspectionResult(str, Enum):
     PARTIAL = "PARTIAL"
 
 
+class RejectionOutcome(str, Enum):
+    """`whs_rejection_outcomes.outcome` — what became of goods QC turned away.
+
+    PENDING is the only state the inspection itself writes. Everything after it is a
+    decision somebody makes on Stock Segregation > Rejected, and every one of them is
+    terminal: a rejection is closed once, not reopened.
+
+    Where the units are tracked, the decision also moves `whs_serial_numbers`:
+    DISPOSED scraps them, RETURNED_TO_VENDOR marks them returned, RETURNED_TO_STOCK
+    puts them back to available. REPLACED says only that fresh goods are coming —
+    the rejects stay in maintenance until one of the other three decisions says
+    where they went.
+    """
+    PENDING = "PENDING"
+    DISPOSED = "DISPOSED"
+    RETURNED_TO_VENDOR = "RETURNED_TO_VENDOR"
+    RETURNED_TO_STOCK = "RETURNED_TO_STOCK"
+    REPLACED = "REPLACED"
+
+
+class RejectionDirection(str, Enum):
+    """`whs_rejection_outcomes.direction` — which QC door turned the goods away."""
+    INWARD = "INWARD"
+    OUTWARD = "OUTWARD"
+
+
+class ReadingScope(str, Enum):
+    """`inb_inspection_items.parameters[].scope` — which side of the split a reading
+    was taken on. Blank on older rows: a reading taken before this existed names no
+    side, and renders as a line-level reading."""
+    ACCEPTED = "ACCEPTED"
+    REJECTED = "REJECTED"
+
+
 class PutawayStatus(str, Enum):
     """`whs_warehouse_items.status` — a MySQL ENUM, lower case in the schema."""
     DRAFT = "draft"
