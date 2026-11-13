@@ -1063,6 +1063,12 @@ export const warehouseTierOptions = async (search?: string) =>
 export const allWarehouseOptions = (search?: string) =>
   get<WarehouseOption[]>(`${BASE}/options/warehouses`, { all_points: true, search });
 
+/** Every point a consignment may go to — the same network as `allWarehouseOptions`,
+ *  on `dispatch.view`, the permission the consignment screen itself needs (SCM_0132).
+ *  The other list is gated on `stock.view`, which a logistics desk does not hold. */
+export const consignmentDestinationOptions = (search?: string) =>
+  get<WarehouseOption[]>(`${BASE}/options/consignment-destinations`, { search });
+
 /** Only the points this login actually holds. For the field that names where the
  *  goods physically are — the receiving point on an inward, the issuing point on an
  *  issue. Never for a destination, which is by definition somebody else's. */

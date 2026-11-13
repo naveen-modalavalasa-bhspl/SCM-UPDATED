@@ -4383,6 +4383,9 @@ class IssueDispatchSource(BaseModel):
     issue_no: str
     issue_nos: list[str] = []
     warehouse_id: int
+    #: The origin's name, served with it (SCM_0132): "From warehouse" used to look it up
+    #: in a warehouse list the logistics desk is not allowed to read, and stayed "—".
+    warehouse_name: str | None = None
     project_id: int | None = None
     destination_office_id: int | None = None
     destination_office_name: str | None = None

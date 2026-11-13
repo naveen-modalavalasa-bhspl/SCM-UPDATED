@@ -28099,6 +28099,7 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
         "issue_no": issue.issue_no,
         "issue_nos": [issue.issue_no],
         "warehouse_id": issue.warehouse_id,
+        "warehouse_name": issue.warehouse_name,
         "project_id": issue.project_id,
         "destination_office_id": getattr(issue, "destination_office_id", None),
         "destination_office_name": getattr(issue, "destination_office_name", None),

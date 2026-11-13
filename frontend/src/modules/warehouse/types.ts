@@ -2041,6 +2041,8 @@ export interface IssueDispatchSource {
   issue_no: string;
   issue_nos?: string[];
   warehouse_id: number;
+  /** The origin's name, served with it (SCM_0132). */
+  warehouse_name?: string | null;
   project_id?: number | null;
   destination_office_id?: number | null;
   destination_office_name?: string | null;
