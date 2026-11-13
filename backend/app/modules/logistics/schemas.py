@@ -398,6 +398,9 @@ class TROut(OrgScopeOut):
     requested_by_name: str | None = None
     created_at: datetime
     items: list[TRItemOut] = []
+    #: The consignment's cartons, each counted once (SCM_0130) — what the gate counts.
+    #: Null on a leg raised with no consignment behind it.
+    consignment_package_total: int | None = None
     quotes: list[QuoteOut] = []
     events: list[EventOut] = []
 
