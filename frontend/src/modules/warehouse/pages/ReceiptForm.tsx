@@ -103,7 +103,7 @@ const emptyLine = (): ReceiptItemWrite => ({
 /** Line columns a gate entry does not ask for — they belong to the GRN, after the
  *  consignment has been opened and inspected. */
 const GRN_ONLY_LINE_COLUMNS = new Set([
-  "accepted", "rejected", "batch", "manufactured", "expiry", "reason", "bin", "rate",
+  "rejected", "batch", "manufactured", "expiry", "reason", "bin", "rate",
 ]);
 
 const RECEIPT_TYPES = [
@@ -679,8 +679,10 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           if ((next.imei_numbers?.length ?? 0) > units) next.imei_numbers = next.imei_numbers!.slice(0, units);
         }
         const received = num(next.received_qty);
-        // Accepted can never exceed what arrived; rejected is the remainder.
-        const accepted = Math.min(num(next.accepted_qty), received);
+        // Accepted mirrors received quantity since accepted is not an independent input field.
+        const accepted = "accepted_qty" in patch && patch.accepted_qty !== undefined
+          ? Math.min(num(next.accepted_qty), received)
+          : received;
         return { ...next, accepted_qty: accepted, rejected_qty: Math.max(received - accepted, 0) };
       });
       return { ...f, items };
@@ -691,9 +693,9 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     return {
       lines: rows.length,
       received: rows.reduce((s, l) => s + num(l.received_qty), 0),
-      accepted: rows.reduce((s, l) => s + num(l.accepted_qty), 0),
+      accepted: rows.reduce((s, l) => s + (l.accepted_qty != null && l.accepted_qty !== ("" as any) ? num(l.accepted_qty) : num(l.received_qty)), 0),
       rejected: rows.reduce((s, l) => s + num(l.rejected_qty), 0),
-      value: rows.reduce((s, l) => s + num(l.accepted_qty) * num(l.rate), 0),
+      value: rows.reduce((s, l) => s + (l.accepted_qty != null && l.accepted_qty !== ("" as any) ? num(l.accepted_qty) : num(l.received_qty)) * num(l.rate), 0),
     };
   }, [form.items]);
 
@@ -769,15 +771,12 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
   /** The lines the storekeeper has not counted yet — read by the Save check and by
    *  the red border on the box, so both say the same thing about the same cell. */
   const uncountedLines = useMemo(() => form.items.reduce<
-    { index: number; field: "received" | "accepted"; name: string }[]
+    { index: number; field: "received"; name: string }[]
   >((acc, line, index) => {
     const name = savedLine(index)?.item_name ?? line.item_name ?? "";
     if (blankQty(line.received_qty)) acc.push({ index, field: "received", name });
-    // Only a GRN takes an accepted figure. On a gate entry the column is disabled and
-    // mirrors what was received, so it can never be the box that was missed.
-    else if (isGrn && blankQty(line.accepted_qty)) acc.push({ index, field: "accepted", name });
     return acc;
-  }, []), [form.items, isGrn, doc]);
+  }, []), [form.items, savedLine]);
 
   const validateQuantities = () => {
     for (const [index, line] of form.items.entries()) {
@@ -797,10 +796,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     const where = uncountedLines
       .map((l) => `line ${l.index + 1}${l.name ? ` (${l.name})` : ""}`)
       .join(", ");
-    const column = uncountedLines.every((l) => l.field === "accepted")
-      ? "Accepted" : "Received";
     throw new Error(
-      `${column} quantity is blank on ${where}. Enter what came off the vehicle — `
+      `Received quantity is blank on ${where}. Enter what came off the vehicle — `
       + "0 if none of it did.");
   };
 
@@ -1335,24 +1332,6 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       render: (l, i) => <span className="text-xs text-muted">{savedLine(i)?.uom_code ?? l.uom_code ?? "—"}</span>,
     },
     {
-      key: "accepted",
-      header: "Accepted",
-      numeric: true,
-      width: "w-28",
-      render: (l, i) => (
-        <QtyInput
-          ariaLabel={`Accepted quantity, line ${i + 1}`}
-          uom={savedLine(i)?.uom_code ?? l.uom_code}
-          value={l.accepted_qty ?? 0}
-          max={num(l.received_qty)}
-          disabled={locked || !isGrn}
-          invalid={num(l.accepted_qty) > num(l.received_qty)
-            || (touched && isGrn && blankQty(l.accepted_qty))}
-          onChange={(v) => patchLine(i, { accepted_qty: v })}
-        />
-      ),
-    },
-    {
       key: "rejected",
       header: "Rejected",
       numeric: true,
@@ -1844,7 +1823,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           title="Lines"
           hint={
             isGrn
-              ? "Rejected is received minus accepted; short is ordered minus received."
+              ? "Short is ordered minus received."
               : "Record the physical item count at the gate. Capture any serials you can read — the rest, plus batch and QC, are completed in the GRN."
           }
         >
@@ -1877,17 +1856,16 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
                 ? "Pick a purchase order above, or add lines by hand."
                 : "Add the items received at the gate."}
             footer={
-              /* Only what the columns above show: totalling accepted, rejected and
-               * value at the gate would report figures nobody entered there. */
               <div className="flex flex-wrap justify-end gap-x-6 gap-y-1 text-sm">
                 <span className="text-muted">{totals.lines} lines</span>
                 <span className="text-ink">Received <b className="tabular">{fmtQty(totals.received)}</b></span>
                 {isGrn && (
                   <>
-                    <span className="text-ok">Accepted <b className="tabular">{fmtQty(totals.accepted)}</b></span>
-                    <span className={totals.rejected > 0 ? "text-bad" : "text-muted"}>
-                      Rejected <b className="tabular">{fmtQty(totals.rejected)}</b>
-                    </span>
+                    {totals.rejected > 0 && (
+                      <span className="text-bad">
+                        Rejected <b className="tabular">{fmtQty(totals.rejected)}</b>
+                      </span>
+                    )}
                     <span className="text-ink">Value <b className="tabular">₹ {fmtMoney(totals.value)}</b></span>
                   </>
                 )}
