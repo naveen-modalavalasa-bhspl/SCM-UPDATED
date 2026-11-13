@@ -8,7 +8,7 @@ import {
   SearchCheck, Send, Store,
   Settings, Shield, ShoppingCart, SlidersHorizontal, Sparkles, Split, TrendingUp,
   Truck, Undo2, UserCog, Users, Warehouse, type LucideIcon,
-  PieChart, GitCompareArrows
+  PieChart, GitCompareArrows, CalendarCheck, Radio
 } from "lucide-react";
 
 /**
@@ -101,6 +101,8 @@ const MAP: Record<string, LucideIcon> = {
   store: Store,
   "pie-chart": PieChart,
   "git-compare-arrows": GitCompareArrows,
+  "calendar-check": CalendarCheck,
+  radio: Radio,
 };
 
 /** Names already reported, so one missing glyph does not log on every render. */

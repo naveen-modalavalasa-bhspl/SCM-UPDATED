@@ -17,7 +17,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "e1f2a3b4c5d7"
-down_revision: Union[str, Sequence[str], None] = "fb5af1a673a8"
+down_revision: Union[str, Sequence[str], None] = "f5b9d1e3a7c4"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
@@ -27,7 +27,18 @@ def _has_table(table: str) -> bool:
     return table in inspector.get_table_names()
 
 
+def _has_column(table: str, column: str) -> bool:
+    inspector = sa.inspect(op.get_bind())
+    if table not in inspector.get_table_names():
+        return False
+    columns = [c["name"] for c in inspector.get_columns(table)]
+    return column in columns
+
+
 def upgrade() -> None:
+    if not _has_column("whs_inspection_items", "rejected_codes"):
+        op.add_column("whs_inspection_items", sa.Column("rejected_codes", sa.JSON, nullable=True))
+
     if _has_table("whs_rejection_outcomes"):
         # Already created by bootstrap — leave it alone.
         return
@@ -70,6 +81,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if _has_column("whs_inspection_items", "rejected_codes"):
+        op.drop_column("whs_inspection_items", "rejected_codes")
     if not _has_table("whs_rejection_outcomes"):
         return
     op.drop_index("ix_whs_rejection_outcomes_outcome", table_name="whs_rejection_outcomes")
