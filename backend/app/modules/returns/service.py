@@ -1028,6 +1028,7 @@ async def _out(db: AsyncSession, doc: StockTransferOrder, user=None,
     reason = payload.get("reason")
     lines = list(doc.items or [])
     reason_rows = _reasons_of(payload, _total_qty(lines))
+    item_snap = {int(line.item_id): (line.item_code, line.item_name) for line in lines}
     phase = _phase(doc)
     pending = doc.status == ReturnStatus.PENDING_APPROVAL.value
     # FIX 2026-09-10: a signature can still be owed on a return that is no longer
@@ -1159,11 +1160,14 @@ async def _out(db: AsyncSession, doc: StockTransferOrder, user=None,
         "intent": _intent(doc),
         "intent_label": INTENT_LABELS.get(_intent(doc), _intent(doc)),
         "reason": reason,
-        "reason_label": (", ".join(REASON_LABELS.get(row["reason"], row["reason"])
-                                   for row in reason_rows) or None),
+        "reason_label": (", ".join(dict.fromkeys(
+            REASON_LABELS.get(row["reason"], row["reason"]) for row in reason_rows)) or None),
         "reasons": [{"reason": row["reason"],
                      "reason_label": REASON_LABELS.get(row["reason"], row["reason"]),
-                     "quantity": row["quantity"], "note": row.get("note")}
+                     "quantity": row["quantity"], "note": row.get("note"),
+                     "item_id": row.get("item_id"),
+                     "item_code": item_snap.get(row.get("item_id"), (None, None))[0],
+                     "item_name": item_snap.get(row.get("item_id"), (None, None))[1]}
                     for row in reason_rows],
         "reason_note": payload.get("note"),
         # The request this return answers. None on a return raised on its own, which is
@@ -1876,10 +1880,28 @@ def _total_qty(lines) -> Decimal:
 
 
 def _reason_rows(data, total: Decimal) -> list[dict]:
-    """The reasons a write names, as stored: `[{reason, quantity, note}]`.
+    """The reasons a write names, as stored: `[{reason, quantity, note, item_id?}]`.
 
-    `reasons` wins; the single `reason` is shorthand for "all of it, for this reason", so
-    a client written before reason rows existed keeps working unchanged."""
+    Per ITEM when any line names its own (SCM_0129): each row then carries its
+    `item_id`. Otherwise `reasons` for the whole return, and the single `reason` is
+    shorthand for "all of it, for this reason", so a client written before reason rows
+    existed keeps working unchanged."""
+    if any(getattr(line, "reasons", None) for line in (getattr(data, "items", None) or [])):
+        # Two lines of one item (two brands of it) state their reasons apart on screen
+        # and are stored as one set per item: a reason is once per item, its units added.
+        merged: dict[tuple[int, str], dict] = {}
+        for line in data.items:
+            for row in line.reasons or []:
+                key = (int(line.item_id), row.reason.value)
+                if key in merged:
+                    merged[key]["quantity"] += float(row.quantity)
+                    if row.note and row.note not in (merged[key]["note"] or ""):
+                        merged[key]["note"] = "; ".join(
+                            n for n in (merged[key]["note"], row.note) if n)
+                else:
+                    merged[key] = {"reason": row.reason.value, "quantity": float(row.quantity),
+                                   "note": row.note, "item_id": int(line.item_id)}
+        return list(merged.values())
     if getattr(data, "reasons", None):
         return [{"reason": row.reason.value, "quantity": float(row.quantity),
                  "note": row.note} for row in data.reasons]
@@ -1890,10 +1912,24 @@ def _reason_rows(data, total: Decimal) -> list[dict]:
 
 
 def _main_reason(rows: list[dict]) -> str | None:
-    """The reason with the most units - what a single-reason reader should see."""
+    """The reason with the most units - what a single-reason reader should see. Summed
+    over items first: "Damaged 3 + 3" on two items outweighs "Expired 4" on one."""
     if not rows:
         return None
-    return max(rows, key=lambda row: float(row["quantity"]))["reason"]
+    totals: dict[str, float] = {}
+    for row in rows:
+        totals[row["reason"]] = totals.get(row["reason"], 0.0) + float(row["quantity"])
+    return max(totals, key=totals.get)
+
+
+def _line_quantities(lines) -> dict[int, Decimal]:
+    """{item_id: quantity going back} over write lines or stored lines — what each
+    item's own reasons must add up to (SCM_0129)."""
+    out: dict[int, Decimal] = {}
+    for line in lines or []:
+        qty = _d(line.quantity if hasattr(line, "quantity") else line.requested_qty)
+        out[int(line.item_id)] = out.get(int(line.item_id), ZERO) + qty
+    return out
 
 
 def _reasons_of(payload: dict, total: Decimal) -> list[dict]:
@@ -1909,7 +1945,7 @@ def _reasons_of(payload: dict, total: Decimal) -> list[dict]:
 
 
 def _assert_reasons(rows: list[dict], total: Decimal, *, shorthand_note: str | None = None,
-                    allow_blank: bool = False) -> None:
+                    allow_blank: bool = False, lines=None) -> None:
     """A return says WHY, and the reasons account for every unit on it.
 
     "Other" has to say what it means: every other reason describes itself, so the note
@@ -1922,6 +1958,9 @@ def _assert_reasons(rows: list[dict], total: Decimal, *, shorthand_note: str | N
         if allow_blank:
             return
         raise ValidationError("Say why this is being returned")
+    if any(row.get("item_id") for row in rows):
+        _assert_item_reasons(rows, lines, allow_blank=allow_blank)
+        return
     seen: set[str] = set()
     for row in rows:
         if row["reason"] in seen:
@@ -1940,6 +1979,44 @@ def _assert_reasons(rows: list[dict], total: Decimal, *, shorthand_note: str | N
         raise ValidationError(
             f"The reasons add up to {given:g} but {total:g} is being returned. Give every "
             "unit a reason.")
+
+
+def _assert_item_reasons(rows: list[dict], lines, *, allow_blank: bool = False) -> None:
+    """Reasons given per ITEM (SCM_0129): every item says why, each reason once per
+    item, "Others" says what it means, and each item's rows add up to what of it is
+    going back — so nobody can tell which item was damaged and which expired."""
+    quantities = _line_quantities(lines)
+    names = {int(line.item_id): (getattr(line, "item_code", None) or f"item {line.item_id}")
+             for line in lines or []}
+    by_item: dict[int, list[dict]] = {}
+    for row in rows:
+        if not row.get("item_id"):
+            raise ValidationError("Give the reasons item by item, or for the whole return "
+                                  "— not both")
+        by_item.setdefault(int(row["item_id"]), []).append(row)
+    for item_id, item_rows in by_item.items():
+        if item_id not in quantities:
+            raise ValidationError(f"A reason names {names.get(item_id, f'item {item_id}')}, "
+                                  "which is not on this return")
+        label = names.get(item_id, f"item {item_id}")
+        seen: set[str] = set()
+        for row in item_rows:
+            if row["reason"] in seen:
+                raise ValidationError(
+                    f"{label}: {REASON_LABELS.get(row['reason'], row['reason'])} is listed "
+                    "twice - put its quantity on one row")
+            seen.add(row["reason"])
+            if row["reason"] == ReturnReason.OTHER.value and not (row.get("note") or "").strip():
+                raise ValidationError(f"{label}: say what the reason is — 'Others' on its "
+                                      "own tells the decision desk nothing")
+    if allow_blank:
+        return
+    for item_id, qty in quantities.items():
+        given = sum((_d(row["quantity"]) for row in by_item.get(item_id, [])), ZERO)
+        if abs(given - qty) > Decimal("0.0005"):
+            raise ValidationError(
+                f"{names.get(item_id, f'item {item_id}')}: its reasons add up to {given:g} "
+                f"but {qty:g} is going back. Give every unit of it a reason.")
 
 
 def _indent_payload(indent: Indent | None) -> dict | None:
@@ -1965,7 +2042,7 @@ async def create_return(db: AsyncSession, data, user, *, commit: bool = True,
     total = _total_qty(data.items)
     reason_rows = _reason_rows(data, total)
     _assert_reasons(reason_rows, total, shorthand_note=data.reason_note,
-                    allow_blank=allow_blank_reason)
+                    allow_blank=allow_blank_reason, lines=data.items)
     indent = await _resolve_indent(db, getattr(data, "indent_id", None), user)
     context = await _raiser_context(db, user)
     source_id = context["from_warehouse_id"]
@@ -2025,7 +2102,7 @@ async def create_return(db: AsyncSession, data, user, *, commit: bool = True,
 async def update_return(db: AsyncSession, return_id: int, data, user) -> dict:
     total = _total_qty(data.items)
     reason_rows = _reason_rows(data, total)
-    _assert_reasons(reason_rows, total, shorthand_note=data.reason_note)
+    _assert_reasons(reason_rows, total, shorthand_note=data.reason_note, lines=data.items)
     indent = await _resolve_indent(db, getattr(data, "indent_id", None), user)
     doc = await _load(db, return_id)
     _assert_raiser(doc, user)
@@ -2086,7 +2163,7 @@ async def submit_return(db: AsyncSession, return_id: int, user) -> dict:
     # A return raised from an acknowledgement is a draft with no reasons yet; this is
     # where it is made to say why, for every unit, before anybody is asked to approve it.
     _assert_reasons(_reasons_of(_unpack(doc.remarks), _total_qty(lines)),
-                    _total_qty(lines))
+                    _total_qty(lines), lines=lines)
     # The photograph is the evidence: an approver is being asked to accept that material
     # is damaged, expired or wrong, and a return with no picture of it cannot be judged.
     # Checked before the reservation so a rejected submit leaves no hold behind.

@@ -601,6 +601,10 @@ export interface ReceivingConfig {
 }
 
 export interface ReturnLineWrite extends CombinationValue {
+  /** Why this item is going back (screen only; sent as `reasons`). SCM_0129. */
+  reasonRows?: import("./reasonRows").ReasonRow[];
+  /** What is sent: this item's reasons, adding up to its quantity. */
+  reasons?: { reason: string; quantity: string; note: string | null }[];
   /** Typed in an Issue container (screen only): which level, how many. */
   packLevel?: number;
   packCount?: number | "";
@@ -678,6 +682,11 @@ export interface ReturnReasonRow {
   reason_label?: string | null;
   quantity: string | number;
   note?: string | null;
+  /** The item this reason is for (SCM_0129). Null on a return whose reasons were given
+   *  for the whole return, as every return before 2026-11-13 was. */
+  item_id?: number | null;
+  item_code?: string | null;
+  item_name?: string | null;
 }
 
 export interface ReturnWrite {

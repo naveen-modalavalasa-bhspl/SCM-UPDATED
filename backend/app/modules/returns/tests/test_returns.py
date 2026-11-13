@@ -1377,3 +1377,68 @@ class TestTheTrailSaysWhereItStopped:
         note = service._cap_note(rows)
         assert "MATERIAL_ISSUE label" in note
         assert "INDENT label" not in note
+
+
+class TestReasonsPerItem:
+    """SCM_0129: each item says why it is going back, and its rows add up to its quantity."""
+
+    def _write(self, *lines):
+        return ReturnWrite(items=[
+            ReturnLineIn(item_id=item_id, quantity=str(qty),
+                         reasons=[{"reason": r.value, "quantity": str(q), "note": note}
+                                  for r, q, note in rows])
+            for item_id, qty, rows in lines])
+
+    def _check(self, write):
+        total = service._total_qty(write.items)
+        service._assert_reasons(service._reason_rows(write, total), total, lines=write.items)
+
+    def test_each_item_covered_by_its_own_reasons_passes(self):
+        self._check(self._write(
+            (1, 5, [(ReturnReason.DAMAGED, 3, None), (ReturnReason.EXPIRED, 2, None)]),
+            (2, 4, [(ReturnReason.DAMAGED, 4, None)])))
+
+    def test_an_item_whose_reasons_fall_short_is_refused_and_named(self):
+        write = self._write((1, 5, [(ReturnReason.DAMAGED, 3, None)]),
+                            (2, 4, [(ReturnReason.DAMAGED, 4, None)]))
+        with pytest.raises(ValidationError, match="add up to 3"):
+            self._check(write)
+
+    def test_an_item_with_no_reason_is_refused_when_another_has_one(self):
+        write = self._write((1, 5, [(ReturnReason.DAMAGED, 5, None)]), (2, 4, []))
+        with pytest.raises(ValidationError):
+            self._check(write)
+
+    def test_the_same_reason_on_two_items_is_fine(self):
+        rows = service._reason_rows(self._write(
+            (1, 2, [(ReturnReason.EXPIRED, 2, None)]),
+            (2, 3, [(ReturnReason.EXPIRED, 3, None)])), Decimal("5"))
+        assert {(r["item_id"], r["quantity"]) for r in rows} == {(1, 2.0), (2, 3.0)}
+
+    def test_other_on_an_item_still_needs_a_note(self):
+        with pytest.raises(ValidationError):
+            self._check(self._write((1, 2, [(ReturnReason.OTHER, 2, None)])))
+        self._check(self._write((1, 2, [(ReturnReason.OTHER, 2, "rats")])))
+
+    def test_two_lines_of_one_item_merge_their_reasons(self):
+        write = self._write((1, 2, [(ReturnReason.DAMAGED, 2, None)]),
+                            (1, 3, [(ReturnReason.DAMAGED, 3, None)]))
+        rows = service._reason_rows(write, Decimal("5"))
+        assert rows == [{"reason": "DAMAGED", "quantity": 5.0, "note": None, "item_id": 1}]
+        self._check(write)
+
+    def test_the_main_reason_adds_units_across_items(self):
+        rows = [{"reason": "DAMAGED", "quantity": 3, "item_id": 1},
+                {"reason": "DAMAGED", "quantity": 3, "item_id": 2},
+                {"reason": "EXPIRED", "quantity": 4, "item_id": 3}]
+        assert service._main_reason(rows) == "DAMAGED"
+
+    def test_stored_per_item_rows_validate_against_stored_lines(self):
+        class Line:
+            def __init__(self, item_id, qty):
+                self.item_id, self.requested_qty, self.item_code = item_id, qty, f"IT{item_id}"
+        lines = [Line(1, Decimal("5"))]
+        rows = [{"reason": "DAMAGED", "quantity": 5.0, "note": None, "item_id": 1}]
+        service._assert_reasons(rows, Decimal("5"), lines=lines)
+        with pytest.raises(ValidationError, match="IT1"):
+            service._assert_reasons([{**rows[0], "quantity": 4.0}], Decimal("5"), lines=lines)
