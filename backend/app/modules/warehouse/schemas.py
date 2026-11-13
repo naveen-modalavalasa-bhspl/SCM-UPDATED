@@ -1069,6 +1069,10 @@ class InspectionItemWrite(BaseModel):
     batch_no: str | None = None
     inspected_qty: Decimal = Decimal("0")
     accepted_qty: Decimal = Decimal("0")
+    #: How much was rejected (2026-11-13, SCM_0124). Sent, it lets a line be saved
+    #: still being judged — accepted + rejected below inspected stays Pending
+    #: (`service.qc_split`). Left out, the rest of the line is rejected, as before.
+    rejected_qty: Decimal = Decimal("0")
     parameters: Annotated[list[InspectionParameter], ConfigEntries] | None = None
     result: InspectionResult = InspectionResult.PENDING
     defect_type: str | None = None
@@ -1169,6 +1173,8 @@ class OutboundInspectionItemWrite(BaseModel):
     batch_no: str | None = None
     inspected_qty: Decimal = Decimal("0")
     accepted_qty: Decimal = Decimal("0")
+    #: See `InspectionItemWrite.rejected_qty` (SCM_0124).
+    rejected_qty: Decimal = Decimal("0")
     parameters: Annotated[list[InspectionParameter], ConfigEntries] | None = None
     result: InspectionResult = InspectionResult.PENDING
     defect_type: str | None = None

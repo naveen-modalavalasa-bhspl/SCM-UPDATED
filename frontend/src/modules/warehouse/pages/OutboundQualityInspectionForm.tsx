@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
-import { ArrowLeft, CheckCircle2, Info, Plus, ScanLine, Trash2 } from "lucide-react";
+import { ArrowLeft, CheckCheck, CheckCircle2, Info, Plus, ScanLine, Trash2 } from "lucide-react";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
 import { Lookup } from "../components/Lookup";
@@ -29,7 +29,8 @@ import { usePointLabel } from "../usePointLabel";
 import { TONE_APPROVE, TONE_REJECT } from "@/shared/components/tones";
 import { CombinationTag } from "@/shared/combination";
 import { useAuth } from "@/shared/auth/AuthContext";
-import { qcRate } from "../qcSummary";
+import { applyQcEdit, passIfUntouched, qcLineResult, qcRate } from "../qcSummary";
+import { QcResultBadge } from "../components/QcVerdict";
 
 /**
  * Inspect a receipt line by line.
@@ -43,20 +44,6 @@ import { qcRate } from "../qcSummary";
  * (`parameters` JSON) records what was actually measured, because "failed" without a
  * reading is not something a vendor can be held to.
  */
-
-const RESULTS = [
-  { value: "PENDING", label: "Pending" },
-  { value: "PASSED", label: "Passed" },
-  { value: "FAILED", label: "Failed" },
-  { value: "PARTIAL", label: "Partial" },
-];
-
-const deriveResult = (inspected: number, accepted: number): InspectionItemWrite["result"] => {
-  if (inspected <= 0) return "PENDING";
-  if (accepted >= inspected) return "PASSED";
-  if (accepted <= 0) return "FAILED";
-  return "PARTIAL";
-};
 
 const parseCodes = (arr: any): string[] | null => {
   if (!arr) return null;
@@ -211,7 +198,7 @@ export default function OutboundQualityInspectionForm({
   const deliveryMeta = useMemo(() => {
     const byLine = new Map<number, {
       is_serial_tracked?: boolean, serials: string[], boxes: Map<string, number> | null,
-      packName: string, info: Map<string, IssueBox>,
+      packName: string, info: Map<string, IssueBox>, issued: number,
     }>();
     for (const line of delivery?.items ?? []) {
       byLine.set(line.id, {
@@ -223,6 +210,9 @@ export default function OutboundQualityInspectionForm({
         packName: (line.box_codes?.[0]?.pack_name ?? "box").toLowerCase(),
         // Where each box sits and the strips inside it (2026-10-28).
         info: new Map((line.box_codes ?? []).map((b) => [b.code, b])),
+        // What the issue line sent: the cap on Inspected, and the figure shown beside
+        // a line that starts un-inspected at 0 (SCM_0124).
+        issued: num(line.issued_qty),
       });
     }
     return byLine;
@@ -321,15 +311,17 @@ export default function OutboundQualityInspectionForm({
           item_code: l.item_code,
           item_name: l.item_name,
           batch_no: l.batch_no,
-          inspected_qty: num(l.issued_qty),
-          accepted_qty: num(l.issued_qty),
+          // SCM_0124: UN-INSPECTED. Nothing is counted or accepted until the inspector
+          // says so; "Pass all un-inspected" does it in one press for a clean load.
+          inspected_qty: 0,
+          accepted_qty: 0,
           rejected_qty: 0,
           parameters: [],
-          result: "PASSED" as const,
+          result: "PENDING" as const,
           defect_type: null,
           rejection_reason: null,
           remarks: null,
-          serial_numbers: parseCodes(l.unit_keys?.length ? l.unit_keys : l.serial_numbers),
+          serial_numbers: null,
         })),
       }));
     },
@@ -356,31 +348,40 @@ export default function OutboundQualityInspectionForm({
     ? unitsStillToReject(resolvedSerials(index).length, num(form.items[index]?.accepted_qty))
     : 0;
 
+  /** What the issue line sent — Inspected never goes past it. */
+  const issuedOf = (line: InspectionItemWrite) =>
+    deliveryMeta.get(line.issue_item_id ?? 0)?.issued;
+
   const patchLine = (index: number, patch: Partial<InspectionItemWrite>) =>
     setForm((f) => ({
       ...f,
       items: f.items.map((l, i) => {
         if (i !== index) return l;
         const next = { ...l, ...patch };
-        const inspected = num(next.inspected_qty);
-        
-        let accepted = 0;
-        let rejected = 0;
-        
-        if (patch.rejected_qty !== undefined) {
-          rejected = Math.min(Math.max(num(patch.rejected_qty), 0), inspected);
-          accepted = Math.max(inspected - rejected, 0);
-        } else {
-          accepted = Math.min(Math.max(num(next.accepted_qty), 0), inspected);
-          rejected = Math.max(inspected - accepted, 0);
-        }
+        // A package line is inspected WHOLE — every package sent is looked at — so its
+        // Inspected is what was sent the moment anything is recorded on it.
+        const wholePackages = !!(l.issue_item_id && deliveryMeta.get(l.issue_item_id)?.boxes);
+        // SCM_0124: one rule for every edit (`applyQcEdit`) — typing Inspected alone
+        // never rejects anything, and the line stays Pending until it is accounted for.
+        const { inspected, accepted, rejected } = applyQcEdit(
+          { inspected: wholePackages ? issuedOf(l) ?? num(l.inspected_qty) : num(l.inspected_qty),
+            accepted: num(l.accepted_qty), rejected: num(l.rejected_qty) },
+          {
+            ...(patch.inspected_qty !== undefined ? { inspected: num(patch.inspected_qty) } : {}),
+            ...(patch.accepted_qty !== undefined ? { accepted: num(patch.accepted_qty) } : {}),
+            ...(patch.rejected_qty !== undefined ? { rejected: num(patch.rejected_qty) } : {}),
+          },
+          issuedOf(l),
+        );
 
         return {
           ...next,
+          inspected_qty: inspected,
           accepted_qty: accepted,
           rejected_qty: rejected,
-          // An explicitly chosen result wins; otherwise it follows the split.
-          result: patch.result ?? deriveResult(inspected, accepted),
+          // SCM_0124: the result follows the numbers — the server's rule — and a line
+          // not yet accounted for stays Pending.
+          result: qcLineResult(inspected, accepted, rejected),
           serial_numbers: patch.serial_numbers !== undefined
             ? patch.serial_numbers
             : keepUnitsInStep(l, accepted),
@@ -394,9 +395,29 @@ export default function OutboundQualityInspectionForm({
    *  the confirm modal announced "0 pass, 0 fail" over a full sheet of accepted lines.
    *  Count what the save is about to write, by the same rule. */
   const resultOf = (line: InspectionItemWrite) =>
-    line.result && line.result !== "PENDING"
-      ? line.result
-      : deriveResult(num(line.inspected_qty), num(line.accepted_qty));
+    qcLineResult(num(line.inspected_qty), num(line.accepted_qty), num(line.rejected_qty));
+
+  /** SCM_0124: a clean load is still one press, but a deliberate one — every line
+   *  nobody has touched becomes fully inspected and accepted; lines being worked stay. */
+  const splitOf = (line: InspectionItemWrite) => ({
+    inspected: num(line.inspected_qty), accepted: num(line.accepted_qty),
+    rejected: num(line.rejected_qty),
+  });
+  const untouchedLines = form.items.filter(
+    (line) => passIfUntouched(splitOf(line), issuedOf(line) ?? 0) !== null);
+  const passAllUntouched = () =>
+    setForm((f) => ({
+      ...f,
+      items: f.items.map((line) => {
+        const passed = passIfUntouched(splitOf(line), issuedOf(line) ?? 0);
+        return passed
+          ? { ...line, inspected_qty: passed.inspected, accepted_qty: passed.accepted,
+              rejected_qty: 0, result: "PASSED" as const,
+              // Every unit / package kept: left unnamed, the line resolves to all.
+              serial_numbers: null, pack_rejections: null }
+          : line;
+      }),
+    }));
 
   const totals = useMemo(
     () => ({
@@ -555,6 +576,20 @@ export default function OutboundQualityInspectionForm({
       },
     },
     {
+      key: "issued",
+      header: "Issued",
+      numeric: true,
+      width: "w-24",
+      // SCM_0124: what went out, beside a line that starts un-inspected — so "0
+      // inspected" reads as "not checked yet", never as nothing sent.
+      render: (l, i) => (
+        <span className="tabular text-sm text-body">
+          {fmtQty(issuedOf(l) ?? 0)}
+          <span className="ml-1 text-[11px] text-muted">{savedLine(i)?.uom_code ?? ""}</span>
+        </span>
+      ),
+    },
+    {
       key: "inspected",
       header: "Inspected",
       numeric: true,
@@ -635,16 +670,10 @@ export default function OutboundQualityInspectionForm({
     {
       key: "result",
       header: "Result",
-      width: "w-36",
-      render: (l, i) => (
-        <Select
-          value={l.result}
-          onChange={(v) => patchLine(i, { result: v as InspectionItemWrite["result"] })}
-          options={RESULTS}
-          isDisabled={locked}
-          ariaLabel={`Result, line ${i + 1}`}
-        />
-      ),
+      width: "w-32",
+      // Shown, not picked (SCM_0124): it follows the numbers, as on inward QC — a
+      // dropdown here let a line read "Pass" over goods nobody had counted.
+      render: (l) => <QcResultBadge result={resultOf(l)} />,
     },
     {
       key: "defect",
@@ -875,7 +904,16 @@ export default function OutboundQualityInspectionForm({
         );
       })()}
 
-      <Section title="Lines" hint="Every unit is accepted by default. Enter a rejected quantity, then tick only the rejected units.">
+      <Section
+        title="Lines"
+        hint="Lines start un-inspected. Enter what you checked, then what you accept or reject — tick the rejected units where asked."
+        actions={!locked && untouchedLines.length > 0 ? (
+          <Button variant="soft" onClick={passAllUntouched}>
+            <CheckCheck aria-hidden className="h-4 w-4" />
+            Pass all un-inspected ({untouchedLines.length})
+          </Button>
+        ) : undefined}
+      >
         <LinesEditor
           rows={form.items}
           columns={columns}
