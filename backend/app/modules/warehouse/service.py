@@ -4455,7 +4455,13 @@ async def _raise_inspection_for(
         vendor_id=receipt.vendor_id, vendor_name=receipt.vendor_name,
         inspection_type=InspectionType.INCOMING.value,
         status=InspectionStatus.DRAFT.value,
-        inspector_id=getattr(user, "id", None), inspector_name=_name(user),
+        # NOBODY has inspected yet. This draft is raised by whoever SUBMITTED the GRN
+        # — the store keeper at the gate — and stamping them here put the GRN's author
+        # on the sheet as its inspector, which is the name the QC screen then showed
+        # and the name that reached the report. The inspector is recorded by
+        # `update_inspection` (the person working the sheet) and again by
+        # `complete_inspection` (the person submitting it).
+        inspector_id=None, inspector_name=None,
     )
     values, _args = _carried_scope(receipt)
     if values is not None:
@@ -4769,9 +4775,14 @@ async def update_inspection(db: AsyncSession, inspection_id: int, data: s.Inspec
            {InspectionStatus.DRAFT.value, InspectionStatus.IN_PROGRESS.value},
            "edit", "inspection")
 
-    before = {"status": inspection.status, "failed_items": inspection.failed_items}
+    before = {"status": inspection.status, "failed_items": inspection.failed_items,
+              "inspector_name": inspection.inspector_name}
     inspection.inspection_date = data.inspection_date
-    # The inspector recorded at creation stands (SCM_0097): an edit never re-points it.
+    # The inspector is the person doing the check, not the person who raised the GRN
+    # this sheet hangs off (SCM_0097 as amended): whoever saves the sheet is recorded,
+    # and `complete_inspection` records the person who actually submits it.
+    inspection.inspector_id = getattr(user, "id", None)
+    inspection.inspector_name = _name(user)
     inspection.remarks = data.remarks
     inspection.status = InspectionStatus.IN_PROGRESS.value
 
@@ -4889,6 +4900,11 @@ async def complete_inspection(db: AsyncSession, inspection_id: int, user) -> m.I
                 await _sync_receipt_source(db, receipt)
 
     inspection.status = InspectionStatus.COMPLETED.value
+    # The inspector of record is whoever SIGNS the sheet. A draft raised off a GRN
+    # carries no inspector; the last person to work it — the one pressing Complete —
+    # is the one whose name belongs on the printed report.
+    inspection.inspector_id = getattr(user, "id", None)
+    inspection.inspector_name = _name(user)
 
     await write_audit(db, entity="inb_inspections", entity_id=inspection.id,
                       entity_no=inspection.inspection_no, action=AuditAction.UPDATE, actor=user,
@@ -13872,8 +13888,12 @@ async def _raise_outbound_inspection_for(
         warehouse_id=issue.warehouse_id,
         warehouse_name=issue.warehouse_name,
         status=InspectionStatus.DRAFT.value,
-        inspector_id=getattr(user, "id", None),
-        inspector_name=_name(user),
+        # As `_raise_inspection_for` says: this draft is raised by whoever POSTED the
+        # material issue, not by the inspector. Left empty until somebody works the
+        # sheet (`update_outbound_inspection`) or submits it
+        # (`complete_outbound_inspection`).
+        inspector_id=None,
+        inspector_name=None,
     )
     db.add(inspection)
     await db.flush()
@@ -29489,14 +29509,15 @@ async def update_outbound_inspection(db: AsyncSession, inspection_id: int, data:
            {InspectionStatus.DRAFT.value, InspectionStatus.IN_PROGRESS.value},
            "edit", "outbound inspection")
 
-    before = {"status": inspection.status, "failed_items": inspection.failed_items}
+    before = {"status": inspection.status, "failed_items": inspection.failed_items,
+              "inspector_name": inspection.inspector_name}
     inspection.inspection_date = data.inspection_date
-    # The inspector recorded at creation stands (SCM_0160, as SCM_0097 inward): an
-    # edit never re-points it. Only a sheet that somehow carries nobody is given the
-    # person editing it, so a signed check is never anonymous.
-    if inspection.inspector_id is None:
-        inspection.inspector_id = getattr(user, "id", None)
-        inspection.inspector_name = _name(user)
+    # SCM_0160, as SCM_0097 inward, as amended: the inspector is the person doing the
+    # check. The draft this sheet was raised from carries the ISSUE's poster, not an
+    # inspector, so whoever saves the sheet is recorded here, and
+    # `complete_outbound_inspection` records the person who submits it.
+    inspection.inspector_id = getattr(user, "id", None)
+    inspection.inspector_name = _name(user)
     inspection.remarks = data.remarks
     inspection.status = InspectionStatus.IN_PROGRESS.value
 
@@ -29625,6 +29646,13 @@ async def complete_outbound_inspection(db: AsyncSession, inspection_id: int, use
             )
 
     before = inspection.status
+    # The inspector of record is the person SIGNING the check, exactly as inward
+    # (`complete_inspection`): a sheet raised off a material issue carries the issue's
+    # poster, and the name on the printed report has to be the one that inspected it.
+    # Stamped before the approval branch, so a sheet sent for a signature keeps its
+    # inspector when an approver later applies the verdict.
+    inspection.inspector_id = getattr(user, "id", None)
+    inspection.inspector_name = _name(user)
     if await _outbound_inspection_approval_pending(db, inspection, user):
         # Now with its approvers. The issue keeps its PENDING qc_status until they sign.
         await write_audit(db, entity="whs_inspections", entity_id=inspection.id,

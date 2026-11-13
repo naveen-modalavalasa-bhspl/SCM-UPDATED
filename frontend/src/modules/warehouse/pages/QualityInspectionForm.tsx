@@ -101,10 +101,12 @@ export default function QualityInspectionForm({
 
   /* The inspector is whoever is standing at the bench. Left at "pick one" it was a
    * list of every active employee in HCM with the person actually inspecting somewhere
-   * in it, so a signed inspection could carry anybody's name. Prefilled from the
-   * login and shown read-only (SCM_0097): the server records the signed-in user on
-   * create and keeps that inspector on every edit, so a picker here would only offer
-   * a choice the save ignores. */
+   * in it, so a signed inspection could carry anybody's name. Shown read-only from the
+   * login (SCM_0097): the server records the signed-in user when the sheet is saved
+   * and again when it is submitted, so a picker here would only offer a choice the
+   * save ignores. A draft auto-raised from a GRN carries NO inspector — the store
+   * keeper who submitted the GRN is not the person doing the check — so the field
+   * reads the signed-in user until the sheet is signed, then the recorded name. */
   const { me } = useAuth();
   const prefilledInspector = useRef(false);
   useEffect(() => {
@@ -826,8 +828,11 @@ export default function QualityInspectionForm({
               placeholder="Warehouse"
             />
           </Field>
-          <Field label="Inspector">
-            <Input value={(editing ? doc?.inspector_name : me?.employee?.name) ?? "—"} disabled />
+          <Field
+            label="Inspector"
+            hint={locked ? "Recorded when this check was submitted." : "You — the signed-in user."}
+          >
+            <Input value={(locked ? doc?.inspector_name : me?.employee?.name) ?? "—"} disabled />
           </Field>
         </div>
       </Section>

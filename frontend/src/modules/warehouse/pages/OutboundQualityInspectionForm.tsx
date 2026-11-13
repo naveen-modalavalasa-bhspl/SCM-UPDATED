@@ -874,11 +874,17 @@ export default function OutboundQualityInspectionForm({
           </Field>
           {/* SCM_0160, as SCM_0097 inward: the inspector is whoever is signed in and
             * doing the check. The picker here listed every employee in HCM and a
-            * signed sheet could carry anybody's name; the server now records the
-            * signed-in user on create and keeps them on every edit, so this is shown,
-            * never chosen. */}
-          <Field label="Inspector" hint={editing ? "Recorded when this check was started." : "You — the signed-in user."}>
-            <Input value={(editing ? doc?.inspector_name : me?.employee?.name) ?? "—"} disabled />
+            * signed sheet could carry anybody's name; the server records the
+            * signed-in user when the sheet is saved and again when it is submitted,
+            * so this is shown, never chosen. A draft auto-raised from a material
+            * issue carries NO inspector — the store keeper who posted the issue is
+            * not the person doing the check — so until the sheet is signed the field
+            * reads the signed-in user. */}
+          <Field
+            label="Inspector"
+            hint={locked ? "Recorded when this check was submitted." : "You — the signed-in user."}
+          >
+            <Input value={(locked ? doc?.inspector_name : me?.employee?.name) ?? "—"} disabled />
           </Field>
         </div>
       </Section>
