@@ -715,3 +715,46 @@ async def test_batch_and_expiry_wait_for_the_grn_never_the_gate(
                                json=grn, headers=headers)
     assert refused.status_code == 422
     assert "MED-GEN-0009 is batch tracked" in refused.json()["error"]
+
+
+async def _po_with_dispatch(db, wh, item, *, po_no: str, dispatched: bool):
+    """An order the supplier has accepted, and — if `dispatched` — a note saying so."""
+    from app.modules.procurement.models import DespatchNote, DespatchNoteItem, POItem, PurchaseOrder
+    from app.shared.enums import DespatchNoteStatus, POVendorStatus, POStatus
+    from app.shared.models.master import Vendor
+
+    vendor = Vendor(code=f"V{po_no}", name="Naveen Traders", is_active=True)
+    db.add(vendor)
+    await db.flush()
+    po = PurchaseOrder(po_no=po_no, vendor_id=vendor.id, vendor_name=vendor.name,
+                       status=POStatus.ACCEPTED_BY_SUPPLIER.value, facility_id=wh.id,
+                       vendor_status=POVendorStatus.ACCEPTED.value)
+    db.add(po)
+    await db.flush()
+    line = POItem(po_id=po.id, item_id=item.id, item_code=item.code,
+                  quantity=10, rate=1, amount=10)
+    db.add(line)
+    await db.flush()
+    if dispatched:
+        note = DespatchNote(dn_no=f"DES-{po_no}", po_id=po.id, vendor_id=vendor.id,
+                            vendor_name=vendor.name, status=DespatchNoteStatus.SUBMITTED.value)
+        db.add(note)
+        await db.flush()
+        db.add(DespatchNoteItem(despatch_note_id=note.id, po_item_id=line.id,
+                                item_id=item.id, despatched_qty=10))
+    await db.commit()
+    return po
+
+
+async def test_the_po_dropdown_offers_only_orders_the_vendor_has_dispatched(db):
+    """2026-11-13: an accepted order is a promise. Only a SUBMITTED despatch note says
+    goods are on a vehicle, and nothing can arrive at the gate that nobody has sent."""
+    from app.modules.warehouse import service
+
+    wh, item = await _fixtures(db)
+    accepted = await _po_with_dispatch(db, wh, item, po_no="PO-ACCEPTED", dispatched=False)
+    sent = await _po_with_dispatch(db, wh, item, po_no="PO-SENT", dispatched=True)
+
+    offered = {row["id"] for row in await service.po_options(db, None, warehouse_id=None)}
+    assert sent.id in offered
+    assert accepted.id not in offered

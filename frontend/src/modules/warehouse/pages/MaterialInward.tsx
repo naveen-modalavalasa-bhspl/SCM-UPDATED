@@ -4,7 +4,7 @@ import { StatusPill, type Column } from "@/shared/components";
 import { DocumentList } from "../components/DocumentList";
 import { listReceipts, deleteReceipt, DRAFT_DELETE_PERMISSION } from "../api";
 import { fmtDate, fmtQty } from "../format";
-import type { Receipt } from "../types";
+import type { Page, Receipt } from "../types";
 
 /**
  * Gate entry — the vehicle is at the gate and the goods are not yours yet.
@@ -41,6 +41,28 @@ const STATUSES = [
 
 /** Draft while the row is still typed as a gate entry; done once it became a GRN. */
 const isDraft = (r: Receipt) => r.receipt_type === "GATE_ENTRY";
+
+/**
+ * Only a vehicle that actually arrived belongs on this register (2026-11-13).
+ *
+ * `gate_register` asks the server for every row with a gate entry number, and a direct
+ * receipt — and a GRN raised straight on the goods-receipt screen — save that column as
+ * an EMPTY STRING rather than leaving it null, so `IS NOT NULL` counts them and they
+ * turned up here as blank numbers with no vendor. Nothing without a gate entry number
+ * was ever at the gate, so it is filtered out of the page the screen draws.
+ *
+ * The filtered rows also correct the TOTAL, because the register is a short list and the
+ * server's count included the rows just dropped: without it the pager offered a page 2
+ * of nothing. A page that comes back full may have more behind it, so in that case the
+ * server's own figures are left alone and paging still works.
+ */
+const REGISTER_PAGE = 500; // the list endpoint's own MAX_PAGE_SIZE
+
+const atTheGate = (page: Page<Receipt>): Page<Receipt> => {
+  const items = page.items.filter((r) => !!r.gate_entry_no?.trim());
+  if (items.length >= REGISTER_PAGE) return { ...page, items };
+  return { ...page, items, total: (page.page - 1) * REGISTER_PAGE + items.length };
+};
 
 /** A converted row is a GRN now and prints as one — the sheet heads itself off
  *  `receipt_type`, so pointing a done row at the gate path would print "Gate Entry"
@@ -127,7 +149,12 @@ export default function MaterialInward() {
     <DocumentList<Receipt>
       title="Gate entry"
       queryKey="wh-gate-entries"
-      fetch={(p) => listReceipts({ ...p, gate_register: true })}
+      fetch={(p) =>
+        listReceipts({ ...p, gate_register: true, size: REGISTER_PAGE }).then(atTheGate)
+      }
+      // The register holds a handful of vehicles, so they all belong on one page and
+      // the pager below them is furniture. `<Pagination>` draws only past one page.
+      pageSize={REGISTER_PAGE}
       extraParams={{ gate_register: true }}
       columns={columns}
       keyOf={(r) => r.id}

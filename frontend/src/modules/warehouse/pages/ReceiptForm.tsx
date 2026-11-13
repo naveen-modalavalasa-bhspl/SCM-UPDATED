@@ -50,10 +50,10 @@ import {
  * Asking for any of that at the gate is asking a security guard to do QC, so
  * `GRN_ONLY_LINE_COLUMNS` keeps those columns out of the inward grid entirely.
  *
- * Serials are the exception: they show on both, but only the GRN insists on a full set.
- * At the gate you capture whatever the cartons let you read — none, some, all — and the
- * GRN, which is the same row, opens with those already in the grid and will not save
- * until the rest are scanned.
+ * Serials and IMEIs are GRN-only too (2026-11-13): nobody opens the cartons at the gate,
+ * so the column has no place there and the inward grid does not show it. The GRN, which
+ * is the same row, is the one screen that asks for them and will not save until every
+ * received unit has its code.
  *
  * The purchase order is a typed box on both. It used to be a picker on the GRN that
  * filled the lines from the chosen order, but procurement does not raise orders in this
@@ -104,6 +104,8 @@ const emptyLine = (): ReceiptItemWrite => ({
  *  consignment has been opened and inspected. */
 const GRN_ONLY_LINE_COLUMNS = new Set([
   "rejected", "batch", "manufactured", "expiry", "reason", "bin", "rate",
+  // Serial / IMEI capture happens at the GRN, where the boxes are opened.
+  "codes",
 ]);
 
 const RECEIPT_TYPES = [
@@ -1824,7 +1826,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           hint={
             isGrn
               ? "Short is ordered minus received."
-              : "Record the physical item count at the gate. Capture any serials you can read — the rest, plus batch and QC, are completed in the GRN."
+              : "Record the physical item count at the gate. Serials, batch and QC are completed in the GRN."
           }
         >
           {invalid.lines && <ErrorBanner error="Add at least one line before saving." />}

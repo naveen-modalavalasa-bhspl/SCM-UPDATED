@@ -26774,6 +26774,67 @@ async def po_options(db: AsyncSession, search: str | None = None, warehouse_id: 
     from sqlalchemy import or_
     stmt = stmt.where(PurchaseOrder.vendor_status == POVendorStatus.ACCEPTED.value)
 
+    # And only orders the vendor has actually DISPATCHED (2026-11-13). An accepted
+    # order is a promise; a SUBMITTED despatch note is goods on a vehicle. Nothing can
+    # arrive at the gate that nobody has sent, so an accepted-but-undispatched order
+    # has no business in this dropdown.
+    #
+    # Read off the notes, never off a column: `DespatchStatus` is derived (see
+    # `_despatch_status_by_po`), because a delivery goes out in parts and a running
+    # total on the order would be a second place for the same fact to disagree with
+    # itself. DRAFT and CANCELLED notes are not despatches.
+    from app.modules.procurement.models import DespatchNote, DespatchNoteItem
+    from app.shared.enums import DespatchNoteStatus
+
+    # 1. Any SUBMITTED despatch note that has not yet been inwarded on an active receipt
+    unreceived_notes = (
+        select(DespatchNote.po_id)
+        .outerjoin(
+            m.Receipt,
+            (m.Receipt.despatch_note_id == DespatchNote.id)
+            & (m.Receipt.status != ReceiptStatus.CANCELLED.value)
+        )
+        .where(
+            DespatchNote.status == DespatchNoteStatus.SUBMITTED.value,
+            m.Receipt.id.is_(None)
+        )
+    )
+
+    # 2. Or orders where total quantity dispatched on submitted notes exceeds total quantity received
+    despatch_qty = (
+        select(
+            DespatchNote.po_id.label("po_id"),
+            func.coalesce(func.sum(DespatchNoteItem.despatched_qty), 0).label("qty")
+        )
+        .join(DespatchNoteItem, DespatchNoteItem.despatch_note_id == DespatchNote.id)
+        .where(DespatchNote.status == DespatchNoteStatus.SUBMITTED.value)
+        .group_by(DespatchNote.po_id)
+        .subquery()
+    )
+    received_po_qty = (
+        select(
+            m.Receipt.po_id.label("po_id"),
+            func.coalesce(func.sum(m.ReceiptItem.received_qty), 0).label("qty")
+        )
+        .join(m.ReceiptItem, m.ReceiptItem.receipt_id == m.Receipt.id)
+        .where(
+            m.Receipt.status != ReceiptStatus.CANCELLED.value,
+            m.Receipt.po_id.is_not(None)
+        )
+        .group_by(m.Receipt.po_id)
+        .subquery()
+    )
+    pending_despatched_orders = (
+        select(despatch_qty.c.po_id)
+        .outerjoin(received_po_qty, received_po_qty.c.po_id == despatch_qty.c.po_id)
+        .where(despatch_qty.c.qty > func.coalesce(received_po_qty.c.qty, 0))
+    )
+
+    stmt = stmt.where(or_(
+        PurchaseOrder.id.in_(unreceived_notes),
+        PurchaseOrder.id.in_(pending_despatched_orders)
+    ))
+
     # And only orders with something still to come.
     #
     # The status filter above is not enough on its own, for two reasons. An order
