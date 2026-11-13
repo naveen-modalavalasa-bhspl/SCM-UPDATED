@@ -2845,11 +2845,19 @@ async def create_requisition_from_mr(db: AsyncSession, mr_id: int, user) -> Requ
 
     # The MR names a project but no stocking point; the buyer picks one on the edit.
     _, project_name = await _place_names(db, None, mr.project_id)
+
+    # Carry organisation, department, project and fiscal year from the MR (or its indent)
+    source_scope = None
+    if getattr(mr, "organization_id", None):
+        source_scope = mr
+    elif getattr(mr, "indent_id", None):
+        from app.modules.indents.models import Indent
+        indent = await db.get(Indent, mr.indent_id)
+        if indent and getattr(indent, "organization_id", None):
+            source_scope = indent
+
     req = Requisition(
-        # Nobody is at a form when this runs: it fires as the MR is approved, and an MR
-        # names no organisation. So a holding reference, not a number that would read NA.
-        # The buyer selects the organisation on the draft and the real number comes then.
-        req_no=org_scope.holding_number(mr.id),
+        req_no="",
         req_date=utcnow().date(),
         warehouse_id=None,
         project_id=mr.project_id,
@@ -2863,6 +2871,16 @@ async def create_requisition_from_mr(db: AsyncSession, mr_id: int, user) -> Requ
         created_by_id=user.id,
         created_by_name=user.full_name,
     )
+    if source_scope:
+        org_scope.carry(source_scope, req, project=True)
+        if getattr(source_scope, "fiscal_year", None):
+            req.fiscal_year = source_scope.fiscal_year
+        if not req.project_name and project_name:
+            req.project_name = project_name
+        req.req_no = await next_number(db, DocType.REQUISITION.value, **org_scope.number_args(req))
+    else:
+        req.req_no = org_scope.holding_number(mr.id)
+
     db.add(req)
     await db.flush()
     await _write_requisition_lines(db, req, lines, lock=True)

@@ -1,5 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
-import { Award, Check, Search, Trophy, ChevronDown, ChevronRight, Star } from "lucide-react";
+import {
+  Award,
+  Check,
+  Search,
+  Trophy,
+  ChevronDown,
+  ChevronRight,
+  Star,
+  Zap,
+  RotateCcw,
+  AlertTriangle,
+} from "lucide-react";
 import { Can, Card, ScrollBox, StatusPill } from "@/shared/components";
 import { Button } from "./ActionButton";
 import { fmtDate } from "@/shared/datetime";
@@ -41,20 +52,29 @@ type LineRef = { item_id: number; rfq_item_id: number };
 
 const PINNED = "sticky left-0 z-10 bg-content1 min-w-[220px] w-[220px]";
 
-function Cell({ cell }: { cell: ComparisonCell }) {
+function Cell({ cell, isAllocated = false }: { cell: ComparisonCell; isAllocated?: boolean }) {
   // The whole breakup, always: unit rate, what came off, what tax was added, what the
   // line comes to. A comparison that shows only the total is a comparison nobody can
   // argue with — and buyers have to be able to argue with it.
   return (
     <div
-      className={`h-full rounded-lg border p-2.5 ${
-        cell.is_best
+      className={`h-full rounded-lg border p-2.5 transition-all ${
+        isAllocated
+          ? "border-emerald-500/80 bg-emerald-50/25 dark:bg-emerald-950/25 shadow-sm ring-2 ring-emerald-500/30"
+          : cell.is_best
           ? "border-success/40 bg-success/5"
           : "border-line bg-surface-2/40"
       }`}
     >
-      <div className="text-right text-sm font-semibold text-ink">
-        {money(cell.line_total)}
+      <div className="flex items-start justify-between gap-1">
+        {cell.is_best ? (
+          <span className="inline-flex items-center gap-1 rounded bg-success/15 px-1.5 py-0.5 text-[10px] font-bold text-success uppercase tracking-wider">
+            <Check className="h-3 w-3 stroke-[2.5]" /> Best price
+          </span>
+        ) : <span />}
+        <div className="text-right text-sm font-semibold text-ink">
+          {money(cell.line_total)}
+        </div>
       </div>
       {/* The brand THIS supplier quoted — amber when it is not what was asked. */}
       {cell.combination && (
@@ -67,16 +87,16 @@ function Cell({ cell }: { cell: ComparisonCell }) {
       <div className="mt-1.5 space-y-0.5 border-t border-line pt-1.5">
         <div className="flex justify-between gap-2 text-[11px] text-muted">
           <span>Qty</span>
-          <span className="font-mono text-body">{cell.quantity}</span>
+          <span className="font-mono text-body font-medium">{cell.quantity}</span>
         </div>
         <div className="flex justify-between gap-2 text-[11px] text-muted">
           <span>Rate</span>
-          <span className="font-mono text-body">{money(cell.rate)}</span>
+          <span className="font-mono text-body font-medium">{money(cell.rate)}</span>
         </div>
         {cell.discount_percent > 0 && (
           <div className="flex justify-between gap-2 text-[11px] text-muted">
             <span>Discount ({cell.discount_percent}%)</span>
-            <span className="font-mono">− {money(cell.discount_amount)}</span>
+            <span className="font-mono text-body">− {money(cell.discount_amount)}</span>
           </div>
         )}
         <div className="flex justify-between gap-2 text-[11px] text-muted">
@@ -85,14 +105,9 @@ function Cell({ cell }: { cell: ComparisonCell }) {
         </div>
         <div className="flex justify-between gap-2 text-[11px] text-muted">
           <span>GST ({cell.tax_percent}%)</span>
-          <span className="font-mono">{money(cell.tax_amount)}</span>
+          <span className="font-mono text-body">{money(cell.tax_amount)}</span>
         </div>
       </div>
-      {cell.is_best && (
-        <div className="mt-2 flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-success">
-          <Check className="h-3 w-3" /> Best price
-        </div>
-      )}
     </div>
   );
 }
@@ -264,6 +279,143 @@ export function QuotationComparison({
     return Number.isFinite(value) && value > 0 ? value : 0;
   };
 
+  const splitAllocations = useMemo(() => {
+    return (comparison.items ?? []).flatMap((item) =>
+      splitVendorIds.map((vendorId) => {
+        const quantity = liveAllocation(item, vendorId) + additionalAward(item, vendorId);
+        return quantity > 0
+          ? { item_id: item.item_id, rfq_item_id: item.rfq_item_id, vendor_id: vendorId, quantity }
+          : null;
+      }).filter((row): row is {
+        item_id: number; rfq_item_id: number; vendor_id: number; quantity: number;
+      } => row !== null),
+    );
+  }, [comparison.items, splitVendorIds, liveAllocatedQuantities, purchaseOrders, split]);
+
+  const splitOverItems = useMemo(() => {
+    return (comparison.items ?? []).filter((row) =>
+      splitVendorIds.reduce((sum, vendorId) =>
+        sum + liveAllocation(row, vendorId) + additionalAward(row, vendorId), 0)
+      > Number(row.quantity)
+    );
+  }, [comparison.items, splitVendorIds, liveAllocatedQuantities, purchaseOrders, split]);
+
+  const splitHasBadValue = useMemo(() => {
+    return (comparison.items ?? []).some((row) =>
+      splitVendorIds.some((vendorId) =>
+        Boolean(quantityProblem(split[splitKey(row.rfq_item_id, vendorId)], {
+          decimals: uomDecimals(row.uom_code), required: false,
+        }))
+      )
+    );
+  }, [comparison.items, splitVendorIds, split, uomDecimals]);
+
+  const hasAdditionalQuantity = useMemo(() => {
+    return Object.entries(split).some(([, value]) => Number(value) > 0);
+  }, [split]);
+
+  const awardedVendorsCount = useMemo(() => {
+    return splitVendorIds.filter((vId) =>
+      (comparison.items ?? []).some((item) => additionalAward(item, vId) > 0)
+    ).length;
+  }, [comparison.items, splitVendorIds, split]);
+
+  const autoAllocateBestPrices = () => {
+    const newSplit: Record<string, string> = {};
+
+    (comparison.items ?? []).forEach((row) => {
+      const decimals = uomDecimals(row.uom_code);
+      const factor = Math.pow(10, decimals);
+
+      // Live allocated quantity on previous POs
+      const totalAllocatedOnItem = splitVendorIds.reduce(
+        (sum, vId) => sum + liveAllocation(row, vId),
+        0,
+      );
+      const unallocatedQty = Math.max(0, Number(row.quantity) - totalAllocatedOnItem);
+      if (unallocatedQty <= 0) return;
+
+      // Filter valid cells that quoted this line
+      const quotedCells = row.cells.filter(
+        (c) => Number(c.quantity) > 0 || Number(c.rate) > 0,
+      );
+      if (quotedCells.length === 0) return;
+
+      // Determine the best price cells:
+      // First priority: backend cell.is_best flag
+      let bestCells = quotedCells.filter((c) => c.is_best);
+      if (bestCells.length === 0) {
+        const minRate = Math.min(...quotedCells.map((c) => Number(c.rate)));
+        bestCells = quotedCells.filter((c) => Math.abs(Number(c.rate) - minRate) < 0.0001);
+      }
+
+      // Deduplicate by vendor_id to handle revisions
+      const vendorCells: { vendorId: number; cell: ComparisonCell }[] = [];
+      const seenVendors = new Set<number>();
+      for (const cell of bestCells) {
+        const total = totals.find((t) => t.quotation_id === cell.quotation_id);
+        if (total && !seenVendors.has(total.vendor_id)) {
+          seenVendors.add(total.vendor_id);
+          vendorCells.push({ vendorId: total.vendor_id, cell });
+        }
+      }
+
+      const tiedCount = vendorCells.length;
+      if (tiedCount === 0) return;
+
+      const totalUnits = Math.round(unallocatedQty * factor);
+      const baseUnits = Math.floor(totalUnits / tiedCount);
+      const remUnits = totalUnits % tiedCount;
+
+      vendorCells.forEach(({ vendorId, cell }, idx) => {
+        const allocatedUnits = baseUnits + (idx < remUnits ? 1 : 0);
+        const calculatedShare = allocatedUnits / factor;
+        // Cap at supplier quoted capacity minus what they already have allocated
+        const supplierCurrentAlloc = liveAllocation(row, vendorId);
+        const supplierMaxAvailable = Math.max(0, Number(cell.quantity) - supplierCurrentAlloc);
+        const finalQty = Math.min(calculatedShare, supplierMaxAvailable);
+        if (finalQty > 0) {
+          newSplit[splitKey(row.rfq_item_id, vendorId)] =
+            decimals > 0 ? finalQty.toFixed(decimals) : String(finalQty);
+        }
+      });
+    });
+
+    setSplit(newSplit);
+    setShown(totals.map((total) => total.quotation_id));
+    setSplitting(true);
+    setLinesExpanded(true);
+  };
+
+  const handleStartManualSplit = () => {
+    const initialSplit: Record<string, string> = {};
+    (comparison.items ?? []).forEach((row) => {
+      const quotingVendorIds = Array.from(
+        new Set(
+          row.cells
+            .map((cell) => totals.find((t) => t.quotation_id === cell.quotation_id)?.vendor_id)
+            .filter((vId): vId is number => vId != null),
+        ),
+      );
+      if (quotingVendorIds.length === 1) {
+        const singleVendorId = quotingVendorIds[0];
+        const totalAllocatedOnItem = splitVendorIds.reduce(
+          (sum, vId) => sum + liveAllocation(row, vId),
+          0,
+        );
+        const unallocatedQty = Math.max(0, Number(row.quantity) - totalAllocatedOnItem);
+        if (unallocatedQty > 0) {
+          initialSplit[splitKey(row.rfq_item_id, singleVendorId)] = String(unallocatedQty);
+        }
+      }
+    });
+
+    setSplit(initialSplit);
+    setShown(totals.map((total) => total.quotation_id));
+    setSplitting(true);
+    setLinesExpanded(true);
+  };
+
   return (
     <Card className="p-0 overflow-hidden shadow-lg border-line">
       {totals.length > 0 && totals.some((t) => t.is_recommended) && (
@@ -369,6 +521,117 @@ export function QuotationComparison({
         </div>
       )}
 
+      {onAwardSplit && (!isAnyAwarded || reawardable) && (
+        <div className={`border-b transition-colors ${
+          splitting
+            ? "border-emerald-500/30 bg-emerald-500/[0.04] p-3.5"
+            : "border-line bg-surface-2/30 p-3"
+        }`}>
+          {!splitting ? (
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-semibold text-ink">Multi-Supplier Awards:</span>
+                <span className="text-xs text-muted">
+                  Award whole quotations, or split quantities by line across best-price suppliers.
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <Can do="rfq.award">
+                  <Button
+                    variant="primary"
+                    disabled={busy}
+                    onClick={autoAllocateBestPrices}
+                    className="!bg-emerald-600 hover:!bg-emerald-700 text-white shadow-sm flex items-center gap-1.5 text-xs font-semibold"
+                  >
+                    <Zap className="h-3.5 w-3.5 fill-current" /> Select the Best Price Suppliers
+                  </Button>
+                  <Button
+                    variant="subtle"
+                    disabled={busy}
+                    onClick={handleStartManualSplit}
+                    className="text-xs"
+                  >
+                    {isAnyAwarded ? "Re-share Unordered Items" : "Share Items Between Suppliers"}
+                  </Button>
+                </Can>
+              </div>
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 px-3 py-1 text-xs font-bold text-emerald-700 dark:text-emerald-300">
+                  <Zap className="h-3.5 w-3.5 fill-current text-emerald-600 dark:text-emerald-400" />
+                  Split Mode Active
+                </span>
+                <span className="text-xs text-muted">
+                  Auto-allocate lowest prices or check supplier boxes to fill quoted quantities.
+                </span>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  variant="soft"
+                  disabled={busy}
+                  onClick={autoAllocateBestPrices}
+                  className="text-xs font-semibold flex items-center gap-1.5 border border-emerald-500/40 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/15"
+                  title="Automatically allocate the best price suppliers for each line item (splits tied prices equally)"
+                >
+                  <Zap className="h-3.5 w-3.5 fill-current text-emerald-600" /> Select the Best Price Suppliers
+                </Button>
+
+                <Button
+                  variant="subtle"
+                  disabled={busy}
+                  onClick={() => setSplit({})}
+                  className="text-xs flex items-center gap-1 text-muted hover:text-ink"
+                  title="Clear all allocated quantities"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" /> Reset
+                </Button>
+
+                <Button
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={() => {
+                    setSplitting(false);
+                    setSplit({});
+                  }}
+                  className="text-xs"
+                >
+                  Cancel
+                </Button>
+
+                {splitOverItems.length > 0 && (
+                  <span className="text-xs font-semibold text-danger flex items-center gap-1">
+                    <AlertTriangle className="h-3.5 w-3.5" />
+                    {splitOverItems.length === 1
+                      ? `${splitOverItems[0].item_name ?? "One item"} is over-allocated`
+                      : `${splitOverItems.length} items over-allocated`}
+                  </span>
+                )}
+
+                <Button
+                  variant="primary"
+                  disabled={
+                    busy ||
+                    splitOverItems.length > 0 ||
+                    splitHasBadValue ||
+                    !splitAllocations.length ||
+                    (isAnyAwarded && !hasAdditionalQuantity)
+                  }
+                  onClick={() => onAwardSplit(splitAllocations)}
+                  className="text-xs font-semibold shadow-sm !bg-emerald-600 hover:!bg-emerald-700 text-white"
+                >
+                  {awardedVendorsCount > 0
+                    ? `Award & Generate ${awardedVendorsCount} PO${awardedVendorsCount > 1 ? "s" : ""}`
+                    : "Award & Generate POs"}
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       <ScrollBox>
         <table className="w-full border-collapse text-sm">
           <thead>
@@ -437,23 +700,66 @@ export function QuotationComparison({
                     </div>
                   )}
                   {(isAnyAwarded || splitting) && (() => {
-                    // Allocation is historical PO state. It must never be calculated
-                    // from an editable re-share box: clearing a draft value must not
-                    // make a quantity that is already on a PO look unallocated.
+                    const reqQty = Number(row.quantity);
                     const allocated = splitVendorIds.reduce((sum, vendorId) =>
                       sum + liveAllocation(row, vendorId), 0);
                     const added = splitVendorIds.reduce((sum, vendorId) =>
                       sum + additionalAward(row, vendorId), 0);
-                    const afterThisAward = allocated + added;
-                    const over = afterThisAward > Number(row.quantity);
+                    const totalAlloc = allocated + (splitting ? added : 0);
+                    const isOver = totalAlloc > reqQty;
+                    const isFull = Math.abs(totalAlloc - reqQty) < 0.0001;
+                    const pct = reqQty > 0 ? Math.min(100, Math.round((totalAlloc / reqQty) * 100)) : 0;
+                    const remaining = Math.max(0, reqQty - totalAlloc);
+
                     return (
-                      <div className="mt-1 text-[11px] font-semibold text-muted">
-                        <div>
-                          Allocated {formatQuantity(allocated)} / {formatQuantity(Number(row.quantity))}
+                      <div className="mt-2 space-y-1.5 rounded-lg border border-line bg-surface-2/40 p-2 text-[11px]">
+                        <div className="flex items-center justify-between gap-1 font-medium">
+                          <span className="text-muted">Allocation:</span>
+                          <span className={`font-mono font-bold ${
+                            isOver ? "text-danger" : isFull ? "text-success" : totalAlloc > 0 ? "text-amber-600 dark:text-amber-400" : "text-muted"
+                          }`}>
+                            {formatQuantity(totalAlloc)} / {formatQuantity(reqQty)}
+                          </span>
                         </div>
+
+                        {/* Mini Progress Bar */}
+                        <div className="h-1.5 w-full overflow-hidden rounded-full bg-line/80">
+                          <div
+                            className={`h-full transition-all duration-300 ${
+                              isOver
+                                ? "bg-danger"
+                                : isFull
+                                ? "bg-success"
+                                : totalAlloc > 0
+                                ? "bg-amber-500"
+                                : "bg-transparent"
+                            }`}
+                            style={{ width: `${isOver ? 100 : pct}%` }}
+                          />
+                        </div>
+
                         {splitting && (
-                          <div className={over ? "text-danger" : "text-body"}>
-                            After this award {formatQuantity(afterThisAward)} / {formatQuantity(Number(row.quantity))}
+                          <div className="flex items-center justify-between text-[10px]">
+                            {isOver ? (
+                              <span className="font-semibold text-danger flex items-center gap-1">
+                                Over by +{formatQuantity(totalAlloc - reqQty)} {row.uom_code || ""}
+                              </span>
+                            ) : isFull ? (
+                              <span className="font-semibold text-success flex items-center gap-1">
+                                <Check className="h-3 w-3 stroke-[2.5]" /> 100% Covered
+                              </span>
+                            ) : totalAlloc > 0 ? (
+                              <span className="text-amber-600 dark:text-amber-400 font-medium">
+                                {formatQuantity(remaining)} remaining
+                              </span>
+                            ) : (
+                              <span className="text-muted">Unassigned</span>
+                            )}
+                            {added > 0 && (
+                              <span className="font-mono text-brand font-semibold">
+                                +{formatQuantity(added)} new
+                              </span>
+                            )}
                           </div>
                         )}
                       </div>
@@ -469,10 +775,17 @@ export function QuotationComparison({
                     po.quotation_id === total.quotation_id
                     && lineQty(po.item_quantities, row) > 0,
                   );
+                  const key = splitKey(row.rfq_item_id, total.vendor_id);
+                  const splitVal = split[key] ?? "";
+                  const allocQty = Number(splitVal);
+                  const hasActiveAllocation = Number.isFinite(allocQty) && allocQty > 0;
+
                   return (
-                    <td key={total.quotation_id} className={`${COL} border-t border-line p-2`}>
+                    <td key={total.quotation_id} className={`${COL} border-t border-line p-2 transition-colors ${
+                      hasActiveAllocation ? "bg-emerald-500/[0.04]" : ""
+                    }`}>
                       {cell
-                        ? <Cell cell={cell} />
+                        ? <Cell cell={cell} isAllocated={hasActiveAllocation} />
                         : <div className="py-3 text-center text-xs text-muted">Not quoted</div>}
                       {cell && isAnyAwarded && (
                         <div className="mt-2 space-y-1 text-right text-[11px] font-semibold text-muted">
@@ -496,21 +809,75 @@ export function QuotationComparison({
                         </div>
                       )}
                       {splitting && cell && (
-                        <div className="mt-2">
-                          <div className="mb-1 text-right text-[10px] font-medium uppercase tracking-wide text-muted">
-                            {isAnyAwarded ? "Additional quantity" : "Award quantity"}
+                        <div className={`mt-2 rounded-lg border p-2 transition-all ${
+                          hasActiveAllocation
+                            ? "border-emerald-400 bg-emerald-50/50 dark:border-emerald-700 dark:bg-emerald-950/40 shadow-sm"
+                            : "border-line bg-surface-2/50 hover:border-brand/40"
+                        }`}>
+                          <div className="mb-1.5 flex items-center justify-between gap-1">
+                            <label className="flex cursor-pointer items-center gap-1.5 select-none" title="Check to allocate quoted quantity">
+                              <input
+                                type="checkbox"
+                                checked={hasActiveAllocation}
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    const quotedQty = Number(cell.quantity);
+                                    const otherVendorsAllocated = splitVendorIds.reduce((sum, vId) => {
+                                      if (vId === total.vendor_id) return sum;
+                                      return sum + liveAllocation(row, vId) + additionalAward(row, vId);
+                                    }, 0);
+                                    const unallocatedNeeded = Math.max(0, Number(row.quantity) - otherVendorsAllocated);
+                                    const fillVal = (unallocatedNeeded > 0 && unallocatedNeeded < quotedQty)
+                                      ? unallocatedNeeded
+                                      : quotedQty;
+                                    const decimals = uomDecimals(row.uom_code);
+                                    setSplit((prev) => ({
+                                      ...prev,
+                                      [key]: decimals > 0 ? fillVal.toFixed(decimals) : String(fillVal),
+                                    }));
+                                  } else {
+                                    setSplit((prev) => {
+                                      const next = { ...prev };
+                                      delete next[key];
+                                      return next;
+                                    });
+                                  }
+                                }}
+                                className="h-3.5 w-3.5 cursor-pointer rounded border-line text-emerald-600 focus:ring-emerald-500 accent-emerald-600"
+                              />
+                              <span className="text-[11px] font-semibold text-ink">
+                                Quoted: <span className="font-mono">{formatQuantity(Number(cell.quantity))}</span>
+                              </span>
+                            </label>
+                            <span className="text-[9px] font-semibold uppercase tracking-wider text-muted">
+                              {isAnyAwarded ? "Add Qty" : "Award Qty"}
+                            </span>
                           </div>
+
                           <QuantityInput
-                            decimals={uomDecimals(row.uom_code)} min={0}
-                            value={split[splitKey(row.rfq_item_id, total.vendor_id)] ?? ""}
+                            decimals={uomDecimals(row.uom_code)}
+                            min={0}
+                            value={splitVal}
                             data-uom={row.uom_code ?? ""}
                             aria-label={`Quantity for ${total.vendor_name ?? "supplier"} on ${row.item_name ?? row.item_id}`}
+                            placeholder="0"
                             onChange={(raw) => setSplit((current) => ({
                               ...current,
-                              [splitKey(row.rfq_item_id, total.vendor_id)]: raw,
+                              [key]: raw,
                             }))}
-                            className="min-h-9 w-full rounded-md border border-line bg-content1 px-2 text-right text-sm text-ink outline-none focus:border-brand"
+                            className={`min-h-8 w-full rounded-md border px-2 text-right text-xs font-mono font-bold text-ink outline-none transition-all ${
+                              hasActiveAllocation
+                                ? "border-emerald-500 bg-content1 shadow-sm focus:ring-2 focus:ring-emerald-500/20"
+                                : "border-line bg-content1 focus:border-brand"
+                            }`}
                           />
+
+                          {hasActiveAllocation && Number(cell.rate) > 0 && (
+                            <div className="mt-1.5 flex items-center justify-between border-t border-emerald-200/60 pt-1 text-[10px] font-medium text-emerald-700 dark:border-emerald-800/60 dark:text-emerald-300">
+                              <span>Line share:</span>
+                              <span className="font-mono font-bold">{money(allocQty * Number(cell.rate))}</span>
+                            </div>
+                          )}
                         </div>
                       )}
                     </td>
@@ -554,102 +921,79 @@ export function QuotationComparison({
                 </th>
                 <td colSpan={columns.length} className="border-t border-line px-3 py-3">
                   {!splitting ? (
-                    <Can do="rfq.award">
-                      <Button variant="subtle" disabled={busy} onClick={() => {
-                        // A re-share asks only for NEW quantity. For items mapped to a single
-                        // supplier, pre-fill the remaining unallocated RFQ quantity into the
-                        // split input box (editable by the user).
-                        const initialSplit: Record<string, string> = {};
-                        (comparison.items ?? []).forEach((row) => {
-                          const quotingVendorIds = Array.from(
-                            new Set(
-                              row.cells
-                                .map((cell) => totals.find((t) => t.quotation_id === cell.quotation_id)?.vendor_id)
-                                .filter((vId): vId is number => vId != null),
-                            ),
-                          );
-                          if (quotingVendorIds.length === 1) {
-                            const singleVendorId = quotingVendorIds[0];
-                            const totalAllocatedOnItem = splitVendorIds.reduce(
-                              (sum, vId) => sum + liveAllocation(row, vId),
-                              0,
-                            );
-                            const unallocatedQty = Math.max(0, Number(row.quantity) - totalAllocatedOnItem);
-                            if (unallocatedQty > 0) {
-                              initialSplit[splitKey(row.rfq_item_id, singleVendorId)] = String(unallocatedQty);
-                            }
-                          }
-                        });
-
-                        setSplit(initialSplit);
-                        // Every supplier that quoted an item is eligible for the new
-                        // share. Open every quotation while editing so no eligible
-                        // supplier is hidden behind the four-column default window.
-                        setShown(totals.map((total) => total.quotation_id));
-                        setSplitting(true);
-                        setLinesExpanded(true);
-                      }}>
-                        {isAnyAwarded ? "Re-share the unordered items" : "Share items between suppliers"}
-                      </Button>
-                    </Can>
-                  ) : (() => {
-                    // The API stores the complete award total, but this screen accepts
-                    // only the ADDITION. Include every already-live quantity here so
-                    // it stays protected, then add the buyer's new number on top.
-                    const allocations = (comparison.items ?? []).flatMap((item) =>
-                      splitVendorIds.map((vendorId) => {
-                        const quantity = liveAllocation(item, vendorId)
-                          + additionalAward(item, vendorId);
-                        return quantity > 0
-                          ? { item_id: item.item_id, rfq_item_id: item.rfq_item_id, vendor_id: vendorId, quantity }
-                          : null;
-                      }).filter((row): row is {
-                        item_id: number; rfq_item_id: number; vendor_id: number; quantity: number;
-                      } => row !== null),
-                    );
-                    const hasAdditionalQuantity = Object.entries(split).some(([, value]) =>
-                      Number(value) > 0);
-                    // Search may hide rows, but it must not hide an over-allocation
-                    // check for a value already in the draft split.
-                    const over = (comparison.items ?? []).filter((row) => splitVendorIds.reduce((sum, vendorId) =>
-                      sum + liveAllocation(row, vendorId)
-                        + additionalAward(row, vendorId), 0)
-                      > Number(row.quantity));
-                    const badSplit = (comparison.items ?? []).some((row) => splitVendorIds.some((vendorId) =>
-                      Boolean(quantityProblem(split[splitKey(row.rfq_item_id, vendorId)], {
-                        decimals: uomDecimals(row.uom_code), required: false }))));
-                    return (
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-xs text-muted">
-                          Enter each supplier&apos;s share against the item they quoted.
-                          Unallocated quantities remain open for a later purchase.
-                          {isAnyAwarded && " Allocated is already on a PO and cannot be changed here. Enter only the additional quantity; it becomes a new PO and is added to the allocated total."}
-                        </span>
-                        <span className="flex-1" />
-                        {over.length > 0 && (
-                          <span className="text-xs font-semibold text-danger">
-                            {over.length === 1
-                              ? `${over[0].item_name ?? "One item"} is over-allocated.`
-                              : `${over.length} items are over-allocated.`}
-                          </span>
-                        )}
-                        <Button variant="subtle" onClick={() => {
-                          setSplitting(false);
-                          setSplit({});
-                        }}>Cancel</Button>
-                        {/* One press, two acts: the split is awarded and every order it
-                            decided is raised. Four suppliers used to mean four more
-                            presses down the sheet, and a buyer who stopped halfway left
-                            a decided tender part-ordered with nothing saying so. Each
-                            order still lands in DRAFT and climbs the PO ladder. */}
-                        <Button disabled={busy || over.length > 0 || badSplit || (!allocations.length
-                          || (isAnyAwarded && !hasAdditionalQuantity))}
-                                onClick={() => onAwardSplit(allocations)}>
-                          Award &amp; generate POs
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Can do="rfq.award">
+                        <Button
+                          variant="primary"
+                          disabled={busy}
+                          onClick={autoAllocateBestPrices}
+                          className="!bg-emerald-600 hover:!bg-emerald-700 text-white text-xs font-semibold flex items-center gap-1.5 shadow-sm"
+                        >
+                          <Zap className="h-3.5 w-3.5 fill-current" /> Select the Best Price Suppliers
                         </Button>
-                      </div>
-                    );
-                  })()}
+                        <Button
+                          variant="subtle"
+                          disabled={busy}
+                          onClick={handleStartManualSplit}
+                          className="text-xs"
+                        >
+                          {isAnyAwarded ? "Re-share the unordered items" : "Share items between suppliers"}
+                        </Button>
+                      </Can>
+                    </div>
+                  ) : (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs text-muted">
+                        Enter each supplier&apos;s share against the item they quoted.
+                        Unallocated quantities remain open for a later purchase.
+                        {isAnyAwarded && " Allocated is already on a PO and cannot be changed here. Enter only the additional quantity; it becomes a new PO and is added to the allocated total."}
+                      </span>
+                      <span className="flex-1" />
+                      <Button
+                        variant="soft"
+                        disabled={busy}
+                        onClick={autoAllocateBestPrices}
+                        className="text-xs font-semibold flex items-center gap-1.5 border border-emerald-500/40 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/15"
+                      >
+                        <Zap className="h-3.5 w-3.5 fill-current text-emerald-600" /> Select the Best Price Suppliers
+                      </Button>
+                      <Button
+                        variant="subtle"
+                        disabled={busy}
+                        onClick={() => setSplit({})}
+                        className="text-xs flex items-center gap-1 text-muted hover:text-ink"
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" /> Reset
+                      </Button>
+                      {splitOverItems.length > 0 && (
+                        <span className="text-xs font-semibold text-danger flex items-center gap-1">
+                          <AlertTriangle className="h-3.5 w-3.5" />
+                          {splitOverItems.length === 1
+                            ? `${splitOverItems[0].item_name ?? "One item"} is over-allocated.`
+                            : `${splitOverItems.length} items are over-allocated.`}
+                        </span>
+                      )}
+                      <Button variant="subtle" onClick={() => {
+                        setSplitting(false);
+                        setSplit({});
+                      }}>Cancel</Button>
+                      <Button
+                        disabled={
+                          busy ||
+                          splitOverItems.length > 0 ||
+                          splitHasBadValue ||
+                          !splitAllocations.length ||
+                          (isAnyAwarded && !hasAdditionalQuantity)
+                        }
+                        onClick={() => onAwardSplit(splitAllocations)}
+                        className="!bg-emerald-600 hover:!bg-emerald-700 text-white text-xs font-semibold shadow-sm"
+                      >
+                        {awardedVendorsCount > 0
+                          ? `Award & Generate ${awardedVendorsCount} PO${awardedVendorsCount > 1 ? "s" : ""}`
+                          : "Award & generate POs"}
+                      </Button>
+                    </div>
+                  )}
                 </td>
               </tr>
             )}
