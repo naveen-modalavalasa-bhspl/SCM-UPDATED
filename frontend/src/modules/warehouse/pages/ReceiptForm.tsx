@@ -804,8 +804,10 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       + "0 if none of it did.");
   };
 
-  /** Serials and IMEIs must match the received quantity exactly — the server refuses
-   *  anything else, at the gate too. Said here by line and item, with where to press. */
+  /** Serials and IMEIs (2026-11-13): STRICT ON THE GRN — exactly one per received unit,
+   *  as the server refuses anything else there. At the gate (Material Inward) nobody has
+   *  opened the cartons, so whatever was read is kept and only MORE than arrived is
+   *  refused. Said here by line and item, with where to press. */
   const validateSerialLines = () => {
     for (const [index, line] of form.items.entries()) {
       if (!line.is_serial_tracked && !line.is_imei_tracked) continue;
@@ -814,6 +816,17 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       const required = Math.floor(num(line.received_qty));
       if (num(line.received_qty) !== required) {
         throw new Error(`${at}: enter a whole number of units (like 5, not 5.5) — each unit carries its own code.`);
+      }
+      if (!isGrn) {
+        const over = [
+          ...(line.is_serial_tracked && (line.serial_numbers?.length ?? 0) > required ? ["serial numbers"] : []),
+          ...(line.is_imei_tracked && (line.imei_numbers?.length ?? 0) > required ? ["IMEI numbers"] : []),
+        ];
+        if (over.length) {
+          throw new Error(`${at}: more ${over.join(" and ")} than the ${required} units that arrived. `
+            + "Remove the extra ones or correct the quantity.");
+        }
+        continue;
       }
       const missing = [
         ...(line.is_serial_tracked && (line.serial_numbers?.length ?? 0) !== required ? ["serial"] : []),

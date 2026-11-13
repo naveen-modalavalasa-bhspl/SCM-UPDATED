@@ -1745,7 +1745,16 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
         # units nobody can ever tell apart. The message at least says how many
         # are short or extra and where, rather than a bare "exactly N" that sent
         # the gate hunting for which of several cartons was the one short.
-        if item.is_serial_tracked and len(serials) != int(received):
+        # 2026-11-13: STRICT ON THE GRN ONLY. At the gate (Material Inward) nobody has
+        # opened the cartons, so a guard records whatever serials they can read —
+        # none, some, all — and only MORE serials than units, a contradiction, is
+        # refused there. The GRN still names every unit before it saves or submits.
+        if at_gate and item.is_serial_tracked and len(serials) > int(received):
+            raise ValidationError(
+                f"Line {index}: {item.code} — {len(serials)} serial numbers for "
+                f"{int(received)} received units. Remove "
+                f"{len(serials) - int(received)} or correct the quantity.")
+        if not at_gate and item.is_serial_tracked and len(serials) != int(received):
             gap = int(received) - len(serials)
             what = (f"{gap} more serial number{'s' if gap != 1 else ''}"
                     if gap > 0
@@ -1800,10 +1809,21 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
                 f"Line {index}: IMEI-tracked quantity must be a whole number"
             )
         
-        if item.is_imei_tracked and len(imeis) != int(received):
+        # Same rule as serials: anything readable at the gate, never more than arrived;
+        # every unit on the GRN.
+        if at_gate and item.is_imei_tracked and len(imeis) > int(received):
             raise ValidationError(
-                f"Line {index}: Please provide exactly {int(received)} IMEI numbers for "
-                f"received units of {item.code}"
+                f"Line {index}: {item.code} — {len(imeis)} IMEI numbers for "
+                f"{int(received)} received units. Remove "
+                f"{len(imeis) - int(received)} or correct the quantity.")
+        if not at_gate and item.is_imei_tracked and len(imeis) != int(received):
+            gap = int(received) - len(imeis)
+            what = (f"{gap} more IMEI number{'s' if gap != 1 else ''}" if gap > 0
+                    else f"{-gap} too many IMEI number{'s' if -gap != 1 else ''}")
+            raise ValidationError(
+                f"Line {index}: {item.code} — {received} received units need "
+                f"{int(received)} IMEI numbers, and {len(imeis)} are entered on this "
+                f"line. Add {what} before saving."
             )
         if imeis:
             seen_for_item = seen_imeis_by_item.setdefault(item.id, set())

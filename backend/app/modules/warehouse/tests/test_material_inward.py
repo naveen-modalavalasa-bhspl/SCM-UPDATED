@@ -209,13 +209,16 @@ async def test_serials_are_optional_at_the_gate_and_mandatory_on_the_grn(
     }, headers=headers)
     assert too_many.status_code == 422, too_many.text
 
-    # Filling in the GRN on that same row: the partial list is no longer enough.
+    # Filling in the GRN on that same row: the partial list is no longer enough. The GRN
+    # is STRICT (2026-11-13) — it does not save without one serial per received unit,
+    # and says how many are missing.
     grn = {**gate, "receipt_type": "PURCHASE"}
     short = await client.put(f"/api/warehouse/receipts/{receipt_id}", json={
         **grn,
         "items": [{"item_id": item.id, "received_qty": 3, "serial_numbers": ["SN-1"]}],
     }, headers=headers)
-    assert short.status_code == 200, short.text
+    assert short.status_code == 422, short.text
+    assert "Add 2 more serial numbers" in short.json()["error"]
 
     full = await client.put(f"/api/warehouse/receipts/{receipt_id}", json={
         **grn,
@@ -687,3 +690,28 @@ async def test_an_inspection_cannot_take_a_line_that_needs_no_qc(
     }, headers=headers)
     assert refused.status_code == 422, refused.text
     assert "does not require quality inspection" in refused.text
+
+
+async def test_batch_and_expiry_wait_for_the_grn_never_the_gate(
+    db, client, make_user, login,
+):
+    """2026-11-13: Material Inward (the gate) validates no batch, expiry or serial count
+    — nobody has opened the cartons — and the GRN is strict, naming the line and item."""
+    wh, _ = await _fixtures(db)
+    item = Item(code="MED-GEN-0009", name="Paracetamol 500", uom_code="NOS",
+                requires_qi=True, is_batch_tracked=True, has_expiry=True, is_active=True)
+    db.add(item)
+    await db.commit()
+    await make_user(username="store", permissions=[RECEIPT_CREATE, RECEIPT_VIEW])
+    headers = await login("store", "pw")
+
+    gate = {"receipt_type": "GATE_ENTRY", "grn_date": "2026-07-31", "warehouse_id": wh.id,
+            "items": [{"item_id": item.id, "received_qty": 10}]}
+    created = await client.post("/api/warehouse/receipts", json=gate, headers=headers)
+    assert created.status_code == 201, created.text
+
+    grn = {**gate, "receipt_type": "PURCHASE"}
+    refused = await client.put(f"/api/warehouse/receipts/{created.json()['id']}",
+                               json=grn, headers=headers)
+    assert refused.status_code == 422
+    assert "MED-GEN-0009 is batch tracked" in refused.json()["error"]
