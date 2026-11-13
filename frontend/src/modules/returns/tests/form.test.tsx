@@ -73,7 +73,7 @@ describe("ReturnFormPage — the raise screen", () => {
 
     // Step 1 is the gate, step 2 is what it gates, step 3 is the evidence.
     expect(screen.getByText("Details")).toBeInTheDocument();
-    expect(screen.getByText("Line items")).toBeInTheDocument();
+    expect(screen.getByText("Line items & reasons")).toBeInTheDocument();
     expect(screen.getByText("Photos & documents")).toBeInTheDocument();
     expect(screen.getByText("Step 1:")).toBeInTheDocument();
     expect(screen.getByText("Step 2:")).toBeInTheDocument();
@@ -89,7 +89,7 @@ describe("ReturnFormPage — the raise screen", () => {
     expect(screen.getByText("Ready to submit")).toBeInTheDocument();
     expect(screen.getByText("After you submit")).toBeInTheDocument();
     expect(screen.getByText("4 to go")).toBeInTheDocument();
-    expect(screen.getByText("Pick a reason")).toBeInTheDocument();
+    expect(screen.getByText("Give every item a reason")).toBeInTheDocument();
     expect(screen.getByText("Add a photo of the stock")).toBeInTheDocument();
 
     // The identity strip, not five disabled boxes.
@@ -134,7 +134,8 @@ describe("ReturnFormPage — the raise screen", () => {
     expect(
       screen.getByText("There is no stock on your point to return."),
     ).toBeInTheDocument();
-    // Two rows ticked off now (the indent question and the reason), so two remain.
-    expect(screen.getByText("2 to go")).toBeInTheDocument();
+    // Only the indent question is ticked off: reasons are per ITEM now (SCM_0129), and a
+    // draft with no items has nobody to give one to.
+    expect(screen.getByText("3 to go")).toBeInTheDocument();
   });
 });

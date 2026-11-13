@@ -1069,6 +1069,10 @@ class InspectionItemWrite(BaseModel):
     batch_no: str | None = None
     inspected_qty: Decimal = Decimal("0")
     accepted_qty: Decimal = Decimal("0")
+    #: How much was rejected (2026-11-13, SCM_0124). Sent, it lets a line be saved
+    #: still being judged — accepted + rejected below inspected stays Pending
+    #: (`service.qc_split`). Left out, the rest of the line is rejected, as before.
+    rejected_qty: Decimal = Decimal("0")
     parameters: Annotated[list[InspectionParameter], ConfigEntries] | None = None
     result: InspectionResult = InspectionResult.PENDING
     defect_type: str | None = None
@@ -1169,6 +1173,8 @@ class OutboundInspectionItemWrite(BaseModel):
     batch_no: str | None = None
     inspected_qty: Decimal = Decimal("0")
     accepted_qty: Decimal = Decimal("0")
+    #: See `InspectionItemWrite.rejected_qty` (SCM_0124).
+    rejected_qty: Decimal = Decimal("0")
     parameters: Annotated[list[InspectionParameter], ConfigEntries] | None = None
     result: InspectionResult = InspectionResult.PENDING
     defect_type: str | None = None
@@ -4377,6 +4383,9 @@ class IssueDispatchSource(BaseModel):
     issue_no: str
     issue_nos: list[str] = []
     warehouse_id: int
+    #: The origin's name, served with it (SCM_0132): "From warehouse" used to look it up
+    #: in a warehouse list the logistics desk is not allowed to read, and stayed "—".
+    warehouse_name: str | None = None
     project_id: int | None = None
     destination_office_id: int | None = None
     destination_office_name: str | None = None

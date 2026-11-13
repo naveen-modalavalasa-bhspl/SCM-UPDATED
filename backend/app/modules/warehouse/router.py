@@ -1867,6 +1867,19 @@ async def warehouse_options(search: str | None = None, mine_only: bool = False, 
         db, search=search, mine_only=mine_only, all_points=all_points, user=user)
 
 
+@router.get("/options/consignment-destinations", response_model=list[s.Option])
+async def consignment_destination_options(search: str | None = None,
+                                          db: AsyncSession = Depends(get_db),
+                                          user=Depends(require_permission(DISPATCH_VIEW))):
+    """Every stocking point a consignment may be addressed to (SCM_0132).
+
+    The whole network, as `/options/warehouses?all_points=true` — but on the permission
+    the consignment screen itself requires. That list is gated on `stock.view`, which a
+    logistics desk does not hold, so its To-warehouse box came up empty and the save
+    could not find the warehouse it needed."""
+    return await service.warehouse_options(db, search=search, all_points=True, user=user)
+
+
 @router.get("/options/bins", response_model=list[s.LocationOption])
 async def bin_options(warehouse_id: int, search: str | None = None,
                       item_id: int | None = None, batch_id: int | None = None,

@@ -11,6 +11,7 @@ import {
   StatusPill, type Column,
 } from "@/shared/components";
 import { returnsApi, type ReturnStage } from "../api";
+import { summariseReasons } from "../reasonRows";
 import { ApprovalTrail } from "../components/ApprovalTrail";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { CertificatePanel } from "../components/CertificatePanel";
@@ -161,6 +162,29 @@ export default function ReturnDetailPage() {
   if (isLoading) return <p className="p-4 text-sm text-muted">Loading…</p>;
   if (!doc) return <ErrorBanner error="This return could not be found." />;
 
+  // Why each ITEM is going back (SCM_0129). Empty on a return whose reasons were given
+  // for the whole return — the header's Reasons line says those.
+  const perItem = (doc.reasons ?? []).some((row) => row.item_id);
+  const reasonChips = (itemId: number) => {
+    const own = perItem ? doc.reasons.filter((row) => row.item_id === itemId) : [];
+    if (!own.length) return null;
+    return (
+      <div className="mt-1.5 flex flex-wrap gap-1">
+        {own.map((row) => (
+          <span
+            key={row.reason}
+            title={row.note ?? undefined}
+            className="inline-flex items-center gap-1 rounded-full border border-line bg-content2/70 px-2 py-0.5 text-[11px] font-medium text-ink"
+          >
+            {row.reason_label ?? row.reason}
+            {own.length > 1 && <span className="tabular-nums text-muted">{qty(row.quantity)}</span>}
+            {row.note && <span className="max-w-[12rem] truncate text-muted">· {row.note}</span>}
+          </span>
+        ))}
+      </div>
+    );
+  };
+
   const columns: Column<ReturnLine>[] = [
     {
       key: "item",
@@ -170,6 +194,7 @@ export default function ReturnDetailPage() {
           <div className="font-medium text-ink">{row.item_name ?? "—"}</div>
           <div className="mono text-xs text-muted">{row.item_code ?? ""}</div>
           <CombinationTag value={row} className="mt-1" />
+          {reasonChips(row.item_id)}
         </div>
       ),
     },
@@ -292,8 +317,11 @@ export default function ReturnDetailPage() {
     {
       label: (doc.reasons?.length ?? 0) > 1 ? "Reasons" : "Reason",
       // "Damaged 10 · Expired 2": several reasons only read with their quantities.
+      // Per item, the header is the SUM over the items: "Damaged 6 · Expired 2".
       value: (doc.reasons?.length ?? 0) > 1
-        ? doc.reasons.map((row) => `${row.reason_label ?? row.reason} ${row.quantity}`).join(" · ")
+        ? summariseReasons(doc.reasons, (r) => doc.reasons.find((row) => row.reason === r)
+            ?.reason_label ?? r)
+            .map((row) => `${row.label} ${row.quantity}`).join(" · ")
         : doc.reason_label ?? doc.reason,
       icon: <MessageSquareWarning className="h-4 w-4" /> },
     { label: "Description", value: doc.reason_note, icon: <ScrollText className="h-4 w-4" /> },
@@ -629,6 +657,7 @@ export default function ReturnDetailPage() {
                   <div className="font-medium text-ink">{row.item_name ?? "—"}</div>
                   <div className="mono text-xs text-muted">{row.item_code ?? ""}</div>
                   <CombinationTag value={row} className="mt-1" />
+                  {reasonChips(row.item_id)}
                   <div className="tabular mt-1 text-sm font-semibold text-body">
                     {qty(row.quantity)} {row.uom_code ?? ""}
                   </div>

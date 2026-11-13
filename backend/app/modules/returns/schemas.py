@@ -16,25 +16,6 @@ from app.shared.limits import (  # request-size guards, see the module
 from app.shared.masters.combinations import CombinationIn, CombinationOut
 from app.shared.org_scope_schemas import OrgScopeIn, OrgScopeOut
 
-class ReturnLineIn(CombinationIn):
-    item_id: int
-    quantity: Decimal = Field(gt=0)
-    remarks: str | None = None
-    #: The exact units going back, for coded goods (2026-11-06). Empty means "whichever
-    #: the shelf gives up first", as it always was.
-    serial_numbers: list[str] = Field(default_factory=list, max_length=500)
-
-    @field_validator("quantity")
-    @classmethod
-    def _sane(cls, value: Decimal) -> Decimal:
-        # The column is Numeric(16, 3); anything finer is silently rounded on the way
-        # in, so a line saved as 1.0004 came back as 1.000 and the returner was told
-        # they had sent a quantity they never typed.
-        if value != value.quantize(Decimal("0.001")):
-            raise ValueError("Quantity cannot be finer than three decimal places")
-        return value
-
-
 class ReturnReasonRowIn(BaseModel):
     """One reason a part of the return is going back, and how much of it (2026-11-07).
 
@@ -59,11 +40,39 @@ class ReturnReasonRowIn(BaseModel):
         return (value or "").strip() or None
 
 
+class ReturnLineIn(CombinationIn):
+    item_id: int
+    quantity: Decimal = Field(gt=0)
+    remarks: str | None = None
+    #: The exact units going back, for coded goods (2026-11-06). Empty means "whichever
+    #: the shelf gives up first", as it always was.
+    serial_numbers: list[str] = Field(default_factory=list, max_length=500)
+    #: Why THIS item is going back, by quantity (SCM_0129, 2026-11-13): "Damaged 3,
+    #: Expired 2" on a line of 5. Its rows add up to the line's quantity. Left empty,
+    #: the return's own `reasons` speak for the whole return, as before.
+    reasons: list[ReturnReasonRowIn] = Field(default_factory=list, max_length=12)
+
+    @field_validator("quantity")
+    @classmethod
+    def _sane(cls, value: Decimal) -> Decimal:
+        # The column is Numeric(16, 3); anything finer is silently rounded on the way
+        # in, so a line saved as 1.0004 came back as 1.000 and the returner was told
+        # they had sent a quantity they never typed.
+        if value != value.quantize(Decimal("0.001")):
+            raise ValueError("Quantity cannot be finer than three decimal places")
+        return value
+
+
 class ReturnReasonOut(BaseModel):
     reason: str
     reason_label: str | None = None
     quantity: Decimal
     note: str | None = None
+    #: The item this reason is for (SCM_0129) — null on a return whose reasons were
+    #: given for the whole return, as every return before 2026-11-13 was.
+    item_id: int | None = None
+    item_code: str | None = None
+    item_name: str | None = None
 
 
 class ReturnWrite(OrgScopeIn):

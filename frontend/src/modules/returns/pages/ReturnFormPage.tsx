@@ -11,10 +11,11 @@ import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { FormSection } from "../components/FormSection";
 import { NextStepsCard } from "../components/NextStepsCard";
 import { RaiserStrip } from "../components/RaiserStrip";
+import { LineReasons } from "../components/LineReasons";
 import { ReasonRowsEditor } from "../components/ReasonRowsEditor";
 import {
-  newReasonRow, reasonProblems, reasonRowsFrom, reasonRowsPayload,
-  withSingleRowFollowingTotal, type ReasonRow,
+  lineReasonsFrom, newReasonRow, reasonProblems, reasonRowsFrom, reasonRowsPayload,
+  summariseReasons, withSingleRowFollowingTotal, type ReasonRow, type SavedReasonRow,
 } from "../reasonRows";
 import { SubmitChecklist, type ChecklistItem } from "../components/SubmitChecklist";
 import {
@@ -121,8 +122,10 @@ export default function ReturnFormPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
-  const [reasonRows, setReasonRows] = useState<ReasonRow[]>(() => [newReasonRow()]);
   const [reasonNote, setReasonNote] = useState("");
+  /** A return saved before reasons moved onto the items, whose several reasons cannot
+   *  be put on its several lines without guessing (SCM_0129). Shown, never guessed. */
+  const [legacyReasons, setLegacyReasons] = useState<SavedReasonRow[]>([]);
   /**
    * The indent this return answers. THREE states, not two (2026-09-07):
    *
@@ -239,9 +242,9 @@ export default function ReturnFormPage() {
 
   useEffect(() => {
     if (!existing) return;
-    setReasonRows(reasonRowsFrom(
-      existing.reasons, existing.reason, existing.reason_note,
-      existing.items.reduce((sum, line) => sum + Number(line.quantity ?? 0), 0)));
+    const { perLine, legacy } = lineReasonsFrom(
+      existing.reasons, existing.reason, existing.reason_note, existing.items);
+    setLegacyReasons(legacy);
     setReasonNote(existing.reason_note ?? "");
     setIntent(existing.intent ?? "RETURN");
     setKind(existing.kind ?? "FIELD");
@@ -250,10 +253,11 @@ export default function ReturnFormPage() {
     setIndentId(existing.indent_id ? String(existing.indent_id) : NO_INDENT);
     setLines(
       existing.items.length
-        ? existing.items.map((line) => ({
+        ? existing.items.map((line, at) => ({
             item_id: line.item_id,
             quantity: String(line.quantity ?? ""),
             remarks: line.remarks ?? "",
+            reasonRows: perLine[at],
             ...comboFrom(line),
           }))
         : [{ ...BLANK_LINE }],
@@ -344,11 +348,36 @@ export default function ReturnFormPage() {
     () => validLines.reduce((running, line) => running + Number(line.quantity), 0),
     [validLines],
   );
-  // One row is "all of it" and follows the lines; several are the person's own split.
-  const rows = useMemo(
-    () => withSingleRowFollowingTotal(reasonRows, totalQty), [reasonRows, totalQty]);
-  const reasonIssues = useMemo(() => reasonProblems(rows, totalQty), [rows, totalQty]);
-  const reasonDone = rows.length > 0 && reasonIssues.length === 0;
+  /**
+   * Each line's reasons (SCM_0129): one row is "all of this line" and follows its
+   * quantity; several are the person's own split of it. A problem is named after the
+   * item, because "the reasons add up to 3" on a return of eleven lines says nothing.
+   */
+  const itemLabelOf = (itemId: number) => {
+    const holding = stock.find((row) => row.item_id === itemId)
+      ?? existing?.items.find((row) => row.item_id === itemId);
+    return holding?.item_name ?? holding?.item_code ?? `item ${itemId}`;
+  };
+  const rowsOf = (line: ReturnLineWrite) => withSingleRowFollowingTotal(
+    line.reasonRows?.length ? line.reasonRows : [newReasonRow()], Number(line.quantity) || 0);
+  const lineReasons = validLines.map((line) => ({ line, rows: rowsOf(line) }));
+  const reasonIssues = lineReasons.flatMap(({ line, rows }) =>
+    reasonProblems(rows, Number(line.quantity)).map(
+      (problem) => `${itemLabelOf(line.item_id)}: ${problem}`));
+  const reasonDone = validLines.length > 0 && reasonIssues.length === 0;
+  const reasonLabelOf = (value: string) =>
+    reasons.find((row) => row.value === value)?.label ?? value;
+  /** The whole return's reasons, ADDED UP from its lines — what the desks will see. */
+  const reasonSummary = summariseReasons(
+    lineReasons.flatMap(({ rows }) => rows.filter((row) => row.reason)), reasonLabelOf);
+  const setLineReasons = (index: number, next: ReasonRow[]) =>
+    setLines((current) => current.map((line, at) =>
+      (at === index ? { ...line, reasonRows: next } : line)));
+  // Read-only and from before reasons were per item: the old whole-return split is what
+  // the return says, so that is what is drawn.
+  const legacyRows = useMemo(
+    () => reasonRowsFrom(legacyReasons, null, null, totalQty), [legacyReasons, totalQty]);
+  const showLegacy = legacyReasons.length > 0;
   const canSave =
     reasonDone &&
     validLines.length > 0 &&
@@ -365,8 +394,9 @@ export default function ReturnFormPage() {
    * a summary panel that recomputes the rules is how a screen ends up reporting
    * "all set" for a document the server then rejects.
    */
-  const step1Done = indentAnswered && reasonDone;
+  const step1Done = indentAnswered;
   const linesClean = validLines.length > 0 && !overCommitted && !hasDuplicate && !hasFraction;
+  const step2Done = linesClean && reasonDone;
 
   /**
    * The step to fill in next: the first that is neither finished nor unreachable. One
@@ -377,7 +407,7 @@ export default function ReturnFormPage() {
     ? 0
     : !step1Done
       ? 1
-      : !linesClean
+      : !step2Done
         ? 2
         : photoCount === 0
           ? 3
@@ -391,18 +421,19 @@ export default function ReturnFormPage() {
       hint: "It decides who approves the return, and which items you can pick.",
     },
     {
-      key: "reason",
-      label: "Pick a reason",
-      done: reasonDone,
-      hint: reasonIssues[0] ?? "Why is this coming back? Split it over several reasons if needed.",
-    },
-    {
       key: "lines",
       label: "Add at least one item",
       done: validLines.length > 0,
       hint: indentAnswered
         ? "An item and a quantity, on one line each."
         : "Unlocks once the indent question is answered.",
+    },
+    {
+      key: "reason",
+      label: "Give every item a reason",
+      done: reasonDone,
+      hint: reasonIssues[0]
+        ?? "Under each item: why it is coming back. Split it if part is damaged and part expired.",
     },
     // The three mistakes, each listed only while it is being made. A row that appears is
     // news; a permanent list of things that are fine is not.
@@ -443,7 +474,8 @@ export default function ReturnFormPage() {
 
   const body = (): ReturnWrite => ({
     ...numberScope.payload(),
-    reasons: reasonRowsPayload(rows),
+    // Per item now (SCM_0129); the whole return's reasons are the server's sum of them.
+    reasons: [],
     reason_note: reasonNote.trim() || null,
     // null, not omitted: clearing the picker on an edit has to CLEAR the link, and the
     // backend rebuilds the whole marker payload from what it is sent.
@@ -456,6 +488,7 @@ export default function ReturnFormPage() {
       item_id: line.item_id,
       quantity: String(line.quantity),
       remarks: line.remarks?.trim() || null,
+      reasons: reasonRowsPayload(rowsOf(line)),
       ...comboPayload(line),
     })),
   });
@@ -555,7 +588,7 @@ export default function ReturnFormPage() {
           <FormSection
             step={1}
             title="Details"
-            hint="What is coming back, and why. The indent you name decides who signs it."
+            hint="The indent you name decides who signs it. Each item says why it is coming back in step 2."
             done={step1Done}
             current={currentStep === 1}
             required
@@ -679,23 +712,7 @@ export default function ReturnFormPage() {
                 )}
               </div>
 
-              <Field
-                label="Reasons"
-                required
-                hint="One row per reason, with how many. Together they cover every unit."
-              >
-                <ReasonRowsEditor
-                  rows={rows}
-                  reasons={reasons.map((row) => ({ value: row.value, label: row.label }))}
-                  total={totalQty}
-                  readOnly={readOnly}
-                  onChange={setReasonRows}
-                />
-                {reasonIssues.length > 0 && rows.some((row) => row.reason) && (
-                  <p className="mt-2 text-xs text-warn">{reasonIssues[0]}</p>
-                )}
-              </Field>
-
+              <div className="sm:col-span-2">
               <Field label="Description (optional)" hint="Anything the approver should know">
                 <Input
                   value={reasonNote}
@@ -705,14 +722,15 @@ export default function ReturnFormPage() {
                   aria-label="Description"
                 />
               </Field>
+              </div>
             </div>
           </FormSection>
 
           <FormSection
             step={2}
-            title="Line items"
-            hint="Each item once, with the quantity coming back off your shelf."
-            done={linesClean}
+            title="Line items & reasons"
+            hint="Each item once, with the quantity coming back off your shelf and why."
+            done={step2Done}
             current={currentStep === 2}
             locked={!indentAnswered}
             required
@@ -727,6 +745,17 @@ export default function ReturnFormPage() {
               onChange={setLines}
               stock={stock}
               disabled={readOnly || !indentAnswered}
+              renderBelow={showLegacy && readOnly ? undefined : (line, index, holding) => (
+                <LineReasons
+                  rows={rowsOf(line)}
+                  reasons={reasons.map((row) => ({ value: row.value, label: row.label }))}
+                  total={Number(line.quantity) || 0}
+                  uom={holding?.uom}
+                  itemLabel={itemLabelOf(line.item_id)}
+                  readOnly={readOnly}
+                  onChange={(next) => setLineReasons(index, next)}
+                />
+              )}
               lockedNote={
                 indentAnswered
                   ? null
@@ -740,6 +769,49 @@ export default function ReturnFormPage() {
               * the last of it, or a draft already claimed it). Kept, and worded as the
               * stale answer it is, because a list cached for the length of a form fill
               * can always be overtaken by the floor. */}
+            {/* Saved before reasons were per item, with several reasons and several
+              * lines: nobody said which unit was which, so the old split is shown as it
+              * was rather than guessed onto the lines. */}
+            {showLegacy && (
+              <div className="mt-4 rounded-xl border border-line bg-content2/50 p-3">
+                <p className="mb-2 text-xs font-semibold text-ink">
+                  {readOnly ? "Reasons (given for the whole return)"
+                    : "This draft's reasons were given for the whole return"}
+                </p>
+                <ReasonRowsEditor
+                  rows={legacyRows}
+                  reasons={reasons.map((row) => ({ value: row.value, label: row.label }))}
+                  total={totalQty}
+                  readOnly
+                  onChange={() => undefined}
+                />
+                {!readOnly && (
+                  <p className="mt-2 text-xs text-warn">
+                    Give each item its own reason above — they now go item by item.
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* The whole return's reasons, ADDED UP from the items: what the approver and
+              * the decision desk read on the register. Never typed. */}
+            {reasonSummary.length > 0 && !(showLegacy && readOnly) && (
+              <div className="mt-4 flex flex-wrap items-center gap-1.5 border-t border-line pt-3">
+                <span className="mr-1 text-xs font-semibold uppercase tracking-wide text-muted">
+                  Whole return
+                </span>
+                {reasonSummary.map((row) => (
+                  <span
+                    key={row.reason}
+                    className="inline-flex items-center gap-1.5 rounded-full bg-brand/10 px-2.5 py-0.5 text-xs font-semibold text-brand"
+                  >
+                    {row.label}
+                    <span className="tabular-nums">{row.quantity.toLocaleString()}</span>
+                  </span>
+                ))}
+              </div>
+            )}
+
             {indentAnswered && stock.length === 0 && (
               <p className="text-sm text-muted">
                 {pickedIndentId

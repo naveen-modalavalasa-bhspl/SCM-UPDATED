@@ -22,7 +22,7 @@ import {
   getIssueDispatchSources,
   issueOptions,
   updateConsignment,
-  allWarehouseOptions,
+  consignmentDestinationOptions,
   consignmentTransferContext,
   issueTransferContext,
 } from "../api";
@@ -658,13 +658,18 @@ export default function ConsignmentForm() {
   // existing doc. The server derives the same value, so this is a display of its
   // decision, not an input.
   const originId = source?.warehouse_id ?? doc?.warehouse_id ?? null;
-  const ALL_HOUSES_KEY = ["wh-lookup", "warehouses", "all"];
-  const { data: allHouses = [] } = useQuery({
+  // SCM_0132: read on `dispatch.view` — the permission this screen already requires.
+  // The old list was gated on `stock.view`, so for a logistics desk it failed in
+  // silence and both warehouse boxes stayed empty.
+  const ALL_HOUSES_KEY = ["wh-lookup", "consignment-destinations"];
+  const { data: allHouses = [], error: housesError } = useQuery({
     queryKey: ALL_HOUSES_KEY,
-    queryFn: () => allWarehouseOptions(),
+    queryFn: () => consignmentDestinationOptions(),
     staleTime: 5 * 60_000,
   });
+  // The origin's own name comes WITH the issue now, so it never depends on a list.
   const originName = doc?.warehouse_name
+    ?? source?.warehouse_name
     ?? allHouses.find((w) => w.id === originId)?.name
     ?? "";
   /** The network minus the origin — a transfer to itself is what the backend
@@ -677,7 +682,7 @@ export default function ConsignmentForm() {
   const destinationOptions = useCallback(
     () => qc.fetchQuery({
       queryKey: ALL_HOUSES_KEY,
-      queryFn: () => allWarehouseOptions(),
+      queryFn: () => consignmentDestinationOptions(),
       staleTime: 5 * 60_000,
     }).then((rows) => rows.filter((w) => w.id !== originId)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1383,6 +1388,12 @@ export default function ConsignmentForm() {
                            name: transferContext.destination_warehouse_name ?? "" }]
                       : undefined}
                     placeholder="Auto from the indent" />
+            {housesError && !lockedDestination && (
+              <span role="alert" className="mt-1 block text-xs font-semibold text-danger">
+                The warehouse list could not be loaded — leave this blank and it is taken
+                from the indent, or ask for Dispatch access.
+              </span>
+            )}
             {lockedDestination && (
               <span className="mt-1 inline-flex items-center gap-1 text-xs text-muted">
                 <Lock className="h-3 w-3" aria-hidden /> Locked to the {transferContext!.kind}'s destination

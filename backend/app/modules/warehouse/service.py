@@ -1745,7 +1745,16 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
         # units nobody can ever tell apart. The message at least says how many
         # are short or extra and where, rather than a bare "exactly N" that sent
         # the gate hunting for which of several cartons was the one short.
-        if item.is_serial_tracked and len(serials) != int(received):
+        # 2026-11-13: STRICT ON THE GRN ONLY. At the gate (Material Inward) nobody has
+        # opened the cartons, so a guard records whatever serials they can read —
+        # none, some, all — and only MORE serials than units, a contradiction, is
+        # refused there. The GRN still names every unit before it saves or submits.
+        if at_gate and item.is_serial_tracked and len(serials) > int(received):
+            raise ValidationError(
+                f"Line {index}: {item.code} — {len(serials)} serial numbers for "
+                f"{int(received)} received units. Remove "
+                f"{len(serials) - int(received)} or correct the quantity.")
+        if not at_gate and item.is_serial_tracked and len(serials) != int(received):
             gap = int(received) - len(serials)
             what = (f"{gap} more serial number{'s' if gap != 1 else ''}"
                     if gap > 0
@@ -1800,10 +1809,21 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
                 f"Line {index}: IMEI-tracked quantity must be a whole number"
             )
         
-        if item.is_imei_tracked and len(imeis) != int(received):
+        # Same rule as serials: anything readable at the gate, never more than arrived;
+        # every unit on the GRN.
+        if at_gate and item.is_imei_tracked and len(imeis) > int(received):
             raise ValidationError(
-                f"Line {index}: Please provide exactly {int(received)} IMEI numbers for "
-                f"received units of {item.code}"
+                f"Line {index}: {item.code} — {len(imeis)} IMEI numbers for "
+                f"{int(received)} received units. Remove "
+                f"{len(imeis) - int(received)} or correct the quantity.")
+        if not at_gate and item.is_imei_tracked and len(imeis) != int(received):
+            gap = int(received) - len(imeis)
+            what = (f"{gap} more IMEI number{'s' if gap != 1 else ''}" if gap > 0
+                    else f"{-gap} too many IMEI number{'s' if -gap != 1 else ''}")
+            raise ValidationError(
+                f"Line {index}: {item.code} — {received} received units need "
+                f"{int(received)} IMEI numbers, and {len(imeis)} are entered on this "
+                f"line. Add {what} before saving."
             )
         if imeis:
             seen_for_item = seen_imeis_by_item.setdefault(item.id, set())
@@ -4314,6 +4334,33 @@ def _derive_result(inspected: Decimal, accepted: Decimal) -> str:
     return InspectionResult.PARTIAL.value
 
 
+def qc_split(inspected: Decimal, accepted_in, rejected_in, *,
+             rejected_sent: bool) -> tuple[Decimal, Decimal, bool]:
+    """A QC line's (accepted, rejected, judged) — the one rule for every QC sheet,
+    inward and outward (2026-11-13, SCM_0124).
+
+    A line starts UN-INSPECTED: inspected, accepted and rejected all 0. It is JUDGED
+    only once the inspector has accounted for everything inspected — accepted +
+    rejected = inspected. Until then it is still Pending, whatever is saved, and no
+    save may decide it: the old sheet seeded every line "fully accepted", so pressing
+    Save on a sheet nobody had looked at turned Pending into Pass.
+
+    `rejected_sent`: the client said how much it rejected. A caller that sends only an
+    accepted quantity means "the rest is rejected" — the rule before this — and is
+    read that way, so nothing outside the two QC forms changes.
+    """
+    inspected = max(_d(inspected), ZERO)
+    accepted = max(min(_d(accepted_in), inspected), ZERO)
+    if inspected <= ZERO:
+        return ZERO, ZERO, False
+    if not rejected_sent:
+        return accepted, inspected - accepted, True
+    rejected = max(_d(rejected_in), ZERO)
+    if accepted + rejected < inspected:
+        return accepted, min(rejected, inspected - accepted), False
+    return accepted, inspected - accepted, True
+
+
 def inspection_quantity_summary(lines) -> dict:
     """What an inspection found, by QUANTITY — SCM_0164 / 0165 / 0166.
 
@@ -4337,8 +4384,15 @@ def inspection_quantity_summary(lines) -> dict:
         inspected += line_inspected
         accepted += line_accepted
         rejected += _d(line.rejected_qty)
-        result = (line.result if line.result != InspectionResult.PENDING.value
-                  else _derive_result(line_inspected, line_accepted))
+        if line.result != InspectionResult.PENDING.value:
+            result = line.result
+        else:
+            # Judged off its own numbers by the save rule (`qc_split`): counted but not
+            # yet accounted for is still Pending, never a Fail (SCM_0124).
+            _a, _r, judged = qc_split(line_inspected, line_accepted, line.rejected_qty,
+                                      rejected_sent=True)
+            result = (_derive_result(line_inspected, line_accepted) if judged
+                      else InspectionResult.PENDING.value)
         counts[result] = counts.get(result, 0) + 1
     return {
         "inspected_qty": inspected,
@@ -4415,10 +4469,11 @@ async def _raise_inspection_for(
             item_code=line.item_code, item_name=line.item_name, uom_code=line.uom_code,
             batch_no=line.batch_no,
             **combinations.carry(line),
-            inspected_qty=_d(line.received_qty), accepted_qty=_d(line.received_qty),
+            # SCM_0124: UN-INSPECTED — nothing counted, nothing accepted. Seeded "fully
+            # accepted", the first Save turned a sheet nobody had looked at into a Pass.
+            # The received quantity is the GRN line's own, and the form shows it beside.
+            inspected_qty=ZERO, accepted_qty=ZERO,
             rejected_qty=ZERO, result=InspectionResult.PENDING.value,
-            serial_numbers=list(line.serial_numbers) if line.serial_numbers else None,
-            imei_numbers=list(line.imei_numbers) if getattr(line, 'imei_numbers', None) else None,
         ))
     _inspection_totals(inspection)
     await db.flush()
@@ -4561,14 +4616,21 @@ async def _apply_inspection_lines(db: AsyncSession, inspection: m.Inspection,
                 f"{item.code}: {line.accepted_qty} accepted out of {inspected} "
                 f"inspected. Accepted cannot exceed inspected."
             )
-        accepted = min(_d(line.accepted_qty), inspected)
-        rejected = inspected - accepted
+        # SCM_0124: judged only once accepted + rejected account for what was inspected
+        # (`qc_split`); a pack verdict IS a judgement. Until then the line is Pending
+        # and none of the unit / reason checks below apply — there is nothing decided
+        # for them to check.
+        accepted, rejected, judged = qc_split(
+            inspected, line.accepted_qty, line.rejected_qty,
+            rejected_sent=("rejected_qty" in line.model_fields_set
+                           and accepted_packs is None and rejected_packs is None))
         # SCM_0164: the result FOLLOWS the split, always. A hand-picked "Passed" over a
         # line that rejected two units was saved as asked, so the sheet said passed
         # while the stock said two came back — and every total built on the result
         # disagreed with every total built on the quantities. No result a split could
         # be "overridden" to is anything but one of the two contradicting the other.
-        result = _derive_result(inspected, accepted)
+        result = (_derive_result(inspected, accepted) if judged
+                  else InspectionResult.PENDING.value)
         serials = [value.strip() for value in (line.serial_numbers or []) if value.strip()]
         if len(serials) != len(set(serials)):
             raise ValidationError(f"{item.code}: accepted serial numbers must be unique")
@@ -4604,17 +4666,17 @@ async def _apply_inspection_lines(db: AsyncSession, inspection: m.Inspection,
             raise ValidationError(
                 f"{item.code}: accepted quantity must be a whole number for IMEI tracked items"
             )
-        if item.is_serial_tracked and len(serials) != int(accepted):
+        if judged and item.is_serial_tracked and len(serials) != int(accepted):
             raise ValidationError(
                 f"{item.code}: choose exactly {int(accepted)} accepted serial numbers"
             )
-        if item.is_imei_tracked and len(imeis) != int(accepted):
+        if judged and item.is_imei_tracked and len(imeis) != int(accepted):
             raise ValidationError(
                 f"{item.code}: choose exactly {int(accepted)} accepted IMEI numbers"
             )
         reason = line.rejection_reason or line.defect_type
 
-        if rejected > ZERO and not (reason or "").strip():
+        if judged and rejected > ZERO and not (reason or "").strip():
             raise ValidationError(
                 f"{item.code}: a failed line needs a defect type — "
                 "'failed' with no reason cannot be put to a vendor.")
@@ -11919,6 +11981,13 @@ async def _issue_scope(db: AsyncSession, data, source) -> tuple[dict | None, dic
         if not org_scope.uses_org(source):
             return None, None
         values = {field: getattr(source, field, None) for field in org_scope.SCOPE_FIELDS}
+        # The PROJECT too (2026-11-13): the number is already drawn under the source's
+        # project (`number_args` below), so the issue must carry it — or its card reads
+        # "Not chosen here" over a number that plainly prints it. Only when the source
+        # names one: an STO / indent filed under a department leaves the issue's own.
+        if getattr(source, "project_id", None) or getattr(source, "project_name", None):
+            values["project_id"] = getattr(source, "project_id", None)
+            values["project_name"] = getattr(source, "project_name", None)
         # The year is the issue's own: picked on the form, else today's — never the
         # source's, which may be last year's.
         values["fiscal_year"] = org_scope.assert_fiscal_year(getattr(data, "fiscal_year", None))
@@ -13847,9 +13916,11 @@ async def _raise_outbound_inspection_for(
             item_code=line.item_code, item_name=line.item_name, uom_code=line.uom_code,
             batch_no=line.batch_no,
             **combinations.carry(line),
-            inspected_qty=_d(line.issued_qty), accepted_qty=_d(line.issued_qty),
+            # SCM_0124: UN-INSPECTED, as inward. The issued quantity and the units it
+            # sent are the issue line's own, read by the form beside each line.
+            inspected_qty=ZERO, accepted_qty=ZERO,
             rejected_qty=ZERO, result=InspectionResult.PENDING.value,
-            serial_numbers=line_serials if line_serials else None,
+            serial_numbers=None,
         ))
         
     _outbound_inspection_totals(inspection)
@@ -28028,6 +28099,7 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
         "issue_no": issue.issue_no,
         "issue_nos": [issue.issue_no],
         "warehouse_id": issue.warehouse_id,
+        "warehouse_name": issue.warehouse_name,
         "project_id": issue.project_id,
         "destination_office_id": getattr(issue, "destination_office_id", None),
         "destination_office_name": getattr(issue, "destination_office_name", None),
@@ -29232,10 +29304,15 @@ async def _apply_outbound_inspection_lines(db: AsyncSession, inspection: m.Outbo
                 f"{item.code}: {line.accepted_qty} accepted out of {inspected} "
                 f"inspected. Accepted cannot exceed inspected."
             )
-        accepted = min(_d(line.accepted_qty), inspected)
-        rejected = inspected - accepted
-        result = (line.result.value if line.result != InspectionResult.PENDING
-                  else _derive_result(inspected, accepted))
+        # SCM_0124: judged only once accepted + rejected account for what was inspected
+        # (`qc_split`), and the result then follows the split — the same rule as
+        # inward QC. Until then the line stays Pending and no unit, package or reason
+        # check applies: nothing has been decided for them to check.
+        accepted, rejected, judged = qc_split(
+            inspected, line.accepted_qty, line.rejected_qty,
+            rejected_sent="rejected_qty" in line.model_fields_set)
+        result = (_derive_result(inspected, accepted) if judged
+                  else InspectionResult.PENDING.value)
                   
         serials_data = line.serial_numbers or []
         if isinstance(serials_data, dict):
@@ -29272,7 +29349,9 @@ async def _apply_outbound_inspection_lines(db: AsyncSession, inspection: m.Outbo
         sent = units_by_line.get(line.issue_item_id or 0, set())
         boxes = boxes_by_line.get(line.issue_item_id or 0)
         pack_rejections: dict[str, float] = {}
-        if boxes:
+        if not judged:
+            serials = []
+        elif boxes:
             # Inspected by the PACKAGE (2026-10-26). Every unit rejected is said to
             # have come out of a named package: a package rejected whole is left out
             # of the accepted codes, and units rejected out of a package that is
@@ -29322,7 +29401,7 @@ async def _apply_outbound_inspection_lines(db: AsyncSession, inspection: m.Outbo
                 f"{label}: choose exactly {int(accepted)} accepted serial numbers")
 
         reason = line.rejection_reason or line.defect_type
-        if rejected > ZERO and not (reason or "").strip():
+        if judged and rejected > ZERO and not (reason or "").strip():
             raise ValidationError(
                 f"{label}: {rejected} rejected — enter a Rejection reason on this line "
                 "before saving")

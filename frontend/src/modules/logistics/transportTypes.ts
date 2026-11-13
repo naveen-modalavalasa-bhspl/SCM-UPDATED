@@ -849,6 +849,9 @@ export interface TransportRequest extends ScopedDoc {
   total_qty: number;
   total_weight_kg: number;
   total_volume_cbm: number;
+  /** The consignment's cartons, each counted once (SCM_0130) — what the gate counts.
+   *  Null on a leg with no consignment behind it. */
+  consignment_package_total?: number | null;
   total_packages: number;
   carrier_id?: number | null;
   carrier_name?: string | null;

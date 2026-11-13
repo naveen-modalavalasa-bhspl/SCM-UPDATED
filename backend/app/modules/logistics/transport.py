@@ -304,6 +304,13 @@ async def _attach_package_quantities(
         key = _package_quantity_key(line)
         if key is not None:
             setattr(line, "package_quantities", by_item.get(key, []))
+    # SCM_0130: the cartons that actually LEFT, counted once each. The lines'
+    # `package_count` is a freight figure — a carton shared by three items credits one
+    # of them — so the gate pass printed 0 against the other two and its total was
+    # whatever the lines happened to add up to. This is the consignment's own count.
+    doc.consignment_package_total = int((await db.scalar(text(
+        "SELECT COUNT(*) FROM out_dispatch_packages WHERE dispatch_id = :dispatch_id"
+    ), {"dispatch_id": doc.dispatch_id})) or 0) or None
     return doc
 
 
