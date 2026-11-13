@@ -11981,6 +11981,13 @@ async def _issue_scope(db: AsyncSession, data, source) -> tuple[dict | None, dic
         if not org_scope.uses_org(source):
             return None, None
         values = {field: getattr(source, field, None) for field in org_scope.SCOPE_FIELDS}
+        # The PROJECT too (2026-11-13): the number is already drawn under the source's
+        # project (`number_args` below), so the issue must carry it — or its card reads
+        # "Not chosen here" over a number that plainly prints it. Only when the source
+        # names one: an STO / indent filed under a department leaves the issue's own.
+        if getattr(source, "project_id", None) or getattr(source, "project_name", None):
+            values["project_id"] = getattr(source, "project_id", None)
+            values["project_name"] = getattr(source, "project_name", None)
         # The year is the issue's own: picked on the form, else today's — never the
         # source's, which may be last year's.
         values["fiscal_year"] = org_scope.assert_fiscal_year(getattr(data, "fiscal_year", None))
