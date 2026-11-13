@@ -74,6 +74,9 @@ import type {
   WarehouseOption,
   WarehouseWrite,
   TrackingTypeMeta,
+  RejectionOutcome,
+  RejectionSummary,
+  RejectionDecision,
 } from "./types";
 
 /**
@@ -1283,6 +1286,25 @@ export const DRAFT_DELETE_PERMISSION = {
 export const deleteReceipt = (id: number) => del(`${BASE}/receipts/${id}`);
 export const deleteInspection = (id: number) => del(`${BASE}/inspections/${id}`);
 export const deleteOutboundInspection = (id: number) => del(`${BASE}/outbound-inspections/${id}`);
+
+// ---------------------------------------------------------------------------
+// Rejection register (SCM_REJ) — Stock Segregation > QC Lifecycle
+// ---------------------------------------------------------------------------
+
+export const listRejectionOutcomes = (params: {
+  warehouse_id?: number; direction?: string; outcome?: string;
+  item_id?: number; inspection_no?: string;
+} = {}) =>
+  get<RejectionOutcome[]>(`${BASE}/rejection-outcomes`, params as any);
+
+export const getRejectionSummary = (params: {
+  warehouse_id?: number; direction?: string;
+} = {}) =>
+  get<RejectionSummary>(`${BASE}/rejection-outcomes/summary`, params as any);
+
+export const decideRejectionOutcome = (id: number, body: RejectionDecision) =>
+  post<RejectionOutcome>(`${BASE}/rejection-outcomes/${id}/decide`, body);
+
 export const deletePutaway = (id: number) => del(`${BASE}/putaways/${id}`);
 export const deletePicking = (id: number) => del(`${BASE}/pickings/${id}`);
 export const deleteIssue = (id: number) => del(`${BASE}/issues/${id}`);

@@ -4843,6 +4843,108 @@ async def _write_rejection_outcomes(
     await db.flush()
 
 
+async def list_rejection_outcomes(
+    db: AsyncSession, *,
+    warehouse_id: int | None = None,
+    direction: str | None = None,
+    outcome: str | None = None,
+    item_id: int | None = None,
+    inspection_no: str | None = None,
+) -> list[m.RejectionOutcome]:
+    """The rejection register (SCM_REJ), read for Stock Segregation > QC Lifecycle.
+
+    Returns every row in scope — the register is short by nature (only lines a QC
+    sheet turned away) and the supervisor reads it end-to-end. Filters are optional
+    and combined; an unfiltered call is the whole register, which is what the
+    lifecycle subtab opens with.
+    """
+    stmt = select(m.RejectionOutcome).order_by(m.RejectionOutcome.created_at.desc())
+    if warehouse_id is not None:
+        stmt = stmt.where(m.RejectionOutcome.warehouse_id == warehouse_id)
+    if direction is not None:
+        stmt = stmt.where(m.RejectionOutcome.direction == direction)
+    if outcome is not None:
+        stmt = stmt.where(m.RejectionOutcome.outcome == outcome)
+    if item_id is not None:
+        stmt = stmt.where(m.RejectionOutcome.item_id == item_id)
+    if inspection_no is not None:
+        stmt = stmt.where(m.RejectionOutcome.inspection_no == inspection_no)
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def rejection_summary(db: AsyncSession, *,
+                            warehouse_id: int | None = None,
+                            direction: str | None = None) -> s.RejectionSummary:
+    """Counts and quantities by outcome, for the register's KPI tiles.
+
+    One GROUP BY over the rows in scope, never a page of rows counted in Python.
+    Quantities are summed as float because the summary is a tile, not a ledger: a
+    supervisor reads "12.5 kg pending", not "12.50000".
+    """
+    stmt = (select(m.RejectionOutcome.outcome,
+                   func.count().label("count"),
+                   func.sum(m.RejectionOutcome.rejected_qty).label("qty"))
+            .group_by(m.RejectionOutcome.outcome))
+    if warehouse_id is not None:
+        stmt = stmt.where(m.RejectionOutcome.warehouse_id == warehouse_id)
+    if direction is not None:
+        stmt = stmt.where(m.RejectionOutcome.direction == direction)
+    rows = (await db.execute(stmt)).all()
+    by_outcome: dict[str, int] = {}
+    qty_by_outcome: dict[str, float] = {}
+    total_qty = 0.0
+    for outcome, count, qty in rows:
+        by_outcome[outcome] = int(count or 0)
+        q = float(qty or 0)
+        qty_by_outcome[outcome] = q
+        total_qty += q
+    return s.RejectionSummary(by_outcome=by_outcome,
+                              qty_by_outcome=qty_by_outcome,
+                              total_qty=total_qty)
+
+
+async def decide_rejection_outcome(
+    db: AsyncSession, outcome_id: int, decision: s.RejectionDecisionIn, user,
+) -> m.RejectionOutcome:
+    """Close a rejection: PENDING -> DISPOSED / RETURNED_TO_VENDOR / RETURNED_TO_STOCK /
+    REPLACED. Terminal — a rejection is closed once, not reopened.
+
+    `decision.action` is the outcome enum value. `decision.doc_no` is the carrier
+    document (purchase return, replacement GRN, disposal note). Where the units are
+    serial-tracked, the future hook will also move `whs_serial_numbers` — for now the
+    register is the source of truth and `whs_serial_numbers` stays as the inspection
+    left it (MAINTENANCE).
+    """
+    outcome = await db.get(m.RejectionOutcome, outcome_id)
+    if outcome is None:
+        raise ValidationError("Rejection outcome not found")
+    if outcome.outcome != RejectionOutcome.PENDING.value:
+        raise ValidationError(
+            f"This rejection was already closed as {outcome.outcome}. "
+            "A rejection is closed once.")
+    valid = {e.value for e in RejectionOutcome if e != RejectionOutcome.PENDING}
+    if decision.action not in valid:
+        raise ValidationError(
+            f"Unknown decision '{decision.action}'. "
+            f"Choose one of {', '.join(sorted(valid))}.")
+    outcome.outcome = decision.action
+    outcome.outcome_by_id = getattr(user, "id", None)
+    outcome.outcome_by_name = _name(user)
+    outcome.outcome_at = utcnow()
+    outcome.outcome_remarks = decision.remarks
+    outcome.outcome_doc_no = decision.doc_no
+    await db.flush()
+    await write_audit(db, entity="whs_rejection_outcomes", entity_id=outcome.id,
+                      entity_no=outcome.inspection_no, action=AuditAction.UPDATE,
+                      actor=user, before={"outcome": RejectionOutcome.PENDING.value},
+                      after={"outcome": outcome.outcome,
+                             "doc_no": outcome.outcome_doc_no,
+                             "remarks": outcome.outcome_remarks})
+    await db.commit()
+    await db.refresh(outcome)
+    return outcome
+
+
 async def complete_inspection(db: AsyncSession, inspection_id: int, user) -> m.Inspection:
     """Writes the outcome back onto the receipt lines.
 
@@ -29547,6 +29649,28 @@ async def _apply_outbound_inspection_lines(db: AsyncSession, inspection: m.Outbo
                 f"{label}: {rejected} rejected — enter a Rejection reason on this line "
                 "before saving")
 
+        # The REJECTED units, named the same way as the ACCEPTED half — the register
+        # of what this sheet turned away (SCM_REJ) reads them off the line, never the
+        # issue, so the rejection travels with the line that found it. Boxes name
+        # their box codes (a partial-rejected box is named with the qty rejected out
+        # of it); serial / IMEI / asset / consumable codes name themselves.
+        rejected_unit_codes: list[dict] = []
+        if judged and rejected > ZERO:
+            if boxes:
+                # A box rejected whole is one not in the kept list; a partial-rejected
+                # box contributes the qty rejected out of it.
+                for code, carries in boxes.items():
+                    if code not in serials:
+                        rejected_unit_codes.append(
+                            {"code": code, "kind": "box", "qty": float(carries)})
+                    elif (pack_rejections.get(code) or 0) > 0:
+                        rejected_unit_codes.append(
+                            {"code": code, "kind": "box",
+                             "qty": float(pack_rejections[code])})
+            elif sent:
+                for code in sorted(sent - set(serials)):
+                    rejected_unit_codes.append({"code": code, "kind": "unit"})
+
         inspection.items.append(m.OutboundInspectionItem(
             issue_item_id=line.issue_item_id,
             **(combinations.carry(await db.get(m.MaterialIssueLine, line.issue_item_id))
@@ -29558,6 +29682,7 @@ async def _apply_outbound_inspection_lines(db: AsyncSession, inspection: m.Outbo
             result=result, defect_type=reason, remarks=line.remarks,
             serial_numbers={"accepted": serials} if serials else None,
             pack_rejections=pack_rejections or None,
+            rejected_codes=rejected_unit_codes or None,
         ))
     _outbound_inspection_totals(inspection)
 
@@ -29682,6 +29807,26 @@ async def _apply_outbound_inspection_result(db: AsyncSession,
     issue.qc_status = _outbound_qc_verdict(
         passed=inspection.passed_items, failed=inspection.failed_items,
         lines=len(inspection.items), unchecked=unchecked)
+
+    # Every line this sheet turned away enters the rejection register (SCM_REJ), one
+    # row per line, PENDING a decision on Stock Segregation > Rejected. The direction
+    # is STOCK_TRANSFER when the inspection is the QC of a stock transfer's Material
+    # Issue, OUTWARD otherwise — so the register reads honestly about which door the
+    # goods went back through. `_write_rejection_outcomes` is idempotent, so a re-run
+    # after an edit replaces this inspection's rows instead of duplicating them.
+    direction = (RejectionDirection.STOCK_TRANSFER.value
+                 if getattr(inspection, "is_stock_transfer", False)
+                 else RejectionDirection.OUTWARD.value)
+    rejected_codes_by_item: dict[int, list[dict]] = {}
+    for line in inspection.items:
+        if _d(line.rejected_qty) <= ZERO:
+            continue
+        codes = list(line.rejected_codes or [])
+        rejected_codes_by_item[line.id] = codes
+    await _write_rejection_outcomes(
+        db, inspection, direction, rejected_codes_by_item,
+        issue_id=inspection.issue_id)
+
     return issue.qc_status
 
 

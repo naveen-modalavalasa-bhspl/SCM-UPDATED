@@ -96,9 +96,16 @@ class RejectionOutcome(str, Enum):
 
 
 class RejectionDirection(str, Enum):
-    """`whs_rejection_outcomes.direction` — which QC door turned the goods away."""
+    """`whs_rejection_outcomes.direction` — which QC door turned the goods away.
+
+    STOCK_TRANSFER is the QC of a stock transfer's Material Issue — the same
+    `OutboundInspection` row as OUTWARD, gated by `is_stock_transfer`. Splitting it
+    out keeps the rejection register honest about which door the goods went back
+    through, instead of filing transfer rejects as plain outward rejects.
+    """
     INWARD = "INWARD"
     OUTWARD = "OUTWARD"
+    STOCK_TRANSFER = "STOCK_TRANSFER"
 
 
 class ReadingScope(str, Enum):

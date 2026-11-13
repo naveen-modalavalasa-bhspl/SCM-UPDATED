@@ -1,6 +1,6 @@
 import {
   Button, Can, ConfirmModal, DocumentScopeStrip, ErrorBanner, Field, Input, PackageCheckModal,
-  PageHeader, Select, StatusPill,
+  PageHeader, StatusPill,
 } from "@/shared/components";
 import {
   type PackEntry, baseOf, checkFrom, checkSummary, expandPacks, shrinkWithin, splitByCheck,
@@ -9,7 +9,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
-import { ArrowLeft, Boxes, CheckCheck, FileText, Plus, ScanLine, Trash2 } from "lucide-react";
+import { ArrowLeft, Boxes, CheckCheck, FileText, ScanLine } from "lucide-react";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
 import { Lookup } from "../components/Lookup";
@@ -24,6 +24,7 @@ import {
 import { fmtQty, num, today } from "../format";
 import { applyQcEdit, passIfUntouched, qcLineResult, qcRate, qcSentence, summarizeQc } from "../qcSummary";
 import { QcResultBadge, QcVerdictPanel, QcVerdictStrip } from "../components/QcVerdict";
+import { UnitReadingsSection, type UnitReading } from "../components/UnitReadingsSection";
 import { resolveAcceptedUnits } from "../qcUnits";
 import { alerts } from "@/modules/alerts";
 import { useAuth } from "@/shared/auth/AuthContext";
@@ -692,10 +693,6 @@ export default function QualityInspectionForm({
 
   if (editing && isLoading) return <div className="py-16 text-center text-muted">Loading…</div>;
 
-  const params = paramsFor === null ? [] : form.items[paramsFor]?.parameters ?? [];
-  const setParams = (rows: InspectionParameter[]) =>
-    paramsFor !== null && patchLine(paramsFor, { parameters: rows });
-
   return (
     <div>
       <PageHeader
@@ -877,73 +874,40 @@ export default function QualityInspectionForm({
 
       {paramsFor !== null && (
         <Section
-          title={`Readings — line ${paramsFor + 1}`}
-          hint="What was measured, and what it should have been."
+          title={`Per-unit readings — line ${paramsFor + 1}`}
+          hint="One row per accepted and per rejected quantity. The verdict on each row follows the line's split — record what was measured on that unit."
           actions={
-            <>
-              <Button
-                variant="subtle"
-                onClick={() => setParams([...params, { name: "", expected: "", observed: "", result: "PASS" }])}
-                disabled={locked}
-              >
-                <Plus className="h-4 w-4" /> Add reading
-              </Button>
-              <Button variant="ghost" onClick={() => setParamsFor(null)}>Close</Button>
-            </>
+            <Button variant="ghost" onClick={() => setParamsFor(null)}>Close</Button>
           }
         >
-          {params.length === 0 ? (
-            <p className="text-sm text-muted">No readings recorded for this line.</p>
-          ) : (
-            <div className="space-y-2">
-              {params.map((p, i) => (
-                <div key={i} className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_1fr_1fr_130px_44px]">
-                  <Input
-                    value={p.name}
-                    placeholder="Parameter"
-                    disabled={locked}
-                    onChange={(e) =>
-                      setParams(params.map((r, x) => (x === i ? { ...r, name: e.target.value } : r)))
-                    }
-                  />
-                  <Input
-                    value={p.expected ?? ""}
-                    placeholder="Expected"
-                    disabled={locked}
-                    onChange={(e) =>
-                      setParams(params.map((r, x) => (x === i ? { ...r, expected: e.target.value } : r)))
-                    }
-                  />
-                  <Input
-                    value={p.observed ?? ""}
-                    placeholder="Observed"
-                    disabled={locked}
-                    onChange={(e) =>
-                      setParams(params.map((r, x) => (x === i ? { ...r, observed: e.target.value } : r)))
-                    }
-                  />
-                  <Select
-                    value={p.result ?? "PASS"}
-                    onChange={(v) =>
-                      setParams(params.map((r, x) => (x === i ? { ...r, result: v as "PASS" | "FAIL" } : r)))
-                    }
-                    options={[{ value: "PASS", label: "Pass" }, { value: "FAIL", label: "Fail" }]}
-                    isDisabled={locked}
-                    ariaLabel={`Reading ${i + 1} result`}
-                  />
-                  <button
-                    type="button"
-                    aria-label={`Remove reading ${i + 1}`}
-                    disabled={locked}
-                    onClick={() => setParams(params.filter((_, x) => x !== i))}
-                    className="inline-flex h-11 w-11 items-center justify-center rounded-lg text-muted hover:text-bad"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
+          <UnitReadingsSection
+            acceptedQty={num(form.items[paramsFor]?.accepted_qty)}
+            rejectedQty={num(form.items[paramsFor]?.rejected_qty)}
+            tracked={isSerialTracked(paramsFor) || isImeiTracked(paramsFor)}
+            acceptedIdentifiers={
+              isImeiTracked(paramsFor)
+                ? resolvedImeis(paramsFor)
+                : resolvedSerials(paramsFor)
+            }
+            rejectedIdentifiers={
+              (() => {
+                const offered = isImeiTracked(paramsFor)
+                  ? availableImeis(paramsFor)
+                  : availableSerials(paramsFor);
+                if (!offered) return undefined;
+                const accepted = new Set(isImeiTracked(paramsFor)
+                  ? resolvedImeis(paramsFor)
+                  : resolvedSerials(paramsFor));
+                return offered.filter((s) => !accepted.has(s));
+              })()
+            }
+            identifierLabel={
+              isImeiTracked(paramsFor) ? "IMEI" : isSerialTracked(paramsFor) ? "Serial" : "Unit"
+            }
+            readings={(form.items[paramsFor]?.parameters ?? []) as UnitReading[]}
+            readOnly={locked}
+            onChange={(next) => patchLine(paramsFor, { parameters: next as InspectionParameter[] })}
+          />
         </Section>
       )}
 

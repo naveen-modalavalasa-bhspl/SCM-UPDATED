@@ -48,6 +48,7 @@ from app.platform.rbac.permissions import (
     STOCK_TRANSFER_QC_APPROVE, STOCK_TRANSFER_RECEIVE, STOCK_TRANSFER_VIEW,
     ADMIN_SETTINGS_MANAGE, TRANSPORT_CREATE, TRANSPORT_TRACK, TRANSPORT_VIEW,
     STOCK_REPACK,
+    STOCK_REJECTION_VIEW, STOCK_REJECTION_MANAGE,
 )
 from app.modules.warehouse.enums import (
     DISPATCH_ACKNOWLEDGE, DISPATCH_APPROVE, DISPATCH_CREATE, DISPATCH_DELETE,
@@ -2238,6 +2239,48 @@ async def delete_outbound_inspection(inspection_id: int, db: AsyncSession = Depe
         QC_OUTWARD_DELETE, STOCK_TRANSFER_QC, service.transfer_qc_in_reach))):
     await service.delete_draft(db, "whs_inspections", inspection_id, user)
     return None
+
+
+# ---------------------------------------------------------------------------
+# Rejection register (SCM_REJ) — what every QC door turned away, and where it went
+# ---------------------------------------------------------------------------
+#
+# Read by Stock Segregation > QC Lifecycle, where the supervisor follows each
+# rejected quantity from the inspection that found it to the document that carried
+# it out (purchase return, disposal note, replacement GRN). The list returns every
+# row in scope — the register is short by nature — and the summary returns one
+# GROUP BY for the KPI tiles. Decisions are terminal: PENDING -> one of the four
+# outcomes, never back to PENDING.
+
+@router.get("/rejection-outcomes", response_model=list[s.RejectionOutcomeRead])
+async def list_rejection_outcomes(warehouse_id: int | None = None,
+                                  direction: str | None = None,
+                                  outcome: str | None = None,
+                                  item_id: int | None = None,
+                                  inspection_no: str | None = None,
+                                  db: AsyncSession = Depends(get_db),
+                                  _user=Depends(require_permission(STOCK_REJECTION_VIEW))):
+    return await service.list_rejection_outcomes(
+        db, warehouse_id=warehouse_id, direction=direction, outcome=outcome,
+        item_id=item_id, inspection_no=inspection_no)
+
+
+@router.get("/rejection-outcomes/summary", response_model=s.RejectionSummary)
+async def rejection_outcomes_summary(warehouse_id: int | None = None,
+                                     direction: str | None = None,
+                                     db: AsyncSession = Depends(get_db),
+                                     _user=Depends(require_permission(STOCK_REJECTION_VIEW))):
+    return await service.rejection_summary(
+        db, warehouse_id=warehouse_id, direction=direction)
+
+
+@router.post("/rejection-outcomes/{outcome_id}/decide",
+             response_model=s.RejectionOutcomeRead)
+async def decide_rejection_outcome(outcome_id: int, body: s.RejectionDecisionIn,
+                                   db: AsyncSession = Depends(get_db),
+                                   user=Depends(require_permission(STOCK_REJECTION_MANAGE))):
+    return await service.decide_rejection_outcome(db, outcome_id, body, user)
+
 
 
 # ---------------------------------------------------------------------------

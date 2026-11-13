@@ -1,9 +1,9 @@
-import { Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
+import { Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, StatusPill } from "@/shared/components";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
-import { ArrowLeft, CheckCheck, CheckCircle2, Info, Plus, ScanLine, Trash2 } from "lucide-react";
+import { ArrowLeft, CheckCheck, CheckCircle2, Info, ScanLine } from "lucide-react";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
 import { Lookup } from "../components/Lookup";
@@ -29,8 +29,13 @@ import { usePointLabel } from "../usePointLabel";
 import { TONE_APPROVE, TONE_REJECT } from "@/shared/components/tones";
 import { CombinationTag } from "@/shared/combination";
 import { useAuth } from "@/shared/auth/AuthContext";
-import { applyQcEdit, passIfUntouched, qcLineResult, qcRate } from "../qcSummary";
-import { QcResultBadge } from "../components/QcVerdict";
+import {
+  applyQcEdit, passIfUntouched, qcLineResult,
+  summarizeQc, type QcSummary,
+} from "../qcSummary";
+import { QcResultBadge, QcVerdictPanel, QcVerdictStrip } from "../components/QcVerdict";
+import { deleteOutboundInspection } from "../api";
+import { UnitReadingsSection, type UnitReading } from "../components/UnitReadingsSection";
 
 /**
  * Inspect a receipt line by line.
@@ -431,6 +436,25 @@ export default function OutboundQualityInspectionForm({
     [form.items],
   );
 
+  /** SCM_0164 / 0165 / 0166: the same QcSummary the inward screen renders, so the live
+   *  form, the saved document and the register can never tell three different stories.
+   *  Counts by QUANTITY, with a partly-rejected line in its own PARTIAL bucket. */
+  const summary: QcSummary = useMemo(
+    () => summarizeQc(form.items.map((line) => ({ ...line, result: resultOf(line) }))),
+    [form.items],
+  );
+
+  /** `uom` is named only when every line shares one, so "units" never claims a unit.
+   *  Same rule as the inward form. */
+  const sharedUom = useMemo(() => {
+    const uoms = new Set(
+      form.items
+        .map((_, i) => savedLine(i)?.uom_code)
+        .filter((u): u is string => !!u),
+    );
+    return uoms.size === 1 ? [...uoms][0] : undefined;
+  }, [form.items]);
+
   const locked = !!doc && doc.status !== "DRAFT" && doc.status !== "IN_PROGRESS";
 
   /** A line whose issue line sent out named units — serials, IMEIs, asset tags or
@@ -533,16 +557,18 @@ export default function OutboundQualityInspectionForm({
     },
   });
 
-  /* Cancelling hands the Material Issue back: the server walks an untouched receipt out of
-   * PENDING_QC to DRAFT, which is the only way to correct lines — serials above all —
-   * once the receipt has been submitted. */
+  /* Cancelling a DRAFT outward inspection deletes it, which hands the Material Issue
+   * back to DRAFT — the only way to correct lines once the receipt has been submitted.
+   * The matching `cancelInspection` POST on the inward side is, in this module, the
+   * DELETE endpoint the form already had wired everywhere except here. */
   const cancel = useMutation({
-    mutationFn: () => null as any, // cancelOutboundInspection(Number(id)),
+    mutationFn: () => deleteOutboundInspection(Number(id)),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["wh-inspection", id] });
       qc.invalidateQueries({ queryKey: [`wh-inspections-${type}`] });
       qc.invalidateQueries({ queryKey: ["wh-issues"] });
       setCancelling(false);
+      nav(listPath, { replace: true });
     },
   });
 
@@ -765,10 +791,6 @@ export default function OutboundQualityInspectionForm({
 
   if (editing && isLoading) return <div className="py-16 text-center text-muted">Loading…</div>;
 
-  const params = paramsFor === null ? [] : form.items[paramsFor]?.parameters ?? [];
-  const setParams = (rows: InspectionParameter[]) =>
-    paramsFor !== null && patchLine(paramsFor, { parameters: rows });
-
   return (
     <div>
       <PageHeader
@@ -824,14 +846,20 @@ export default function OutboundQualityInspectionForm({
           {doc.current_approver_name && (
             <MetaRow label="With" value={doc.current_approver_name} />
           )}
-          <MetaRow
-            label="Pass rate"
-            // By quantity, as served (SCM_0165) — passed LINES over all lines read 0 % on
-            // a line that kept most of itself.
-            value={<span className="tabular">{qcRate(doc.pass_rate ?? null)}</span>}
-          />
         </MetaCard>
       )}
+
+      {/* SCM_0164 / 0165: the same verdict panel the inward screen renders — ring,
+          sentence, accepted / rejected split and line chips — fed by the shared
+          `summarizeQc`. The Pass rate meta row that used to live above is now this
+          panel, so a number and its story never sit apart. */}
+      <div className="mb-4">
+        <QcVerdictPanel
+          summary={summary}
+          uom={sharedUom}
+          title={locked ? "Inspection result" : "Inspection so far"}
+        />
+      </div>
 
       <Section title="Inspection">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -930,91 +958,47 @@ export default function OutboundQualityInspectionForm({
           onRemove={locked ? undefined : (i) => set("items", form.items.filter((_, x) => x !== i))}
           rowTone={(l) => (l.result === "FAILED" ? "bg-bad-bg/40" : undefined)}
           empty="Pick a Material Issue above to pull its lines in."
-          footer={
-            <div className="flex flex-wrap justify-end gap-x-6 gap-y-1 text-sm">
-              <span className="text-muted">{totals.lines} lines</span>
-              <span className="text-ok">Passed <b className="tabular">{totals.passed}</b></span>
-              <span className={totals.failed > 0 ? "text-bad" : "text-muted"}>
-                Failed <b className="tabular">{totals.failed}</b>
-              </span>
-              <span className="text-ink">Inspected <b className="tabular">{fmtQty(totals.inspected)}</b></span>
-              <span className={totals.rejected > 0 ? "text-bad" : "text-muted"}>
-                Rejected <b className="tabular">{fmtQty(totals.rejected)}</b>
-              </span>
-            </div>
-          }
+          footer={<QcVerdictStrip summary={summary} uom={sharedUom} />}
         />
       </Section>
 
       {paramsFor !== null && (
         <Section
-          title={`Readings — line ${paramsFor + 1}`}
-          hint="What was measured, and what it should have been."
+          title={`Per-unit readings — line ${paramsFor + 1}`}
+          hint="One row per accepted and per rejected quantity. The verdict on each row follows the line's split — record what was measured on that unit."
           actions={
-            <>
-              <Button
-                variant="subtle"
-                onClick={() => setParams([...params, { name: "", expected: "", observed: "", result: "PASS" }])}
-                disabled={locked}
-              >
-                <Plus className="h-4 w-4" /> Add reading
-              </Button>
-              <Button variant="ghost" onClick={() => setParamsFor(null)}>Close</Button>
-            </>
+            <Button variant="ghost" onClick={() => setParamsFor(null)}>Close</Button>
           }
         >
-          {params.length === 0 ? (
-            <p className="text-sm text-muted">No readings recorded for this line.</p>
-          ) : (
-            <div className="space-y-2">
-              {params.map((p, i) => (
-                <div key={i} className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_1fr_1fr_130px_44px]">
-                  <Input
-                    value={p.name}
-                    placeholder="Parameter"
-                    disabled={locked}
-                    onChange={(e) =>
-                      setParams(params.map((r, x) => (x === i ? { ...r, name: e.target.value } : r)))
-                    }
-                  />
-                  <Input
-                    value={p.expected ?? ""}
-                    placeholder="Expected"
-                    disabled={locked}
-                    onChange={(e) =>
-                      setParams(params.map((r, x) => (x === i ? { ...r, expected: e.target.value } : r)))
-                    }
-                  />
-                  <Input
-                    value={p.observed ?? ""}
-                    placeholder="Observed"
-                    disabled={locked}
-                    onChange={(e) =>
-                      setParams(params.map((r, x) => (x === i ? { ...r, observed: e.target.value } : r)))
-                    }
-                  />
-                  <Select
-                    value={p.result ?? "PASS"}
-                    onChange={(v) =>
-                      setParams(params.map((r, x) => (x === i ? { ...r, result: v as "PASS" | "FAIL" } : r)))
-                    }
-                    options={[{ value: "PASS", label: "Pass" }, { value: "FAIL", label: "Fail" }]}
-                    isDisabled={locked}
-                    ariaLabel={`Reading ${i + 1} result`}
-                  />
-                  <button
-                    type="button"
-                    aria-label={`Remove reading ${i + 1}`}
-                    disabled={locked}
-                    onClick={() => setParams(params.filter((_, x) => x !== i))}
-                    className="inline-flex h-11 w-11 items-center justify-center rounded-lg text-muted hover:text-bad"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
+          <UnitReadingsSection
+            acceptedQty={num(form.items[paramsFor]?.accepted_qty)}
+            rejectedQty={num(form.items[paramsFor]?.rejected_qty)}
+            tracked={isSerialTracked(paramsFor)}
+            acceptedIdentifiers={resolvedSerials(paramsFor)}
+            rejectedIdentifiers={
+              // The rejected codes — read from the line's `rejected_codes` when the
+              // server populates it (boxes and serial-tracked items), else derived
+              // from offered - accepted for serial-tracked items, else undefined.
+              (() => {
+                const offered = availableSerials(paramsFor);
+                if (!offered) return undefined;
+                const accepted = new Set(resolvedSerials(paramsFor));
+                return offered.filter((s) => !accepted.has(s));
+              })()
+            }
+            identifierLabel={
+              // The unit's identifier name — read off the issue line's tracking flags.
+              (() => {
+                const line = (delivery?.items ?? []).find((x) => x.id === form.items[paramsFor]?.issue_item_id);
+                if (line?.is_imei_tracked) return "IMEI";
+                if (line?.is_serial_tracked) return "Serial";
+                return "Unit";
+              })()
+            }
+            readings={(form.items[paramsFor]?.parameters ?? []) as UnitReading[]}
+            readOnly={locked}
+            onChange={(next) => patchLine(paramsFor, { parameters: next as InspectionParameter[] })}
+          />
         </Section>
       )}
 
