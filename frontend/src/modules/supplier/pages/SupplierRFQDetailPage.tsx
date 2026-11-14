@@ -174,19 +174,31 @@ export function SupplierRFQDetailPage() {
     return out;
   }, [header.valid_till, header.expected_delivery_date, lines]);
 
+  /** The same arithmetic the server runs in `_quote_totals`, stated so a vendor can
+   *  follow it: line gross → line discount → sub-total → overall discount → tax →
+   *  freight → grand total. Tax is per LINE, on the line's value after ITS discount;
+   *  the overall discount is a flat amount taken off at the end (and so does not
+   *  reduce the tax), and freight is added last. */
   const totals = useMemo(() => {
-    let sumNet = 0;
+    let gross = 0;
+    let lineDiscount = 0;
     let tax = 0;
     for (const line of lines) {
-      const gross = Number(line.quantity || 0) * Number(line.rate || 0);
-      const net = gross - (gross * Number(line.discount_percent || 0)) / 100;
-      sumNet += net;
+      const lineGross = Number(line.quantity || 0) * Number(line.rate || 0);
+      const discount = (lineGross * Number(line.discount_percent || 0)) / 100;
+      const net = lineGross - discount;
+      gross += lineGross;
+      lineDiscount += discount;
       tax += (net * taxRate(line)) / 100;
     }
-    const sub = sumNet - Number(header.discount_amount || 0);
-    const grand = sub + tax + (freightAsked ? Number(header.freight_amount || 0) : 0);
-    return { sub, tax, grand };
-  }, [lines, interstate, header.freight_amount, header.discount_amount, freightAsked]);
+    const net = gross - lineDiscount;
+    const overallDiscount = Number(header.discount_amount || 0);
+    const freight = freightAsked ? Number(header.freight_amount || 0) : 0;
+    return {
+      gross, lineDiscount, net, overallDiscount, tax, freight,
+      grand: net - overallDiscount + tax + freight,
+    };
+  }, [lines, header.freight_amount, header.discount_amount, freightAsked]);
 
   const save = useMutation({
     mutationFn: () => {
@@ -918,21 +930,69 @@ export function SupplierRFQDetailPage() {
           />
         </Field>
 
-        {/* Stacks on a phone: three money columns at 375px wrap mid-number. */}
-        <dl className="grid grid-cols-1 gap-4 border-t border-line pt-4 text-sm sm:grid-cols-3">
-          <div>
-            <dt className="text-xs text-muted">Sub-total</dt>
-            <dd className="mt-1 text-body">{money(totals.sub)}</dd>
-          </div>
-          <div>
-            <dt className="text-xs text-muted">Tax</dt>
-            <dd className="mt-1 text-body">{money(totals.tax)}</dd>
-          </div>
-          <div>
-            <dt className="text-xs text-muted">Grand total</dt>
-            <dd className="mt-1 font-semibold text-ink">{money(totals.grand)}</dd>
-          </div>
-        </dl>
+        {/* The whole sum, one line per step, so the grand total can be reconciled
+          * without leaving the screen (2026-11-14). It used to print three figures
+          * and call the largest of them "Grand total" — the overall discount was
+          * folded silently into "Sub-total", so a vendor could not see what their
+          * discount had done, or prove the total to themselves. */}
+        <div className="border-t border-line pt-4">
+          <table className="ml-auto w-full max-w-md text-sm">
+            <tbody className="divide-y divide-line/60">
+              <tr>
+                <td className="py-1.5 text-body">
+                  Line value
+                  <span className="ml-1 text-xs text-muted">(quantity × rate, every line)</span>
+                </td>
+                <td className="tabular py-1.5 text-right text-body">{money(totals.gross)}</td>
+              </tr>
+              <tr>
+                <td className="py-1.5 text-body">
+                  Line discounts
+                  <span className="ml-1 text-xs text-muted">(each line's discount %)</span>
+                </td>
+                <td className="tabular py-1.5 text-right text-body">
+                  {totals.lineDiscount > 0 ? `− ${money(totals.lineDiscount)}` : money(0)}
+                </td>
+              </tr>
+              <tr>
+                <td className="py-1.5 font-medium text-ink">
+                  Sub-total
+                  <span className="ml-1 text-xs font-normal text-muted">(line value after line discounts)</span>
+                </td>
+                <td className="tabular py-1.5 text-right font-medium text-ink">{money(totals.net)}</td>
+              </tr>
+              <tr>
+                <td className="py-1.5 text-body">
+                  Overall discount
+                  <span className="ml-1 text-xs text-muted">(flat amount, off the sub-total)</span>
+                </td>
+                <td className="tabular py-1.5 text-right text-body">
+                  {totals.overallDiscount > 0 ? `− ${money(totals.overallDiscount)}` : money(0)}
+                </td>
+              </tr>
+              <tr>
+                <td className="py-1.5 text-body">
+                  {interstate ? "IGST" : "CGST + SGST"}
+                  <span className="ml-1 text-xs text-muted">(each line, at the item's HSN rate)</span>
+                </td>
+                <td className="tabular py-1.5 text-right text-body">+ {money(totals.tax)}</td>
+              </tr>
+              {freightAsked && (
+                <tr>
+                  <td className="py-1.5 text-body">Freight</td>
+                  <td className="tabular py-1.5 text-right text-body">+ {money(totals.freight)}</td>
+                </tr>
+              )}
+              <tr className="border-t-2 border-line">
+                <td className="py-2 text-base font-bold text-ink">Grand total</td>
+                <td className="tabular py-2 text-right text-base font-bold text-ink">
+                  {money(totals.grand)}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+
+        </div>
 
         {open && gaps.length > 0 && (
           <p className="rounded-lg bg-danger/10 px-3 py-2 text-xs text-danger">
