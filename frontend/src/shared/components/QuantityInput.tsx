@@ -1,7 +1,7 @@
 import { forwardRef } from "react";
 import type { ClipboardEvent, InputHTMLAttributes, KeyboardEvent } from "react";
 
-import { acceptsQuantityEdit, sanitizeQuantityInput } from "../quantity";
+import { acceptsQuantityEdit, leadingZeroFix, sanitizeQuantityInput } from "../quantity";
 
 export interface QuantityInputProps
   extends Omit<InputHTMLAttributes<HTMLInputElement>, "value" | "onChange" | "type" | "min" | "max" | "step"> {
@@ -37,7 +37,12 @@ export const QuantityInput = forwardRef<HTMLInputElement, QuantityInputProps>(fu
     const el = event.currentTarget;
     const start = el.selectionStart ?? el.value.length;
     const end = el.selectionEnd ?? el.value.length;
-    if (!acceptsQuantityEdit(el.value, start, end, event.key, decimals)) event.preventDefault();
+    if (acceptsQuantityEdit(el.value, start, end, event.key, decimals)) return;
+    event.preventDefault();
+    // SCM_0156: "." into an empty box was meant as "0." — write that, rather than
+    // swallowing the key and leaving the storekeeper wondering why nothing happened.
+    const fixed = leadingZeroFix(el.value.slice(0, start) + event.key + el.value.slice(end), decimals);
+    if (fixed !== null) onChange(fixed);
   };
 
   // Covers what a key event cannot: IME, drag-and-drop text, mobile keyboards.
@@ -71,6 +76,7 @@ export const QuantityInput = forwardRef<HTMLInputElement, QuantityInputProps>(fu
       inputMode={wholeOnly ? "numeric" : "decimal"}
       autoComplete="off"
       data-decimals={decimals}
+      data-leading-zero="auto"
       data-min={min}
       data-max={max}
       {...rest}

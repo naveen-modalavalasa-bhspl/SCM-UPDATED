@@ -253,6 +253,12 @@ async def po_payments(db: AsyncSession, po_id: int, user=None) -> dict:
         "po_id": po.id, "po_no": po.po_no, "po_status": po.status,
         "vendor_id": po.vendor_id, "vendor_name": po.vendor_name,
         "project_name": po.project_name, "po_date": po.po_date,
+        # Whose paper a payment against it is on (2026-11-12): copied from the order,
+        # shown locked on the Record payment card. Null on an older order.
+        "project_id": po.project_id,
+        "organization_id": po.organization_id, "organization_name": po.organization_name,
+        "org_department_id": po.org_department_id,
+        "org_department_name": po.org_department_name,
         "approved_at": po.approved_at, "payment_terms": po.payment_terms,
         "total_amount": float(po.total_amount or 0),
         "paid": float(paid), "pending": float(pending),
@@ -483,8 +489,13 @@ async def record_payment(db: AsyncSession, data, user) -> dict:
             f"(₹{stage['amount']:,.2f} due, ₹{stage['paid']:,.2f} paid, "
             f"₹{stage['pending']:,.2f} awaiting approval).")
 
+    # Whose paper it is on (2026-11-12): COPIED from the order when the order carries an
+    # organisation — the money is the PO's — else selected on the number card.
+    from app.platform.doc_numbering import scope as org_scope
+    scope_values, scope_args = await org_scope.carry_or_select(db, data, po)
+
     payment = VendorPayment(
-        payment_no=await next_number(db, "vendor_payment"),
+        payment_no=await next_number(db, "vendor_payment", **(scope_args or {})),
         po_id=po.id, po_no=po.po_no, milestone_id=milestone.id, stage=milestone.stage,
         vendor_id=po.vendor_id, vendor_name=po.vendor_name, project_id=po.project_id,
         amount=amount, paid_on=data.paid_on, mode=mode,
@@ -495,6 +506,10 @@ async def record_payment(db: AsyncSession, data, user) -> dict:
         created_by_id=getattr(user, "id", None),
         created_by_name=getattr(user, "full_name", None),
     )
+    if scope_values:
+        org_scope.stamp_with_project(payment, scope_values)
+    else:
+        payment.project_name = getattr(po, "project_name", None)
     db.add(payment)
     await db.flush()
 

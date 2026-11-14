@@ -11,7 +11,10 @@ import {
 import { ErrorBanner } from "./Feedback";
 import { Select } from "./ui";
 
-const label = (row: DocNumberOption) => (row.code ? `${row.code} — ${row.name}` : row.name);
+/** Name first, code after (2026-11-13): "BAVYA (BHS)" reads as the thing it is; a code
+ *  first made every option start with letters nobody says out loud. */
+const label = (row: DocNumberOption) =>
+  (row.code && row.code !== row.name ? `${row.name} (${row.code})` : row.name);
 
 /** A list that always holds the current selection, even one no longer offered. */
 function withSelected(rows: DocNumberOption[], id: number | "", name?: string) {
@@ -22,8 +25,10 @@ function withSelected(rows: DocNumberOption[], id: number | "", name?: string) {
   return options;
 }
 
-function FieldShell({ title, required, locked, active, hint, children, onActive, onIdle }: {
+function FieldShell({ title, required, locked, active, hint, check, children, onActive, onIdle }: {
   title: string; required?: boolean; locked?: boolean; active: boolean; hint?: ReactNode;
+  /** Filled by a default, not by a person: a small "Check" chip beside the title. */
+  check?: boolean;
   children: ReactNode; onActive: () => void; onIdle: () => void;
 }) {
   return (
@@ -39,6 +44,12 @@ function FieldShell({ title, required, locked, active, hint, children, onActive,
             <span aria-hidden="true" className="text-danger">*</span>
             <span className="sr-only"> (required)</span>
           </>
+        )}
+        {check && (
+          <span title="Filled in for you from your defaults. Change it if it is wrong."
+                className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-full bg-warn-bg px-2 py-0.5 text-[11px] font-semibold text-warn ring-1 ring-warn/25">
+            <AlertTriangle aria-hidden className="h-3 w-3" /> Check
+          </span>
         )}
       </div>
       {children}
@@ -182,7 +193,6 @@ export function DocumentNumberCard({
     onActive: () => setActiveField(field),
     onIdle: () => setActiveField((f) => (f === field ? null : f)),
   });
-  const guess = <span className="font-semibold text-warn">Default, please check</span>;
   const fromSource = source ? (
     <>Copied from {source.to
       ? <Link to={source.to} className="font-semibold text-brand hover:underline">{source.label}</Link>
@@ -194,8 +204,8 @@ export function DocumentNumberCard({
     organisation: (inNumber) => (
       <FieldShell key="organisation" title="Organisation" required locked={orgLocked}
                   {...shell("organisation")}
-                  hint={guessed.includes("organisation") ? guess
-                    : lockedAll ? "Fixed once submitted."
+                  check={guessed.includes("organisation")}
+                  hint={lockedAll ? "Fixed once submitted."
                       : locks.organisation ? reasonFor("organisation")
                         : inNumber ? "Goes into the number." : notPrinted}>
         <Select
@@ -212,8 +222,8 @@ export function DocumentNumberCard({
     project: (inNumber) => (
       <FieldShell key="project" title="Project" required={neither && !projectLocked} locked={projectLocked}
                   {...shell("project")}
-                  hint={guessed.includes("project") ? guess
-                    : lockedAll ? "Fixed once submitted."
+                  check={guessed.includes("project")}
+                  hint={lockedAll ? "Fixed once submitted."
                       : locks.project ? reasonFor("project")
                         : !inNumber ? notPrinted
                           : value.orgDepartmentId !== "" && value.projectId === ""
@@ -221,7 +231,7 @@ export function DocumentNumberCard({
                             : "Prints first, ahead of the department."}>
         <Select
           ariaLabel="Project" value={value.projectId === "" ? (carried ? "carried" : "") : String(value.projectId)}
-          placeholder={projectLocked ? "Not chosen here" : "Select project"}
+          placeholder={projectLocked ? "None — not on the document before" : "Select project"}
           options={carried ? [{ value: "carried", label: value.projectName as string }, ...projects] : projects}
           isDisabled={projectLocked} isInvalid={showInvalid && neither}
           onChange={(v) => {
@@ -248,7 +258,7 @@ export function DocumentNumberCard({
                         : value.orgDepartmentId !== "" ? "Prints in the number." : "Prints when there is no project."}>
         <Select
           ariaLabel="Department" value={value.orgDepartmentId === "" ? "" : String(value.orgDepartmentId)}
-          placeholder={departmentLocked ? "Not chosen here" : "Select department"}
+          placeholder={departmentLocked ? "None — not on the document before" : "Select department"}
           options={departments} isDisabled={departmentLocked}
           isInvalid={showInvalid && neither}
           onChange={(v) => {
@@ -267,7 +277,7 @@ export function DocumentNumberCard({
                   {...shell("fiscal_year")}
                   hint={lockedAll ? "Fixed once submitted."
                     : value.fiscalYear === card?.current_fiscal_year || !value.fiscalYear
-                      ? "Set from today's date. You can change it."
+                      ? "This year, from today's date."
                       : "An earlier year, picked by hand."}>
         <Select
           ariaLabel="Financial year" value={value.fiscalYear} options={years}
@@ -282,23 +292,26 @@ export function DocumentNumberCard({
   const holding = savedNumber?.startsWith("DRAFT-");
 
   return (
-    <section aria-label="Document number" className="overflow-hidden rounded-2xl border border-line bg-content1 shadow-sm">
+    // Laid out by its OWN width, not the screen's (2026-11-13): the same card sits in a
+    // full-page form and in a 420 px side panel (New STO), and screen breakpoints split
+    // it into two columns there, so labels ran together and dropdowns shrank to arrows.
+    <section aria-label="Document number" className="@container overflow-hidden rounded-2xl border border-line bg-content1 shadow-sm">
       <div aria-hidden className="h-1 bg-gradient-to-r from-signal via-brand to-violet-700" />
-      <div className="grid lg:grid-cols-[minmax(0,1fr)_minmax(340px,0.8fr)]">
+      <div className="grid @3xl:grid-cols-[minmax(0,1fr)_minmax(300px,0.8fr)]">
         <div className="min-w-0 p-3.5 sm:p-4">
           {error ? <ErrorBanner error={error} /> : isLoading ? (
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="grid grid-cols-1 gap-3 @lg:grid-cols-2">
               {[0, 1, 2, 3].map((i) => <div key={i} className="h-16 animate-pulse rounded-xl bg-surface-2" />)}
             </div>
           ) : (
-            <div className="grid grid-cols-1 gap-x-2 gap-y-1 sm:grid-cols-2">
+            <div className="grid grid-cols-1 gap-x-3 gap-y-1 @lg:grid-cols-2">
               {card?.fields.map((field) => fieldViews[field.key](field.in_number))}
             </div>
           )}
         </div>
 
         {/* Above the fields on a phone, so the number is what is seen first. */}
-        <div className="order-first flex min-w-0 flex-col justify-center border-b border-line bg-gradient-to-br from-brand-050/80 to-surface-2/60 p-4 lg:order-none lg:border-b-0 lg:border-l sm:p-5">
+        <div className="order-first flex min-w-0 flex-col justify-center border-b border-line bg-gradient-to-br from-brand-050/80 to-surface-2/60 p-4 @3xl:order-none @3xl:border-b-0 @3xl:border-l @md:p-5">
           <div className="mb-3 flex items-center gap-2">
             <span className="grid h-7 w-7 place-items-center rounded-lg bg-brand text-white"><Hash aria-hidden className="h-4 w-4" /></span>
             <h2 className="text-xs font-bold uppercase tracking-widest text-body">

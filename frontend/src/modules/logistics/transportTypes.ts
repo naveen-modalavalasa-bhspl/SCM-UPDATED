@@ -1,3 +1,4 @@
+import type { ScopedDoc } from "@/shared/useDocNumberScope";
 import type { PackEntry } from "@/shared/packing";
 /** The transport leg — types mirroring `backend/app/modules/logistics/schemas.py`.
  *
@@ -814,7 +815,7 @@ export interface ShipmentEvent {
   tr_id?: number;
 }
 
-export interface TransportRequest {
+export interface TransportRequest extends ScopedDoc {
   id: number;
   tr_no: string;
   /** The stops of the multi-drop run this shipment carries — served to the winning
@@ -848,6 +849,9 @@ export interface TransportRequest {
   total_qty: number;
   total_weight_kg: number;
   total_volume_cbm: number;
+  /** The consignment's cartons, each counted once (SCM_0130) — what the gate counts.
+   *  Null on a leg with no consignment behind it. */
+  consignment_package_total?: number | null;
   total_packages: number;
   carrier_id?: number | null;
   carrier_name?: string | null;
@@ -1065,6 +1069,11 @@ export interface TRLineInput {
 }
 
 export interface TRInput {
+  /** The number card's selection (2026-11-12) — `docNumberPayload`. Against an indent
+   *  that carries an organisation the server copies the indent's instead. */
+  organization_id?: number | null;
+  org_department_id?: number | null;
+  fiscal_year?: string | null;
   mode: TransportMode;
   /** Road / rail / air / sea. Optional on the wire: the service falls back to ROAD,
    *  which is what a leg that named no carriage has always been. */

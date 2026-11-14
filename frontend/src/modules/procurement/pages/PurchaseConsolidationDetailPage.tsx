@@ -11,6 +11,8 @@ import { DetailShell, SectionCard, RailStat } from "../components/DetailKit";
 import { money } from "./RequisitionListPage";
 import { TONE_APPROVE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
 import { CombinationTag } from "@/shared/combination";
+import { quantityProblem } from "@/shared/quantity";
+import { uomDecimals } from "@/shared/numberGuard";
 
 const EDITABLE = ["DRAFT"];
 
@@ -46,6 +48,23 @@ export function PurchaseConsolidationDetailPage() {
       doc.items.map((line) => [line.id, String(Number(line.approved_qty))]),
     ));
   }, [doc]);
+
+  /** SCM_0156: what is wrong with each typed "To buy", in words — said under the box
+   *  and keeping Save off, so ".5", a fraction of a whole unit or a figure above the
+   *  cap never reaches the server as a silent `Number(".5")`. A unit whose places are
+   *  not loaded yet is not held to a decimal count here; the box's own guard and the
+   *  server still are. */
+  const lineProblems: Record<number, string> = Object.fromEntries(
+    (doc?.items ?? []).flatMap((line) => {
+      const problem = quantityProblem(edits[line.id], {
+        decimals: uomDecimals(line.uom_code) ?? 3,
+        max: Number(line.max_allowed_qty ?? line.quantity),
+        unit: line.uom_code,
+      });
+      return problem ? [[line.id, problem]] : [];
+    }),
+  );
+  const problemCount = Object.keys(lineProblems).length;
 
   const invalidates = [["consolidations"], ["consolidation", id]];
   const saveLines = useAction({
@@ -102,7 +121,10 @@ export function PurchaseConsolidationDetailPage() {
             {editable && (
               <Can do="consolidation.create">
                 <Button variant="ghost" onClick={() => saveLines.mutate()}
-                  disabled={saveLines.isPending}>
+                  disabled={saveLines.isPending || problemCount > 0}
+                  title={problemCount > 0
+                    ? `Fix the ${problemCount === 1 ? "quantity" : `${problemCount} quantities`} marked in red first`
+                    : undefined}>
                   Save quantities
                 </Button>
                 <Button className={TONE_SUBMIT} onClick={() => submit.mutate()} disabled={submit.isPending}>
@@ -191,11 +213,19 @@ export function PurchaseConsolidationDetailPage() {
                           <div className="ml-auto w-28">
                             <Input
                               type="number"
+                              min={0}
                               data-uom={line.uom_code ?? ""}
                               value={edits[line.id] ?? ""}
                               max={Number(line.max_allowed_qty ?? line.quantity)}
+                              isInvalid={!!lineProblems[line.id]}
+                              aria-label={`To buy, ${line.item_code ?? "line"}`}
                               onChange={(e) => setEdits({ ...edits, [line.id]: e.target.value })}
                             />
+                            {lineProblems[line.id] && (
+                              <div role="alert" className="mt-1 text-[11px] font-semibold leading-tight text-danger">
+                                {lineProblems[line.id]}
+                              </div>
+                            )}
                             {Number(line.replenishment_qty ?? 0) > 0 ? (
                               <div className="mt-1 text-[11px] leading-tight text-muted">
                                 Up to {Number(line.max_allowed_qty ?? line.quantity)} {line.uom_code}

@@ -7,6 +7,7 @@ import { fmtDate, todayIst } from "@/shared/datetime";
 import { requisitionApi } from "../api";
 import { emptyOrgValue, OrgFields, orgPayload, type OrgValue } from "../components/OrgFields";
 import { SelectAllBar } from "../components/SelectAllBar";
+import { PickBox, PickedTag, pickRevision } from "../components/PickBox";
 import type { MRCandidate } from "../types";
 
 const PRIORITIES = [
@@ -107,15 +108,8 @@ export function MRConsolidationPage() {
       key: "pick",
       header: "",
       render: (r) => (
-        <label className="flex h-11 w-11 items-center justify-center">
-          <input
-            type="checkbox"
-            className="h-4 w-4"
-            checked={picked.includes(r.id)}
-            onChange={() => toggle(r.id)}
-            aria-label={`Include ${r.mr_no}`}
-          />
-        </label>
+        <PickBox checked={picked.includes(r.id)} onToggle={() => toggle(r.id)}
+                 label={`Include ${r.mr_no}`} />
       ),
     },
     {
@@ -123,7 +117,9 @@ export function MRConsolidationPage() {
       header: "Material request",
       render: (r) => (
         <div className="min-w-0">
-          <div className="font-mono text-xs font-semibold text-ink">{r.mr_no}</div>
+          <div className={`font-mono text-xs font-semibold ${picked.includes(r.id) ? "text-brand" : "text-ink"}`}>
+            {r.mr_no}<PickedTag show={picked.includes(r.id)} />
+          </div>
           <div className="text-[11px] text-muted">
             {r.indent_no ? `for ${r.indent_no}` : "No indent"}
           </div>
@@ -226,28 +222,27 @@ export function MRConsolidationPage() {
           columns={columns}
           keyOf={(r) => r.id}
           loading={isLoading}
+          // SCM_0158: repaint the cached desktop rows whenever the selection moves.
+          revision={pickRevision(page, picked)}
           page={page}
           totalPages={totalPages}
           onPageChange={setPage}
           empty="No approved material requests are waiting. Ones already on a requisition do not appear here."
           renderCard={(r) => (
-            <label className="flex items-start gap-3">
-              <input
-                type="checkbox"
-                className="mt-1 h-4 w-4"
-                checked={picked.includes(r.id)}
-                onChange={() => toggle(r.id)}
-              />
-              <span className="min-w-0 space-y-1">
-                <span className="block font-mono text-xs font-semibold text-ink">
-                  {r.mr_no}
+            <div className={`-m-1 flex items-start gap-2 rounded-xl p-1 transition-colors ${
+              picked.includes(r.id) ? "bg-brand-050/70" : ""}`}>
+              <PickBox checked={picked.includes(r.id)} onToggle={() => toggle(r.id)}
+                       label={`Include ${r.mr_no}`} />
+              <span className="min-w-0 space-y-1 pt-2">
+                <span className={`block font-mono text-xs font-semibold ${picked.includes(r.id) ? "text-brand" : "text-ink"}`}>
+                  {r.mr_no}<PickedTag show={picked.includes(r.id)} />
                 </span>
                 <span className="block text-[11px] text-muted">
                   {r.indent_no ? `for ${r.indent_no}` : "No indent"}
                   {r.project_name ? ` · ${r.project_name}` : ""}
                 </span>
               </span>
-            </label>
+            </div>
           )}
         />
       </Card>

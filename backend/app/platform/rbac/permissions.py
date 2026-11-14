@@ -169,6 +169,12 @@ QC_OUTWARD_CREATE = "qc_outward.create"
 QC_OUTWARD_UPDATE = "qc_outward.update"
 QC_OUTWARD_APPROVE = "qc_outward.approve"
 QC_OUTWARD_EXPORT = "qc_outward.export"
+# The register of goods every QC door turned away (Stock Segregation > Rejected).
+# It is a list of what already happened, so viewing it is near `inspection.view`;
+# deciding what became of the rejects (dispose, return to vendor/stock, replaced)
+# is its own authority.
+STOCK_REJECTION_VIEW = "stock.rejection.view"
+STOCK_REJECTION_MANAGE = "stock.rejection.manage"
 PUTAWAY_VIEW = "putaway.view"
 PUTAWAY_EXECUTE = "putaway.execute"
 # Changing the PACK LEVEL of stock already on the shelf (Stock Segregation > Lots):
@@ -468,6 +474,10 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(QC_OUTWARD_UPDATE, "warehouse", "qc_outward", "update", "Update Outward QC draft"),
     Perm(QC_OUTWARD_APPROVE, "warehouse", "qc_outward", "approve", "Approve/Complete Outward QC"),
     Perm(QC_OUTWARD_EXPORT, "warehouse", "qc_outward", "export", "Export Outward QC"),
+    Perm(STOCK_REJECTION_VIEW, "warehouse", "stock_rejection", "view",
+         "View the register of goods rejected by QC"),
+    Perm(STOCK_REJECTION_MANAGE, "warehouse", "stock_rejection", "manage",
+         "Decide what became of goods rejected by QC"),
     Perm(PUTAWAY_VIEW, "warehouse", "putaway", "view", "View put-away tasks"),
     Perm(PUTAWAY_EXECUTE, "warehouse", "putaway", "execute", "Put stock away into bins"),
     # Module "inventory": the `stock` resource is inventory's, and one resource never

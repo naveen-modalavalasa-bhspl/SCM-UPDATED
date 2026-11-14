@@ -17,7 +17,11 @@ describe("sanitizeQuantityInput", () => {
   it("lets a half-typed number exist", () => {
     expect(sanitizeQuantityInput("")).toBe("");
     expect(sanitizeQuantityInput("5.")).toBe("5.");
-    expect(sanitizeQuantityInput(".5")).toBe(".5");
+  });
+  it("never lets a quantity start with a point — SCM_0156", () => {
+    expect(sanitizeQuantityInput(".5")).toBe("0.5");
+    expect(sanitizeQuantityInput(".")).toBe("0.");
+    expect(sanitizeQuantityInput(".5", 0)).toBe("");
   });
   it("whole-unit units take no fraction at all", () => {
     expect(sanitizeQuantityInput("5.7", 0)).toBe("5");
@@ -25,7 +29,7 @@ describe("sanitizeQuantityInput", () => {
   });
 });
 
-import { acceptsQuantityEdit, quantityProblem } from "../quantity";
+import { acceptsQuantityEdit, leadingZeroFix, quantityProblem } from "../quantity";
 
 describe("acceptsQuantityEdit (keystroke block)", () => {
   it("refuses letters, signs and a second point", () => {
@@ -53,5 +57,22 @@ describe("quantityProblem (validation net)", () => {
     expect(quantityProblem("1", { min: 2 })).toMatch(/less than 2/);
     expect(quantityProblem("11", { max: 10, unit: "KG" })).toMatch(/more than 10 KG/);
     expect(quantityProblem("10", { max: 10 })).toBeNull();
+  });
+});
+
+describe("a leading point (SCM_0156)", () => {
+  it("is refused as typed, and the box is offered 0. instead", () => {
+    expect(acceptsQuantityEdit("", 0, 0, ".")).toBe(false);
+    expect(leadingZeroFix(".")).toBe("0.");
+    expect(leadingZeroFix(".5")).toBe("0.5");
+  });
+  it("is no fix for a whole-unit unit, or for anything else that is wrong", () => {
+    expect(leadingZeroFix(".", 0)).toBeNull();
+    expect(leadingZeroFix("5.")).toBeNull();
+    expect(leadingZeroFix(".a")).toBeNull();
+  });
+  it("is explained in words when it is already in a box", () => {
+    expect(quantityProblem(".5", { unit: "KG" })).toMatch(/write 0\.5, not \.5/);
+    expect(quantityProblem("0.5", { unit: "KG" })).toBeNull();
   });
 });

@@ -50,10 +50,10 @@ import {
  * Asking for any of that at the gate is asking a security guard to do QC, so
  * `GRN_ONLY_LINE_COLUMNS` keeps those columns out of the inward grid entirely.
  *
- * Serials are the exception: they show on both, but only the GRN insists on a full set.
- * At the gate you capture whatever the cartons let you read — none, some, all — and the
- * GRN, which is the same row, opens with those already in the grid and will not save
- * until the rest are scanned.
+ * Serials and IMEIs are GRN-only too (2026-11-13): nobody opens the cartons at the gate,
+ * so the column has no place there and the inward grid does not show it. The GRN, which
+ * is the same row, is the one screen that asks for them and will not save until every
+ * received unit has its code.
  *
  * The purchase order is a typed box on both. It used to be a picker on the GRN that
  * filled the lines from the chosen order, but procurement does not raise orders in this
@@ -103,7 +103,9 @@ const emptyLine = (): ReceiptItemWrite => ({
 /** Line columns a gate entry does not ask for — they belong to the GRN, after the
  *  consignment has been opened and inspected. */
 const GRN_ONLY_LINE_COLUMNS = new Set([
-  "accepted", "rejected", "batch", "manufactured", "expiry", "reason", "bin", "rate",
+  "rejected", "batch", "manufactured", "expiry", "reason", "bin", "rate",
+  // Serial / IMEI capture happens at the GRN, where the boxes are opened.
+  "codes",
 ]);
 
 const RECEIPT_TYPES = [
@@ -679,8 +681,10 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           if ((next.imei_numbers?.length ?? 0) > units) next.imei_numbers = next.imei_numbers!.slice(0, units);
         }
         const received = num(next.received_qty);
-        // Accepted can never exceed what arrived; rejected is the remainder.
-        const accepted = Math.min(num(next.accepted_qty), received);
+        // Accepted mirrors received quantity since accepted is not an independent input field.
+        const accepted = "accepted_qty" in patch && patch.accepted_qty !== undefined
+          ? Math.min(num(next.accepted_qty), received)
+          : received;
         return { ...next, accepted_qty: accepted, rejected_qty: Math.max(received - accepted, 0) };
       });
       return { ...f, items };
@@ -691,9 +695,9 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     return {
       lines: rows.length,
       received: rows.reduce((s, l) => s + num(l.received_qty), 0),
-      accepted: rows.reduce((s, l) => s + num(l.accepted_qty), 0),
+      accepted: rows.reduce((s, l) => s + (l.accepted_qty != null && l.accepted_qty !== ("" as any) ? num(l.accepted_qty) : num(l.received_qty)), 0),
       rejected: rows.reduce((s, l) => s + num(l.rejected_qty), 0),
-      value: rows.reduce((s, l) => s + num(l.accepted_qty) * num(l.rate), 0),
+      value: rows.reduce((s, l) => s + (l.accepted_qty != null && l.accepted_qty !== ("" as any) ? num(l.accepted_qty) : num(l.received_qty)) * num(l.rate), 0),
     };
   }, [form.items]);
 
@@ -769,15 +773,12 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
   /** The lines the storekeeper has not counted yet — read by the Save check and by
    *  the red border on the box, so both say the same thing about the same cell. */
   const uncountedLines = useMemo(() => form.items.reduce<
-    { index: number; field: "received" | "accepted"; name: string }[]
+    { index: number; field: "received"; name: string }[]
   >((acc, line, index) => {
     const name = savedLine(index)?.item_name ?? line.item_name ?? "";
     if (blankQty(line.received_qty)) acc.push({ index, field: "received", name });
-    // Only a GRN takes an accepted figure. On a gate entry the column is disabled and
-    // mirrors what was received, so it can never be the box that was missed.
-    else if (isGrn && blankQty(line.accepted_qty)) acc.push({ index, field: "accepted", name });
     return acc;
-  }, []), [form.items, isGrn, doc]);
+  }, []), [form.items, savedLine]);
 
   const validateQuantities = () => {
     for (const [index, line] of form.items.entries()) {
@@ -797,15 +798,15 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     const where = uncountedLines
       .map((l) => `line ${l.index + 1}${l.name ? ` (${l.name})` : ""}`)
       .join(", ");
-    const column = uncountedLines.every((l) => l.field === "accepted")
-      ? "Accepted" : "Received";
     throw new Error(
-      `${column} quantity is blank on ${where}. Enter what came off the vehicle — `
+      `Received quantity is blank on ${where}. Enter what came off the vehicle — `
       + "0 if none of it did.");
   };
 
-  /** Serials and IMEIs must match the received quantity exactly — the server refuses
-   *  anything else, at the gate too. Said here by line and item, with where to press. */
+  /** Serials and IMEIs (2026-11-13): STRICT ON THE GRN — exactly one per received unit,
+   *  as the server refuses anything else there. At the gate (Material Inward) nobody has
+   *  opened the cartons, so whatever was read is kept and only MORE than arrived is
+   *  refused. Said here by line and item, with where to press. */
   const validateSerialLines = () => {
     for (const [index, line] of form.items.entries()) {
       if (!line.is_serial_tracked && !line.is_imei_tracked) continue;
@@ -814,6 +815,17 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       const required = Math.floor(num(line.received_qty));
       if (num(line.received_qty) !== required) {
         throw new Error(`${at}: enter a whole number of units (like 5, not 5.5) — each unit carries its own code.`);
+      }
+      if (!isGrn) {
+        const over = [
+          ...(line.is_serial_tracked && (line.serial_numbers?.length ?? 0) > required ? ["serial numbers"] : []),
+          ...(line.is_imei_tracked && (line.imei_numbers?.length ?? 0) > required ? ["IMEI numbers"] : []),
+        ];
+        if (over.length) {
+          throw new Error(`${at}: more ${over.join(" and ")} than the ${required} units that arrived. `
+            + "Remove the extra ones or correct the quantity.");
+        }
+        continue;
       }
       const missing = [
         ...(line.is_serial_tracked && (line.serial_numbers?.length ?? 0) !== required ? ["serial"] : []),
@@ -1322,24 +1334,6 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       render: (l, i) => <span className="text-xs text-muted">{savedLine(i)?.uom_code ?? l.uom_code ?? "—"}</span>,
     },
     {
-      key: "accepted",
-      header: "Accepted",
-      numeric: true,
-      width: "w-28",
-      render: (l, i) => (
-        <QtyInput
-          ariaLabel={`Accepted quantity, line ${i + 1}`}
-          uom={savedLine(i)?.uom_code ?? l.uom_code}
-          value={l.accepted_qty ?? 0}
-          max={num(l.received_qty)}
-          disabled={locked || !isGrn}
-          invalid={num(l.accepted_qty) > num(l.received_qty)
-            || (touched && isGrn && blankQty(l.accepted_qty))}
-          onChange={(v) => patchLine(i, { accepted_qty: v })}
-        />
-      ),
-    },
-    {
       key: "rejected",
       header: "Rejected",
       numeric: true,
@@ -1831,8 +1825,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           title="Lines"
           hint={
             isGrn
-              ? "Rejected is received minus accepted; short is ordered minus received."
-              : "Record the physical item count at the gate. Capture any serials you can read — the rest, plus batch and QC, are completed in the GRN."
+              ? "Short is ordered minus received."
+              : "Record the physical item count at the gate. Serials, batch and QC are completed in the GRN."
           }
         >
           {invalid.lines && <ErrorBanner error="Add at least one line before saving." />}
@@ -1864,17 +1858,16 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
                 ? "Pick a purchase order above, or add lines by hand."
                 : "Add the items received at the gate."}
             footer={
-              /* Only what the columns above show: totalling accepted, rejected and
-               * value at the gate would report figures nobody entered there. */
               <div className="flex flex-wrap justify-end gap-x-6 gap-y-1 text-sm">
                 <span className="text-muted">{totals.lines} lines</span>
                 <span className="text-ink">Received <b className="tabular">{fmtQty(totals.received)}</b></span>
                 {isGrn && (
                   <>
-                    <span className="text-ok">Accepted <b className="tabular">{fmtQty(totals.accepted)}</b></span>
-                    <span className={totals.rejected > 0 ? "text-bad" : "text-muted"}>
-                      Rejected <b className="tabular">{fmtQty(totals.rejected)}</b>
-                    </span>
+                    {totals.rejected > 0 && (
+                      <span className="text-bad">
+                        Rejected <b className="tabular">{fmtQty(totals.rejected)}</b>
+                      </span>
+                    )}
                     <span className="text-ink">Value <b className="tabular">₹ {fmtMoney(totals.value)}</b></span>
                   </>
                 )}

@@ -24,7 +24,7 @@ import {
   CARRYING_LABEL, carryingFields, carryingValue,
 } from "../components/gatePassFields";
 import type { CarryingField } from "../components/gatePassFields";
-import { aadhaarError, HANDOVER_PERSONS } from "../components/HandoverCustody";
+import { aadhaarError, HANDOVER_PERSONS, switchHandoverPerson } from "../components/HandoverCustody";
 import { OptionTiles } from "../components/OptionTiles";
 import { CARRIAGE_ICON, MODE_ICON } from "../components/transportIcons";
 import {
@@ -756,18 +756,25 @@ export function DispatchConfirmPage() {
   // only into EMPTY boxes, and only until somebody types: the person who actually
   // turns up on the day is the desk's to record.
   const prefilledHandover = useRef<string | null>(null);
+  /** WHAT was prefilled from the issue (SCM_0131), so switching Person can take back
+   *  exactly that — and never a name or number the desk typed itself. */
+  const prefilledPerson = useRef<{ name: string; code: string; phone: string } | null>(null);
   useEffect(() => {
     if (!needs("handed_over_by_name") || !transferContext?.issued_to_name) return;
     const key = `${mode}:${transferContext.issue_id}`;
     if (prefilledHandover.current === key) return;
     prefilledHandover.current = key;
+    prefilledPerson.current = {
+      name: transferContext.issued_to_name || "",
+      code: transferContext.issued_to_code || "",
+      phone: sanitizePhone(transferContext.issued_to_phone ?? ""),
+    };
     setHandoverPerson("EMPLOYEE");
     setForm((f) => ({
       ...f,
-      handed_over_by_name: f.handed_over_by_name || transferContext.issued_to_name || "",
-      handed_over_employee_id: f.handed_over_employee_id || transferContext.issued_to_code || "",
-      handed_over_phone: f.handed_over_phone
-        || sanitizePhone(transferContext.issued_to_phone ?? ""),
+      handed_over_by_name: f.handed_over_by_name || prefilledPerson.current!.name,
+      handed_over_employee_id: f.handed_over_employee_id || prefilledPerson.current!.code,
+      handed_over_phone: f.handed_over_phone || prefilledPerson.current!.phone,
     }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, rule, transferContext]);
@@ -1254,11 +1261,12 @@ export function DispatchConfirmPage() {
         onChange={(value) => {
           if (!value) return;
           setHandoverPerson(value);
-          // The id boxes are exclusive: keeping the one that is no longer asked for
-          // is how an Aadhaar ends up filed against an employee.
-          setForm((f) => ({
-            ...f, handed_over_employee_id: "", handed_over_aadhaar: "",
-          }));
+          // SCM_0131: the whole person follows the choice, not only the id box. The id
+          // boxes are exclusive (an Aadhaar must never be filed against an employee);
+          // and the employee prefilled from the issue — name, phone, code — leaves
+          // with "Others" and comes back with "Employee". What the desk TYPED stays:
+          // only a value still equal to the prefill is taken back.
+          setForm((f) => switchHandoverPerson(f, value, prefilledPerson.current));
         }}
         options={HANDOVER_PERSONS}
         ariaLabel={aria}
@@ -1859,7 +1867,9 @@ export function DispatchConfirmPage() {
                       title="Who takes custody"
                       hint="A name alone identifies nobody"
                     />
-                    {transferContext?.issued_to_name && (
+                    {/* Only while it is TRUE: with "Others" picked the boxes below are
+                        somebody else, and the note would say the opposite (SCM_0131). */}
+                    {transferContext?.issued_to_name && handoverPerson === "EMPLOYEE" && (
                       <p className="col-span-full -mt-1 inline-flex items-center gap-1.5 rounded-lg bg-info-bg px-3 py-2 text-xs text-info">
                         <IdCard className="h-3.5 w-3.5 shrink-0" aria-hidden />
                         Filled from {transferContext.issue_no}: issued to {transferContext.issued_to_name}.

@@ -37,6 +37,11 @@ const STATUSES = [
 const dueIn = (s?: string | null) =>
   s ? Math.ceil((new Date(s).getTime() - Date.now()) / 86_400_000) : null;
 
+/** SCM_0155: a request whose goods have arrived, or that will never be bought, has no
+ *  deadline left to miss — its "Needed by" is history, not a warning. */
+const SETTLED = new Set(["ORDERED", "RECEIVED", "REJECTED", "CANCELLED"]);
+const stillDue = (r: MaterialRequestListRow) => !SETTLED.has(r.status);
+
 export function MaterialRequestsPage() {
   const [status, setStatus] = useState("");
   const [search, setSearch] = useState("");
@@ -59,7 +64,7 @@ export function MaterialRequestsPage() {
     let out = all;
     if (flag === "urgent") out = out.filter((r) => r.priority === "URGENT");
     if (flag === "overdue") {
-      out = out.filter((r) => (dueIn(r.required_by) ?? 1) < 0 && r.status !== "ORDERED");
+      out = out.filter((r) => (dueIn(r.required_by) ?? 1) < 0 && stillDue(r));
     }
     if (!q) return out;
     return out.filter((r) =>
@@ -72,7 +77,7 @@ export function MaterialRequestsPage() {
   const kpis = useMemo(() => ({
     pending: all.filter((r) => r.status === "PENDING_APPROVAL").length,
     urgent: all.filter((r) => r.priority === "URGENT").length,
-    overdue: all.filter((r) => (dueIn(r.required_by) ?? 1) < 0 && r.status !== "ORDERED").length,
+    overdue: all.filter((r) => (dueIn(r.required_by) ?? 1) < 0 && stillDue(r)).length,
   }), [all]);
 
   const columns: Column<MaterialRequestListRow>[] = [
@@ -110,13 +115,17 @@ export function MaterialRequestsPage() {
       header: "Needed By",
       render: (r) => {
         const d = dueIn(r.required_by);
-        if (d === null) return <span className="text-muted">—</span>;
+        // SCM_0155: "Not set" rather than a bare dash — a dash reads as "the screen
+        // failed to load it", which is exactly what this column was reported for.
+        if (d === null) return <span className="text-xs text-muted">Not set</span>;
         return (
           <div>
             <div className="text-sm text-body">{fmtDate(r.required_by)}</div>
-            <div className={`text-[11px] ${d < 0 ? "text-danger" : d <= 3 ? "text-warning" : "text-muted"}`}>
-              {d < 0 ? `${Math.abs(d)}d overdue` : `in ${d}d`}
-            </div>
+            {stillDue(r) ? (
+              <div className={`text-[11px] font-medium ${d < 0 ? "text-danger" : d <= 3 ? "text-warning" : "text-muted"}`}>
+                {d < 0 ? `${Math.abs(d)}d overdue` : d === 0 ? "due today" : `in ${d}d`}
+              </div>
+            ) : null}
           </div>
         );
       },
@@ -125,7 +134,21 @@ export function MaterialRequestsPage() {
       key: "approver",
       header: "With",
       hideOnNarrow: true,
-      render: (r) => r.current_approver_name ?? "—",
+      // SCM_0155: where the request is, for every status — served by the API
+      // (`service.mr_with`). The approver snapshot alone went blank on approval, so
+      // every request procurement was working on read "—".
+      render: (r) => {
+        const who = r.with_text ?? r.current_approver_name;
+        if (!who || who === "—") {
+          return <span className="text-xs text-muted">{r.with_note ?? "—"}</span>;
+        }
+        return (
+          <div className="min-w-0">
+            <div className="truncate text-sm font-medium text-ink">{who}</div>
+            {r.with_note && <div className="truncate text-[11px] text-muted">{r.with_note}</div>}
+          </div>
+        );
+      },
     },
     {
       key: "date",
@@ -212,6 +235,12 @@ export function MaterialRequestsPage() {
                 <p className="text-xs text-muted">
                   Raised {fmtDate(r.created_at)}{r.required_by ? ` · needed by ${fmtDate(r.required_by)}` : ""}
                 </p>
+                {(r.with_text || r.with_note) && (
+                  <p className="text-xs text-body">
+                    With <span className="font-medium text-ink">{r.with_text ?? "—"}</span>
+                    {r.with_note ? <span className="text-muted"> · {r.with_note}</span> : null}
+                  </p>
+                )}
               </div>
             )}
           />

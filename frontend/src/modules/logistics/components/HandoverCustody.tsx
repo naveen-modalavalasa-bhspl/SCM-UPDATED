@@ -16,6 +16,44 @@ import { PHONE_HINT, phoneError, sanitizePhone } from "./validate";
 
 /** Who is carrying it. One of ours or somebody else — the only thing that changes is
  *  which number identifies them, because an outsider has no employee id. */
+/** The person boxes a hand-over carries. */
+export interface HandoverPersonFields {
+  handed_over_by_name: string;
+  handed_over_employee_id: string;
+  handed_over_aadhaar: string;
+  handed_over_phone: string;
+}
+
+/**
+ * Switching "Person" between Employee and Others (SCM_0131) — the whole person follows
+ * the choice, not only the id box.
+ *
+ * - The id boxes are exclusive: an Aadhaar is never filed against an employee.
+ * - "Others" takes back the employee PREFILLED from the issue (name, phone, code) —
+ *   only values still equal to that prefill; whatever the desk typed stays.
+ * - "Employee" puts the prefill back into empty boxes.
+ */
+export function switchHandoverPerson<F extends HandoverPersonFields>(
+  form: F, value: string,
+  prefill: { name: string; code: string; phone: string } | null,
+): F {
+  if (value === "EMPLOYEE") {
+    return {
+      ...form, handed_over_aadhaar: "",
+      handed_over_employee_id: form.handed_over_employee_id || prefill?.code || "",
+      handed_over_by_name: form.handed_over_by_name || prefill?.name || "",
+      handed_over_phone: form.handed_over_phone || prefill?.phone || "",
+    };
+  }
+  return {
+    ...form, handed_over_employee_id: "", handed_over_aadhaar: "",
+    handed_over_by_name: prefill && form.handed_over_by_name === prefill.name
+      ? "" : form.handed_over_by_name,
+    handed_over_phone: prefill && form.handed_over_phone === prefill.phone
+      ? "" : form.handed_over_phone,
+  };
+}
+
 export const HANDOVER_PERSONS = [
   { value: "EMPLOYEE", label: "Employee" },
   { value: "OTHERS", label: "Others" },

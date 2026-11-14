@@ -219,10 +219,12 @@ class MRItemOut(CombinationOut):
     remarks: str | None = None
 
 
-class MRListRow(BaseModel):
+class MRListRow(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     mr_no: str
+    project_id: int | None = None
+    project_name: str | None = None
     mr_date: date | None = None
     indent_id: int | None = None
     indent_no: str | None = None
@@ -232,6 +234,11 @@ class MRListRow(BaseModel):
     priority: str
     required_by: date | None = None
     current_approver_name: str | None = None
+    # SCM_0155: where the request IS, for every status — "Procurement · On REQ0012"
+    # once approved, where `current_approver_name` above goes blank. Derived on read
+    # (`service.mr_with`), never stored.
+    with_text: str | None = None
+    with_note: str | None = None
     created_at: datetime
 
 
@@ -269,8 +276,12 @@ class MRLineIn(BaseModel):
     indent_item_id: int | None = None
 
 
-class MRCreateIn(BaseModel):
+class MRCreateIn(OrgScopeIn):
     """Raise a material request by hand.
+
+    Organisation, project or department and year come from the number card on the
+    direct form (2026-11-12) and go into the MR number. The allocation screen's Raise
+    MR names none of them: it takes the default organisation and the indent's project.
 
     `indent_id` is optional on purpose: the allocation screen raises against the
     indent it is working, and the Material Requests screen raises a free-standing

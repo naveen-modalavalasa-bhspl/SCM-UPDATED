@@ -1,3 +1,4 @@
+import type { ScopedDoc } from "@/shared/useDocNumberScope";
 /** Accounts — vendor payments against PO payment milestones. Mirrors
  *  backend/app/modules/accounts/schemas.py. */
 
@@ -61,7 +62,7 @@ export interface FiledDocument {
   created_at: string | null;
 }
 
-export interface PoPayments {
+export interface PoPayments extends ScopedDoc {
   po_id: number;
   po_no: string;
   po_status: string;
@@ -110,6 +111,12 @@ export interface CarrierInvoiceRow {
 }
 
 export interface PaymentInput {
+  /** The number card's selection (2026-11-12). Against an organised PO the server
+   *  copies the order's instead; only the year is the payment's own. */
+  organization_id?: number | null;
+  project_id?: number | null;
+  org_department_id?: number | null;
+  fiscal_year?: string | null;
   po_id: number;
   milestone_id: number;
   amount: number;

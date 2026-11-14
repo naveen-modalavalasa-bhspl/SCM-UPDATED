@@ -324,7 +324,7 @@ class AllocationItem(CombinationMixin, Base):
     allocation = relationship("Allocation", back_populates="items")
 
 
-class MaterialRequest(Base):
+class MaterialRequest(OrgScopeColumns, Base):
     """The bridge from a short indent to procurement.
 
     Flow doc §4.2 raises it at inventory level; §5.1 has procurement approve it. It
@@ -333,7 +333,8 @@ class MaterialRequest(Base):
     """
     __tablename__ = "inv_material_requests"
     id = pk()
-    mr_no = Column(String(30), unique=True, nullable=False)
+    # 50, the width every document number has once it is built from codes (2026-11-12).
+    mr_no = Column(String(50), unique=True, nullable=False)
     mr_date = Column(Date, nullable=True)
     # backward pointer to the indent that ran short (business flow: each doc points back)
     indent_id = Column(BigInteger, index=True, nullable=True)
