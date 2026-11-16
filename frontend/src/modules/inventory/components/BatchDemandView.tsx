@@ -6,6 +6,11 @@ import { Button, Can, Card, Input } from "@/shared/components";
 import { LoadingRows } from "./PageStates";
 import { splitQuantity } from "@/shared/quantity";
 import { createAllocationsBatch, getBatchDemand } from "../api";
+import { errorMessage } from "@/shared/api/errors";
+
+/** Indents per request when a cycle is submitted (SCM_0146). Well under the server's
+ *  200-document request limit, and short enough that no one request nears a timeout. */
+const BATCH_CHUNK = 50;
 // FIXED 2026-08-22 — a LIP is where stock ends up, not a shelf an indent is filled
 // from. See warehouseTiers.ts for why both allocation screens needed this.
 import { isChainPoint, orderPoints } from "../warehouseTiers";
@@ -706,8 +711,40 @@ export function BatchDemandView({ cycle }: { cycle?: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items, plans]);
 
+  const indentNoOf = useMemo(() => new Map(
+    items.flatMap((item) => item.demand.map((line) => [line.indent_id, line.indent_no] as const)),
+  ), [items]);
+
+  // SCM_0146: a cycle is sent in chunks. One request for the whole month ran into
+  // the 200-document request limit (and the gateway timeout) on a large cycle, and the
+  // storekeeper saw one red error for 900 good decisions. Each chunk is independent —
+  // the backend is per-indent anyway — and the results are added up.
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const submit = useMutation({
-    mutationFn: () => createAllocationsBatch(allocations),
+    mutationFn: async () => {
+      const merged = { created_count: 0, created_indent_ids: [] as number[],
+                       failed: [] as { indent_id: number; indent_no?: string | null; reason: string }[] };
+      setProgress({ done: 0, total: allocations.length });
+      for (let start = 0; start < allocations.length; start += BATCH_CHUNK) {
+        const chunk = allocations.slice(start, start + BATCH_CHUNK);
+        try {
+          const part = await createAllocationsBatch(chunk);
+          merged.created_count += part.created_count;
+          merged.created_indent_ids.push(...part.created_indent_ids);
+          merged.failed.push(...part.failed);
+        } catch (error) {
+          // A chunk the server refused outright: every indent in it is reported, by
+          // name where the screen knows it, and the rest of the cycle still goes.
+          const reason = errorMessage(error) || "The server did not accept this part of the cycle.";
+          merged.failed.push(...chunk.map((row) => ({
+            indent_id: row.indent_id, indent_no: indentNoOf.get(row.indent_id) ?? null, reason,
+          })));
+        }
+        setProgress({ done: Math.min(start + chunk.length, allocations.length), total: allocations.length });
+      }
+      return merged;
+    },
+    onSettled: () => setProgress(null),
     onSuccess: (data) => {
       setResult({ created: data.created_count, failed: data.failed });
       setPlans({});
@@ -743,10 +780,18 @@ export function BatchDemandView({ cycle }: { cycle?: string }) {
     <div className="space-y-2">
       {result && (
         <Card className="p-4 text-sm">
-          <p className="font-semibold text-ok">
-            {result.created} allocation{result.created === 1 ? "" : "s"} raised and sent
-            for approval.
-          </p>
+          {result.created > 0
+            ? <p className="font-semibold text-ok">
+                {result.created} allocation{result.created === 1 ? "" : "s"} raised and sent
+                for approval.
+              </p>
+            : <p className="font-semibold text-danger">Nothing was allocated.</p>}
+          {result.failed.length > 0 && (
+            <p className="mt-1 text-xs text-muted">
+              {result.failed.length} indent{result.failed.length === 1 ? "" : "s"} could not be
+              allocated — each one is listed with the reason. The others are not affected.
+            </p>
+          )}
           {result.failed.length > 0 && (
             <ul className="mt-2 space-y-1 text-danger">
               {result.failed.map((f, i) => (
@@ -782,7 +827,11 @@ export function BatchDemandView({ cycle }: { cycle?: string }) {
             onClick={() => { setResult(null); submit.mutate(); }}
           >
             <Send className="h-4 w-4" />
-            {submit.isPending ? "Submitting…" : `Submit all ${indentCount}`}
+            {submit.isPending
+              ? progress && progress.total > BATCH_CHUNK
+                ? `Submitting… ${progress.done} of ${progress.total}`
+                : "Submitting…"
+              : `Submit all ${indentCount}`}
           </Button>
         </Can>
       </Card>

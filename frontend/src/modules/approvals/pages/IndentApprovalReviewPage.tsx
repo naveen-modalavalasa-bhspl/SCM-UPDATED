@@ -310,6 +310,14 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
     enabled: Number.isFinite(indentId) && indentId > 0,
   });
 
+  // SCM_0153: a cut that was an exclusion says how much and why, not just "cut".
+  const cutNote = (line: { excluded_quantity?: number; exclusion_reason?: string | null; excluded_by_name?: string | null; uom_code?: string | null }) =>
+    (line.excluded_quantity ?? 0) > 0
+      ? `${formatQuantity(Number(line.excluded_quantity))} ${line.uom_code ?? ""} excluded${
+          line.excluded_by_name ? ` by ${line.excluded_by_name}` : ""}${
+          line.exclusion_reason ? ` · ${line.exclusion_reason}` : ""}`.replace(/\s+/g, " ")
+      : "Cut by a previous approver";
+
   // SCM_0143: from the second level on, the ceiling is what the level below APPROVED.
   const hasPreviousApproval = !!indent.data?.has_previous_approval;
   const ceilingLabel = hasPreviousApproval ? "Approved request" : "Current request";
@@ -693,7 +701,7 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
                         <span className={`whitespace-nowrap font-semibold tabular-nums ${reduced ? "text-warn" : "text-ink"}`}>
                           {formatQuantity(ceiling)} {unit}
                         </span>
-                        {reduced && <p className="text-[11px] text-muted">Cut by a previous approver</p>}
+                        {reduced && <p className="text-[11px] text-muted">{cutNote(line)}</p>}
                       </td>
                       {/* One right-aligned block per cell, the same width as the
                           column's right-aligned header: the field, its unit and the
@@ -770,7 +778,7 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
                       </span>
                     </div>
                   </div>
-                  {reduced && <p className="mt-1 text-[11px] text-muted">Cut by a previous approver</p>}
+                  {reduced && <p className="mt-1 text-[11px] text-muted">{cutNote(line)}</p>}
                   <div className="mt-3">
                     <span className="mb-1.5 block text-[10px] font-semibold uppercase tracking-wider text-muted">
                       Approved at this level

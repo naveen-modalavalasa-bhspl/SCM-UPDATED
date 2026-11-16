@@ -32,6 +32,11 @@ export interface LineDecision {
   /** Dropped from this item for this indent: it gets nothing, and the flag is sent to the
    *  server as such (an excluded line and a line approved at zero are not the same). */
   excluded: boolean;
+  /** SCM_0153: PART of the line excluded — `approved` is what is left, and the cut is
+   *  sent as an exclusion rather than a plain reduction. */
+  partial?: boolean;
+  /** Why it was excluded (whole or part). Recorded on the line, shown to the levels above. */
+  reason?: string;
 }
 
 /** Keyed by `line_id`, one entry per line the approver has actually touched. */
@@ -50,7 +55,7 @@ const storageKey = (cycle: string) => `${STORAGE_PREFIX}${cycle}`;
 /** An untouched line is absent, not stored empty, so a decision map only ever holds
  *  what the approver actually changed — and `{}` means "nothing decided yet". */
 const isEmpty = (decision: LineDecision) =>
-  decision.approved.trim() === "" && !decision.excluded;
+  decision.approved.trim() === "" && !decision.excluded && !decision.partial;
 
 function parse(raw: string | null): CycleDecisions {
   if (!raw) return EMPTY;
@@ -62,6 +67,8 @@ function parse(raw: string | null): CycleDecisions {
       const decision: LineDecision = {
         approved: typeof value?.approved === "string" ? value.approved : "",
         excluded: value?.excluded === true,
+        ...(value?.partial === true ? { partial: true } : {}),
+        ...(typeof value?.reason === "string" && value.reason ? { reason: value.reason } : {}),
       };
       if (!isEmpty(decision)) state[lineId] = decision;
     }
@@ -117,6 +124,10 @@ export function useConsolidationDecisions(cycle: string) {
       const updated = { ...current };
       for (const [lineId, next] of entries) {
         const merged: LineDecision = { ...EMPTY_DECISION, ...current[String(lineId)], ...next };
+        // Optional keys are stored only when they say something, so an ordinary
+        // decision keeps its plain {approved, excluded} shape.
+        if (!merged.partial) delete merged.partial;
+        if (!merged.reason) delete merged.reason;
         if (isEmpty(merged)) delete updated[String(lineId)];
         else updated[String(lineId)] = merged;
       }
@@ -125,8 +136,23 @@ export function useConsolidationDecisions(cycle: string) {
     [key],
   );
 
+  // Typing a quantity is a plain cut again, not an exclusion.
   const setApproved = useCallback(
-    (lineId: number, approved: string) => patchMany([[lineId, { approved }]]),
+    (lineId: number, approved: string) => patchMany([[lineId, { approved, partial: false }]]),
+    [patchMany],
+  );
+
+  /** SCM_0153: exclude PART of a line — `left` is what goes on, `reason` why. */
+  const excludePart = useCallback(
+    (lineId: number, left: string, reason: string) =>
+      patchMany([[lineId, { approved: left, partial: true, excluded: false, reason }]]),
+    [patchMany],
+  );
+
+  /** Exclude the whole line, with the reason for it. */
+  const excludeWhole = useCallback(
+    (lineId: number, reason: string) =>
+      patchMany([[lineId, { excluded: true, partial: false, reason }]]),
     [patchMany],
   );
 
@@ -141,7 +167,9 @@ export function useConsolidationDecisions(cycle: string) {
    *  line of an indent in the cycle ("remove from all items"). */
   const setExcluded = useCallback(
     (lineIds: number[], excluded: boolean) =>
-      patchMany(lineIds.map((lineId) => [lineId, { excluded }])),
+      patchMany(lineIds.map((lineId) => [lineId, excluded
+        ? { excluded }
+        : { excluded, reason: undefined }])),
     [patchMany],
   );
 
@@ -149,7 +177,7 @@ export function useConsolidationDecisions(cycle: string) {
   const clearCycle = useCallback(() => persist(key, EMPTY), [key]);
 
   return useMemo(
-    () => ({ decisions, setApproved, setApprovedMany, setExcluded, clearCycle }),
-    [clearCycle, decisions, setApproved, setApprovedMany, setExcluded],
+    () => ({ decisions, setApproved, setApprovedMany, setExcluded, excludePart, excludeWhole, clearCycle }),
+    [clearCycle, decisions, excludePart, excludeWhole, setApproved, setApprovedMany, setExcluded],
   );
 }

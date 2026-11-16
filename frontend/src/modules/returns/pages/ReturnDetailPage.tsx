@@ -454,7 +454,13 @@ export default function ReturnDetailPage() {
           <div className="h-[3px] w-full bg-brand" aria-hidden="true" />
 
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line/70 px-5 py-3.5">
-            <StatusPill status={doc.status} />
+            <span className="flex flex-wrap items-center gap-2">
+              <StatusPill status={doc.status} />
+              {/* SCM_0199: which of the four steps it is on, in words. */}
+              {doc.stage_label && (
+                <span className="text-sm font-semibold text-ink">{doc.stage_label}</span>
+              )}
+            </span>
             {doc.current_approver_name && (
               <span
                 title={`with ${doc.current_approver_name}`}

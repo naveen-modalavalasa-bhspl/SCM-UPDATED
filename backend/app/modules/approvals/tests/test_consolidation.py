@@ -614,3 +614,73 @@ async def test_a_line_sent_as_excluded_is_dropped_while_the_indent_goes_on(db):
     assert kept.is_excluded is False and float(kept.approved_quantity) == 10
     assert dropped.is_excluded is True and float(dropped.approved_quantity) == 0
 
+
+
+async def test_part_exclusion_and_the_next_rungs_approve_all(db):
+    """SCM_0153 + SCM_0154/0127: the OE takes 4 of 10 out of one line (with a reason)
+    and the whole of another; the DM then presses Approve All without touching
+    anything. The excluded line used to be sent on and fail the whole indent."""
+    holders = await _org(db)
+    await _save_ladder(db, holders[801])
+    first = await _item(db)
+    second = Item(code="IT-CONS-3", name="Third Item", uom_id=first.uom_id, uom_code="NOS")
+    db.add(second)
+    await db.flush()
+    requester = holders[811]
+    created = await indent_service.create_indent(
+        db,
+        IndentCreate(
+            required_date=date.today() + timedelta(days=3), priority="NORMAL",
+            indent_type=IndentType.MONTHLY,
+            items=[IndentItemIn(item_id=first.id, quantity=10),
+                   IndentItemIn(item_id=second.id, quantity=6)],
+        ),
+        requester,
+    )
+    indent = await indent_service.submit_indent(db, created.id, requester)
+    part, whole = sorted(indent.items, key=lambda line: (line.line_no, line.id))
+    indent_id, part_id, whole_id = indent.id, part.id, whole.id
+
+    oe_result = await approvals_service.approve_consolidation(
+        db,
+        ConsolidationApprovalIn(
+            indent_ids=[indent_id],
+            lines=[
+                ConsolidationApprovalLineIn(
+                    indent_id=indent_id, line_id=part_id, approved_quantity=6,
+                    excluded_qty=4, exclusion_reason="Branch still has stock"),
+                _batch_line(indent_id, whole_id, 0, excluded=True),
+            ],
+        ),
+        holders[805],
+    )
+    assert oe_result.approved_count == 1, oe_result.failed
+    await db.refresh(part)
+    await db.refresh(whole)
+    assert part.is_excluded is False
+    assert float(part.approved_quantity) == 6
+    assert float(part.excluded_quantity) == 4
+    assert part.exclusion_reason == "Branch still has stock"
+    assert whole.is_excluded is True and float(whole.excluded_quantity) == 6
+
+    # The DM's screen serves the part-exclusion, and the excluded line as excluded.
+    dm = holders[804]
+    batch = (await approvals_service.consolidation_batches_for_user(db, dm))[0]
+    shares = {a.line_id: a for item in batch.consolidated_items for a in item.allocations}
+    assert shares[part_id].excluded_quantity == 4
+    assert shares[part_id].exclusion_reason == "Branch still has stock"
+    assert shares[whole_id].is_excluded is True
+
+    # Approve All, untouched — and with the excluded line restated at 0, as the old
+    # screen sent it. Both used to fail the indent as "unknown lines".
+    dm_result = await approvals_service.approve_consolidation(
+        db,
+        ConsolidationApprovalIn(
+            indent_ids=[indent_id],
+            lines=[_batch_line(indent_id, part_id, 6),
+                   _batch_line(indent_id, whole_id, 0, excluded=True)],
+        ),
+        dm,
+    )
+    assert dm_result.failed == []
+    assert dm_result.approved_count == 1

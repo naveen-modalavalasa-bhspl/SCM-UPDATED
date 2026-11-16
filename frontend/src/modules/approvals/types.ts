@@ -207,6 +207,9 @@ export interface ApprovalIndentLine {
   remarks?: string | null;
   is_excluded?: boolean;
   excluded_by_name?: string | null;
+  /** SCM_0153: excluded so far at the levels below (whole or part), and why. */
+  excluded_quantity?: number;
+  exclusion_reason?: string | null;
   /** Set by the review screen: what an allocation already covers on this line. The
    *  field edits only what is left, and the server is sent the two added together. */
   served_quantity?: number;
@@ -371,6 +374,9 @@ export interface ConsolidatedItemAllocation {
    *  omits it, and the row then behaves exactly as it always did. */
   is_excluded?: boolean;
   excluded_by_name?: string | null;
+  /** SCM_0153: excluded so far at the rungs below (whole or part), and why. */
+  excluded_quantity?: number;
+  exclusion_reason?: string | null;
 }
 
 export interface ConsolidatedItem {
@@ -478,7 +484,13 @@ export interface ConsolidationApprovalInput {
   /** The filtered set on screen — this is what gets approved. */
   indent_ids: number[];
   /** Only the quantities the split produced; an untouched line keeps its ceiling. */
-  lines: Array<{ indent_id: number; line_id: number; approved_quantity: number }>;
+  lines: Array<{
+    indent_id: number; line_id: number; approved_quantity: number;
+    excluded?: boolean;
+    /** SCM_0153: part of the line excluded (the amount the screen worked out). */
+    excluded_qty?: number;
+    exclusion_reason?: string;
+  }>;
   comments?: string;
 }
 

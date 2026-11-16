@@ -108,6 +108,10 @@ export default function ReturnsListPage() {
       render: (row) => (
         <div className="space-y-1">
           <StatusPill status={row.status} />
+          {/* SCM_0199: WHICH step it is waiting on — not just "pending". */}
+          {row.stage_label && (
+            <div className="text-xs font-medium text-body">{row.stage_label}</div>
+          )}
           {row.current_approver_name && (
             <div className="text-xs text-muted">with {row.current_approver_name}</div>
           )}
@@ -225,9 +229,11 @@ export default function ReturnsListPage() {
               {row.total_items} {row.total_items === 1 ? "item" : "items"}
               {row.indent_no ? ` · against ${row.indent_no}` : ""}
             </div>
-            {row.current_approver_name && (
+            {(row.stage_label || row.current_approver_name) && (
               <div className="mt-1 text-xs text-muted">
-                with {row.current_approver_name}
+                {row.stage_label && <span className="font-medium text-body">{row.stage_label}</span>}
+                {row.stage_label && row.current_approver_name ? " · " : ""}
+                {row.current_approver_name && <>with {row.current_approver_name}</>}
               </div>
             )}
           </Link>

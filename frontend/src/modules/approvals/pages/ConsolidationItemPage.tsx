@@ -57,6 +57,10 @@ interface ItemRow {
   removedEverywhere: boolean;
   invalid: boolean;
   over: boolean;
+  /** SCM_0153: part of this line excluded by you; `cut` is how much, `reason` why. */
+  partial: boolean;
+  cut: number;
+  reason?: string;
   indent?: ConsolidationIndentSummary;
 }
 
@@ -91,13 +95,18 @@ export function ConsolidationItemPage() {
   const allItems = batch?.consolidated_items ?? [];
   const item = allItems.find((row) => String(row.item_id) === itemId) ?? null;
 
-  const { decisions, setApproved, setApprovedMany, setExcluded } = useConsolidationDecisions(cycle);
+  const { decisions, setApproved, setApprovedMany, setExcluded, excludePart, excludeWhole } = useConsolidationDecisions(cycle);
 
   const [search, setSearch] = useState("");
   const [priority, setPriority] = useState("");
   const [reduceOpen, setReduceOpen] = useState(false);
   const [percent, setPercent] = useState("");
   const [removing, setRemoving] = useState<ItemRow | null>(null);
+  // SCM_0153: the Exclude dialog — all of the line, or only part of it, and why.
+  const [excluding, setExcluding] = useState<ItemRow | null>(null);
+  const [excludeMode, setExcludeMode] = useState<"all" | "part">("all");
+  const [excludeQty, setExcludeQty] = useState("");
+  const [excludeReason, setExcludeReason] = useState("");
 
   const resolved = item ? resolveItem(item, decisions) : null;
   const decimals = item?.uom_decimals ?? 3;
@@ -123,6 +132,9 @@ export function ConsolidationItemPage() {
         && isIndentRemoved(allItems, line.allocation.indent_id, decisions),
       invalid: line.invalid,
       over: line.over,
+      partial: line.partial,
+      cut: line.cut,
+      reason: line.reason,
       indent: byId.get(line.allocation.indent_id),
     }));
     // `resolved` is rebuilt from item + decisions on every render; depending on those two.
@@ -134,6 +146,9 @@ export function ConsolidationItemPage() {
   const shown = useMemo(() => {
     const needle = search.trim().toLowerCase();
     return rows
+      // SCM_0151: a line a level below excluded is not this approver's decision, so it
+      // is not in the table at 0 — it is named in the "Excluded earlier" strip below.
+      .filter((row) => !row.excludedBelow)
       .filter((row) => !priority || (row.indent?.priority ?? "NORMAL") === priority)
       .filter((row) => !needle || [
         row.indent_no, row.indent?.requested_by_name, row.indent?.region_name,
@@ -145,12 +160,42 @@ export function ConsolidationItemPage() {
         || b.requested_quantity - a.requested_quantity);
   }, [priority, rows, search]);
 
+  const excludedEarlier = rows.filter((row) => row.excludedBelow);
+  const activeCount = rows.length - excludedEarlier.length;
+
   const name = item?.item_name ?? item?.item_code ?? "Item";
   const unit = item?.uom_code ?? "";
   const control = "h-11 rounded-xl border border-line bg-content1 text-sm text-ink outline-none focus:border-brand";
 
   /* ---- the row actions ---- */
-  const exclude = (row: ItemRow) => setExcluded([row.line_id], true);
+  const exclude = (row: ItemRow) => {
+    setExcluding(row);
+    setExcludeMode("all");
+    setExcludeQty("");
+    setExcludeReason(row.reason ?? "");
+  };
+  const partQty = excludeQty.trim() === "" ? null : Number(excludeQty);
+  const partError = excluding && excludeMode === "part"
+    ? partQty === null
+      ? null
+      : Number.isNaN(partQty) || partQty <= 0
+        ? "Enter how much to take out."
+        : partQty >= excluding.cap
+          ? `That is all of it — choose "Exclude all ${formatQty(excluding.cap)}" instead.`
+          : null
+    : null;
+  const excludeReady = excluding !== null && (excludeMode === "all"
+    || (partQty !== null && !partError));
+  const confirmExclude = () => {
+    if (!excluding || !excludeReady) return;
+    const reason = excludeReason.trim();
+    if (excludeMode === "all") excludeWhole(excluding.line_id, reason);
+    else {
+      const left = Math.max(0, excluding.cap - (partQty ?? 0));
+      excludePart(excluding.line_id, String(Math.round(left * 1000) / 1000), reason);
+    }
+    setExcluding(null);
+  };
   const include = (row: ItemRow) => setExcluded([row.line_id], false);
   const includeEverywhere = (row: ItemRow) =>
     setExcluded(indentLineIds(allItems, row.indent_id), false);
@@ -209,9 +254,11 @@ export function ConsolidationItemPage() {
         className={`mt-1 flex items-center gap-1 text-[11px] ${error ? "font-medium text-bad" : "text-muted"}`}
       >
         {error && <AlertCircle className="h-3 w-3 shrink-0" aria-hidden />}
-        {error ?? (row.typed.trim() === ""
-          ? `Blank sends the full ${formatQty(row.cap)}.`
-          : `${pct}% of the ask`)}
+        {error ?? (row.partial
+          ? `${formatQty(row.cut)} excluded${row.reason ? ` · ${row.reason}` : ""}`
+          : row.typed.trim() === ""
+            ? `Blank sends the full ${formatQty(row.cap)}.`
+            : `${pct}% of the ask`)}
       </p>
     </div>;
   };
@@ -454,7 +501,7 @@ export function ConsolidationItemPage() {
                 )}
                 <span className="ml-auto rounded-full bg-content2 px-2.5 py-1 text-xs font-medium text-muted">
                   <strong className="tabular font-semibold text-body">{shown.length}</strong>
-                  {" of "}{rows.length} indent{rows.length === 1 ? "" : "s"}
+                  {" of "}{activeCount} indent{activeCount === 1 ? "" : "s"}
                 </span>
               </div>
 
@@ -511,6 +558,27 @@ export function ConsolidationItemPage() {
                       ))}
                     </div>
                   </>}
+
+              {excludedEarlier.length > 0 && (
+                <div className="mt-3 rounded-xl border border-line/70 bg-content2/40 p-3">
+                  <p className="text-xs font-semibold uppercase tracking-wider text-muted">
+                    Excluded earlier · {excludedEarlier.length}
+                  </p>
+                  <p className="mt-0.5 text-xs text-muted">
+                    Taken out by an approver before you. They do not come to you and are not sent on.
+                  </p>
+                  <ul className="mt-2 flex flex-wrap gap-1.5">
+                    {excludedEarlier.map((row) => (
+                      <li key={row.line_id}
+                          className="rounded-full bg-content1 px-2.5 py-1 text-xs text-body ring-1 ring-line">
+                        <span className="font-mono">{row.indent_no}</span>
+                        {" · "}{formatQty(row.requested_quantity)} {unit}
+                        {row.excludedByName ? <span className="text-muted"> · by {row.excludedByName}</span> : null}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
 
               <p className="mt-3 flex items-start gap-2 rounded-xl border border-line/70 bg-content2/60 p-3 text-xs text-muted">
                 <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-brand" />
@@ -579,6 +647,79 @@ export function ConsolidationItemPage() {
                 onClose={() => setRemoving(null)}
                 onConfirm={() => { if (removing) removeEverywhere(removing); }}
               />
+
+              <ConfirmModal
+                isOpen={excluding !== null}
+                title={excluding ? `Exclude from ${excluding.indent_no}` : "Exclude"}
+                message={excluding
+                  ? `${excluding.indent?.requested_by_name ?? "This indent"} can receive up to ${formatQty(excluding.cap)} ${unit}. Take all of it out, or only part.`
+                  : ""}
+                confirmLabel={excludeMode === "all" ? "Exclude all" : "Exclude part"}
+                confirmDisabled={!excludeReady}
+                danger
+                onClose={() => setExcluding(null)}
+                onConfirm={confirmExclude}
+              >
+                {excluding && (
+                  <div className="space-y-3">
+                    <div role="radiogroup" aria-label="How much to exclude" className="grid gap-2 sm:grid-cols-2">
+                      {([
+                        ["all", `All ${formatQty(excluding.cap)} ${unit}`.trim(), "The indent gets none of this item."],
+                        ["part", "Only part of it", "The rest still goes to the indent."],
+                      ] as const).map(([mode, label, hint]) => (
+                        <button key={mode} type="button" role="radio" aria-checked={excludeMode === mode}
+                                onClick={() => setExcludeMode(mode)}
+                                className={`min-h-[44px] rounded-xl border p-3 text-left transition ${
+                                  excludeMode === mode
+                                    ? "border-danger bg-danger/5 ring-2 ring-danger/20"
+                                    : "border-line hover:border-muted"}`}>
+                          <span className="block text-sm font-semibold text-ink">{label}</span>
+                          <span className="block text-xs text-muted">{hint}</span>
+                        </button>
+                      ))}
+                    </div>
+                    {excludeMode === "part" && (
+                      <label className="block text-sm font-semibold text-ink">
+                        How much to take out
+                        <span className="mt-1.5 flex h-11 items-center rounded-xl border border-line bg-content1 pr-3 focus-within:border-brand focus-within:ring-2 focus-within:ring-brand/25">
+                          <QuantityInput
+                            autoFocus
+                            decimals={decimals}
+                            min={0}
+                            max={excluding.cap}
+                            aria-label="Quantity to exclude"
+                            placeholder={`up to ${formatQty(excluding.cap)}`}
+                            value={excludeQty}
+                            onChange={setExcludeQty}
+                            className="h-full min-w-0 flex-1 rounded-xl bg-transparent px-3 text-right text-base font-semibold tabular outline-none placeholder:font-normal placeholder:text-muted"
+                          />
+                          {unit && <span className="text-sm font-semibold text-muted">{unit}</span>}
+                        </span>
+                        <span className="mt-1 block min-h-4 text-xs font-normal" role="status">
+                          {partError
+                            ? <span className="text-danger">{partError}</span>
+                            : partQty !== null
+                              ? <span className="text-body">
+                                  {formatQty(partQty)} out · <strong>{formatQty(Math.max(0, excluding.cap - partQty))} {unit}</strong> still goes to {excluding.indent_no}
+                                </span>
+                              : null}
+                        </span>
+                      </label>
+                    )}
+                    <label className="block text-sm font-semibold text-ink">
+                      Reason <span className="font-normal text-muted">(shown to the approvers after you)</span>
+                      <input
+                        type="text"
+                        maxLength={255}
+                        value={excludeReason}
+                        onChange={(event) => setExcludeReason(event.target.value)}
+                        placeholder="e.g. Old stock still at the branch"
+                        className="mt-1.5 h-11 w-full rounded-xl border border-line bg-content1 px-3 text-sm text-ink outline-none focus:border-brand focus:ring-2 focus:ring-brand/25"
+                      />
+                    </label>
+                  </div>
+                )}
+              </ConfirmModal>
             </>}
   </>;
 }

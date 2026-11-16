@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import {
-  CalendarRange, Check, ChevronDown, ChevronRight, Filter, Layers, PackageCheck,
+  CalendarRange, Check, ChevronDown, ChevronRight, Filter, Layers, PackageCheck, Pencil,
   RefreshCw, Search, SlidersHorizontal, Users, X,
 } from "lucide-react";
 import {
@@ -236,8 +236,16 @@ function ItemList({ items, decisions, onOpen }: {
    *  untouched default — an approver scanning the list needs to see at a glance
    *  which items they have already been into. */
   const state = (item: ConsolidatedItem) => {
-    const { total, ceiling, droppedCount, invalid, over } = resolveItem(item, decisions);
-    return { total, ceiling, droppedCount, invalid, over, edited: total !== ceiling || droppedCount > 0 };
+    const resolved = resolveItem(item, decisions);
+    const { total, ceiling, droppedCount, invalid, over } = resolved;
+    return {
+      total, ceiling, droppedCount, invalid, over,
+      excludedBelow: resolved.excludedBelowCount,
+      excludedByYou: resolved.excludedByYouCount,
+      excludedQuantity: resolved.excludedQuantity,
+      // Excluded at a rung below is not an edit of THIS approver's.
+      edited: total !== ceiling || resolved.excludedByYouCount > 0,
+    };
   };
 
   const columns: Column<ConsolidatedItem>[] = [
@@ -285,16 +293,25 @@ function ItemList({ items, decisions, onOpen }: {
     {
       key: "excluded",
       header: "Excluded",
+      // SCM_0150: what was excluded and by whom — never a bare dash.
+      render: (row) => <ExcludedCell {...state(row)} uom={row.uom_code} />,
+    },
+    {
+      // SCM_0152: every item can be opened and changed until the batch is submitted,
+      // edited or not. A visible button, not only a clickable row.
+      key: "open", header: "",
       render: (row) => {
-        const { droppedCount } = state(row);
-        return droppedCount === 0
-          ? <span className="text-muted">—</span>
-          : <span className="rounded-full bg-warn/15 px-2 py-0.5 text-xs font-semibold text-warn">
-              {droppedCount} out
-            </span>;
+        const { edited } = state(row);
+        return (
+          <button type="button"
+                  onClick={(event) => { event.stopPropagation(); onOpen(row); }}
+                  className="inline-flex min-h-[36px] items-center gap-1 rounded-lg border border-line px-2.5 text-xs font-semibold text-brand hover:bg-brand-050">
+            <Pencil className="h-3.5 w-3.5" aria-hidden /> {edited ? "Change" : "Edit"}
+            <ChevronRight className="h-3.5 w-3.5 text-muted" aria-hidden />
+          </button>
+        );
       },
     },
-    { key: "open", header: "", render: () => <ChevronRight className="h-4 w-4 text-muted" /> },
   ];
 
   return (
@@ -327,9 +344,42 @@ function ItemList({ items, decisions, onOpen }: {
                 </span>}
             {droppedCount > 0 && <span className="text-warn"> · {droppedCount} excluded</span>}
           </p>
+          <p>
+            <button type="button"
+                    onClick={(event) => { event.stopPropagation(); onOpen(row); }}
+                    className="inline-flex min-h-[44px] items-center gap-1 text-xs font-semibold text-brand">
+              <Pencil className="h-3.5 w-3.5" aria-hidden /> {edited ? "Change quantities" : "Edit quantities"}
+            </button>
+          </p>
         </div>;
       }}
     />
+  );
+}
+
+/** SCM_0150: the Excluded column, in words. "None" when nothing is out; otherwise
+ *  how many this approver took out (and how much) and how many a level below did. */
+function ExcludedCell({ excludedByYou, excludedBelow, excludedQuantity, uom }: {
+  excludedByYou: number; excludedBelow: number; excludedQuantity: number; uom?: string | null;
+}) {
+  if (excludedByYou === 0 && excludedBelow === 0) {
+    return <span className="text-xs text-muted">None</span>;
+  }
+  return (
+    <div className="flex flex-wrap gap-1">
+      {excludedByYou > 0 && (
+        <span className="rounded-full bg-warn/15 px-2 py-0.5 text-xs font-semibold text-warn"
+              title="Excluded by you in this batch — open the item to undo it">
+          {excludedByYou} by you · {formatQty(excludedQuantity)}{uom ? ` ${uom}` : ""}
+        </span>
+      )}
+      {excludedBelow > 0 && (
+        <span className="rounded-full bg-content2 px-2 py-0.5 text-xs font-semibold text-muted ring-1 ring-line"
+              title="Excluded by an approver before you — it does not come to you">
+          {excludedBelow} earlier
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -586,15 +636,24 @@ export function BatchCard({ batch, onBack }: {
       // Every line, flattened, each at the quantity its own box holds. A line nobody
       // edited still ships its full ceiling.
       const lines = batch.consolidated_items.flatMap((item) =>
-        resolveItem(item, decisions).lines.map((line) => ({
-          indent_id: line.allocation.indent_id,
-          line_id: line.allocation.line_id,
-          approved_quantity: line.value,
-          // Said out loud, not left to be inferred from the zero: a line dropped from
-          // the batch and a line approved at nothing are the same number and mean
-          // completely different things (BUG_SCM_0004).
-          excluded: line.excluded,
-        })));
+        resolveItem(item, decisions).lines
+          // SCM_0154: a line a rung below excluded is not this approver's to send —
+          // naming it at 0 used to fail its whole indent as an "unknown line".
+          .filter((line) => !line.excludedBelow)
+          .map((line) => ({
+            indent_id: line.allocation.indent_id,
+            line_id: line.allocation.line_id,
+            approved_quantity: line.value,
+            // Said out loud, not left to be inferred from the zero: a line dropped from
+            // the batch and a line approved at nothing are the same number and mean
+            // completely different things (BUG_SCM_0004).
+            excluded: line.excluded,
+            // SCM_0153: part of the line excluded, and why. The server works out the
+            // amount from the ceiling; this only says the cut IS an exclusion.
+            ...(line.partial ? { excluded_qty: line.cut } : {}),
+            ...((line.excluded || line.partial) && line.reason?.trim()
+              ? { exclusion_reason: line.reason.trim() } : {}),
+          })));
       // The frozen set, never whatever the server holds at click time: an indent that
       // joined the month while this screen was open has not been read by anybody here.
       const indentIds = batch.indents

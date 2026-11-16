@@ -244,8 +244,30 @@ async def is_hierarchy_root(db: AsyncSession, position_id: int | None) -> bool:
     return position is not None and not position.parent_position_id
 
 
+async def seated_post_ids(db: AsyncSession, employee_id: int | None,
+                          post_ids: set[int]) -> set[int]:
+    """Which of these LOCAL posts (workflow/posts.py) this person is seated in.
+
+    A local chair — CPO, Director, SCM Head set up under Settings because HCM has no
+    post for it — is held by being seated in it, not by an HCM position or rank. The
+    two "where is the raiser on this ladder" questions below must count it, or a raiser
+    sitting in the Director chair is not recognised as the top of a PO ladder.
+    """
+    if employee_id is None or not post_ids:
+        return set()
+    from app.platform.workflow.models import ApprovalPostMember
+    return set((await db.execute(
+        select(ApprovalPostMember.post_id).where(
+            ApprovalPostMember.post_id.in_(post_ids),
+            ApprovalPostMember.employee_id == employee_id,
+            ApprovalPostMember.is_active.is_(True),
+        )
+    )).scalars().all())
+
+
 async def raiser_is_final(db: AsyncSession, stages: list[Stage],
-                          requester_position_id: int | None) -> bool:
+                          requester_position_id: int | None,
+                          requester_id: int | None = None) -> bool:
     """Is the raiser at the END of this approval — so there is no one left to ask?
 
     Two ways to be at the end, and either is enough:
@@ -256,17 +278,22 @@ async def raiser_is_final(db: AsyncSession, stages: list[Stage],
     the top, so the document is theirs to approve" from "something is misconfigured",
     which still goes to the independent-approver fallback.
     """
-    if requester_position_id is None:
-        return False
-    position = await db.get(HcmPosition, requester_position_id)
-    if position is None:
-        return False
     enabled = [s for s in stages if s.is_enabled]
-    held = [s.sequence for s in enabled if s.position_id == position.id or (
-        position.role_id is not None and s.position_role_id == position.role_id)]
+    # SCM_0139: a local chair the raiser is seated in is a rung he holds too — the
+    # Director seated in the PO ladder's Director chair IS its end, HCM post or not.
+    seated = await seated_post_ids(
+        db, requester_id, {s.post_id for s in enabled if getattr(s, "post_id", None)})
+    position = (await db.get(HcmPosition, requester_position_id)
+                if requester_position_id is not None else None)
+    if position is None and not seated:
+        return False
+    held = [s.sequence for s in enabled
+            if (position is not None and (s.position_id == position.id or (
+                position.role_id is not None and s.position_role_id == position.role_id)))
+            or (getattr(s, "post_id", None) in seated)]
     if held and not any(s.sequence > min(held) for s in enabled):
         return True
-    return not position.parent_position_id
+    return position is not None and not position.parent_position_id
 
 
 def is_custom_ladder(wf: Workflow) -> bool:

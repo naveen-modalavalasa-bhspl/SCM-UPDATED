@@ -1121,10 +1121,20 @@ async def act(db: AsyncSession, allocation_id: int, action: str, user,
     the next approver must see the number this one actually agreed to.
     """
     ctx = ctx or {}
+    # SCM_0142: locked, then re-read. Two Approve presses on one allocation both saw
+    # PENDING_APPROVAL and both signed it; the second now waits for the first and is
+    # told, in words, that it is already decided.
+    await db.execute(select(Allocation.id).where(Allocation.id == allocation_id)
+                     .with_for_update())
     alloc = await get(db, allocation_id)
+    await db.refresh(alloc, ["status"])
     if alloc.status != AllocationStatus.PENDING_APPROVAL.value:
+        if alloc.status == AllocationStatus.APPROVED.value:
+            raise ValidationError(
+                f"{alloc.allocation_no} is already approved — nothing more to sign.")
         raise ValidationError(
-            f"Allocation is not awaiting approval (status {alloc.status})")
+            f"{alloc.allocation_no} is no longer awaiting approval "
+            f"(it is {alloc.status.replace('_', ' ').lower()}).")
 
     before = alloc.status
     await db.refresh(alloc, ["items"])

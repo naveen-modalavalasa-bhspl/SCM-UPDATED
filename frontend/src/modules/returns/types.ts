@@ -103,6 +103,8 @@ export interface StockReturn extends ScopedDoc {
   return_no: string;
   status: ReturnStatus;
   phase: ReturnPhase;
+  /** Which step a return still in approval is waiting on, in words (SCM_0199). */
+  stage_label?: string | null;
   kind: ReturnKind | null;
   kind_label: string | null;
   intent: ReturnIntent | null;

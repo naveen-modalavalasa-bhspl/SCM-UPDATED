@@ -8,13 +8,34 @@ from app.modules.approvals.schemas import ApprovalQuantityIn, IndentRejectionIn
 from app.modules.approvals.service import _approval_ceiling, _validated_quantities
 
 
-def _indent(approved_1=0, approved_2=0):
+def _indent(approved_1=0, approved_2=0, excluded_2=False):
     return SimpleNamespace(items=[
         SimpleNamespace(id=1, quantity=10, approved_quantity=approved_1,
-                        item_name="Gloves", item_code="GLV"),
+                        item_name="Gloves", item_code="GLV", uom_code="NOS",
+                        is_excluded=False),
         SimpleNamespace(id=2, quantity=4, approved_quantity=approved_2,
-                        item_name="Masks", item_code="MSK"),
+                        item_name="Masks", item_code="MSK", uom_code="NOS",
+                        is_excluded=excluded_2),
     ])
+
+
+def test_a_line_excluded_below_restated_at_zero_is_not_an_unknown_line():
+    """SCM_0154 / SCM_0127: Approve All named a line a lower rung had excluded, at 0,
+    and the whole indent failed with "unknown lines". Restating it is harmless."""
+    result = _validated_quantities(_indent(approved_1=8, approved_2=0, excluded_2=True), [
+        ApprovalQuantityIn(line_id=1, approved_quantity=8),
+        ApprovalQuantityIn(line_id=2, approved_quantity=0, excluded=True),
+    ], has_previous_approval=True)
+    assert set(result) == {1}
+    assert float(result[1]) == 8
+
+
+def test_a_line_excluded_below_cannot_be_brought_back():
+    with pytest.raises(ValidationError, match="excluded cannot be approved again: Masks"):
+        _validated_quantities(_indent(approved_1=8, approved_2=0, excluded_2=True), [
+            ApprovalQuantityIn(line_id=1, approved_quantity=8),
+            ApprovalQuantityIn(line_id=2, approved_quantity=3),
+        ], has_previous_approval=True)
 
 
 def test_rejection_reason_is_mandatory():
@@ -76,16 +97,17 @@ def test_ladder_ceiling_walks_down_and_never_back_up():
     assert _approval_ceiling(line, True) == 0
 
 
-def test_quantity_is_rounded_down_before_the_ceiling_is_checked():
-    """4.9995 must not clear a ceiling of 4.999 and then store as 5.000."""
+def test_a_quantity_finer_than_the_unit_is_refused_not_rounded():
+    """4.9995 must not clear a ceiling of 4.999 and then store as 5.000. The unit's own
+    step is enforced: what the approver typed is refused, never silently rounded."""
     indent = SimpleNamespace(items=[
         SimpleNamespace(id=1, quantity=4.999, approved_quantity=0,
-                        item_name="Gloves", item_code="GLV"),
+                        item_name="Gloves", item_code="GLV", uom_code="KG"),
     ])
-    result = _validated_quantities(indent, [
-        ApprovalQuantityIn(line_id=1, approved_quantity=4.9995),
-    ])
-    assert str(result[1]) == "4.999"
+    with pytest.raises(ValidationError, match="up to 3 decimal places"):
+        _validated_quantities(indent, [
+            ApprovalQuantityIn(line_id=1, approved_quantity=4.9995),
+        ])
 
 
 def test_infinite_quantity_is_refused_at_the_wire():
