@@ -1,3 +1,4 @@
+import { errorMessage } from "@/shared/api/errors";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -493,8 +494,9 @@ export default function ReturnFormPage() {
     })),
   });
 
-  const fail = (err: any) =>
-    setError(err?.response?.data?.error ?? "That could not be saved.");
+  // The shared reader: the server's own sentence when it sent one, else what the status
+  // means (a timeout, a server fault) — never a bare "could not be saved" (SCM_0121).
+  const fail = (err: unknown) => setError(errorMessage(err) || "That could not be saved.");
 
   /** Posts what was picked before the document had an id. Sequential, because the
    * endpoint takes one file per call. */

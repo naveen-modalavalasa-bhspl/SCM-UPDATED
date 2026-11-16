@@ -584,11 +584,11 @@ describe("splitProblems", () => {
 describe("the coded-item FEFO exception", () => {
   // Allocated: the OLD batch, which carries no codes. The item must leave with one
   // code per unit, so the old batch can never be posted.
-  const old = source({ batch_id: 1, batch_no: "OLD", expiry_date: "2026-11-01",
+  const old = source({ batch_id: 1, batch_no: "OLD", expiry_date: "2098-11-01",
     own_reserved_qty: 5, drawable_qty: 5, codes_required: true, has_unit_codes: false });
-  const mid = source({ batch_id: 2, batch_no: "MID", expiry_date: "2027-01-01",
+  const mid = source({ batch_id: 2, batch_no: "MID", expiry_date: "2099-01-01",
     bin_id: 7, codes_required: true, has_unit_codes: true });
-  const late = source({ batch_id: 3, batch_no: "LATE", expiry_date: "2027-06-01",
+  const late = source({ batch_id: 3, batch_no: "LATE", expiry_date: "2099-06-01",
     bin_id: 8, codes_required: true, has_unit_codes: true });
 
   it("unlocks only the oldest batch that has codes", () => {

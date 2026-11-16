@@ -1335,6 +1335,41 @@ async def test_a_name_matching_two_rows_is_refused_rather_than_guessed(db):
     assert {c["code"] for c in problems[0]["candidates"]} == {"CIP1", "CIP2"}
 
 
+async def test_a_level_3_category_is_named_by_its_path_when_its_name_repeats(db):
+    """SCM_0026: two Level 3 categories called "Gloves" under different parents made
+    every item row naming "Gloves" ambiguous, and the upload failed. The full path
+    (Level 1 > Level 2 > Level 3) names exactly one; the bare name still says which
+    ones it might be, and the template's dropdown offers paths."""
+    from app.shared.masters.bulk import lookup_choices, resolve_lookups
+
+    medical = ItemCategory(code="10", name="Medical", level=1, is_active=True)
+    lab = ItemCategory(code="20", name="Lab", level=1, is_active=True)
+    db.add_all([medical, lab])
+    await db.flush()
+    med_cons = ItemCategory(code="1010", name="Consumables", level=2, parent_id=medical.id,
+                            is_active=True)
+    lab_cons = ItemCategory(code="2010", name="Consumables", level=2, parent_id=lab.id,
+                            is_active=True)
+    db.add_all([med_cons, lab_cons])
+    await db.flush()
+    med_gloves = ItemCategory(code="101010", name="Gloves", level=3, parent_id=med_cons.id,
+                              is_active=True)
+    lab_gloves = ItemCategory(code="201010", name="Gloves", level=3, parent_id=lab_cons.id,
+                              is_active=True)
+    db.add_all([med_gloves, lab_gloves])
+    await db.flush()
+
+    parsed = [{"__row__": 2, "__lookup__": {"category_id": "Lab › Consumables › Gloves"}},
+              {"__row__": 3, "__lookup__": {"category_id": "Gloves"}}]
+    problems = await resolve_lookups(_items_def(), db, parsed)
+    assert parsed[0]["category_id"] == lab_gloves.id
+    assert [p["row"] for p in problems] == [3]
+    assert "full path" in problems[0]["message"]
+
+    labels = {o["label"] for o in (await lookup_choices(_items_def(), db))["category_id"]}
+    assert {"Medical > Consumables > Gloves", "Lab > Consumables > Gloves"} <= labels
+
+
 async def test_an_unknown_name_is_reported_with_the_row_it_was_on(db):
     from app.shared.masters.bulk import resolve_lookups
 

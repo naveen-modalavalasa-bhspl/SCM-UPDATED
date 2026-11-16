@@ -108,8 +108,15 @@ export function GatePassPrintPage() {
   const totalLabel = doc.consignment_package_total
     ? `${totalPackages} carton${totalPackages === 1 ? "" : "s"}` : totalPackages;
 
-  const receivedByDisplay = doc.received_by_name?.trim()
-    || (["PENDING_APPROVAL", "DRAFT", "READY", "IN_TRANSIT", "QUOTING", "AWAITING_CARRIER"].includes(doc.status)
+  // SCM_0140: who actually signed for it. The receiving site's acknowledgement writes
+  // `acknowledged_by_name` (and the carrier's delivery `delivered_to_name`); the pass
+  // read only `received_by_name`, which nothing fills at receipt, so it stayed blank.
+  const signedBy = doc.received_by_name?.trim() || doc.acknowledged_by_name?.trim()
+    || doc.delivered_to_name?.trim();
+  const signedOn = doc.acknowledged_at ?? doc.delivered_at;
+  const receivedByDisplay = signedBy
+    ? `${signedBy}${signedOn ? ` · ${fmtDate(signedOn)}` : ""}`
+    : (["PENDING_APPROVAL", "DRAFT", "READY", "IN_TRANSIT", "QUOTING", "AWAITING_CARRIER", "DELIVERED"].includes(doc.status)
       ? "Pending receipt (to be signed)"
       : "—");
 

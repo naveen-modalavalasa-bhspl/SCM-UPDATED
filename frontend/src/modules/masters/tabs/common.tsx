@@ -64,11 +64,12 @@ bulk={api} usage={api.usage}
 
 /** Read-only HCM mirrors (rule 10 — sync owns those tables). */
 export function ReadOnlyTab<T extends { id: number }>(
-  { title, fetchList, columns, renderCard }: {
+  { title, fetchList, columns, renderCard, emptyText }: {
     title: string;
     fetchList: () => Promise<T[]>;
     columns: Column<T>[];
     renderCard: (r: T) => React.ReactNode;
+    emptyText?: string;
   },
 ) {
   return (
@@ -77,6 +78,7 @@ export function ReadOnlyTab<T extends { id: number }>(
       readOnly managePerm="" columns={columns} renderCard={renderCard}
       fetchList={fetchList} fields={[]} emptyForm={{}} toForm={() => ({})}
       onCreate={async () => undefined} onUpdate={async () => undefined}
+      emptyText={emptyText}
     />
   );
 }

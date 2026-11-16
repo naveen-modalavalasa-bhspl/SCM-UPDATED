@@ -67,7 +67,7 @@ ROLE_PERMS = {
     # Store runs the floor, so it gets the whole warehouse cycle. The two decisions
     # that cost money — approving a dispatch and approving a purchase return — stay
     # off this list; those belong to a role that sits above the store.
-    RoleCode.STORE.value: [P.GRN_VIEW, P.GRN_CREATE, P.GRN_QC, P.STOCK_VIEW,
+    RoleCode.STORE.value: [P.GRN_VIEW, P.RECEIPT_CREATE, P.GRN_QC, P.STOCK_VIEW,
                            P.STOCK_VIEW_ALL,
                            P.STOCK_ADJUST, P.STOCK_RESERVE, P.STOCK_TRANSFER,
                            P.ISSUE_VIEW, P.ISSUE_CREATE, P.ISSUE_SUBMIT, P.ISSUE_ISSUE,
