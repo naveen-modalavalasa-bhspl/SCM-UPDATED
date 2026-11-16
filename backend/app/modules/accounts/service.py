@@ -145,10 +145,14 @@ def _milestones(po: PurchaseOrder, sums: dict, delivered_on: date | None,
     nth: dict[str, int] = {}
     out = []
     for row, amount in zip(rows, amounts):
-        meta = dict(_META.get(row.stage, {"label": row.stage, "trigger": ""}))
+        meta = dict(_META.get(row.stage, {"label": row.stage, "trigger": "",
+                                          "short": row.stage[:3]}))
+        # Every milestone carries a code -- ADV 1/1, DLV 2/4 -- so a payment, a
+        # remittance advice and the printed order can all name the same instalment.
+        nth[row.stage] = nth.get(row.stage, 0) + 1
+        code = f"{meta['short']} {nth[row.stage]}/{per_stage[row.stage]}"
         if per_stage[row.stage] > 1:
             # Instalments of one stage (50% against delivery in 30/60/90 days).
-            nth[row.stage] = nth.get(row.stage, 0) + 1
             meta["label"] = (f"{meta['label']} — instalment {nth[row.stage]} of "
                              f"{per_stage[row.stage]}")
         paid, pending = sums.get(row.id, (Decimal(0), Decimal(0)))
@@ -162,7 +166,8 @@ def _milestones(po: PurchaseOrder, sums: dict, delivered_on: date | None,
             trigger_met, start = None, None
         due = start + timedelta(days=row.due_days or 0) if start else None
         out.append({
-            "id": row.id, "seq": row.seq, "stage": row.stage, "label": meta["label"],
+            "id": row.id, "seq": row.seq, "stage": row.stage, "code": code,
+            "label": meta["label"],
             "trigger": meta["trigger"], "percent": float(row.percent),
             "due_days": row.due_days or 0, "amount": float(amount),
             "paid": float(paid), "pending": float(pending),
@@ -187,6 +192,9 @@ async def _can_act(db: AsyncSession, payment: VendorPayment, user,
                    granted: set | None = None) -> bool:
     if user is None or payment.status != VendorPaymentStatus.PENDING_APPROVAL.value:
         return False
+    from app.platform.workflow.engine import is_workflow_admin
+    if await is_workflow_admin(db, user):
+        return True
     instance = await _instance(db, payment.id)
     if instance is not None and instance.status == InstanceStatus.IN_PROGRESS.value:
         return await engine.can_act_now(db, DOC, payment.id, user)
@@ -554,12 +562,14 @@ async def act_on_payment(db: AsyncSession, payment_id: int, action: str, user,
             payment.current_approver_name = await engine.current_approver_label(
                 db, DOC, payment.id)
     else:
-        if getattr(user, "id", None) == payment.created_by_id:
+        from app.platform.workflow.engine import is_workflow_admin
+        is_admin = await is_workflow_admin(db, user)
+        if not is_admin and getattr(user, "id", None) == payment.created_by_id:
             raise PermissionError_(
                 "You recorded this payment, so you cannot approve or reject it. "
                 "Ask another holder of payment approval to action it.")
         granted = await get_user_permissions(db, user, getattr(user, "active_position_id", None))
-        if perms.ACCOUNTS_APPROVE not in granted:
+        if not is_admin and perms.ACCOUNTS_APPROVE not in granted:
             raise PermissionError_("You cannot approve vendor payments.")
         if action == "APPROVE":
             _mark_paid(payment, user)

@@ -41,7 +41,57 @@ DOC_LINKS: dict[str, str] = {
     "STOCK_EDIT": "/inventory/stock-edits?review={id}",
     "VENDOR_PAYMENT": "/accounts/payments?review={id}",
     "STOCK_TRANSFER": "/inventory/transfers?tab=orders&review={id}",
+    # SCM_0074 / SCM_0075 (2026-10-31): every document type the engine notifies about
+    # opens ITS OWN screen. These five used to fall back to the approvals inbox, so
+    # "PO0001 approved" opened an inbox the PO had already left and the click looked
+    # like it did nothing.
+    "PO": "/pos/{id}",
+    "RFQ": "/procurement/rfqs/{id}",
+    "QUOTATION": "/procurement/quotations/{id}",
+    "REQUISITION": "/procurement/requisitions/{id}",
+    "CONSOLIDATION": "/procurement/consolidations/{id}",
+    "OWN_STOCK_ISSUE": "/warehouse/material-issues/{id}",
+    "FORWARD_ISSUE": "/warehouse/material-issues/{id}",
+    "STOCK_TRANSFER_REQUEST": "/inventory/transfers/requests/{id}",
+    "STOCK_MOVEMENT_ORDER": "/inventory/transfers?tab=orders&review={id}",
+    "TRANSPORT_REQUEST": "/logistics/shipments/{id}",
+    "INDENT_ACK": "/indents/acknowledgements/{id}",
 }
+
+#: The fallback `link_for` hands out for a type it cannot place.
+INBOX = "/approvals"
+
+#: Links already written under a path the app no longer serves, mapped onto the one
+#: it does. `/procurement/pos/{id}` was never a route — PO detail is `/pos/{id}` — so
+#: every PO notification opened the Not Found page.
+_STALE_PREFIXES = (("/procurement/pos/", "/pos/"),)
+
+
+def resolve_link(deep_link: str | None, entity_type: str | None,
+                 entity_id: int | None) -> str | None:
+    """Where clicking a notification goes — computed on READ, so a row written with a
+    stale or generic link is corrected without touching the table.
+
+    A specific link the row carries wins (repaired if it names a retired path). A row
+    that only carries the generic inbox, or nothing, is sent to its own document when
+    its entity type and id name one. Anything else keeps what it had; None means
+    there is no document behind it, and the screens open the notification itself.
+    """
+    link = (deep_link or "").strip() or None
+    if link:
+        for old, new in _STALE_PREFIXES:
+            if link.startswith(old):
+                link = new + link[len(old):]
+    if link and link.split("?", 1)[0] != INBOX:
+        return link
+    kind = (entity_type or "").upper()
+    # An indent's status notifications are typed "INDENT_STATUS:<status>".
+    if kind.startswith("INDENT_STATUS"):
+        kind = "INDENT"
+    template = DOC_LINKS.get(kind)
+    if template and entity_id:
+        return template.format(id=entity_id)
+    return link
 
 
 def link_for(doc_type: str, doc_id: int) -> str:

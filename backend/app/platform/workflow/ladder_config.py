@@ -144,8 +144,25 @@ async def get_ladder(db: AsyncSession, project_id: int | None, doc_type: str) ->
 
     wf, rows = found
     # Counts, not rows: seventeen grouped results instead of 3,400 positions.
+    # Project-scoped — used only to offer ranks the project's own people hold as
+    # candidates to ADD (below). It is deliberately not used to score a rung already
+    # on the ladder: see company_summary.
     summary = await ladder.project_rank_summary(db, project_id)
     conditions_by_stage = await _conditions_by_stage(db, [row.id for row in rows])
+
+    # Neither path a rung actually resolves through at submit time filters by
+    # project: the climb (ladder.resolve_chain) walks hcm_positions.parent_position_id
+    # regardless of the project tag on the ancestor's employee, and the company-wide
+    # rescue for a rank the raiser does not report through
+    # (ladder._add_offline_rungs / offline_rung_resolution) is explicitly unscoped —
+    # that is the whole point of a shared chair like CPO or DIRECTOR. So scoring an
+    # already-SAVED rung against the PROJECT'S holder count asks a question the engine
+    # never asks: CPO and DIRECTOR showed "nobody seated, will be skipped" for 104-MMU
+    # even though both resolve fine, because their holders carry a different project's
+    # tag. holder_count/position_count/is_dead for an existing rung are read
+    # company-wide, matching what submitting a document would actually find.
+    company_summary = (summary if project_id is None
+                       else await ladder.project_rank_summary(db, None))
 
     known = {row.position_role_id for row in rows}
     added = sorted(
@@ -155,7 +172,7 @@ async def get_ladder(db: AsyncSession, project_id: int | None, doc_type: str) ->
 
     rungs = []
     for row in rows:
-        rank = summary.get(row.position_role_id, {})
+        rank = company_summary.get(row.position_role_id, {})
         stored = conditions_by_stage.get(row.id, [])
         rungs.append({
             "sequence": row.sequence,
@@ -165,8 +182,8 @@ async def get_ladder(db: AsyncSession, project_id: int | None, doc_type: str) ->
             "position_count": rank.get("position_count", 0),
             "holder_count": rank.get("holder_count", 0),
             "selected_position_ids": _selected_positions_out(stored),
-            # A rung nobody in this project fills any more: HCM removed or renamed the
-            # positions under it. Flagged rather than silently skipped.
+            # A rung nobody anywhere in the company fills any more: HCM removed or
+            # renamed the positions under it. Flagged rather than silently skipped.
             "is_dead": not rank.get("holder_count"),
             "conditions": _conditions_out(stored),
         })

@@ -34,6 +34,7 @@ import {
   Fact, FactGroup, PurchaseReturnHistory, PurchaseReturnJourney, PurchaseReturnTrail,
 } from "../components/PurchaseReturnDossier";
 import { PurchaseReturnLeg } from "../components/PurchaseReturnLeg";
+import { CombinationTag } from "@/shared/combination";
 
 /**
  * Purchase Return review — the screen a draft is read on before it goes out,
@@ -607,6 +608,7 @@ export default function PurchaseReturnDetail() {
                       <tr key={l.id} className="border-b border-line/60 last:border-0">
                         <td className="py-2 pr-3">
                           <div className="font-medium text-ink">{l.item_name ?? l.item_code}</div>
+                          <CombinationTag value={l} className="mt-1" />
                           <div className="text-xs text-muted">
                             {[l.item_code, l.uom_code, l.batch_no ? `Batch ${l.batch_no}` : null]
                               .filter(Boolean).join(" · ")}

@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   AlarmClock, BarChart3, CheckCheck, ChevronRight, ClipboardList, FileText, Inbox,
-  Lock, Package, RefreshCw, Search, Truck, TriangleAlert, X,
+  Lock, Package, RefreshCw, Search, ShieldAlert, Truck, TriangleAlert, X,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import {
@@ -12,6 +12,7 @@ import {
   FILTER_FIELD, FILTER_RAIL, FILTER_TOGGLE, FILTER_TOGGLE_OFF, FILTER_TOGGLE_ON,
   Select,
 } from "@/shared/components";
+import { useAuth } from "@/shared/auth/AuthContext";
 import { fmtDate, fmtDateTime, fmtRelative, parseIst } from "@/shared/datetime";
 import { approvalsApi } from "../api";
 import { approvalDocumentPath } from "../documentRoutes";
@@ -196,7 +197,11 @@ function Tick({
 export function ApprovalsPage() {
   const nav = useNavigate();
   const queryClient = useQueryClient();
+  const { can, me } = useAuth();
+  const isAdmin = can("admin.workflow.manage") || Boolean(me?.roles.includes("ADMIN")) || Boolean(me?.roles.includes("SUPERUSER"));
   const [params, setParams] = useSearchParams();
+  const [scope, setScope] = useState<"mine" | "company" | null>(null);
+  const activeScope = scope ?? (isAdmin ? "company" : "mine");
   const [search, setSearch] = useState("");
   /* Seeded from the URL, once, so the Overview can hand this screen a question
      rather than just a door: /approvals?doc_type=INDENT&overdue=1. Read at mount
@@ -216,6 +221,7 @@ export function ApprovalsPage() {
   const serverWindow = raisedWindow(raisedRange, dateFrom, dateTo);
   const queryFilters = {
     search: search.trim(), doc_type: docType, overdue_only: pastDueOnly, sort,
+    scope: activeScope,
     raised_from: serverWindow && Number.isFinite(serverWindow[0]) ? new Date(serverWindow[0]).toISOString() : undefined,
     raised_to: serverWindow && Number.isFinite(serverWindow[1]) ? new Date(serverWindow[1]).toISOString() : undefined,
   };
@@ -227,11 +233,11 @@ export function ApprovalsPage() {
   // queue. Counting `query.data.items` counted one page of 20, which made "Waiting on
   // you" disagree with the same number on Home.
   const queueQuery = useQuery({
-    queryKey: ["approvals", "pending", "queue"],
-    queryFn: () => approvalsApi.pendingAll(),
+    queryKey: ["approvals", "pending", "queue", activeScope],
+    queryFn: () => approvalsApi.pendingAll(activeScope),
   });
   const queue = useMemo(() => queueQuery.data ?? [], [queueQuery.data]);
-  useEffect(() => setPage(1), [dateFrom, dateTo, docType, pastDueOnly, raisedRange, search, sort]);
+  useEffect(() => setPage(1), [dateFrom, dateTo, docType, pastDueOnly, raisedRange, search, sort, activeScope]);
   const all = useMemo(() => query.data?.items ?? [], [query.data?.items]);
   const types = useMemo(() => approvalTypeCounts(queue), [queue]);
   const rows = useMemo(() => {
@@ -319,9 +325,19 @@ export function ApprovalsPage() {
           <Icon className="h-4.5 w-4.5" />
         </span>
         <div className="min-w-0">
-          <strong className="block truncate font-mono text-[13px] font-semibold text-ink">
-            {row.doc_no ?? `#${row.doc_id}`}
-          </strong>
+          <div className="flex items-center gap-1.5">
+            <strong className="block truncate font-mono text-[13px] font-semibold text-ink">
+              {row.doc_no ?? `#${row.doc_id}`}
+            </strong>
+            {row.is_overridden && (
+              <span
+                title={`Assigned to ${row.approver_name || "another approver"}. You have admin override authority.`}
+                className="inline-flex items-center gap-0.5 rounded-full bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 dark:text-amber-400"
+              >
+                <ShieldAlert className="h-2.5 w-2.5" /> Override
+              </span>
+            )}
+          </div>
           <span className="text-xs text-muted">{label(displayDocType(row))}</span>
         </div>
       </div>
@@ -363,6 +379,14 @@ export function ApprovalsPage() {
         <div>
           <p className="text-sm text-body">{row.requested_by_name ?? "—"}</p>
           {row.waiting_since && <p className="text-xs text-muted">{fmtDate(row.waiting_since)}</p>}
+          {activeScope === "company" && row.approver_name && (
+            <p className="mt-0.5 flex items-center gap-1 text-[11px] text-muted">
+              <span>With:</span>
+              <span className="max-w-[130px] truncate font-medium text-ink" title={row.approver_name}>
+                {row.approver_name}
+              </span>
+            </p>
+          )}
         </div>
       ),
     },
@@ -421,9 +445,36 @@ export function ApprovalsPage() {
 
   return <>
     <PageHeader
-      eyebrow="Approvals"
-      title="Waiting for me"
+      eyebrow={activeScope === "company" ? "Admin Master Queue" : "Approvals"}
+      title={activeScope === "company" ? "All Company In-Flight" : "Waiting for me"}
       actions={<div className="flex flex-wrap items-center gap-2">
+        {isAdmin && (
+          <div className="flex items-center rounded-xl border border-line bg-content2 p-1">
+            <button
+              type="button"
+              onClick={() => setScope("company")}
+              className={`flex items-center gap-1.5 rounded-lg px-3 py-1 text-xs font-semibold transition-all ${
+                activeScope === "company"
+                  ? "bg-amber-600 text-white shadow-sm"
+                  : "text-muted hover:text-ink"
+              }`}
+            >
+              <ShieldAlert className="h-3.5 w-3.5" />
+              All Company In-Flight
+            </button>
+            <button
+              type="button"
+              onClick={() => setScope("mine")}
+              className={`rounded-lg px-3 py-1 text-xs font-semibold transition-all ${
+                activeScope === "mine"
+                  ? "bg-brand text-white shadow-sm"
+                  : "text-muted hover:text-ink"
+              }`}
+            >
+              My Approvals
+            </button>
+          </div>
+        )}
         {/* An inbox that refreshes itself has to say when it last did, or the approver
             cannot tell an empty queue from a stale one. */}
         <span className="hidden text-xs text-muted sm:inline">
@@ -438,6 +489,22 @@ export function ApprovalsPage() {
       </div>}
     />
 
+    {isAdmin && activeScope === "company" && (
+      <div className="mb-4 flex items-center justify-between gap-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3.5 text-amber-900 dark:text-amber-200">
+        <div className="flex items-center gap-3">
+          <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-amber-500/20 text-amber-700 dark:text-amber-300">
+            <ShieldAlert className="h-5 w-5" />
+          </span>
+          <div className="min-w-0">
+            <p className="text-sm font-semibold">Admin Master Queue Active</p>
+            <p className="text-xs text-amber-800/80 dark:text-amber-200/80">
+              Viewing all in-flight documents across the organization. You can review and approve any pending task on behalf of absent or unseated approvers. Actions are logged as Admin Overrides.
+            </p>
+          </div>
+        </div>
+      </div>
+    )}
+
     {/* The three numbers this screen is opened for — each one also the filter it
         names. Reading "3 past due" and then hunting for the control that shows those
         three rows is the step this removes. */}
@@ -448,7 +515,7 @@ export function ApprovalsPage() {
         removes, which is why they set state rather than navigate. */}
     <section aria-label="Approval queues" className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
       <Kpi
-        label="Waiting on you"
+        label={activeScope === "company" ? "In-flight company requests" : "Waiting on you"}
         value={queue.length}
         icon={Inbox}
         tint="bg-brand-050 text-brand"
@@ -639,6 +706,12 @@ export function ApprovalsPage() {
               ? <span className="font-semibold text-body"> · {inr(Number(row.amount))}</span>
               : ` · ${row.current_stage_name ?? `Stage ${row.stage_sequence}`}`}
           </p>
+          {activeScope === "company" && row.approver_name && (
+            <p className="text-xs text-muted flex items-center gap-1">
+              <span>Waiting for:</span>
+              <span className="font-semibold text-ink">{row.approver_name}</span>
+            </p>
+          )}
           <div className="flex items-center justify-between gap-2">
             {BULK_SIGNABLE.has(row.doc_type)
               // The whole card navigates, so the label's TEXT has to stop the click

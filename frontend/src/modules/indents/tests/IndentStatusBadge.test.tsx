@@ -80,4 +80,72 @@ describe("IndentStatusBadge", () => {
     const { container: pill } = render(<StatusPill status="APPROVED" />);
     expect(badge.firstElementChild?.className).toBe(pill.firstElementChild?.className);
   });
+
+  it("updates existing status badge to QC: PASSED when QC completes", () => {
+    render(
+      <IndentStatusBadge
+        status="PARTIALLY_ALLOCATED"
+        journey={{
+          indent_id: 33,
+          indent_no: "IND0105",
+          status: "PARTIALLY_ALLOCATED",
+          created_at: "2026-10-31",
+          current_stage_message: "",
+          stages: [],
+          phases: [],
+          history: [],
+          missing_sources: [],
+          qc_status: "COMPLETED",
+          qc_inspection_no: "QC0021",
+        }}
+      />,
+    );
+
+    expect(screen.getByText("QC: PASSED · QC0021")).toBeInTheDocument();
+    expect(screen.queryByText("PARTIALLY ALLOCATED")).toBeNull();
+  });
+
+  it("updates existing status badge to CONSIGNMENT and IN TRANSIT as delivery progresses", () => {
+    const { rerender } = render(
+      <IndentStatusBadge
+        status="PARTIALLY_ALLOCATED"
+        journey={{
+          indent_id: 33,
+          indent_no: "IND0105",
+          status: "PARTIALLY_ALLOCATED",
+          created_at: "2026-10-31",
+          current_stage_message: "",
+          stages: [],
+          phases: [],
+          history: [],
+          missing_sources: [],
+          consignment_no: "CSG0009",
+          consignment_status: "CREATED",
+        }}
+      />,
+    );
+
+    expect(screen.getByText("CONSIGNMENT: CREATED · CSG0009")).toBeInTheDocument();
+
+    rerender(
+      <IndentStatusBadge
+        status="PARTIALLY_ALLOCATED"
+        journey={{
+          indent_id: 33,
+          indent_no: "IND0105",
+          status: "PARTIALLY_ALLOCATED",
+          created_at: "2026-10-31",
+          current_stage_message: "",
+          stages: [],
+          phases: [],
+          history: [],
+          missing_sources: [],
+          consignment_no: "CSG0009",
+          consignment_status: "IN_TRANSIT",
+        }}
+      />,
+    );
+
+    expect(screen.getByText("IN TRANSIT · CSG0009")).toBeInTheDocument();
+  });
 });

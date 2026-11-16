@@ -2,7 +2,10 @@
  * e.g. import { Button, Card, StatCard, StatusPill, ResponsiveList, Can } from "@/shared/components";
  */
 export { BackLink, Button, Card, PageHeader, StatCard, Field, Input, Textarea, Select, selectOnFocus } from "./ui";
+export { QuantityInput, type QuantityInputProps } from "./QuantityInput";
 export { StatusPill } from "./StatusPill";
+export { QuantityChanges, type QuantityChangeRow } from "./QuantityChanges";
+export { NotificationItem, timeAgo } from "./NotificationItem";
 export { ResponsiveList, type Column } from "./ResponsiveList";
 export { ResponsiveGrid } from "./ResponsiveGrid";
 export { ScrollBox } from "./ScrollBox";
@@ -53,4 +56,13 @@ export { SourceRef, SourceRefLine, type SourceRefCandidate } from "./SourceRef";
 // The cold-open splash: the SCM mark lit with the brand sweep, shown while the
 // session is being resolved. Not for in-page waits — those stay quiet.
 export { AppSplash } from "./AppSplash";
+
+// The top of every document form: the fields its series asks for, beside the number
+// they make. Fields and number parts are served, so a pattern edit needs no screen edit.
+export { DocumentNumberCard } from "./DocumentNumberCard";
+export { DocumentScopeStrip } from "./DocumentScopeStrip";
 export * from "./tones";
+export {
+  PackageCheckModal, packGroups, packMix, packPathLabel, shortPackCode,
+  type InnerCheck, type PackageCheck, type PackageToCheck,
+} from "./PackageCheckModal";

@@ -88,6 +88,7 @@ export function RequisitionListPage() {
         </div>
       ),
     },
+    { key: "organisation", header: "Organisation", hideOnNarrow: true, render: (r) => r.organization_name ?? "—" },
     { key: "project", header: "Project", hideOnNarrow: true, render: (r) => r.project_name ?? "—" },
     { key: "status", header: "Status", render: (r) => <StatusPill status={r.status} /> },
     {
@@ -100,7 +101,7 @@ export function RequisitionListPage() {
         ? r.pending_with.join(", ")
         : (r.current_approver_name ?? "—")),
     },
-    { key: "lines", header: "Lines", className: "text-right", render: (r) => r.total_items },
+    { key: "lines", header: "Number of Items", className: "text-right", render: (r) => r.total_items },
     {
       key: "value",
       header: "Estimated",

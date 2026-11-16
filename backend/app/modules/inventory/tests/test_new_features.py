@@ -4,6 +4,7 @@ from decimal import Decimal
 import pytest
 
 from app.modules.inventory import service
+from app.core.exceptions import ValidationError
 from app.modules.inventory.models import Stock, NO_BIN, NO_PROJECT
 from app.shared.models.master import Item
 from app.shared.models.warehouse import Warehouse
@@ -20,10 +21,14 @@ class _Line:
         self.quantity = quantity
         self.unit_cost = 5.0
         self.remarks = None
+        # The fields every audit line carries now: the codes it writes off, and the
+        # brand / variant / model it counts (None = every combination together).
+        self.serial_numbers = []
+        self.brand_id = self.variant_id = self.model_id = None
 
 
 class _Adj:
-    def __init__(self, warehouse_id, lines, reason="EXCESS"):
+    def __init__(self, warehouse_id, lines, reason="DAMAGE"):
         self.warehouse_id = warehouse_id
         self.reason = reason
         self.remarks = "Count discrepancy"
@@ -31,19 +36,27 @@ class _Adj:
 
 
 async def test_stock_adjustment_flow(db, make_user):
+    """A stock audit only writes stock off (2026-10-31): an inward line is refused, and
+    a write-off — however small — waits for its approver."""
     user = await make_user(employee_id=101, username="adj_user", password="pw",
                            permissions=["stock.view", "admin.settings.manage"])
     wh = Warehouse(code="WH-ADJ", name="Adjustment Warehouse")
     item = Item(code="ITEM-ADJ", name="Adj Item", uom_code="PCS")
     db.add_all([wh, item])
     await db.flush()
+    await service.move_stock(db, item_id=item.id, qty=10, direction="IN", ref_type="INIT",
+                             ref_id=1, ref_no="INIT", user=user, warehouse_id=wh.id)
+
+    with pytest.raises(ValidationError, match="only writes stock off"):
+        await service.create_stock_adjustment(
+            db, _Adj(wh.id, [_Line(item.id, direction="IN", quantity=10)]), user)
 
     adj = await service.create_stock_adjustment(
-        db, _Adj(wh.id, [_Line(item.id, direction="IN", quantity=10)]), user)
-    assert adj.status == "APPROVED"
+        db, _Adj(wh.id, [_Line(item.id, direction="OUT", quantity=2)]), user)
+    assert adj.status == "PENDING_APPROVAL"
     assert len(adj.items) == 1
 
-    # Check stock balance
+    # Nothing has left the shelf yet: a write-off posts only once it is approved.
     stock = (await db.execute(
         service.select(Stock).where(Stock.item_id == item.id, Stock.warehouse_id == wh.id)
     )).scalar_one()

@@ -25,6 +25,7 @@ import { ReturnStepper } from "../components/ReturnStepper";
 import { PHASE, money, roleOnly } from "../constants";
 import { originOf } from "../origin";
 import type { ReturnLine } from "../types";
+import { CombinationTag } from "@/shared/combination";
 
 const qty = (value: string | number) => Number(value ?? 0).toLocaleString();
 
@@ -168,6 +169,7 @@ export default function ReturnDetailPage() {
         <div className="min-w-0">
           <div className="font-medium text-ink">{row.item_name ?? "—"}</div>
           <div className="mono text-xs text-muted">{row.item_code ?? ""}</div>
+          <CombinationTag value={row} className="mt-1" />
         </div>
       ),
     },
@@ -287,7 +289,13 @@ export default function ReturnDetailPage() {
   /* The rest, in the order somebody reads a return: why it was raised, what the branch
    * asked for, who raised it, and when each rung of it happened. */
   const details = [
-    { label: "Reason", value: doc.reason_label ?? doc.reason, icon: <MessageSquareWarning className="h-4 w-4" /> },
+    {
+      label: (doc.reasons?.length ?? 0) > 1 ? "Reasons" : "Reason",
+      // "Damaged 10 · Expired 2": several reasons only read with their quantities.
+      value: (doc.reasons?.length ?? 0) > 1
+        ? doc.reasons.map((row) => `${row.reason_label ?? row.reason} ${row.quantity}`).join(" · ")
+        : doc.reason_label ?? doc.reason,
+      icon: <MessageSquareWarning className="h-4 w-4" /> },
     { label: "Description", value: doc.reason_note, icon: <ScrollText className="h-4 w-4" /> },
     { label: "What the branch wants", value: doc.intent_label, icon: <Target className="h-4 w-4" /> },
     {
@@ -620,6 +628,7 @@ export default function ReturnDetailPage() {
                 <div className="p-4">
                   <div className="font-medium text-ink">{row.item_name ?? "—"}</div>
                   <div className="mono text-xs text-muted">{row.item_code ?? ""}</div>
+                  <CombinationTag value={row} className="mt-1" />
                   <div className="tabular mt-1 text-sm font-semibold text-body">
                     {qty(row.quantity)} {row.uom_code ?? ""}
                   </div>

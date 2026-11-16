@@ -8,8 +8,8 @@ import { type Option } from "../components/MasterCrud";
 import type { RefRow } from "../types";
 import { Code, NamedLookupTab, ReadOnlyTab } from "../tabs/common";
 import {
-  BrandsTab, CategoriesTab, GeneralNamesTab, HsnCodesTab, ItemClassesTab,
-  ItemSubClassesTab, ItemsTab,
+  CategoriesTab, GeneralNamesTab, HsnCodesTab, ItemClassesTab,
+  ItemSubClassesTab, ItemsTab, BrandItemMappingTab,
 } from "../tabs/itemTabs";
 import { ProjectsTab, WarehousesTab } from "../tabs/locationTabs";
 import {
@@ -17,19 +17,24 @@ import {
 } from "../tabs/vendorTabs";
 import { VendorMappingPanel } from "../components/VendorMappingPanel";
 import { ConversionsTab, UomTab } from "../tabs/uomTabs";
+import { BrandFamilyTab } from "../tabs/brandFamilyTabs";
 import {
   AttributesTab, CategoryTaggingTab, FeaturesTab, PackagingTab, SpecsTab,
 } from "../tabs/attributeTabs";
 import { BomGroupsTab, BomsTab, ItemGroupsTab } from "../tabs/bomTabs";
+import { ContainerUsageTab, ItemPackagingVariantsTab } from "../tabs/packagingTabs";
 import { ItemEligibilityTab } from "../tabs/eligibilityTabs";
+import { OrgDirectoryTab } from "../tabs/orgDirectoryTabs";
 const TABS = [
   "items", "categories", "general-names", "item-classes", "item-sub-classes",
   "brands", "manufacturers", "dosage-forms", "hsn-codes",
-  "features", "packaging", "item-groups",
+  "brand-item-mapping",
+  "features", "packaging", "pack-variants", "container-usage", "item-groups",
   "attributes", "specs", "category-tags",
-  "uom", "uom-classes", "conversions", "warehouses",
+  "uom", "conversions", "warehouses",
   "projects", "vendors", "vendor-categories", "vendor-items", "boms", "bom-groups",
   "departments", "facilities", "item-eligibility", "payment-terms",
+  "organisations", "org-departments",
 ] as const;
 
 /** The masters, grouped the way somebody looking for one thinks about them.
@@ -47,9 +52,10 @@ export type MasterGroup = { label: string; tabs: MasterTab[] };
 
 const GROUPS: MasterGroup[] = [
   { label: "Items", tabs: ["items", "categories", "general-names", "item-classes", "item-sub-classes", "item-groups", "item-eligibility"] },
-  { label: "Classification", tabs: ["brands", "manufacturers", "dosage-forms", "hsn-codes"] },
-  { label: "Attributes", tabs: ["attributes", "specs", "features", "category-tags", "packaging"] },
-  { label: "Units", tabs: ["uom", "uom-classes", "conversions"] },
+  { label: "Classification", tabs: ["brands", "manufacturers", "dosage-forms", "hsn-codes", "brand-item-mapping"] },
+  { label: "Attributes", tabs: ["attributes", "specs", "features", "category-tags"] },
+  { label: "Packaging", tabs: ["packaging", "pack-variants", "container-usage"] },
+  { label: "Units", tabs: ["uom", "conversions"] },
   { label: "Vendors", tabs: ["vendors", "vendor-categories", "vendor-items", "payment-terms"] },
   { label: "BOM", tabs: ["boms", "bom-groups"] },
   { label: "Locations", tabs: ["warehouses", "facilities", "projects", "departments"] },
@@ -74,9 +80,10 @@ const GROUPS: MasterGroup[] = [
  *  editor for the same rows is how two screens come to disagree. */
 export const INVENTORY_MASTER_GROUPS: MasterGroup[] = [
   { label: "Items", tabs: ["items", "categories", "general-names", "item-classes", "item-sub-classes", "item-groups"] },
-  { label: "Classification", tabs: ["brands", "manufacturers", "dosage-forms"] },
-  { label: "Attributes", tabs: ["attributes", "specs", "features", "category-tags", "packaging"] },
-  { label: "Units", tabs: ["uom", "uom-classes", "conversions"] },
+  { label: "Classification", tabs: ["brands", "manufacturers", "dosage-forms", "brand-item-mapping"] },
+  { label: "Attributes", tabs: ["attributes", "specs", "features", "category-tags"] },
+  { label: "Packaging", tabs: ["packaging", "pack-variants", "container-usage"] },
+  { label: "Units", tabs: ["uom", "conversions"] },
 ];
 
 /** Tax lives on the HSN code and is read at PO/GRN time, never copied onto an item —
@@ -99,7 +106,7 @@ export const INDENT_MASTER_GROUPS: MasterGroup[] = [
  *  not even registered — which is why they sit under Settings rather than in a module
  *  that would imply somebody here can change them. */
 export const ORG_MASTER_GROUPS: MasterGroup[] = [
-  { label: "Organisation", tabs: ["projects", "facilities", "departments"] },
+  { label: "Organisation", tabs: ["projects", "facilities", "departments", "organisations", "org-departments"] },
 ];
 
 const TAB_LABELS: Record<(typeof TABS)[number], string> = {
@@ -107,12 +114,16 @@ const TAB_LABELS: Record<(typeof TABS)[number], string> = {
   "general-names": "Generic Names", "item-sub-classes": "Item Subclasses",
   brands: "Brands", manufacturers: "Manufacturers",
   "dosage-forms": "Dosage Forms", "hsn-codes": "HSN Codes",
-  features: "Features", packaging: "Packages", "item-groups": "Item Groups",
+  "brand-item-mapping": "Brand Item Mapping",
+  features: "Features", packaging: "Container Types",
+  "pack-variants": "Item Packaging Variants", "container-usage": "Container Usage",
+  "item-groups": "Item Groups",
   attributes: "Attributes", specs: "Specifications", "category-tags": "Category Tagging",
-  uom: "UOM", "uom-classes": "UOM Types", conversions: "Conversions", warehouses: "Warehouses",
+  uom: "UOM", conversions: "Conversions", warehouses: "Warehouses",
   projects: "Projects", vendors: "Vendors", "vendor-categories": "Vendor Categories", "vendor-items": "Vendor Material Mapping",
   boms: "BOM", "bom-groups": "BOM Groups",
   departments: "Departments", facilities: "Facilities",
+  organisations: "Organisations", "org-departments": "Organisation Depts",
   "item-eligibility": "Item Eligibility",
   "payment-terms": "Payment Terms",
 };
@@ -297,11 +308,14 @@ export function MastersShell({
       {tab === "hsn-codes" && <HsnCodesTab />}
       {tab === "payment-terms" && <PaymentTermsTab />}
       {tab === "item-sub-classes" && <ItemSubClassesTab />}
-      {tab === "brands" && <BrandsTab />}
+      {tab === "brands" && <BrandFamilyTab />}
       {tab === "manufacturers" && <NamedLookupTab title="Manufacturer" queryKey="manufacturers" api={mastersApi.manufacturers} managePerm="master.brand.manage" />}
       {tab === "dosage-forms" && <NamedLookupTab title="Dosage form" queryKey="dosage-forms" api={mastersApi.dosageForms} />}
+      {tab === "brand-item-mapping" && <BrandItemMappingTab />}
       {tab === "features" && <FeaturesTab />}
       {tab === "packaging" && <PackagingTab />}
+      {tab === "pack-variants" && <ItemPackagingVariantsTab />}
+      {tab === "container-usage" && <ContainerUsageTab />}
       {tab === "item-groups" && <ItemGroupsTab items={itemOpts} />}
       {tab === "attributes" && <AttributesTab uoms={uomOpts} />}
       {tab === "specs" && <SpecsTab uoms={uomOpts} />}
@@ -311,10 +325,6 @@ export function MastersShell({
           fetches them itself rather than joining the shared NEEDS sources above. */}
       {tab === "bom-groups" && <BomGroupsTab />}
       {tab === "uom" && <UomTab />}
-      {tab === "uom-classes" && <NamedLookupTab title="UOM type" queryKey="uom-classes"
-        api={mastersApi.uomClasses} managePerm="master.uom.manage"
-        codeRule={{ maxLength: 30, pattern: /^[A-Za-z0-9_]+$/,
-                    patternMessage: "Use letters, numbers or an underscore, e.g. COUNT" }} />}
       {tab === "conversions" && <ConversionsTab uoms={uomOpts} />}
       {tab === "warehouses" && <WarehousesTab facilities={facOpts} />}
       {tab === "projects" && <ProjectsTab />}
@@ -336,6 +346,12 @@ export function MastersShell({
           ]}
           renderCard={(r) => <div className="text-sm text-body">{r.name}</div>}
         />
+      )}
+      {tab === "organisations" && (
+        <OrgDirectoryTab title="Organisations" fetchList={mastersApi.organisations} />
+      )}
+      {tab === "org-departments" && (
+        <OrgDirectoryTab title="Organisation Depts" fetchList={mastersApi.orgDepartments} />
       )}
       {tab === "facilities" && (
         <ReadOnlyTab<RefRow>

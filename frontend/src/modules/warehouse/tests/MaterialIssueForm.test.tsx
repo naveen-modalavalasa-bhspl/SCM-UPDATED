@@ -7,7 +7,7 @@ vi.mock("@/shared/api/client", () => ({
   api: { get: vi.fn(), post: vi.fn() },
 }));
 
-const heldPermissions = new Set<string>(["issue.view", "issue.create"]);
+const heldPermissions = new Set<string>(["issue.view", "issue.create", "issue.submit"]);
 vi.mock("@/shared/auth/AuthContext", () => ({
   useAuth: () => ({ can: (code: string) => heldPermissions.has(code) }),
 }));
@@ -135,10 +135,16 @@ vi.mock("../api", async (importOriginal) => {
         item_total_qty: 15, item_available_qty: 0,
       },
     ]),
+    // Spied on, not left to the real implementation: the save-then-submit test
+    // below asserts the ORDER these two are called in, which the real `put`/`post`
+    // helpers can't give us without a live `api.put`.
+    updateIssue: vi.fn().mockResolvedValue({ id: 1, issue_no: "ISS/001", status: "DRAFT" }),
+    submitIssue: vi.fn().mockResolvedValue({ id: 1, issue_no: "ISS/001", status: "PENDING_APPROVAL" }),
   };
 });
 
 import MaterialIssueForm from "../pages/MaterialIssueForm";
+import { updateIssue, submitIssue } from "../api";
 
 const wrap = (ui: React.ReactNode, path = "/") => (
   <QueryClientProvider client={new QueryClient({
@@ -314,8 +320,26 @@ describe("MaterialIssueForm", () => {
     // "1 of 15" used to be the only signal, and it said nothing about WHICH pick was
     // unscanned. Each pick states its own gap, on the pick.
     await waitFor(() => {
-      expect(screen.getAllByText("4 more to assign").length).toBe(1);
+      expect(screen.getAllByText("4 more auto-assigned on save").length).toBe(1);
     });
-    expect(screen.getAllByText("10 more to assign").length).toBe(1);
+    expect(screen.getAllByText("10 more auto-assigned on save").length).toBe(1);
+  });
+
+  it("saves pending edits before handing the document to the approval chain", async () => {
+    // Submit carries no line data of its own — it approves whatever is already in
+    // the database. An edit made after the last Save used to be silently discarded
+    // (and, worse, the chain could advance on stale data while the press reported an
+    // error). Submit must save first, every time.
+    open();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /submit for approval/i })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /submit for approval/i }));
+
+    fireEvent.click(await screen.findByRole("button", { name: /^submit$/i }));
+
+    await waitFor(() => expect(submitIssue).toHaveBeenCalledWith(1));
+    expect(updateIssue).toHaveBeenCalledWith(1, expect.anything());
+    expect(vi.mocked(updateIssue).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(submitIssue).mock.invocationCallOrder[0]);
   });
 });

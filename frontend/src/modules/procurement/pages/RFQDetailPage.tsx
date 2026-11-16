@@ -1,3 +1,4 @@
+import { departmentOf } from "../orgScope";
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -9,6 +10,9 @@ import {
 import { Button } from "../components/ActionButton";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { fmtDate } from "@/shared/datetime";
+import { QuantityInput } from "@/shared/components/QuantityInput";
+import { useUomDecimals } from "@/shared/hooks/useUomDecimals";
+import { quantityProblem } from "@/shared/quantity";
 import { approvalTrailApi, approvalTrailKey, rfqApi } from "../api";
 import { ApprovalTrail } from "../components/ApprovalTrail";
 import {
@@ -17,6 +21,7 @@ import {
 import type { RFQItem, RFQVendor } from "../types";
 import { TONE_APPROVE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
 import { writeToClipboard } from "@/shared/clipboard";
+import { CombinationTag } from "@/shared/combination";
 
 /**
  * One RFQ: its lines, who was asked, and — once quotes are in — WHO answered.
@@ -62,13 +67,13 @@ export function RFQDetailPage() {
 
   // Editable only while nobody outside has seen it, and only for the person who signs
   // it. The endpoint enforces both again — hiding the boxes is courtesy, not the guard.
-  const { can } = useAuth();
-  // Editing the asked-for quantity is part of approving it, so it follows the
-  // same gate — an approver who cannot sign must not be able to change the ask.
-  const canDecide = rfq?.awaiting_me ?? (rfq?.status === "PENDING_APPROVAL");
+  const { can, me } = useAuth();
+  const isAdmin = can("admin.workflow.manage") || Boolean(me?.roles.includes("ADMIN")) || Boolean(me?.roles.includes("SUPERUSER"));
+  // In PENDING_APPROVAL, allowed to decide if assigned to me OR if user has Admin override power
+  const canDecide = rfq?.status === "PENDING_APPROVAL" && (Boolean(rfq?.awaiting_me) || isAdmin);
   // Editing the asked-for quantity is part of approving it, so it follows the
   // same gate — an approver who cannot sign must not change the ask.
-  const editableQty = !!canDecide && can("rfq.approve");
+  const editableQty = canDecide && (can("rfq.approve") || isAdmin);
 
   // Auto-expand line items when the approver can edit — the quantities ARE the decision
   useEffect(() => {
@@ -106,6 +111,14 @@ export function RFQDetailPage() {
   // The approved quantity is what the supplier is asked to price — `_publish_rfq`
   // copies `RFQItem.quantity` into the draft quotation at approval time.
   const [qtyEdits, setQtyEdits] = useState<Record<number, string>>({});
+  const uomDecimals = useUomDecimals();
+  // The unit's own rule for the number in the box (places, minimum). Only an edited
+  // line is judged: an untouched one shows the quantity the document already holds.
+  const qtyProblem = (r: { id: number; quantity: number | string; uom_code?: string | null }) =>
+    r.id in qtyEdits
+      ? quantityProblem(qtyEdits[r.id], { decimals: uomDecimals(r.uom_code), unit: r.uom_code })
+      : null;
+  const hasInvalidQty = (rfq?.items ?? []).some((r: any) => Boolean(qtyProblem(r)));
   const saveQuantities = useMutation({
     mutationFn: () => rfqApi.setQuantities(
       rfqId,
@@ -127,6 +140,7 @@ export function RFQDetailPage() {
       // Save any pending quantity edits before approving — an approver who trims
       // 12 -> 10 and presses "Approve & publish" expects 10 to be what the vendor sees.
       // Without this the edit is discarded and the supplier is asked for the original.
+      if (hasInvalidQty) throw new Error("Correct the highlighted quantities before approving.");
       const edits = Object.entries(qtyEdits)
         .filter(([, value]) => {
           if (value === "") return false;
@@ -142,8 +156,56 @@ export function RFQDetailPage() {
       return rfqApi.approve(rfqId);
     },
     onSuccess: () => { setQtyEdits({}); refresh("Approved — vendors can now see the approved quantities")(); },
+    // The approval/publish itself can have already gone through even though this
+    // request came back as an error (e.g. a courtesy vendor email failed after
+    // the decision was committed) — refetch so a second press isn't needed and
+    // the screen shows the real status instead of a stale one next to a toast.
+    onError: (e: any) => {
+      toast.error(e?.message ?? "Could not approve the RFQ. Checking the latest status…");
+      queryClient.invalidateQueries({ queryKey: ["rfq", id] });
+      queryClient.invalidateQueries({ queryKey: ["rfqs"] });
+    },
   });
-  const reject = useMutation({ mutationFn: () => rfqApi.reject(rfqId), onSuccess: refresh("Rejected") });
+  // Reject and Send back both ask for a reason in a dialog; the server refuses either
+  // without one. `reasonFor` says which of the two the open dialog is for.
+  const [reasonFor, setReasonFor] = useState<"reject" | "send_back" | null>(null);
+  const [reason, setReason] = useState("");
+  const closeReason = () => { setReasonFor(null); setReason(""); };
+  const reject = useMutation({
+    mutationFn: (comments: string) => rfqApi.reject(rfqId, comments),
+    onSuccess: () => { closeReason(); refresh("Rejected")(); },
+  });
+  const sendBack = useMutation({
+    mutationFn: (comments: string) => rfqApi.sendBack(rfqId, comments),
+    onSuccess: (updated) => {
+      closeReason();
+      refresh(`Sent back to ${updated.current_approver_name ?? "the previous approver"}`)();
+    },
+  });
+  // The holder of a sent-back RFQ: a comment (optional to resubmit, required to pass
+  // it further down).
+  const [fixComment, setFixComment] = useState("");
+  const [fixError, setFixError] = useState("");
+  const resubmit = useMutation({
+    mutationFn: () => rfqApi.resubmitCorrection(rfqId, fixComment.trim()),
+    onSuccess: () => { setFixComment(""); refresh("Resubmitted for approval")(); },
+  });
+  const sendFurtherBack = useMutation({
+    mutationFn: () => rfqApi.sendBackFurther(rfqId, fixComment.trim()),
+    onSuccess: (updated) => {
+      setFixComment("");
+      refresh(`Sent back to ${updated.current_approver_name ?? "the previous approver"}`)();
+    },
+  });
+  const sendFurtherBackWithReason = () => {
+    if (sendFurtherBack.isPending) return;
+    if (!fixComment.trim()) {
+      setFixError("Enter a reason before sending this RFQ further back.");
+      return;
+    }
+    setFixError("");
+    sendFurtherBack.mutate();
+  };
   const close = useMutation({ mutationFn: () => rfqApi.close(rfqId), onSuccess: refresh("Closed to further quotes") });
 
   // ── Freeze Prices (2026-09-26) ────────────────────────────────────────────
@@ -152,14 +214,24 @@ export function RFQDetailPage() {
   // mutations only carry the press.
   const freeze = useMutation({
     mutationFn: () => rfqApi.freeze(rfqId),
-    onSuccess: () => refresh("Prices frozen — suppliers can no longer change their quotes")(),
+    // The dialog closes itself on success: left open over a frozen tender, a second
+    // press is refused with "already frozen".
+    onSuccess: () => {
+      setFreezeOpen(false);
+      refresh("Prices frozen — suppliers can no longer change their quotes")();
+    },
   });
   const unfreeze = useMutation({
     mutationFn: (reason: string) => rfqApi.unfreeze(rfqId, reason),
-    onSuccess: () => refresh("Bidding reopened — suppliers can quote again")(),
+    onSuccess: () => {
+      setUnfreezeOpen(false);
+      setUnfreezeReason("");
+      refresh("Bidding reopened — suppliers can quote again")();
+    },
   });
 
   const busy = submit.isPending || approve.isPending || reject.isPending
+    || sendBack.isPending || resubmit.isPending
     || close.isPending || freeze.isPending || unfreeze.isPending;
 
   // ── The Quotes strip (2026-09-26) ─────────────────────────────────────────
@@ -202,6 +274,7 @@ export function RFQDetailPage() {
         <div className="min-w-0">
           <div className="text-sm font-medium text-ink">{r.item_name ?? `Item ${r.item_id}`}</div>
           <div className="font-mono text-[11px] text-muted">{r.item_code ?? "—"}</div>
+          <CombinationTag value={r} className="mt-1" />
         </div>
       ),
     },
@@ -211,10 +284,13 @@ export function RFQDetailPage() {
       className: "text-right",
       render: (r) => (editableQty ? (
         <div className="flex items-center justify-end gap-2">
-          <input
-            type="text" inputMode="decimal" className="h-11 w-28 rounded-md border border-line bg-content1 px-3 text-sm text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
+          <QuantityInput
+            decimals={uomDecimals(r.uom_code)}
+            className="h-11 w-28 rounded-md border border-line bg-content1 px-3 text-sm text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
+            data-uom={r.uom_code ?? ""}
             value={qtyEdits[r.id] ?? String(r.quantity)}
-            onChange={(e) => setQtyEdits((current) => ({ ...current, [r.id]: e.target.value }))}
+            onChange={(raw) => setQtyEdits((current) => ({ ...current, [r.id]: raw }))}
+            aria-invalid={Boolean(qtyProblem(r))}
             title="Approved quantity — up to the source document quantity; 0 removes the line."
             aria-label={`Quantity for ${r.item_name ?? r.item_id}`}
           />
@@ -282,6 +358,11 @@ export function RFQDetailPage() {
                     ? `Pending at ${trail.data.stage_name}`
                     : rfq.status}
                 />
+                {isAdmin && rfq.status === "PENDING_APPROVAL" && (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-purple-500/10 text-purple-700 border border-purple-500/20">
+                    Admin Override
+                  </span>
+                )}
                 {rfq.is_price_frozen ? (
                   <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-500/10 text-amber-700 border border-amber-500/20">
                     <Lock className="h-3.5 w-3.5" /> Locked (Prices Frozen)
@@ -304,15 +385,18 @@ export function RFQDetailPage() {
                 </Button>
               </Can>
             )}
-            {canDecide && (
-              <Can do="rfq.approve">
-                <Button className={TONE_REJECT} variant="subtle" disabled={busy} onClick={() => reject.mutate()}>
+            {canDecide && (can("rfq.approve") || isAdmin) && (
+              <>
+                <Button variant="subtle" disabled={busy} onClick={() => setReasonFor("send_back")}>
+                  Send back
+                </Button>
+                <Button className={TONE_REJECT} variant="subtle" disabled={busy} onClick={() => setReasonFor("reject")}>
                   Reject
                 </Button>
                 <Button className={TONE_APPROVE} disabled={busy} onClick={() => approve.mutate()}>
-                  Approve &amp; publish
+                  {isAdmin && !rfq?.awaiting_me ? "Approve (Admin Override)" : "Approve & publish"}
                 </Button>
-              </Can>
+              </>
             )}
             {rfq?.status === "PUBLISHED" && (
               <Can do="rfq.create">
@@ -346,7 +430,59 @@ export function RFQDetailPage() {
       />
 
       <ErrorBanner error={error ?? submit.error ?? approve.error ?? reject.error ?? close.error
+        ?? sendBack.error ?? resubmit.error
         ?? freeze.error ?? unfreeze.error ?? saveQuantities.error} />
+
+      {rfq?.status === "RETURNED_FOR_CORRECTION" && (
+        <div className="mb-4 rounded-2xl border border-amber-300 bg-amber-50 p-4 text-sm">
+          <p className="font-bold text-amber-900">
+            Sent back to {rfq.correction?.owner_name ?? rfq.current_approver_name ?? "the previous approver"}
+            {rfq.correction?.returned_by_name ? ` by ${rfq.correction.returned_by_name}` : ""}
+          </p>
+          {rfq.correction?.reason && (
+            <p className="mt-2 rounded-xl bg-white p-2.5 font-medium text-ink ring-1 ring-amber-200">
+              Reason: {rfq.correction.reason}
+            </p>
+          )}
+          {rfq.can_resubmit_correction && (
+            <>
+              <p className="mt-2 text-amber-900">
+                {rfq.can_edit_correction
+                  ? "Press Edit RFQ to change it (same form as when it was raised), save, then resubmit."
+                  : rfq.can_pass_correction_down
+                    ? "You can resubmit it as it is, or send it further back to the person below you."
+                    : "Add a comment if needed and resubmit."}
+              </p>
+              <div className="mt-3">
+                <Textarea
+                  value={fixComment}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => { setFixComment(e.target.value); setFixError(""); }}
+                  minRows={1}
+                  placeholder={rfq.can_pass_correction_down ? "Comment (required to send further back)" : "Comment (optional)"}
+                  aria-label="Comment"
+                />
+              </div>
+              {fixError && <p className="mt-2 font-semibold text-red-600">{fixError}</p>}
+              {sendFurtherBack.error && <p className="mt-2 font-semibold text-red-600">{(sendFurtherBack.error as Error).message}</p>}
+              <div className="mt-3 flex flex-wrap justify-end gap-2">
+                {rfq.can_edit_correction && (
+                  <Button variant="subtle" disabled={busy} onClick={() => nav(`/procurement/rfqs/${rfqId}/edit`)}>
+                    Edit RFQ
+                  </Button>
+                )}
+                {rfq.can_pass_correction_down && (
+                  <Button variant="subtle" disabled={busy || sendFurtherBack.isPending} onClick={sendFurtherBackWithReason}>
+                    {sendFurtherBack.isPending ? "Sending…" : "Send further back"}
+                  </Button>
+                )}
+                <Button className={TONE_SUBMIT} disabled={busy || sendFurtherBack.isPending} onClick={() => resubmit.mutate()}>
+                  {resubmit.isPending ? "Resubmitting…" : "Resubmit for approval"}
+                </Button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       <DetailShell
         main={(
@@ -365,10 +501,11 @@ export function RFQDetailPage() {
                         : <DocRef no={rfq.consolidation_no} />,
                     },
                     { label: "Priority", value: rfq.priority ?? "Normal" },
-                    { label: "Department", value: rfq.department_name ?? "\u2014" },
+                    { label: "Department", value: departmentOf(rfq) ?? "\u2014" },
                     { label: "Shipment Address", value: rfq.warehouse_name ?? "\u2014" },
                     { label: "Project", value: rfq.project_name ?? "\u2014" },
-                    { label: "Company", value: rfq.company_name ?? "\u2014" },
+                    { label: rfq.organization_name ? "Organisation" : "Company",
+                      value: rfq.organization_name ?? rfq.company_name ?? "\u2014" },
                   ]}
                 />
 
@@ -417,12 +554,16 @@ export function RFQDetailPage() {
                       <div className="space-y-2">
                         <div className="text-sm font-medium text-ink">{r.item_name ?? `Item ${r.item_id}`}</div>
                         <div className="text-xs text-muted font-mono">{r.item_code ?? ""}</div>
+                        <CombinationTag value={r} />
                         {editableQty ? (
                           <div className="flex items-center gap-2">
-                            <input
-                              type="text" inputMode="decimal" className="h-11 w-28 rounded-md border border-line bg-content1 px-3 text-sm text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
+                            <QuantityInput
+                              decimals={uomDecimals(r.uom_code)}
+                              className="h-11 w-28 rounded-md border border-line bg-content1 px-3 text-sm text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
+                              data-uom={r.uom_code ?? ""}
                               value={qtyEdits[r.id] ?? String(r.quantity)}
-                              onChange={(e) => setQtyEdits((current) => ({ ...current, [r.id]: e.target.value }))}
+                              onChange={(raw) => setQtyEdits((current) => ({ ...current, [r.id]: raw }))}
+                              aria-invalid={Boolean(qtyProblem(r))}
                               aria-label={`Quantity for ${r.item_name ?? r.item_id}`}
                             />
                             <span className="text-xs text-muted">{r.uom_code ?? ""}</span>
@@ -443,7 +584,7 @@ export function RFQDetailPage() {
                     <div className="flex justify-end border-t border-line/60 p-3">
                       <Button
                         variant="subtle"
-                        disabled={saveQuantities.isPending || Object.keys(qtyEdits).length === 0}
+                        disabled={saveQuantities.isPending || hasInvalidQty || Object.keys(qtyEdits).length === 0}
                         onClick={() => saveQuantities.mutate()}
                       >
                         {saveQuantities.isPending ? "Saving\u2026" : "Save quantities"}
@@ -615,6 +756,31 @@ export function RFQDetailPage() {
           minRows={2}
           placeholder="e.g. Winning vendor's delivery date slipped — re-opening the tender"
           aria-label="Reason for reopening bidding"
+        />
+      </ConfirmModal>
+      <ConfirmModal
+        isOpen={reasonFor !== null}
+        title={reasonFor === "reject"
+          ? `Reject ${rfq?.rfq_no ?? "this RFQ"}?`
+          : `Send ${rfq?.rfq_no ?? "this RFQ"} back?`}
+        message={reasonFor === "reject"
+          ? "The RFQ will be cancelled. Say why — it is recorded in the approval trail."
+          : "It goes back to the previous approver (or the raiser) to correct and resubmit. Say what needs fixing — it is recorded in the approval trail."}
+        confirmLabel={reasonFor === "reject" ? "Reject" : "Send back"}
+        tone={reasonFor === "reject" ? "danger" : "warning"}
+        busy={reject.isPending || sendBack.isPending}
+        confirmDisabled={!reason.trim()}
+        onConfirm={() => (reasonFor === "reject"
+          ? reject.mutate(reason.trim())
+          : sendBack.mutate(reason.trim()))}
+        onClose={closeReason}
+      >
+        <Textarea
+          value={reason}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) => setReason(e.target.value)}
+          minRows={2}
+          placeholder="Reason (required)"
+          aria-label="Reason"
         />
       </ConfirmModal>
     </div>

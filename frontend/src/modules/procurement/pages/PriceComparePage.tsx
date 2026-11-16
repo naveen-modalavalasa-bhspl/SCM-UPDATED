@@ -1,13 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Snowflake } from "lucide-react";
+import { Lock, Snowflake } from "lucide-react";
 import {
-  Card, ErrorBanner, PageHeader, Select, StatusPill, useToast,
+  Card, ConfirmModal, ErrorBanner, Field, PageHeader, Select, StatusPill, useToast,
 } from "@/shared/components";
+import { Button } from "../components/ActionButton";
+import { useAuth } from "@/shared/auth/AuthContext";
 import { fmtDate } from "@/shared/datetime";
 import { errorMessage } from "@/shared/api/errors";
 import { poApi, rfqApi } from "../api";
+import { fetchOrgDepartments, fetchOrganisations, orgLabel } from "../orgScope";
 import type { RFQListRow } from "../types";
 import { QuotationComparison } from "../components/QuotationComparison";
 import { money } from "./RequisitionListPage";
@@ -81,6 +84,8 @@ export function PriceComparePage() {
   const nav = useNavigate();
   const toast = useToast();
   const queryClient = useQueryClient();
+  const { can } = useAuth();
+  const canFreeze = can("rfq.approve");
   const [params, setParams] = useSearchParams();
   const rfqId = Number(params.get("rfq") ?? 0);
   const [method, setMethod] = useState("");
@@ -156,9 +161,26 @@ export function PriceComparePage() {
     queryClient.invalidateQueries({ queryKey: ["pos"] });
   };
 
+  // An RFQ raised before organisations has none to copy, so the buyer selects it here.
+  const [pickingFor, setPickingFor] = useState<number | null>(null);
+  const [pickedOrg, setPickedOrg] = useState("");
+  const [pickedDept, setPickedDept] = useState("");
+  const olderRfq = Boolean(rfq && !rfq.organization_id);
+  const needsDept = Boolean(rfq && !rfq.project_name && !rfq.department_name);
+  const organisations = useQuery({
+    queryKey: ["organisation-options"], queryFn: fetchOrganisations, enabled: olderRfq,
+  });
+  const orgDepartments = useQuery({
+    queryKey: ["org-department-options"], queryFn: fetchOrgDepartments, enabled: olderRfq,
+  });
+
   const raisePo = useMutation({
-    mutationFn: (quotationId: number) => poApi.createFromQuotation(quotationId),
+    mutationFn: ({ quotationId, data }: {
+      quotationId: number;
+      data?: { organization_id: number; org_department_id: number | null };
+    }) => poApi.createFromQuotation(quotationId, data),
     onSuccess: (po) => {
+      setPickingFor(null);
       refresh();
       toast.success(`${po.po_no} raised from ${po.vendor_name ?? "the winner"}`);
       nav(`/pos/${po.id}`);
@@ -170,17 +192,34 @@ export function PriceComparePage() {
     mutationFn: (quotationIds: number[]) => rfqApi.award(rfqId, quotationIds),
     onSuccess: (updated) => {
       refresh();
-      toast.success(`Awarded to ${updated.awarded_vendor_name ?? "the selected supplier"} and PO generated`);
+      toast.success(updated.organization_id
+        ? `Awarded to ${updated.awarded_vendor_name ?? "the selected supplier"} and PO generated`
+        : `Awarded to ${updated.awarded_vendor_name ?? "the selected supplier"}. This older RFQ has no organisation, so raise the PO below and select it.`);
     },
     onError: (e: unknown) => toast.error(errorMessage(e)),
   });
 
   const awardSplit = useMutation({
-    mutationFn: (allocations: { item_id: number; vendor_id: number; quantity: number }[]) =>
+    mutationFn: (allocations: { item_id: number; rfq_item_id?: number; vendor_id: number; quantity: number }[]) =>
       rfqApi.awardSplit(rfqId, allocations),
+    onSuccess: (updated) => {
+      refresh();
+      toast.success(updated.organization_id
+        ? "Items awarded and POs generated for each supplier"
+        : "Items awarded. This older RFQ has no organisation, so raise each PO below and select it.");
+    },
+    onError: (e: unknown) => toast.error(errorMessage(e)),
+  });
+
+  // Freeze Prices (SCM_0057): awarding and raising a PO both refuse an unfrozen
+  // tender (`award_rfq` on the server), but this screen used to have no way to
+  // freeze — only a badge once it already was, and a dead-end warning pointing
+  // the buyer back to the RFQ page. Same mutation RFQDetailPage already uses.
+  const freeze = useMutation({
+    mutationFn: () => rfqApi.freeze(rfqId),
     onSuccess: () => {
       refresh();
-      toast.success("Items awarded and POs generated for each supplier");
+      toast.success("Prices frozen — suppliers can no longer change their quotes");
     },
     onError: (e: unknown) => toast.error(errorMessage(e)),
   });
@@ -195,6 +234,14 @@ export function PriceComparePage() {
           <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-700">
             <Snowflake className="h-3.5 w-3.5" /> Frozen
           </span>
+        ) : rfqId > 0 && canFreeze ? (
+          <Button
+            className="bg-amber-600 hover:bg-amber-700 text-white font-medium shadow-sm inline-flex items-center gap-1.5"
+            disabled={freeze.isPending}
+            onClick={() => freeze.mutate()}
+          >
+            <Lock className="h-4 w-4" /> {freeze.isPending ? "Freezing…" : "Freeze prices"}
+          </Button>
         ) : undefined}
       />
 
@@ -232,16 +279,53 @@ export function PriceComparePage() {
         </div>
       </Card>
 
-      <ErrorBanner error={comparison.error} />
+      <ErrorBanner error={comparison.error ?? freeze.error} />
 
       {rfqId > 0 && comparison.data && (
         <>
+          <ConfirmModal
+            isOpen={pickingFor !== null}
+            title="Select the organisation for this PO"
+            message="This RFQ is older than organisations, so there is nothing to copy. The PO number is built from what you select."
+            confirmLabel="Raise PO"
+            busy={raisePo.isPending}
+            confirmDisabled={!pickedOrg || (needsDept && !pickedDept)}
+            onClose={() => setPickingFor(null)}
+            onConfirm={() => pickingFor !== null && raisePo.mutate({
+              quotationId: pickingFor,
+              data: {
+                organization_id: Number(pickedOrg),
+                org_department_id: needsDept ? Number(pickedDept) : null,
+              },
+            })}
+          >
+            <div className="space-y-3">
+              <Field label="Organisation" required>
+                <Select
+                  value={pickedOrg}
+                  placeholder="Select…"
+                  options={(organisations.data ?? []).map((o) => ({ value: String(o.id), label: orgLabel(o) }))}
+                  onChange={(v) => setPickedOrg(String(v ?? ""))}
+                />
+              </Field>
+              {needsDept && (
+                <Field label="Department" required>
+                  <Select
+                    value={pickedDept}
+                    placeholder="Select…"
+                    options={(orgDepartments.data ?? []).map((d) => ({ value: String(d.id), label: orgLabel(d) }))}
+                    onChange={(v) => setPickedDept(String(v ?? ""))}
+                  />
+                </Field>
+              )}
+            </div>
+          </ConfirmModal>
           <VerdictBand comparison={comparison.data} frozen={!!rfq?.is_price_frozen} />
           <QuotationComparison
             comparison={comparison.data}
             awardedQuotationIds={awardedQuoteIds}
             purchaseOrders={rfq?.purchase_orders ?? []}
-            busy={busy || award.isPending || awardSplit.isPending || raisePo.isPending}
+            busy={busy || award.isPending || awardSplit.isPending || raisePo.isPending || freeze.isPending}
             reawardable={rfq?.status === "AWARDED"}
             liveAllocatedQuantities={Object.fromEntries(
               (rfq?.vendors ?? [])
@@ -251,13 +335,18 @@ export function PriceComparePage() {
             )}
             onAward={(ids) => award.mutate(ids)}
             onAwardSplit={(allocations) => awardSplit.mutate(allocations)}
-            onCreatePo={(quoteId) => raisePo.mutate(quoteId)}
+            onCreatePo={(quoteId) => (olderRfq
+              ? setPickingFor(quoteId)
+              : raisePo.mutate({ quotationId: quoteId }))}
             onOpenPo={(poId) => nav(`/pos/${poId}`)}
           />
           {!rfq?.is_price_frozen && (
             <p className="mt-3 rounded-lg border border-warn/30 bg-warn-bg px-3 py-2 text-sm text-warn">
-              Prices on this tender are not frozen yet — freeze them on the RFQ page
-              before awarding or raising purchase orders.
+              {canFreeze
+                ? "Prices on this tender are not frozen yet — freeze them above before "
+                  + "awarding or raising purchase orders."
+                : "Prices on this tender are not frozen yet — ask a buyer with approval "
+                  + "rights to freeze them before awarding or raising purchase orders."}
             </p>
           )}
         </>

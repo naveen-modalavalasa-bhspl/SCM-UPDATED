@@ -9,6 +9,7 @@ import {
 } from "../api";
 import { indentTypeLabel } from "../constants";
 import { displayUom, splitDeliveryOffice } from "../displayFormat";
+import { describe, packsIn, usePackOptions } from "@/shared/packing";
 
 /**
  * The printable indent — one A4 sheet the requester, the approver or the store can
@@ -65,6 +66,8 @@ export function IndentPrintPage() {
   // Always a value, never undefined — undefined is what tells the sheet to go and
   // fetch the letterhead itself, and it must not do that behind this page.
   const company = useMemo(() => companyQuery.data ?? null, [companyQuery.data]);
+  // Each line's Indent containers (2026-10-23), printed under its quantity.
+  const packOptions = usePackOptions((indent?.items ?? []).map((line) => line.item_id));
 
   if (indentQuery.isLoading || companyQuery.isLoading) {
     return <p className="p-10 text-sm text-neutral-600">Preparing the indent…</p>;
@@ -126,9 +129,32 @@ export function IndentPrintPage() {
           <div className="mt-0.5 font-mono text-[8.5px] font-normal" style={{ color: "#697187" }}>
             {dash(line.item_code)}
           </div>
+          {(line.brand_name || line.combination_any) && (
+            <div className="mt-0.5 text-[8.5px] font-semibold" style={{ color: "#697187" }}>
+              {line.combination_any ? "Any brand"
+                : [line.brand_name, line.variant_name, line.model_name].filter(Boolean).join(" · ")}
+            </div>
+          )}
+          {(line.brand_changes ?? []).map((change, n) => (
+            <div key={n} className="mt-0.5 text-[8.5px] font-semibold" style={{ color: "#a15c07" }}>
+              Allocated as {change.given} instead of {change.asked_for} · {change.quantity}
+              {change.reason ? ` — ${change.reason}` : ""}
+            </div>
+          ))}
         </>,
         dash(displayUom(line.uom_code)),
-        <span className="font-semibold" style={{ color: "#141a2a" }}>{qty(line.quantity)}</span>,
+        <>
+          <span className="font-semibold" style={{ color: "#141a2a" }}>{qty(line.quantity)}</span>
+          {(() => {
+            const packs = packsIn(packOptions.data?.[line.item_id], Number(line.quantity),
+                                  "INDENT", line.brand_id);
+            return packs ? (
+              <div className="mt-0.5 text-[8.5px]" style={{ color: "#697187" }}>
+                {describe(packs, line.uom_code, false)}
+              </div>
+            ) : null;
+          })()}
+        </>,
         qty(line.approved_quantity),
         qty(line.ordered_quantity),
         qty(line.received_quantity),

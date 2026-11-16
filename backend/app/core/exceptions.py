@@ -189,6 +189,22 @@ _ISSUE_PHRASES: dict[str, str] = {
     "json_invalid": "could not be read — the request body is not valid JSON",
 }
 
+#: A bound error names a side ("ge"/"gt"/"le"/"lt") and a limit in pydantic's own
+#: `ctx` — SCM_0084/SCM_0070: "must not be smaller than the minimum allowed" says
+#: there IS a rule without saying what it is, which for a day count a person is
+#: about to type is worse than useless. Read with the type, below, so the sentence
+#: says the actual number: "cannot be less than 0."
+_BOUND_CTX_KEY: dict[str, str] = {
+    "greater_than": "gt", "greater_than_equal": "ge",
+    "less_than": "lt", "less_than_equal": "le",
+}
+_BOUND_PHRASE: dict[str, str] = {
+    "greater_than": "must be more than {0}",
+    "greater_than_equal": "cannot be less than {0}",
+    "less_than": "must be less than {0}",
+    "less_than_equal": "cannot be more than {0}",
+}
+
 
 def _field_path(loc) -> str:
     """`("body", "items", 0, "qty")` -> `items.0.qty`. The wrapper names go."""
@@ -216,7 +232,13 @@ def _field_label(path: str) -> str:
 def _issue_sentence(issue: dict) -> str:
     path = _field_path(issue.get("loc", ()))
     label = _field_label(path)
-    phrase = _ISSUE_PHRASES.get(issue.get("type", ""))
+    issue_type = issue.get("type", "")
+    ctx_key = _BOUND_CTX_KEY.get(issue_type)
+    if ctx_key:
+        limit = (issue.get("ctx") or {}).get(ctx_key)
+        if limit is not None:
+            return f"{label} {_BOUND_PHRASE[issue_type].format(limit)}."
+    phrase = _ISSUE_PHRASES.get(issue_type)
     if phrase:
         return f"{label} {phrase}."
     message = str(issue.get("msg", "is not valid")).strip()
@@ -254,10 +276,13 @@ def _request_validation_message(exc: RequestValidationError) -> tuple[str, str |
     return text, _field_path(issues[0].get("loc", ())) or None
 
 
+
 async def request_validation_exception_handler(
     request: Request, exc: RequestValidationError,
 ):
+    print(f'\n\n!!! VALIDATION ERROR: {exc.errors()} !!!\n\n')
     message, field = _request_validation_message(exc)
+
     await _report(request, exc, 422, message)
     return JSONResponse(
         status_code=422,
@@ -432,11 +457,60 @@ async def integrity_error_handler(request: Request, exc: Exception):
     )
 
 
+async def operational_error_handler(request: Request, exc: Exception):
+    """Database driver/connection failure or timeout: lock wait, disconnect, server gone."""
+    orig = getattr(exc, "orig", exc)
+    raw = str(orig)
+    lowered = raw.lower()
+
+    errno = None
+    orig_args = getattr(orig, "args", None)
+    if orig_args and len(orig_args) > 0 and isinstance(orig_args[0], int):
+        errno = orig_args[0]
+
+    if errno in (1205, 1213) or "lock wait timeout" in lowered or "deadlock" in lowered:
+        status, code, title = 409, "LOCK_TIMEOUT", "Record temporarily locked"
+        message = (
+            "This record is currently being updated by another operation or user. "
+            "Please wait a moment and try again."
+        )
+    elif errno in (2003, 2006, 2013) or "can't connect" in lowered or "connection refused" in lowered or "lost connection" in lowered:
+        status, code, title = 503, "DATABASE_UNAVAILABLE", "Database server unavailable"
+        message = (
+            "Unable to connect to the database server. Please verify network connectivity "
+            "or contact system administration if the database is restarting."
+        )
+    elif errno == 3024 or "statement timeout" in lowered or "query timeout" in lowered or "max_execution_time" in lowered:
+        status, code, title = 504, "DATABASE_TIMEOUT", "Database query timed out"
+        message = (
+            "The database query took too long to complete. Please try narrowing your search "
+            "or filter criteria and retry."
+        )
+    else:
+        status, code, title = 500, "DATABASE_ERROR", "Database operation error"
+        message = (
+            "A database operation could not be completed. Please retry, or contact system "
+            "administration if the problem persists."
+        )
+    log.error("Database operational error: %s (errno=%s)", raw, errno)
+    await _report(request, exc, status, message)
+    return JSONResponse(
+        status_code=status,
+        content=_envelope(message, code=code, title=title),
+    )
+
+
 async def unhandled_exception_handler(request: Request, exc: Exception):
     # `error` is fixed on purpose, and `detail` is the sentence a screen shows.
     # Whatever went wrong is in the log with its traceback; anything derived from
     # the exception itself risks carrying a connection string, a query or a path
     # out to the browser.
+    request_id = getattr(request.state, "request_id", None)
+    ref = f" (Ref: {request_id})" if request_id else ""
+    user_detail = (
+        f"We couldn't complete this request due to an unexpected server issue{ref}. "
+        "Please try again in a moment, or contact support with this reference if it persists."
+    )
     await _report(request, exc, 500, "Internal server error")
     return JSONResponse(
         status_code=500,
@@ -445,7 +519,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
             code="SERVER_ERROR",
             title="Something went wrong on our side",
         ) | {
-            "detail": "We couldn't complete this request due to a server problem. "
-                      "Please try again in a moment.",
+            "detail": user_detail,
         },
     )
+

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { packByCode } from "../api";
 import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader, Skeleton } from "@heroui/react";
 import { FixedSizeList } from "react-window";
 import { Boxes, MapPin, ScanLine, Trash2 } from "lucide-react";
@@ -335,6 +336,42 @@ export function SerialNumbersModal({
      * A miss now says so. Silence was the worst outcome: the gun beeps on every read,
      * so nothing on screen changing looked identical to a successful scan.
      */
+    /**
+     * A scanned PACK code (2026-10-08): a box or carton label selects every unit inside
+     * it, at any depth, in one read — the whole point of labelling the box. Tried only
+     * after the value failed as a unit. A pack holding more than the pick still needs
+     * is refused with the numbers, because taking part of a coded pack is a break bulk.
+     */
+    const tryPack = async (value: string): Promise<boolean> => {
+      if (!selectMode) return false;
+      let pack;
+      try {
+        pack = await packByCode(value);
+      } catch {
+        return false;
+      }
+      const keyOf = (u: { serial_number: string; imei?: string | null; code: string }) =>
+        trackingType === "IMEI" ? u.imei : trackingType === "SERIAL" ? u.serial_number : u.code;
+      const values = pack.units.map(keyOf).filter((v): v is string => !!v);
+      setSerials((rows) => {
+        const fresh = values.filter((v) => !rows.includes(v));
+        const room = required - rows.length;
+        if (!fresh.length) {
+          setError(`${pack.pack_name ?? "Pack"} ${pack.hu_code} is already scanned.`);
+          return rows;
+        }
+        if (fresh.length > room) {
+          setError(`${pack.pack_name ?? "Pack"} ${pack.hu_code} holds ${fresh.length}, and this `
+            + `pick needs only ${room} more. Issue the whole ${pack.pack_name ?? "pack"}, or scan `
+            + "single units.");
+          return rows;
+        }
+        setError(null);
+        return [...rows, ...fresh];
+      });
+      return true;
+    };
+
     const scanOrSearch = () => {
       const value = entry.trim();
       if (!value) return;
@@ -355,8 +392,9 @@ export function SerialNumbersModal({
         // answer this box can give.
         if (paging?.onResolve) {
           setError(null);
-          void paging.onResolve(value).then((found) => {
+          void paging.onResolve(value).then(async (found) => {
             if (!found) {
+              if (await tryPack(value)) return;
               setError(
                 `${value} is not at this location. Check the label, or pick a different batch or location.`
                 + (selectMode ? " Check the split it belongs to." : ""),
@@ -377,10 +415,13 @@ export function SerialNumbersModal({
           });
           return;
         }
-        setError(
-          `${value} is not at this location. Check the label, or pick a different batch or location.`
-          + (selectMode ? " Check the split it belongs to." : ""),
-        );
+        void tryPack(value).then((wasPack) => {
+          if (wasPack) return;
+          setError(
+            `${value} is not at this location. Check the label, or pick a different batch or location.`
+            + (selectMode ? " Check the split it belongs to." : ""),
+          );
+        });
         return;
       }
       if (!selectMode) {

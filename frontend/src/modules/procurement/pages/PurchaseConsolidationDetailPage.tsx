@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, StatusPill, useAction } from "@/shared/components";
+import { useAuth } from "@/shared/auth/AuthContext";
 import { Button } from "../components/ActionButton";
 import { fmtDate } from "@/shared/datetime";
 import { consolidationApi } from "../api";
@@ -9,6 +10,7 @@ import { ApprovalTrail } from "../components/ApprovalTrail";
 import { DetailShell, SectionCard, RailStat } from "../components/DetailKit";
 import { money } from "./RequisitionListPage";
 import { TONE_APPROVE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
+import { CombinationTag } from "@/shared/combination";
 
 const EDITABLE = ["DRAFT"];
 
@@ -82,6 +84,10 @@ export function PurchaseConsolidationDetailPage() {
     (line) => Number(line.approved_qty) > Number(line.quantity),
   );
 
+  const { can, me } = useAuth();
+  const isAdmin = can("admin.workflow.manage") || Boolean(me?.roles.includes("ADMIN")) || Boolean(me?.roles.includes("SUPERUSER"));
+  const canDecide = doc.status === "PENDING_APPROVAL" && (Boolean(doc.awaiting_me) || isAdmin);
+
   return (
     <div>
       <PageHeader
@@ -104,14 +110,13 @@ export function PurchaseConsolidationDetailPage() {
                 </Button>
               </Can>
             )}
-            {/* FIXED 2026-08-20 — awaiting_me, not the status: PENDING_APPROVAL says the document is with SOMEBODY, not with you. */}
-            {(doc.awaiting_me ?? doc.status === "PENDING_APPROVAL") && (
-              <Can do="consolidation.approve">
+            {canDecide && (can("consolidation.approve") || isAdmin) && (
+              <>
                 <Button className={TONE_REJECT} variant="ghost" onClick={() => setReject(true)}>Reject</Button>
                 <Button className={TONE_APPROVE} onClick={() => approve.mutate()} disabled={approve.isPending}>
-                  Approve
+                  {isAdmin && !doc.awaiting_me ? "Approve (Admin Override)" : "Approve"}
                 </Button>
-              </Can>
+              </>
             )}
             {["DRAFT", "PENDING_APPROVAL", "APPROVED"].includes(doc.status) && (
               <Can do="consolidation.create">
@@ -176,6 +181,7 @@ export function PurchaseConsolidationDetailPage() {
                       <td className="px-3 py-3">
                         <div className="font-medium text-ink">{line.item_name ?? "—"}</div>
                         <div className="font-mono text-[11px] text-muted">{line.item_code}</div>
+                        <CombinationTag value={line} className="mt-1" />
                       </td>
                       <td className="whitespace-nowrap px-3 py-3 text-right text-body">
                         {Number(line.quantity)} {line.uom_code}
@@ -185,6 +191,7 @@ export function PurchaseConsolidationDetailPage() {
                           <div className="ml-auto w-28">
                             <Input
                               type="number"
+                              data-uom={line.uom_code ?? ""}
                               value={edits[line.id] ?? ""}
                               max={Number(line.max_allowed_qty ?? line.quantity)}
                               onChange={(e) => setEdits({ ...edits, [line.id]: e.target.value })}
@@ -233,6 +240,12 @@ export function PurchaseConsolidationDetailPage() {
               <div className="mt-4 grid grid-cols-2 gap-4 border-t border-line/60 pt-4">
                 <RailStat label="Requisitions" value={doc.source_count} />
                 <RailStat label="Item lines" value={doc.total_items} />
+                {doc.organization_name && (
+                  <RailStat label="Organisation" value={doc.organization_name} />
+                )}
+                {doc.org_department_name && (
+                  <RailStat label="Department" value={doc.org_department_name} />
+                )}
               </div>
             </SectionCard>
 

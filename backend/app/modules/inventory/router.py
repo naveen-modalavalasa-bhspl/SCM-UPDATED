@@ -9,8 +9,9 @@ from app.core.dependencies import require_permission
 from app.core.pagination import Page, PageParams
 from app.modules.inventory import locations, service
 from app.modules.inventory.schemas import (
-    ActionIn, MovementRow, MRClaimsOut, MRCreateIn, MRListRow, MROut, MRReviseIn,
-    StockRow,
+    ActionIn, MovementRow, MRClaimsOut, MRCorrectionIn, MRCreateIn, MRListRow, MROut,
+    MRReviseIn,
+    StockGroupRow, StockRow,
     TransferIn,
     AdjustmentIn, AdjustmentOut, AdjustmentListRow, AdjustmentRejectIn, CountSheetRow, ReplenishmentRow,
     ReservationRow, ReservationReleaseOut, ItemAvailabilityOut,
@@ -45,6 +46,21 @@ async def list_stock(params: PageParams = Depends(), item_id: int | None = None,
                                     include_zero, expiring_in_days, expiry_status,
                                     expiry_from, expiry_to, expired_in_last_days,
                                     below_reorder, stock_view=stock_view, user=user)
+
+
+@stock_router.get("/grouped", response_model=Page[StockGroupRow])
+async def list_stock_grouped(params: PageParams = Depends(), item_id: int | None = None,
+                             warehouse_id: int | None = None, project_id: int | None = None,
+                             search: str | None = None, category_id: int | None = None,
+                             batch_no: str | None = None, below_reorder: bool = False,
+                             stock_view: str | None = None,
+                             db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(perms.STOCK_VIEW))):
+    """One card per item per point with batches inside — the reading list."""
+    return await service.list_stock_grouped(db, params, item_id, warehouse_id,
+                                            project_id, search, category_id,
+                                            batch_no, below_reorder,
+                                            stock_view=stock_view, user=user)
 
 
 @stock_router.get("/summary", response_model=StockSummaryOut)
@@ -240,6 +256,12 @@ async def list_stos(params: PageParams = Depends(), status: str | None = None,
                                    date_from=date_from, date_to=date_to)
 
 
+@stock_router.get("/sto/destinations")
+async def sto_destinations(from_warehouse_id: int, db: AsyncSession = Depends(get_db),
+                           user=Depends(require_permission(perms.STOCK_TRANSFER))):
+    return await service.sto_destinations(db, from_warehouse_id, user)
+
+
 @stock_router.get("/sto/{id}", response_model=STOOut)
 async def get_sto(id: int, db: AsyncSession = Depends(get_db),
                   user=Depends(require_permission(perms.STOCK_TRANSFER_VIEW))):
@@ -354,6 +376,13 @@ async def mr_item_claims(mr_id: int, item_id: int, db: AsyncSession = Depends(ge
     return await service.mr_item_claims(db, mr_id, item_id)
 
 
+@mr_router.get("/{mr_id}/quantity-changes")
+async def mr_quantity_changes(mr_id: int, db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(perms.MR_VIEW))):
+    """Every quantity change since the request was raised, oldest first (2026-11-03)."""
+    return {"items": await service.mr_quantity_changes(db, mr_id, user)}
+
+
 @mr_router.patch("/{mr_id}/items", response_model=MROut)
 async def revise_mr_items(mr_id: int, body: MRReviseIn,
                           db: AsyncSession = Depends(get_db),
@@ -377,6 +406,34 @@ async def reject_mr(mr_id: int, body: ActionIn, db: AsyncSession = Depends(get_d
                     user=Depends(require_permission(perms.MR_REJECT))):
     return await service.act_on_mr(db, mr_id, ApprovalAction.REJECTED.value, user,
                                    body.comments)
+
+
+@mr_router.post("/{mr_id}/send-back", response_model=MROut)
+async def send_back_mr(mr_id: int, body: ActionIn, db: AsyncSession = Depends(get_db),
+                       user=Depends(require_permission(perms.MR_APPROVE))):
+    return await service.send_back_mr(db, mr_id, body.comments, user)
+
+
+@mr_router.post("/{mr_id}/resubmit-correction", response_model=MROut)
+async def resubmit_mr_correction(mr_id: int, body: ActionIn | None = None,
+                                 db: AsyncSession = Depends(get_db),
+                                 user=Depends(require_permission(perms.MR_VIEW))):
+    return await service.resubmit_mr_correction(
+        db, mr_id, user, body.comments if body else "")
+
+
+@mr_router.post("/{mr_id}/send-back-further", response_model=MROut)
+async def send_back_mr_further(mr_id: int, body: ActionIn,
+                               db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission(perms.MR_VIEW))):
+    return await service.pass_mr_correction_down(db, mr_id, body.comments, user)
+
+
+@mr_router.put("/{mr_id}/correction", response_model=MROut)
+async def correct_mr(mr_id: int, body: MRCorrectionIn, db: AsyncSession = Depends(get_db),
+                     user=Depends(require_permission(perms.MR_VIEW))):
+    """The raiser's full edit of an MR sent back to them; the service checks it is theirs."""
+    return await service.correct_mr(db, mr_id, body.model_dump(), user)
 
 
 router.include_router(stock_router)

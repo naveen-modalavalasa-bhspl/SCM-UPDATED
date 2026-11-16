@@ -9,10 +9,11 @@ from sqlalchemy import select
 
 from app.core.database import SessionLocal, engine
 import app.all_models  # noqa: F401
+from app.shared.enums import PaymentSplitMode
 from app.shared.models.master import PaymentTerm
 
-# (code, name, advance %, delivery %, days after delivery — or "30,60,90" for equal
-#  instalments of the delivery share)
+# (code, name, advance %, delivery %, days after delivery — or "30,60,90" for the
+#  delivery share in equal instalments, delivery_split = EQUAL)
 TERMS = [
     ("ADV100", "Advance payment (100%)", 100, 0, 0),
     ("ADV30-D60", "30% advance / 70% in 60 days against delivery", 30, 70, 60),
@@ -36,9 +37,15 @@ async def main() -> None:
                 continue
             schedule = days if isinstance(days, str) else None
             db.add(PaymentTerm(code=code, name=name, advance_pct=adv, advance_days=0,
+                               advance_split=PaymentSplitMode.ONE.value,
                                delivery_pct=dlv,
-                               delivery_days=0 if schedule or not dlv else days,
-                               delivery_schedule=schedule,
+                               delivery_days=(int(schedule.split(",")[0]) if schedule
+                                              else days if dlv else 0),
+                               delivery_split=(PaymentSplitMode.EQUAL.value if schedule
+                                               else PaymentSplitMode.ONE.value),
+                               delivery_instalment_days=schedule,
+                               installation_split=PaymentSplitMode.ONE.value,
+                               warranty_split=PaymentSplitMode.ONE.value,
                                installation_pct=0, installation_days=0,
                                warranty_pct=0, warranty_days=0, is_active=True))
             added += 1

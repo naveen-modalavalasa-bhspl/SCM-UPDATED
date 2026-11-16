@@ -14,23 +14,27 @@ per module:
                               token — never one from the request.
 """
 from datetime import date
-from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import throttle
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.dependencies import get_current_vendor, require_permission
+from app.core.dependencies import (
+    get_current_vendor, require_permission, require_permission_or,
+)
 from app.core.pagination import Page, PageParams
 from app.modules.procurement import po_documents, quote_otp, service, stats, suppliers
 from app.modules.procurement.schemas import (
+    POCorrectionIn,
+    PackChangeDecisionIn, POLinePackingIn,
     ActionIn, ApprovalTrailOut, AwardIn, ConsolidationCreate, ConsolidationLinesIn,
     ConsolidationListRow, ConsolidationOut, ConsolidationSourceOut,
     ConsolidationStatsOut, DemandPoolRow, LedgerStatsOut, POStatsOut, QuoteStatsOut,
     ReqStatsOut, RFQStatsOut,
     DespatchNoteIn, DespatchNoteOut, MRCandidateRow, VendorPOListRow, VendorPOOut,
-    POAmendIn, POApprovalQtyIn, POCommentIn, POCommentOut, POCreate, POFromQuotationIn, POHeaderUpdate, POListRow, POOut,
+    POAmendIn, POApprovalQtyIn, POCommentIn, POCommentOut, POCopyOut, POCreate, POFromQuotationIn, POHeaderUpdate, POListRow, POOut,
     PODocumentOut, PORevisionOut, POVendorResponseIn, QuoteChangeDecisionIn, QuoteChangeRequestIn,
     QuoteChangeRequestOut, QuoteCommentIn, QuoteCommentOut, QuoteListRow,
     QuoteOtpOut, QuoteOut, QuoteSubmit, QuoteUnfreezeIn, ReqCreate, ReqFromMRsIn, ReqListRow,
@@ -142,6 +146,14 @@ async def get_one(po_id: int, db: AsyncSession = Depends(get_db),
     return await service.get_po_detail(db, po_id, user=user)
 
 
+@pos.get("/{po_id}/copy", response_model=POCopyOut)
+async def copy_template(po_id: int, db: AsyncSession = Depends(get_db),
+                        user=Depends(require_permission(perms.PO_CREATE))):
+    """"Copy as new PO": this order's content for the New PO form. Saves nothing —
+    the number is drawn when the form is saved through `POST /api/pos`."""
+    return await service.copy_po_template(db, po_id, user)
+
+
 @pos.get("/{po_id}/documents", response_model=list[PODocumentOut])
 async def po_documents_list(po_id: int, db: AsyncSession = Depends(get_db),
                             user=Depends(require_permission(perms.PO_VIEW))):
@@ -160,8 +172,10 @@ async def po_document_download(po_id: int, attachment_id: int,
 
 @pos.put("/{po_id}", response_model=POOut)
 async def update_po(po_id: int, body: POHeaderUpdate, db: AsyncSession = Depends(get_db),
-                    user=Depends(require_permission(perms.PO_EDIT))):
-    """The header a draft order was raised without — terms, addresses, project."""
+                    user=Depends(require_permission_or(
+        perms.PO_EDIT, perms.PO_APPROVE, service.po_correction_in_reach))):
+    """The header a draft order was raised without — terms, addresses, project. Also
+    a PO sent back for correction, by the person it was sent back to."""
     return await service.update_po_header(db, po_id, body, user)
 
 
@@ -179,6 +193,40 @@ async def po_revisions(po_id: int, db: AsyncSession = Depends(get_db),
                        user=Depends(require_permission(perms.PO_VIEW))):
     """Every version this order has been. Reading one needs only `po.view`."""
     return await service.po_revisions(db, po_id, user)
+
+
+# ── Supplier changes of packing (2026-10-08) ───────────────────────────────
+
+@pos.put("/{po_id}/lines/{line_id}/packing", response_model=POOut)
+async def repack_po_line(po_id: int, line_id: int, body: POLinePackingIn,
+                         db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission(perms.PO_EDIT))):
+    """Change a line's pack hierarchy, level and count."""
+    return await service.repack_po_line(db, po_id, line_id, body, user)
+
+
+@pos.get("/{po_id}/pack-changes")
+async def po_pack_changes(po_id: int, db: AsyncSession = Depends(get_db),
+                          user=Depends(require_permission(perms.PO_VIEW))):
+    """Every despatch-note line where the supplier sent a different pack hierarchy
+    from the order's, with the buyer's answer where there is one."""
+    return {"items": await service.list_po_pack_changes(db, po_id, user)}
+
+
+@pos.post("/{po_id}/pack-changes/{line_id}/accept")
+async def accept_pack_change(po_id: int, line_id: int, body: PackChangeDecisionIn,
+                             db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(perms.PO_PACK_CHANGE))):
+    """The order now says the supplier's hierarchy; the supplier is told."""
+    return await service.decide_po_pack_change(db, po_id, line_id, True, body, user)
+
+
+@pos.post("/{po_id}/pack-changes/{line_id}/decline")
+async def decline_pack_change(po_id: int, line_id: int, body: PackChangeDecisionIn,
+                              db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(perms.PO_PACK_CHANGE))):
+    """Refused, with a reason the supplier and the gate both read."""
+    return await service.decide_po_pack_change(db, po_id, line_id, False, body, user)
 
 
 # ── PO discussion (approver <=> raiser) & approval quantity edits ──────────
@@ -239,6 +287,41 @@ async def approve(po_id: int, body: ActionIn, db: AsyncSession = Depends(get_db)
 async def reject(po_id: int, body: ActionIn, db: AsyncSession = Depends(get_db),
                  user=Depends(require_permission(perms.PO_REJECT))):
     return await service.act_on_po(db, po_id, "REJECT", body.comments, user)
+
+
+@pos.post("/{po_id}/send-back", response_model=POOut)
+async def send_back(po_id: int, body: ActionIn, db: AsyncSession = Depends(get_db),
+                    user=Depends(require_permission(perms.PO_APPROVE))):
+    return await service.send_back_po(db, po_id, body.comments, user)
+
+
+@pos.post("/{po_id}/resubmit-correction", response_model=POOut)
+async def resubmit_correction(po_id: int, body: ActionIn | None = None,
+                              db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(perms.PO_VIEW))):
+    return await service.resubmit_po_correction(
+        db, po_id, user, body.comments if body else "")
+
+
+@pos.put("/{po_id}/correction", response_model=POOut)
+async def correct_po(po_id: int, body: POCorrectionIn, db: AsyncSession = Depends(get_db),
+                     user=Depends(require_permission(perms.PO_VIEW))):
+    """The raiser's full edit of a PO sent back to them; the service checks it is theirs."""
+    return await service.correct_po(db, po_id, body, user)
+
+
+@pos.put("/{po_id}/draft", response_model=POOut)
+async def edit_draft(po_id: int, body: POCorrectionIn, db: AsyncSession = Depends(get_db),
+                     user=Depends(require_permission(perms.PO_EDIT))):
+    """The full edit of a DRAFT order — vendor, date, lines and header. Same body as
+    the correction edit; the service refuses anything past draft."""
+    return await service.edit_draft_po(db, po_id, body, user)
+
+
+@pos.post("/{po_id}/send-back-further", response_model=POOut)
+async def send_back_further(po_id: int, body: ActionIn, db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(perms.PO_VIEW))):
+    return await service.pass_po_correction_down(db, po_id, body.comments, user)
 
 
 @pos.post("/{po_id}/send-to-vendor", response_model=POOut)
@@ -335,6 +418,13 @@ async def create_requisition_from_mrs(body: ReqFromMRsIn,
 async def requisition_sources(req_id: int, db: AsyncSession = Depends(get_db),
                               user=Depends(require_permission(perms.REQUISITION_VIEW))):
     return await service.requisition_sources(db, req_id, user)
+
+
+@requisitions.get("/{req_id}/quantity-changes")
+async def requisition_quantity_changes(req_id: int, db: AsyncSession = Depends(get_db),
+                                       user=Depends(require_permission(perms.REQUISITION_VIEW))):
+    """Every recorded quantity change on the requisition, oldest first (2026-11-03)."""
+    return {"items": await service.requisition_quantity_changes(db, req_id, user)}
 
 
 @requisitions.get("/{req_id}", response_model=ReqOut)
@@ -461,6 +551,20 @@ async def rfq_evaluation_methods(
     return service.evaluation_methods()
 
 
+# Declared BEFORE `/{rfq_id}`, same int-typed-path reason as `/evaluation-methods`
+# above and `/candidates` on the consolidated sheets. SCM_0058: an approved
+# requisition used to be invisible from this screen until somebody opened it and
+# pressed Create RFQ — this is the second doorway into exactly that same press.
+@rfqs.get("/candidates", response_model=Page[ReqListRow])
+async def rfq_requisition_candidates(
+        params: PageParams = Depends(), project_id: int | None = None,
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.RFQ_CREATE))):
+    """Approved requisitions not already an RFQ or on a consolidation sheet — the
+    Approved Requisitions tab's own rows."""
+    return await service.rfq_candidates(db, params, project_id)
+
+
 @rfqs.get("/{rfq_id}", response_model=RFQOut)
 async def get_rfq(rfq_id: int, db: AsyncSession = Depends(get_db),
                   user=Depends(require_permission(perms.RFQ_VIEW))):
@@ -511,6 +615,27 @@ async def reject_rfq(rfq_id: int, body: ActionIn,
                      user=Depends(require_permission(perms.RFQ_APPROVE))):
     return await service.act_on_rfq(
         db, rfq_id, ApprovalAction.REJECTED.value, body.comments, user)
+
+
+@rfqs.post("/{rfq_id}/send-back", response_model=RFQOut)
+async def send_back_rfq(rfq_id: int, body: ActionIn, db: AsyncSession = Depends(get_db),
+                        user=Depends(require_permission(perms.RFQ_APPROVE))):
+    return await service.send_back_rfq(db, rfq_id, body.comments, user)
+
+
+@rfqs.post("/{rfq_id}/resubmit-correction", response_model=RFQOut)
+async def resubmit_rfq_correction(rfq_id: int, body: ActionIn | None = None,
+                                  db: AsyncSession = Depends(get_db),
+                                  user=Depends(require_permission(perms.RFQ_VIEW))):
+    return await service.resubmit_rfq_correction(
+        db, rfq_id, user, body.comments if body else "")
+
+
+@rfqs.post("/{rfq_id}/send-back-further", response_model=RFQOut)
+async def send_back_rfq_further(rfq_id: int, body: ActionIn,
+                                db: AsyncSession = Depends(get_db),
+                                user=Depends(require_permission(perms.RFQ_VIEW))):
+    return await service.pass_rfq_correction_down(db, rfq_id, body.comments, user)
 
 
 @rfqs.get("/{rfq_id}/invites")
@@ -678,6 +803,34 @@ async def vendor_login(body: VendorLoginIn, request: Request,
 async def vendor_me(db: AsyncSession = Depends(get_db),
                     account=Depends(get_current_vendor)):
     return await service.vendor_profile(db, account.vendor_id)
+
+
+# The packing of the vendor's own mapped items (2026-10-11), for the portal's
+# Profile > Packing tab. Vendor id from the token, like every route here.
+# The vendor's own door to the unit-decimals table (2026-11-03): the portal's
+# quantity boxes refuse a "." in a whole unit, and an employee route would 401 the
+# vendor out of the portal.
+@supplier.get("/uom/decimals")
+async def vendor_uom_decimals(db: AsyncSession = Depends(get_db),
+                              account=Depends(get_current_vendor)):
+    from app.shared import uom as uom_rules
+    return {"items": await uom_rules.decimals_table(db)}
+
+
+@supplier.get("/items/packing")
+async def vendor_item_packing(db: AsyncSession = Depends(get_db),
+                              account=Depends(get_current_vendor)):
+    return await service.vendor_item_packing(db, account.vendor_id)
+
+
+# The brand / variant / model a quote or despatch line may name (2026-10-23).
+@supplier.get("/items/combinations")
+async def vendor_item_combinations(item_ids: str = Query(..., max_length=4000),
+                                   db: AsyncSession = Depends(get_db),
+                                   account=Depends(get_current_vendor)):
+    return await service.vendor_item_combinations(
+        db, account.vendor_id,
+        [int(x) for x in item_ids.split(",") if x.strip().isdigit()][:500])
 
 
 @supplier.post("/change-password", status_code=204)

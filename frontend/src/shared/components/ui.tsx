@@ -1,5 +1,7 @@
+import { useEffect, useState, useMemo } from "react";
 import type { ButtonHTMLAttributes, InputHTMLAttributes, MouseEvent, ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
+import { guardNumberKeys } from "../quantity";
 import { ArrowDownRight, ArrowLeft, ArrowUpRight } from "lucide-react";
 import {
   Autocomplete,
@@ -10,7 +12,6 @@ import {
   Textarea as HTextarea,
   Select as HSelect,
   SelectItem as HSelectItem,
-  Tooltip,
 } from "@heroui/react";
 
 /* ---------------------------------------------------------------------------
@@ -45,7 +46,7 @@ interface BtnProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "color"
   variant?: Variant;
 }
 
-export function Button({ variant = "primary", onClick, disabled, type, className, children }: BtnProps) {
+export function Button({ variant = "primary", onClick, disabled, type, className, title, children }: BtnProps) {
   return (
     <HButton
       {...VARIANT[variant]}
@@ -54,6 +55,7 @@ export function Button({ variant = "primary", onClick, disabled, type, className
       isDisabled={disabled}
       onPress={onClick as any}
       className={`min-h-11 font-semibold ${className ?? ""}`}
+      title={title}
     >
       {children}
     </HButton>
@@ -70,7 +72,7 @@ export function Card({ children, className = "" }: { children: ReactNode; classN
 
 export function PageHeader({ eyebrow: _eyebrow, title, actions, back }: {
   eyebrow?: string;
-  title: string;
+  title: ReactNode;
   actions?: ReactNode;
   /** The way out of a screen you arrived AT rather than navigated to.
    *
@@ -170,8 +172,8 @@ function stopLabelReopeningSelect(event: MouseEvent<HTMLLabelElement>) {
 }
 
 export function Field(
-  { label, children, hint, required }:
-  { label: string; children: ReactNode; hint?: string; required?: boolean },
+  { label, children, hint, required, error }:
+  { label: string; children: ReactNode; hint?: string; required?: boolean; error?: string | null },
 ) {
   return (
     <label className="block" onClick={stopLabelReopeningSelect}>
@@ -188,7 +190,8 @@ export function Field(
         )}
       </span>
       {children}
-      {hint && <span className="mt-1 block text-xs text-muted">{hint}</span>}
+      {error && <span className="mt-1 block text-xs font-semibold text-danger">{error}</span>}
+      {hint && !error && <span className="mt-1 block text-xs text-muted">{hint}</span>}
     </label>
   );
 }
@@ -200,12 +203,19 @@ interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
 }
 
 export function Input({ className, ...props }: InputProps) {
+  // Every number box gets the keyboard guard (no "e", "+", or a "-" on a non-negative
+  // box). A caller's own onKeyDown still runs, after the guard.
+  const own = props.onKeyDown;
+  const onKeyDown = props.type === "number"
+    ? (event: any) => { guardNumberKeys(event); if (!event.defaultPrevented) own?.(event); }
+    : own;
   return (
     <HInput
       variant="bordered"
       radius="md"
       classNames={{ inputWrapper: `min-h-11 border-line bg-content1 ${className ?? ""}` }}
       {...(props as any)}
+      onKeyDown={onKeyDown}
     />
   );
 }
@@ -288,6 +298,7 @@ export function Select({
 }: SelectProps) {
   const selected = value === "" || value === undefined || value === null
     ? null : String(value);
+
   const common = {
     variant: "bordered" as const,
     radius: "md" as const,
@@ -298,61 +309,132 @@ export function Select({
     errorMessage,
   };
 
+  // ── non-searchable branch (small option lists) ───────────────────────────
   if (!(searchable ?? options.length >= SEARCHABLE_FROM)) {
     return (
       <div data-select-root className="contents">
-      <HSelect
-        {...common}
-        placeholder={placeholder ?? "Select an option"}
-        items={options}
-        // Only a key the collection actually holds. An edit form sets its value
-        // before the options query lands, and HeroUI warns on every such render —
-        // the field fills itself in the moment the list arrives either way, so this
-        // is the same behaviour with a quiet console.
-        selectedKeys={
-          selected !== null && options.some((o) => String(o.value) === selected)
-            ? [selected] : []
-        }
-        onSelectionChange={(keys) => {
-          const key = Array.from(keys as Set<string | number>)[0];
-          onChange(key == null ? "" : String(key));
-        }}
-        classNames={{ trigger: `min-h-11 border-line bg-content1 ${className ?? ""}` }}
-      >
-        {(option: SelectOption) => (
-          <HSelectItem key={String(option.value)} textValue={option.label} title={option.label}>
-          <Tooltip content={option.label} placement="top" delay={0} closeDelay={0} classNames={{ base: "z-[99999]" }} className="max-w-xs text-sm">
-            <span className="pointer-events-auto block w-full truncate">{option.label}</span>
-          </Tooltip>
-        </HSelectItem>
-        )}
-      </HSelect>
+        <HSelect
+          {...common}
+          placeholder={placeholder ?? "Select an option"}
+          items={options}
+          // Only a key the collection actually holds. An edit form sets its value
+          // before the options query lands, and HeroUI warns on every such render —
+          // the field fills itself in the moment the list arrives either way, so this
+          // is the same behaviour with a quiet console.
+          selectedKeys={
+            selected !== null && options.some((o) => String(o.value) === selected)
+              ? [selected] : []
+          }
+          onSelectionChange={(keys) => {
+            const key = Array.from(keys as Set<string | number>)[0];
+            onChange(key == null ? "" : String(key));
+          }}
+          classNames={{ trigger: `min-h-11 border-line bg-content1 ${className ?? ""}` }}
+        >
+          {(option: SelectOption) => (
+            <HSelectItem key={String(option.value)} textValue={option.label}>
+              <span className="block w-full truncate">{option.label}</span>
+            </HSelectItem>
+          )}
+        </HSelect>
       </div>
     );
   }
 
+  // ── searchable Autocomplete branch (large option lists) ─────────────────
+  // `items` (controlled) disables HeroUI's built-in filtering, so we do it
+  // ourselves: track what the user types and narrow the list before passing
+  // it to the component. This keeps the prop reactive (async-loaded options
+  // appear without a remount) while restoring the search behaviour.
+  return <SearchableSelect
+    common={common}
+    options={options}
+    selected={selected}
+    placeholder={placeholder}
+    className={className}
+    onChange={onChange}
+  />;
+}
+
+/** Internal component so hooks (useState/useMemo) are legal inside the
+ *  conditional render path without violating the Rules of Hooks. */
+function SearchableSelect({
+  common,
+  options,
+  selected,
+  placeholder,
+  className,
+  onChange,
+}: {
+  common: Record<string, unknown>;
+  options: SelectOption[];
+  selected: string | null;
+  placeholder?: string;
+  className?: string;
+  onChange: (v: string) => void;
+}) {
+  const [inputValue, setInputValue] = useState("");
+
+  const encodeKey = (val: string | number | null | undefined) =>
+    val === "" ? "__empty__" : val == null ? null : String(val);
+
+  const decodeKey = (key: unknown) =>
+    key === "__empty__" || key == null ? "" : String(key);
+
+  const [typing, setTyping] = useState(false);
+  const selectedLabel = useMemo(
+    () => (selected === null ? "" : options.find((o) => String(o.value) === selected)?.label ?? ""),
+    [options, selected],
+  );
+
+  useEffect(() => {
+    if (!typing) setInputValue(selectedLabel);
+  }, [selectedLabel, typing]);
+
+  const filteredItems = useMemo(() => {
+    const q = typing ? inputValue.trim().toLowerCase() : "";
+    if (!q) return options;
+    return options.filter((o) => o.label.toLowerCase().includes(q));
+  }, [options, inputValue, typing]);
+
   return (
     <div data-select-root className="contents">
-    <Autocomplete
-      {...common}
-      placeholder={placeholder ?? "Type to search…"}
-      defaultItems={options}
-      selectedKey={selected}
-      // Clearing the box gives null, which must reach the caller as "" — the same
-      // empty value it passes in — or a cleared field would keep its old id.
-      onSelectionChange={(key) => onChange(key == null ? "" : String(key))}
-      inputProps={{
-        classNames: { inputWrapper: `min-h-11 border-line bg-content1 ${className ?? ""}` },
-      }}
-    >
-      {(option: SelectOption) => (
-        <AutocompleteItem key={String(option.value)} textValue={option.label} title={option.label}>
-        <Tooltip content={option.label} placement="top" delay={0} closeDelay={0} classNames={{ base: "z-[99999]" }} className="max-w-xs text-sm">
-          <span className="pointer-events-auto block w-full truncate">{option.label}</span>
-        </Tooltip>
-      </AutocompleteItem>
-      )}
-    </Autocomplete>
+      <Autocomplete
+        {...(common as any)}
+        placeholder={placeholder ?? "Type to search…"}
+        items={filteredItems}
+        selectedKey={encodeKey(selected)}
+        inputValue={inputValue}
+        onInputChange={(text) => {
+          setInputValue(text);
+          setTyping(text !== selectedLabel);
+        }}
+        onClose={() => {
+          setTyping(false);
+          setInputValue(selectedLabel);
+        }}
+        onSelectionChange={(key) => {
+          setTyping(false);
+          const rawKey = decodeKey(key);
+          onChange(rawKey);
+          if (rawKey !== "") {
+            const opt = options.find((o) => String(o.value) === rawKey);
+            setInputValue(opt?.label ?? "");
+          } else {
+            const opt = options.find((o) => o.value === "");
+            setInputValue(opt?.label ?? "");
+          }
+        }}
+        inputProps={{
+          classNames: { inputWrapper: `min-h-11 border-line bg-content1 ${className ?? ""}` },
+        }}
+      >
+        {(option: SelectOption) => (
+          <AutocompleteItem key={encodeKey(option.value) ?? "__empty__"} textValue={option.label}>
+            <span className="block w-full truncate">{option.label}</span>
+          </AutocompleteItem>
+        )}
+      </Autocomplete>
     </div>
   );
 }

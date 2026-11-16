@@ -5,7 +5,14 @@ import { AlertTriangle, ArrowRight, TrendingDown, TrendingUp } from "lucide-reac
 import { ErrorBanner, NoticeChip, Textarea, useToast } from "@/shared/components";
 import { Button } from "./ActionButton";
 import { rfqApi } from "../api";
+import { QuantityInput } from "@/shared/components/QuantityInput";
+import { useUomDecimals } from "@/shared/hooks/useUomDecimals";
+import { quantityProblem } from "@/shared/quantity";
 import type { Quotation, QuoteItem } from "../types";
+import {
+  CombinationPicker, askedLabel, combinationKey, combinationLabel, comboFrom, comboPayload,
+  useCombinationOptions, type CombinationValue,
+} from "@/shared/combination";
 
 const money = (n: number) =>
   `₹${n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -20,6 +27,9 @@ interface DraftLine {
   discount_percent: string;
   note: string;
   included: boolean;
+  /** The brand / variant / model asked of the supplier — the quoted one unless
+   *  the buyer picks another (2026-10-26). */
+  combo?: CombinationValue;
 }
 
 /**
@@ -54,10 +64,19 @@ export function QuoteChangeRequestModal({ quote, onClose }: {
       discount_percent: String(item.discount_percent ?? 0),
       note: "",
       included: false,
+      combo: comboFrom(item),
     })));
+  const comboOptions = useCombinationOptions(quote.items.map((item) => item.item_id));
+  const comboChanged = (d: DraftLine) =>
+    !!d.combo?.brand_id && combinationKey(d.combo) !== combinationKey(comboFrom(d.item));
 
   const touched = drafts.filter((d) => d.included);
 
+  const uomDecimals = useUomDecimals();
+  // The net under the keyboard filter: a proposed quantity the unit cannot hold.
+  const quantityInvalid = drafts.some((d) => Boolean(quantityProblem(d.quantity, {
+    decimals: uomDecimals(quote.items.find((i) => i.id === d.quotation_item_id)?.uom_code),
+  })));
   const update = (id: number, patch: Partial<DraftLine>) =>
     setDrafts(drafts.map((d) => (d.quotation_item_id === id ? { ...d, ...patch } : d)));
 
@@ -89,6 +108,7 @@ export function QuoteChangeRequestModal({ quote, onClose }: {
         proposed_rate: Number(d.rate || 0),
         proposed_discount_percent: Number(d.discount_percent || 0),
         note: d.note || undefined,
+        ...(comboChanged(d) ? comboPayload(d.combo) : {}),
       })),
     }),
     onSuccess: (cr) => {
@@ -104,13 +124,21 @@ export function QuoteChangeRequestModal({ quote, onClose }: {
   const changed = (d: DraftLine) =>
     Number(d.quantity) !== Number(d.item.quantity)
     || Number(d.rate) !== Number(d.item.rate)
-    || Number(d.discount_percent) !== Number(d.item.discount_percent ?? 0);
+    || Number(d.discount_percent) !== Number(d.item.discount_percent ?? 0)
+    || comboChanged(d);
 
-  // Any included line with a rate increase blocks the send.
-  const hasRateViolation = touched.some(rateIncreased);
+  /** The RFQ's quantity (2026-11-11): an amendment may go above it, but only with a
+   *  reason on that line. The server refuses the same; this says it before Send. */
+  const qtyCap = (d: DraftLine) => d.item.requested_quantity ?? null;
+  const qtyAbove = (d: DraftLine) =>
+    d.included && qtyCap(d) != null && Number(d.quantity) > Number(qtyCap(d));
+  const missingReason = (d: DraftLine) => qtyAbove(d) && !d.note.trim();
+
+  // A rate increase, or a higher quantity with no reason, blocks the send.
+  const hasRateViolation = touched.some(rateIncreased) || touched.some(missingReason);
   const hasUnchanged = touched.some((d) => !changed(d));
 
-  const canSend = !propose.isPending
+  const canSend = !propose.isPending && !quantityInvalid
     && touched.length > 0
     && reason.trim().length >= 3
     && !hasRateViolation
@@ -231,15 +259,38 @@ export function QuoteChangeRequestModal({ quote, onClose }: {
 
                       {d.included && (
                         <>
+                          {/* The brand (2026-10-26): what was asked, what was quoted,
+                              and — if the buyer wants another — what to ask for now. */}
+                          {!!comboOptions.data?.[String(d.item.item_id)]?.length && (
+                            <div className="mt-2.5 rounded-md border border-line/70 bg-content1 p-2">
+                              <div className="mb-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] uppercase tracking-wide text-muted">
+                                <span>Brand</span>
+                                {askedLabel(d.item) && <span className="normal-case">RFQ asked: <b className="text-ink">{askedLabel(d.item)}</b></span>}
+                                <span className="normal-case">Quoted: <b className={d.item.brand_changed ? "text-warn" : "text-ink"}>{combinationLabel(d.item) || "—"}</b></span>
+                              </div>
+                              <CombinationPicker
+                                options={comboOptions.data?.[String(d.item.item_id)]}
+                                value={d.combo}
+                                ariaLabel={`Brand to ask for on ${d.item.item_name ?? "this line"}`}
+                                onChange={(combo) => update(d.quotation_item_id, { combo })}
+                              />
+                              {comboChanged(d) && (
+                                <div className="mt-1 text-[11px] font-semibold text-brand">
+                                  Asking for {combinationLabel(d.combo)} instead of {combinationLabel(d.item)}
+                                </div>
+                              )}
+                            </div>
+                          )}
                           {/* Inputs row */}
                           <div className="mt-2.5 grid grid-cols-3 gap-2">
                             <label className="text-[10px] uppercase tracking-wide text-muted">
                               Qty
-                              <input
-                                type="text" inputMode="decimal"
+                              <QuantityInput
+                                decimals={uomDecimals(quote.items.find((i) => i.id === d.quotation_item_id)?.uom_code)}
                                 className="mt-0.5 h-9 w-full rounded-md border border-line bg-content1 px-2 text-sm text-ink outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
                                 value={d.quantity}
-                                onChange={(e) => update(d.quotation_item_id, { quantity: e.target.value })}
+                                data-uom={d.item?.uom_code ?? ""}
+                                onChange={(raw) => update(d.quotation_item_id, { quantity: raw })}
                                 aria-label="Proposed quantity"
                               />
                             </label>
@@ -269,6 +320,30 @@ export function QuoteChangeRequestModal({ quote, onClose }: {
                               />
                             </label>
                           </div>
+
+                          {/* Quantity above the RFQ: allowed, with a reason on this line */}
+                          {qtyAbove(d) && (
+                            <div className="mt-2 rounded-lg bg-warn/10 px-2.5 py-2">
+                              <p className="flex items-center gap-1.5 text-[11px] font-semibold text-warn">
+                                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                                More than the {qtyCap(d)} {d.item.uom_code ?? ""} the RFQ asked for — say why
+                              </p>
+                              <input
+                                type="text"
+                                className={`mt-1.5 h-9 w-full rounded-md border px-2 text-sm outline-none focus:ring-2 ${
+                                  missingReason(d)
+                                    ? "border-danger bg-danger/5 focus:border-danger focus:ring-danger/20"
+                                    : "border-line bg-content1 focus:border-brand focus:ring-brand/20"} text-ink`}
+                                value={d.note}
+                                onChange={(e) => update(d.quotation_item_id, { note: e.target.value })}
+                                placeholder="Reason for the higher quantity (required)"
+                                aria-label="Reason for the higher quantity"
+                              />
+                            </div>
+                          )}
+                          {d.included && !qtyAbove(d) && qtyCap(d) != null && (
+                            <p className="mt-1 text-[10px] text-muted">The RFQ asked for {qtyCap(d)} · going above it needs a reason</p>
+                          )}
 
                           {/* Rate-increase error */}
                           {rateUp && (
@@ -343,7 +418,9 @@ export function QuoteChangeRequestModal({ quote, onClose }: {
             <div className="flex items-start gap-2 rounded-xl border border-danger/30 bg-danger/[0.05] px-3 py-2.5">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-danger" />
               <p className="text-xs text-danger">
-                One or more lines propose a rate higher than the supplier's quote. Lower the rate or uncheck those lines.
+                {touched.some(rateIncreased)
+                  ? "One or more lines propose a rate higher than the supplier's quote. Lower the rate or uncheck those lines."
+                  : "A line asks for more than the RFQ's quantity. Give the reason on that line."}
               </p>
             </div>
           )}

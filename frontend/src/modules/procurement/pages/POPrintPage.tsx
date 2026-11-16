@@ -4,6 +4,7 @@ import { PrintPanel, PrintTemplate, SectionTitle, type PrintColumn } from "@/sha
 import { poApi } from "../api";
 import { fmtDate } from "@/shared/datetime";
 import { formatPONo } from "@/shared/format";
+import { combinationLabel } from "@/shared/combination";
 
 const money = (value: number | null | undefined) =>
   new Intl.NumberFormat("en-IN", {
@@ -48,11 +49,27 @@ export function POPrintPage() {
     ["Logistics terms", order.logistics_terms],
   ];
 
+  // CGST + SGST within a state, IGST across one — the law, not a choice, decided by
+  // the order's own `tax_region` (derived server-side off the two GSTINs). Only one
+  // of the two ever has a non-zero rate on a given line.
+  const taxLabel = (line: { cgst_percent?: number; igst_percent?: number }) =>
+    (line.cgst_percent ?? 0) > 0
+      ? `CGST ${line.cgst_percent}% + SGST ${line.cgst_percent}%`
+      : `IGST ${line.igst_percent ?? 0}%`;
+
+  // Summed from the lines rather than trusted off `order.tax_amount`: the total is
+  // the one figure that has always been right, but it says nothing about which of
+  // CGST+SGST or IGST it is — this is the split that answers that.
+  const cgstTotal = order.items.reduce((sum, line) => sum + (line.cgst_amount ?? 0), 0);
+  const sgstTotal = order.items.reduce((sum, line) => sum + (line.sgst_amount ?? 0), 0);
+  const igstTotal = order.items.reduce((sum, line) => sum + (line.igst_amount ?? 0), 0);
+  const isIntra = cgstTotal > 0;
+
   const columns: PrintColumn[] = [
-    { header: "Item", width: "38%" },
-    { header: "Qty", align: "right", width: "13%" },
-    { header: "Rate", align: "right", width: "14%" },
-    { header: "Tax %", align: "right", width: "10%" },
+    { header: "Item", width: "33%" },
+    { header: "Qty", align: "right", width: "11%" },
+    { header: "Rate", align: "right", width: "13%" },
+    { header: "Tax", align: "right", width: "18%" },
     { header: "Amount", align: "right", width: "15%" },
   ];
 
@@ -68,7 +85,12 @@ export function POPrintPage() {
       status={order.status}
       metadata={[
         { label: "Vendor", value: order.vendor_name ?? "—", fullWidth: true },
-        { label: "Project", value: order.project_name || "—" },
+        { label: "Vendor GSTIN", value: order.vendor_gstin || "—", mono: true },
+        ...(order.organization_name
+          ? [{ label: "Organisation", value: order.organization_name }] : []),
+        order.org_department_name && !order.project_name
+          ? { label: "Department", value: order.org_department_name }
+          : { label: "Project", value: order.project_name || "—" },
         { label: "RFQ", value: order.rfq_no || "—", mono: true },
         { label: "Quotation", value: order.quotation_no || "—", mono: true },
       ]}
@@ -93,10 +115,13 @@ export function POPrintPage() {
           <div className="mt-0.5 font-mono text-[8.5px]" style={{ color: "#697187" }}>
             {line.item_code ?? `#${line.item_id}`}
           </div>
+          {combinationLabel(line) && (
+            <div className="mt-0.5 text-[8.5px]" style={{ color: "#3d4559" }}>{combinationLabel(line)}</div>
+          )}
         </>,
         <>{line.quantity} <span style={{ color: "#697187" }}>{line.uom_code ?? ""}</span></>,
         money(line.rate),
-        `${line.tax_percent}%`,
+        taxLabel(line),
         <span className="font-semibold" style={{ color: "#141a2a" }}>{money(line.amount)}</span>,
       ])}
       itemsTotal={["", "", "", "", money(order.total_amount)]}
@@ -110,7 +135,9 @@ export function POPrintPage() {
             {([
               ["Subtotal", order.sub_total],
               ["Discount", order.discount_amount],
-              ["Tax", order.tax_amount],
+              ...(isIntra
+                ? ([["CGST", cgstTotal], ["SGST", sgstTotal]] as [string, number][])
+                : ([["IGST", igstTotal]] as [string, number][])),
               ["Freight", order.freight_amount],
             ] as [string, number | null | undefined][]).map(([label, value]) => (
               <tr key={label}>

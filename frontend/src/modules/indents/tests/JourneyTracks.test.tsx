@@ -463,4 +463,59 @@ describe("complete indent journey screen", () => {
     expect(within(screen.getByRole("list", { name: "Remaining indent journey stages" }))
       .getByRole("heading", { name: "DM Review" })).toBeInTheDocument();
   });
+
+  it("displays stage-specific pending status names for remaining stages", async () => {
+    renderJourney(fulfilledJourney({
+      status: "DRAFT",
+      stages: [
+        { sequence: 1, title: "Draft created", status: "PENDING", is_current: true, stage_type: "draft" },
+        { sequence: 2, title: "Request submitted", status: "PENDING", stage_type: "submission" },
+        { sequence: 3, title: "OE Review", status: "PENDING", stage_type: "approval" },
+        { sequence: 4, title: "Inventory Allocation", status: "PENDING", stage_type: "allocation" },
+        { sequence: 5, title: "Warehouse Issue", status: "PENDING", stage_type: "warehouse" },
+        { sequence: 6, title: "Dispatch and Transport", status: "PENDING", stage_type: "delivery" },
+        { sequence: 7, title: "Requester Acknowledgement", status: "PENDING", stage_type: "acknowledgement" },
+      ],
+      phases: [],
+      history: [],
+    }));
+
+    const remaining = await screen.findByRole("list", { name: "Remaining indent journey stages" });
+    expect(within(remaining).getByText("Current")).toBeInTheDocument();
+    expect(within(remaining).getByText("Awaiting submission")).toBeInTheDocument();
+    expect(within(remaining).getByText("Awaiting approval")).toBeInTheDocument();
+    expect(within(remaining).getByText("Awaiting allocation")).toBeInTheDocument();
+    expect(within(remaining).getByText("Pending warehouse")).toBeInTheDocument();
+    expect(within(remaining).getByText("In transit")).toBeInTheDocument();
+    expect(within(remaining).getByText("Awaiting acknowledgement")).toBeInTheDocument();
+  });
+
+  it("marks Ready for allocation as completed once allocation occurred", async () => {
+    const journeyWithReady = fulfilledJourney({
+      status: "PARTIALLY_ALLOCATED",
+      history: [
+        {
+          id: "ready-for-allocation:1",
+          event_type: "READY_FOR_ALLOCATION",
+          title: "Ready for allocation",
+          timestamp: "2026-10-31T12:46:00Z",
+        },
+        {
+          id: "allocation:1",
+          event_type: "STOCK_ALLOCATED",
+          title: "Stock allocated",
+          timestamp: "2026-10-31T12:54:00Z",
+        },
+      ],
+    });
+
+    renderJourney(journeyWithReady);
+
+    const timeline = await screen.findByRole("list", { name: "Complete indent journey timeline" });
+    const readyHeading = within(timeline).getByRole("heading", { name: "Ready for allocation" });
+    const readyCard = readyHeading.closest("article");
+    expect(readyCard).not.toBeNull();
+    expect(within(readyCard!).queryByText("Waiting for allocation")).not.toBeInTheDocument();
+    expect(within(readyCard!).getByText("Completed")).toBeInTheDocument();
+  });
 });

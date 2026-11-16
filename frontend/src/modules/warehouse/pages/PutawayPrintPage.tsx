@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { getPutaway, warehouseOptions } from "../api";
 import { fmtDate, fmtQty } from "../format";
 import { PrintTemplate, type PrintColumn } from "@/shared/components";
+import { combinationLabel } from "@/shared/combination";
 
 export function PutawayPrintPage() {
   const { id } = useParams();
@@ -38,6 +39,8 @@ export function PutawayPrintPage() {
     { label: "Assigned To", value: putaway.assigned_to_name || "—" },
     { label: "Item", value: putaway.item_name || "—", fullWidth: true },
     { label: "Code", value: putaway.item_code || "—", mono: true },
+    ...(combinationLabel(putaway)
+      ? [{ label: "Brand · Variant · Model", value: combinationLabel(putaway) }] : []),
     { label: "Batch", value: putaway.batch_no || "—", mono: true },
     { label: "Suggested Bin", value: putaway.suggested_bin_code || "—", mono: true },
     { label: "Total Quantity", value: fmtQty(putaway.qty) },

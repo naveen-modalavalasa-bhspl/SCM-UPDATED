@@ -1,12 +1,21 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Card, ErrorBanner, PageHeader } from "@/shared/components";
+import { Card, ErrorBanner, PageHeader, SubNav } from "@/shared/components";
 import { supplierApi } from "@/modules/procurement/api";
 import { vendorPasswordPath } from "@/shared/api/client";
+import { SupplierItemPacking } from "../components/SupplierItemPacking";
+
+const TABS = [
+  { key: "details", label: "Details" },
+  // How each mapped item is to be packed (2026-10-11).
+  { key: "packing", label: "Packing" },
+];
 
 /** Read-only. The vendor master belongs to procurement — a supplier correcting their
  *  own GSTIN would silently change what every past PO was raised against. */
 export function SupplierProfilePage() {
+  const [tab, setTab] = useState("details");
   const { data: profile, error } = useQuery({
     queryKey: ["supplier-me"],
     queryFn: () => supplierApi.me(),
@@ -29,6 +38,9 @@ export function SupplierProfilePage() {
 
       <ErrorBanner error={error} />
 
+      <SubNav label="Profile" items={TABS} value={tab} onChange={setTab} />
+
+      {tab === "packing" ? <SupplierItemPacking /> : (
       <Card className="p-5">
         <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           {rows.map(([label, value]) => (
@@ -52,6 +64,7 @@ export function SupplierProfilePage() {
           .
         </p>
       </Card>
+      )}
     </div>
   );
 }

@@ -1,8 +1,11 @@
 """The one test that proves the system works, end to end, through the HTTP API:
 
-indent -> submit -> approve -> PO -> submit -> approve -> send-to-vendor ->
+indent -> submit -> approve -> allocate (no stock, so 0 given / all to procurement) ->
+PO -> submit -> approve -> send-to-vendor ->
 GRN -> QC pass -> assert stock increased by the accepted quantity.
 """
+import datetime
+
 from app.platform.hcm.models import (
     HcmDepartment, HcmFacility, HcmPosition, HcmPositionAssignment,
 )
@@ -47,6 +50,11 @@ async def _setup_world(db, make_user):
     requester.department_id = DEPT_ID
     await make_user(employee_id=3, username="depthead", password="pw",
                     permissions=["indent.view", "indent.approve"])
+    # Inventory desk: decides allocations after indent approval.
+    # allocation.create + allocation.submit are both required by the route.
+    await make_user(employee_id=7, username="invdesk", password="pw",
+                    permissions=["indent.view", "allocation.view",
+                                 "allocation.create", "allocation.submit"])
     await make_user(employee_id=4, username="proc", password="pw",
                     permissions=["po.view", "po.create", "po.submit", "po.send_vendor"])
     po_approver = await make_user(employee_id=5, username="pohead", password="pw",
@@ -65,7 +73,9 @@ async def test_indent_to_stock_full_flow(client, db, make_user, login):
     # 1. requester creates + submits an indent
     h = await login("req", "pw")
     r = await client.post("/api/indents", headers=h, json={
-        "facility_id": FACILITY_ID, "items": [{"item_id": item.id, "quantity": 10}]})
+        "facility_id": FACILITY_ID,
+        "required_date": datetime.date.today().isoformat(),
+        "items": [{"item_id": item.id, "quantity": 10}]})
     assert r.status_code == 200, r.text
     indent = r.json()
     indent_id, indent_item_id = indent["id"], indent["items"][0]["id"]
@@ -73,18 +83,36 @@ async def test_indent_to_stock_full_flow(client, db, make_user, login):
     r = await client.post(f"/api/indents/{indent_id}/submit", headers=h)
     assert r.json()["status"] == "PENDING_APPROVAL"
 
-    # 2. dept head approves
+    # 2. dept head approves — indent parks at AWAITING_ALLOCATION (allocation is now a
+    # human decision; see 2026-07-26-allocation-is-a-decision-CHANGE.md).
     h = await login("depthead", "pw")
     r = await client.post(f"/api/indents/{indent_id}/approve", headers=h, json={"comments": "ok"})
     assert r.status_code == 200, r.text
-    # Was "APPROVED". Approval now runs the availability check (flow doc §3 steps 3-5):
-    # this world has no stock, so every line is short and the indent goes straight to
-    # procurement with a material request raised for it.
-    # NOTE: this becomes AWAITING_ALLOCATION once allocation becomes a human decision
-    # -- see docs/superpowers/specs/2026-07-26-allocation-is-a-decision-CHANGE.md
-    assert r.json()["status"] == "PENDING_PROCUREMENT"
+    assert r.json()["status"] == "AWAITING_ALLOCATION"
 
-    # 3. procurement creates PO from the approved indent, submits
+    # 2b. inventory desk decides the allocation. No stock available → give 0 for every
+    # line. A decision with quantity=0 is valid ("give nothing now"); the engine then
+    # raises a material request for the shortfall and moves the indent to PENDING_PROCUREMENT.
+    h = await login("invdesk", "pw")
+    r = await client.post("/api/allocations", headers=h, json={
+        "indent_id": indent_id,
+        "decisions": [{
+            "indent_item_id": indent_item_id,
+            "item_id": item.id,
+            "item_code": item.code,
+            "item_name": item.name,
+            "quantity": 0,        # give nothing from stock
+            "requested_qty": 10,
+            "warehouse_id": None,
+        }],
+        "remarks": "No stock available, raising MR",
+    })
+    assert r.status_code == 200, r.text
+    # The allocation is approved immediately (single-rung or auto-approve ladder),
+    # and the shortfall raises a material request → indent → PENDING_PROCUREMENT.
+    assert r.json()["status"] in ("APPROVED", "PENDING_APPROVAL"), r.text
+
+    # 3. procurement creates PO from the indent (now PENDING_PROCUREMENT)
     h = await login("proc", "pw")
     r = await client.post(f"/api/pos/from-indent/{indent_id}", headers=h, json={
         "vendor_id": 1,

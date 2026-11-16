@@ -4,6 +4,7 @@ import type { IndentJourney, IndentJourneyStage } from "../types";
 
 const TOP_ALLOCATION_STATUS_TONE: Partial<Record<string, string>> = {
   [INDENT_STATUS.ALLOCATED]: "bg-ok-bg text-ok",
+  [INDENT_STATUS.PARTIALLY_ALLOCATED]: "bg-warn-bg text-warn",
   [INDENT_STATUS.AWAITING_ALLOCATION]: "bg-info-bg text-info",
 };
 
@@ -59,6 +60,73 @@ function returnedStageLabel(journey?: IndentJourney) {
 }
 
 export function IndentStatusBadge({ status, journey }: { status: string; journey?: IndentJourney }) {
+  // If the indent is in an approval / review / terminal state, keep those authoritative outcome labels
+  const terminalOrApproval = [
+    INDENT_STATUS.DRAFT,
+    INDENT_STATUS.PENDING_APPROVAL,
+    INDENT_STATUS.REJECTED,
+    INDENT_STATUS.RETURNED,
+    INDENT_STATUS.RETURNED_FOR_CORRECTION,
+    INDENT_STATUS.CANCELLED,
+    INDENT_STATUS.CLOSED,
+  ];
+
+  if (!terminalOrApproval.includes(status as any)) {
+    const csgStatus = journey?.consignment_status ? String(journey.consignment_status).toUpperCase() : null;
+    const qcStatus = journey?.qc_status ? String(journey.qc_status).toUpperCase() : null;
+    const isQcComplete = Boolean(journey?.qc_complete || qcStatus === "COMPLETED" || qcStatus === "PASSED");
+    const qcRef = journey?.qc_inspection_no ? ` · ${journey.qc_inspection_no.split("/").pop()}` : "";
+    const csgRef = journey?.consignment_no ? ` · ${journey.consignment_no.split("/").pop()}` : "";
+
+    if (csgStatus === "DELIVERED") {
+      return (
+        <span className="inline-flex h-6 max-w-fit items-center justify-center whitespace-nowrap rounded-full bg-ok-bg px-2.5 text-[11px] font-semibold uppercase tracking-wide text-ok">
+          DELIVERED{csgRef}
+        </span>
+      );
+    }
+
+    if (csgStatus && ["DISPATCHED", "GATED_OUT", "IN_TRANSIT"].includes(csgStatus)) {
+      return (
+        <span className="inline-flex h-6 max-w-fit items-center justify-center whitespace-nowrap rounded-full bg-info-bg px-2.5 text-[11px] font-semibold uppercase tracking-wide text-info">
+          {csgStatus === "DISPATCHED" ? "DISPATCHED" : "IN TRANSIT"}{csgRef}
+        </span>
+      );
+    }
+
+    if (journey?.consignment_no) {
+      return (
+        <span className="inline-flex h-6 max-w-fit items-center justify-center whitespace-nowrap rounded-full bg-info-bg px-2.5 text-[11px] font-semibold uppercase tracking-wide text-info">
+          CONSIGNMENT: {journey.consignment_status || "CREATED"}{csgRef}
+        </span>
+      );
+    }
+
+    if (isQcComplete) {
+      return (
+        <span className="inline-flex h-6 max-w-fit items-center justify-center whitespace-nowrap rounded-full bg-ok-bg px-2.5 text-[11px] font-semibold uppercase tracking-wide text-ok">
+          QC: PASSED{qcRef}
+        </span>
+      );
+    }
+
+    if (qcStatus === "REJECTED" || qcStatus === "FAILED") {
+      return (
+        <span className="inline-flex h-6 max-w-fit items-center justify-center whitespace-nowrap rounded-full bg-bad-bg px-2.5 text-[11px] font-semibold uppercase tracking-wide text-bad">
+          QC: FAILED{qcRef}
+        </span>
+      );
+    }
+
+    if (qcStatus && qcStatus !== "PENDING") {
+      return (
+        <span className="inline-flex h-6 max-w-fit items-center justify-center whitespace-nowrap rounded-full bg-warn-bg px-2.5 text-[11px] font-semibold uppercase tracking-wide text-warn">
+          QC: {qcStatus}{qcRef}
+        </span>
+      );
+    }
+  }
+
   const allocationTone = TOP_ALLOCATION_STATUS_TONE[status];
   if (allocationTone) {
     return (

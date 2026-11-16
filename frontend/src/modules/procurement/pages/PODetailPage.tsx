@@ -1,11 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
+import { PackChangesPanel } from "../components/PackChangesPanel";
+import { POLinePacking } from "../components/POLinePacking";
+import { PackQty } from "@/shared/packing";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowLeft, Check, ChevronDown, ChevronRight, FilePen, Printer, Send, X,
-  ShoppingCart, Package, Building2, Calendar, Coins, MapPin, FileText, ShieldCheck, History, Sparkles, TrendingDown, Save,
+  ArrowLeft, Check, ChevronDown, ChevronRight, Copy, FilePen, Printer, Send, Undo2, X,
+  ShoppingCart, Package, Building2, Calendar, Coins, ShieldCheck, History, Sparkles, TrendingDown, Save,
 } from "lucide-react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Can, Card, Field, Input, StatusPill, useToast } from "@/shared/components";
+import { useAuth } from "@/shared/auth/AuthContext";
 import { Button } from "../components/ActionButton";
 import { Stepper, type Step } from "@/shared/components/Stepper";
 import { poApi } from "../api";
@@ -13,12 +17,21 @@ import { revisionLines } from "../types";
 import { ApprovalTrail } from "../components/ApprovalTrail";
 import { POPaymentsPanel } from "../components/POPaymentsPanel";
 import { POApprovalChat } from "../components/POApprovalChat";
+import { POCorrectionForm } from "../components/POCorrectionForm";
+import { departmentOf } from "../orgScope";
+import { POAddressesTerms } from "../components/POAddressesTerms";
 import { blankPOHeader, POHeaderFields, poHeaderFrom, poHeaderPayload, type POHeaderValue } from "../components/POHeaderFields";
 import { LinePicker, type DraftLine } from "../components/LinePicker";
 import { alerts } from "@/modules/alerts";
 import { fmtDate } from "@/shared/datetime";
 import { formatPONo } from "@/shared/format";
 import { TONE_APPROVE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
+import { comboFrom, comboPayload } from "@/shared/combination";
+import { CombinationTag } from "@/shared/combination";
+import { QuantityInput } from "@/shared/components/QuantityInput";
+import { useUomDecimals } from "@/shared/hooks/useUomDecimals";
+import { quantityProblem } from "@/shared/quantity";
+import { despatchLabel } from "../poStatus";
 
 const money = (value: number | null | undefined) =>
   new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value ?? 0);
@@ -71,6 +84,10 @@ export function PODetailPage() {
   });
 
   const [amending, setAmending] = useState(false);
+  // A draft is read in its own cards and edited IN them: Edit swaps the cards for the
+  // form in the same place, Save or Cancel swaps them back. It used to show both at
+  // once — every figure twice, the saved copy above the form editing it.
+  const [editingDraft, setEditingDraft] = useState(false);
   const [amendReason, setAmendReason] = useState("");
   const [amendLines, setAmendLines] = useState<DraftLine[]>([]);
   const startAmending = () => {
@@ -85,6 +102,7 @@ export function PODetailPage() {
         original_quantity: String(i.quantity),
         rate: String(i.rate),
         tax_percent: String(i.tax_percent),
+        combo: comboFrom(i),
       })) ?? [],
     );
   };
@@ -101,6 +119,7 @@ export function PODetailPage() {
           quantity: Number(l.quantity),
           rate: Number(l.rate ?? 0),
           tax_percent: Number(l.tax_percent ?? 0),
+          ...comboPayload(l.combo),
         })),
       }),
     onSuccess: (updated) => {
@@ -108,14 +127,6 @@ export function PODetailPage() {
       setAmending(false);
       setAmendReason("");
       qc.invalidateQueries({ queryKey: ["purchase-order-revisions", poId] });
-      refresh();
-    },
-  });
-
-  const saveHeader = useMutation({
-    mutationFn: () => poApi.update(poId, poHeaderPayload(header)),
-    onSuccess: () => {
-      toast.success("Order details saved");
       refresh();
     },
   });
@@ -130,12 +141,24 @@ export function PODetailPage() {
       refresh();
       if (approvalView || decisionView) nav("/approvals");
     },
+    // The approval itself can have gone through even though this request came
+    // back as an error (e.g. a courtesy vendor email failed after the decision
+    // was committed) — refetch so the screen shows what actually happened
+    // instead of leaving the old status up next to an error toast.
+    onError: (e: any) => {
+      toast.error(e?.message ?? "Could not record the decision. Checking the latest status…");
+      refresh();
+    },
   });
 
   const submit = useMutation({
     mutationFn: () => poApi.submit(poId),
     onSuccess: () => {
       void alerts.success("po.submitted", { number: formatPONo(po.data?.po_no, po.data?.revision_no) });
+      refresh();
+    },
+    onError: (e: any) => {
+      toast.error(e?.message ?? "Could not submit the order. Checking the latest status…");
       refresh();
     },
   });
@@ -147,6 +170,10 @@ export function PODetailPage() {
       void alerts.success("po.sent_to_vendor", { number, vendor: po.data?.vendor_name ?? "the vendor" });
       refresh();
     },
+    onError: (e: any) => {
+      toast.error(e?.message ?? "Could not send the order to the vendor. Checking the latest status…");
+      refresh();
+    },
   });
 
   const sendWithConfirm = async () => {
@@ -155,8 +182,63 @@ export function PODetailPage() {
       send.mutate();
   };
 
+  // Send back needs a reason: the person it lands with has to know what to fix.
+  const [sendBackError, setSendBackError] = useState("");
+  const sendBack = useMutation({
+    mutationFn: () => poApi.sendBack(poId, comments.trim()),
+    onSuccess: (updated) => {
+      toast.success(`Sent back to ${updated.current_approver_name ?? "the previous approver"}`);
+      setComments("");
+      refresh();
+      if (approvalView || decisionView) nav("/approvals");
+    },
+  });
+  const sendBackWithReason = () => {
+    if (sendBack.isPending) return;
+    if (!comments.trim()) {
+      setSendBackError("Enter a reason in Comments before sending this order back.");
+      return;
+    }
+    setSendBackError("");
+    sendBack.mutate();
+  };
+
+  // The holder of a sent-back PO: a comment (optional to resubmit, required to pass it
+  // further down).
+  const [fixComment, setFixComment] = useState("");
+  const [fixError, setFixError] = useState("");
+  const resubmit = useMutation({
+    mutationFn: () => poApi.resubmitCorrection(poId, fixComment.trim()),
+    onSuccess: () => {
+      toast.success("Resubmitted for approval");
+      setFixComment("");
+      refresh();
+    },
+  });
+  const sendBackFurther = useMutation({
+    mutationFn: () => poApi.sendBackFurther(poId, fixComment.trim()),
+    onSuccess: (updated) => {
+      toast.success(`Sent back to ${updated.current_approver_name ?? "the previous approver"}`);
+      setFixComment("");
+      refresh();
+    },
+  });
+  const sendBackFurtherWithReason = () => {
+    if (sendBackFurther.isPending) return;
+    if (!fixComment.trim()) {
+      setFixError("Enter a reason before sending this order further back.");
+      return;
+    }
+    setFixError("");
+    sendBackFurther.mutate();
+  };
+
   const decideWithConfirm = async (action: "approve" | "reject") => {
     if (decide.isPending || !po.data) return;
+    if (action === "reject" && !comments.trim()) {
+      setSendBackError("Enter a reason in Comments before rejecting this order.");
+      return;
+    }
     const number = formatPONo(po.data.po_no, po.data.revision_no);
     const asked =
       action === "approve"
@@ -168,6 +250,7 @@ export function PODetailPage() {
   // ── approval quantity editing (decrease only) ────────────────────────
   const [qtyDraft, setQtyDraft] = useState<Record<number, string>>({});
   const [qtyTouched, setQtyTouched] = useState(false);
+  const uomDecimals = useUomDecimals();
 
   useEffect(() => {
     if (po.data?.items) {
@@ -193,7 +276,15 @@ export function PODetailPage() {
   }, [qtyDraft, po.data?.items]);
 
   const hasQtyIncrease = qtyChanges.some((c) => c.quantity > c.prev);
-  const hasInvalidQty = qtyChanges.some((c) => c.quantity <= 0);
+  const lineById = new Map<number, any>((po.data?.items ?? []).map((it: any) => [it.id, it]));
+  // Zero is not a valid PO quantity here (a line is removed another way), and nothing
+  // finer than the unit allows, nothing above what the PO already holds.
+  const hasInvalidQty = qtyChanges.some((c) => {
+    const line = lineById.get(c.id);
+    return c.quantity <= 0 || Boolean(quantityProblem(String(c.quantity), {
+      decimals: uomDecimals(line?.uom_code), min: 0, max: c.prev, unit: line?.uom_code,
+    }));
+  });
 
   const saveQty = useMutation({
     mutationFn: () => poApi.updateApprovalQuantities(poId, qtyChanges.map((c) => ({ id: c.id, quantity: c.quantity }))),
@@ -209,13 +300,25 @@ export function PODetailPage() {
   if (po.error) return <p className="rounded-lg bg-danger/10 p-4 text-danger">{(po.error as Error).message}</p>;
   if (!po.data) return <p className="p-6 text-muted">Purchase order not found.</p>;
 
-  const canDecide = po.data.awaiting_me ?? po.data.status === "PENDING_APPROVAL";
+  const { can, me } = useAuth();
+  const isAdmin = can("admin.workflow.manage") || Boolean(me?.roles.includes("ADMIN")) || Boolean(me?.roles.includes("SUPERUSER"));
+  const canDecide = po.data.status === "PENDING_APPROVAL" && (Boolean(po.data.awaiting_me) || isAdmin);
   const isApprovalPending = po.data.status === "PENDING_APPROVAL" && !!canDecide;
+  // CGST+SGST within a state, IGST across one — summed from the lines rather than
+  // trusted off `tax_amount`, which says nothing about which split it is.
+  const cgstTotal = po.data.items.reduce((sum: number, item: any) => sum + (item.cgst_amount ?? 0), 0);
+  const sgstTotal = po.data.items.reduce((sum: number, item: any) => sum + (item.sgst_amount ?? 0), 0);
+  const igstTotal = po.data.items.reduce((sum: number, item: any) => sum + (item.igst_amount ?? 0), 0);
+  const isIntraState = cgstTotal > 0;
   const canAmend = po.data.amendment_allowed === true;
   const isDraft = po.data.status === "DRAFT";
+  // Sent back to the RAISER: only they may fix the details and trim quantities. An
+  // approver it was sent back to can only resubmit or pass it further down.
+  const canFix = po.data.status === "RETURNED_FOR_CORRECTION" && !!po.data.can_edit_correction;
+  const canEditQty = isApprovalPending;
   const isFinished = ["PARTIALLY_RECEIVED", "RECEIVED", "CLOSED", "CANCELLED", "REJECTED"].includes(po.data.status);
   const backTo = decisionView ? "/approvals/decisions" : approvalView ? "/approvals" : "/pos";
-  const busy = submit.isPending || send.isPending || decide.isPending;
+  const busy = submit.isPending || send.isPending || decide.isPending || sendBack.isPending;
 
   const steps: Step[] = (() => {
     const s = po.data.status;
@@ -225,9 +328,11 @@ export function PODetailPage() {
       { id: "approved", label: "Approved", status: "upcoming" },
       { id: "sent", label: "Sent to Supplier", status: "upcoming" },
       { id: "accepted", label: "Accepted", status: "upcoming" },
+      { id: "dispatched", label: "Dispatched", status: "upcoming" },
       { id: "received", label: "Received", status: "upcoming" },
     ];
     if (s === "DRAFT" || s === "SUBMITTED" || s === "PENDING_APPROVAL") base[1].status = "current";
+    else if (s === "RETURNED_FOR_CORRECTION") base[1] = { id: "approved", label: "Sent back", status: "current" };
     else if (s === "REJECTED") base[1] = { id: "approved", label: "Rejected", status: "error" };
     else {
       base[1].status = "complete";
@@ -238,9 +343,20 @@ export function PODetailPage() {
         else if (s === "SENT_TO_VENDOR") base[3].status = "current";
         else {
           base[3].status = "complete";
-          if (s === "ACCEPTED_BY_SUPPLIER") base[4].status = "current";
-          else if (s === "PARTIALLY_RECEIVED") { base[4].status = "current"; base[4].description = "Partially received"; }
-          else if (s === "RECEIVED" || s === "CLOSED") base[4].status = "complete";
+          // Dispatched is DERIVED (despatch_status, off the supplier's submitted
+          // despatch notes); a receipt landing implies the goods were sent.
+          const ds = po.data.despatch_status;
+          if (s === "ACCEPTED_BY_SUPPLIER") {
+            if (ds === "DISPATCHED") { base[4].status = "complete"; base[5].status = "current"; }
+            else if (ds === "PARTIALLY_DISPATCHED") { base[4].status = "current"; base[4].description = "Partially dispatched"; }
+            else base[4].status = "current";
+          }
+          else if (s === "PARTIALLY_RECEIVED") {
+            base[4].status = ds === "PARTIALLY_DISPATCHED" ? "current" : "complete";
+            if (ds === "PARTIALLY_DISPATCHED") base[4].description = "Partially dispatched";
+            base[5].status = "current"; base[5].description = "Partially received";
+          }
+          else if (s === "RECEIVED" || s === "CLOSED") { base[4].status = "complete"; base[5].status = "complete"; }
         }
       }
     }
@@ -271,15 +387,33 @@ export function PODetailPage() {
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <StatusPill status={po.data.status} variant="solid" />
+              <StatusPill status={po.data.status} label={despatchLabel(po.data.status, po.data.despatch_status) ?? undefined} variant="solid" />
               {po.data.vendor_status && <StatusPill status={po.data.vendor_status} variant="solid" />}
               <Button variant="subtle" onClick={() => window.open(`/pos/${poId}/print`, "_blank")} className="!bg-slate-50 !text-slate-900 shadow-sm hover:!bg-slate-200">
                 <Printer className="h-4 w-4" /> PDF
               </Button>
+              <Can do="po.create">
+                <Button variant="subtle" onClick={() => nav(`/pos/new?copyFrom=${poId}`)} className="!border-white/20 !bg-black/20 !text-slate-50 backdrop-blur hover:!bg-black/40">
+                  <Copy className="h-4 w-4" /> Copy as new PO
+                </Button>
+              </Can>
               {!isFinished && canAmend && (
                 <Can do="po.edit">
                   <Button variant="subtle" onClick={startAmending} className="!border-white/20 !bg-black/20 !text-slate-50 backdrop-blur hover:!bg-black/40">
                     <FilePen className="h-4 w-4" /> Amend
+                  </Button>
+                </Can>
+              )}
+              {isDraft && (
+                <Can do="po.edit">
+                  <Button variant="subtle" disabled={editingDraft}
+                          onClick={() => {
+                            setEditingDraft(true);
+                            requestAnimationFrame(() => document.getElementById("edit-draft")
+                              ?.scrollIntoView({ behavior: "smooth", block: "start" }));
+                          }}
+                          className="!border-white/20 !bg-black/20 !text-slate-50 backdrop-blur hover:!bg-black/40">
+                    <FilePen className="h-4 w-4" /> {editingDraft ? "Editing" : "Edit"}
                   </Button>
                 </Can>
               )}
@@ -302,7 +436,11 @@ export function PODetailPage() {
           <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
             {[
               { label: "Vendor", value: po.data.vendor_name, icon: Building2, tint: "bg-black/25" },
-              { label: "Project", value: po.data.project_name ?? "—", icon: ShoppingCart, tint: "bg-black/25" },
+              ...(po.data.organization_name
+                ? [{ label: "Organisation", value: po.data.organization_name, icon: Building2, tint: "bg-black/25" }] : []),
+              departmentOf(po.data) && !po.data.project_name
+                ? { label: "Department", value: departmentOf(po.data), icon: ShoppingCart, tint: "bg-black/25" }
+                : { label: "Project", value: po.data.project_name ?? "—", icon: ShoppingCart, tint: "bg-black/25" },
               { label: "Expected", value: fmtDate(po.data.expected_date), icon: Calendar, tint: "bg-black/25" },
             ].map((k) => (
               <div key={k.label} className={`rounded-2xl ${k.tint} p-3 backdrop-blur`}>
@@ -322,6 +460,19 @@ export function PODetailPage() {
         <p className="rounded-2xl bg-red-50 p-4 text-sm text-red-700 ring-1 ring-red-200">{((submit.error ?? send.error) as Error).message}</p>
       )}
 
+      {/* ── A draft being edited: the form stands where its cards stand ── */}
+      {isDraft && editingDraft && (
+        <Can do="po.edit">
+          <div id="edit-draft" className="scroll-mt-4">
+            <POCorrectionForm key={`draft-${po.data.id}-${po.data.total_amount}-${po.data.items.length}`}
+                              po={po.data} mode="draft"
+                              onSaved={() => { refresh(); setEditingDraft(false); }}
+                              onCancel={() => setEditingDraft(false)} />
+          </div>
+        </Can>
+      )}
+
+      {!(isDraft && editingDraft) && (<>
       {/* ── Order facts — amber block ─────────────────────────────── */}
       <div className="overflow-hidden rounded-2xl border border-amber-200 bg-gradient-to-br from-amber-50 via-orange-50 to-white shadow-sm">
         <div className="h-1 w-full bg-gradient-to-r from-amber-400 via-orange-400 to-amber-500" />
@@ -334,7 +485,12 @@ export function PODetailPage() {
           <div className="grid gap-4 sm:grid-cols-3">
             {[
               { label: "Vendor", value: po.data.vendor_name ?? "—" },
-              { label: "Project", value: po.data.project_name ?? "—" },
+              { label: "Vendor GSTIN", value: po.data.vendor_gstin ?? "—" },
+              ...(po.data.organization_name
+                ? [{ label: "Organisation", value: po.data.organization_name }] : []),
+              departmentOf(po.data) && !po.data.project_name
+                ? { label: "Department", value: departmentOf(po.data) }
+                : { label: "Project", value: po.data.project_name ?? "—" },
               { label: "Expected date", value: fmtDate(po.data.expected_date) },
             ].map((f) => (
               <div key={f.label} className="rounded-xl bg-white p-3 ring-1 ring-amber-100">
@@ -346,6 +502,14 @@ export function PODetailPage() {
           {po.data.remarks && (
             <div className="mt-4 rounded-xl bg-white p-3 text-sm text-body ring-1 ring-amber-100">
               <span className="font-bold text-ink">Remarks: </span>{po.data.remarks}
+            </div>
+          )}
+          {po.data.copied_from_po_id && (
+            <div className="mt-4 rounded-xl bg-white p-3 text-sm text-body ring-1 ring-amber-100">
+              <span className="font-bold text-ink">Copied from: </span>
+              <Link to={`/pos/${po.data.copied_from_po_id}`} className="font-mono font-semibold text-brand hover:underline">
+                {po.data.copied_from_po_no ?? `PO #${po.data.copied_from_po_id}`}
+              </Link>
             </div>
           )}
           {po.data.quotation_no && (
@@ -361,6 +525,9 @@ export function PODetailPage() {
         </div>
       </div>
 
+      {/* ── A supplier sending a different packing — the buyer answers here ── */}
+      <PackChangesPanel poId={po.data.id} />
+
       {/* ── Line items — emerald block, editable on approval ───────── */}
       <div className="overflow-hidden rounded-2xl border border-emerald-200 bg-gradient-to-br from-emerald-50 via-teal-50 to-white shadow-sm">
         <div className="h-1 w-full bg-gradient-to-r from-emerald-400 via-teal-400 to-emerald-500" />
@@ -373,7 +540,7 @@ export function PODetailPage() {
               {linesExpanded ? <ChevronDown className="h-3.5 w-3.5"/> : <ChevronRight className="h-3.5 w-3.5"/>}{linesExpanded ? "Hide" : "View"}
             </Button>
           </div>
-          {isApprovalPending && (
+          {canEditQty && (
             <div className="mb-3 flex items-center gap-2 rounded-xl bg-amber-50 p-3 text-xs font-medium text-amber-800 ring-1 ring-amber-200">
               <TrendingDown className="h-4 w-4 shrink-0"/> Approver may <b>decrease</b> quantities here (increase blocked). Edited numbers are what the vendor receives.
             </div>
@@ -391,7 +558,7 @@ export function PODetailPage() {
                     const isNew = previous.length > 0 && !prev;
                     const isQtyChanged = previous.length > 0 && prev && Number(prev.quantity) !== Number(item.quantity);
                     const isRateChanged = previous.length > 0 && prev && Number(prev.rate) !== Number(item.rate);
-                    const editable = isApprovalPending;
+                    const editable = canEditQty;
                     const original = Number(item.quantity);
                     const draftVal = qtyDraft[item.id] ?? String(item.quantity);
                     const parsed = Number(draftVal);
@@ -407,6 +574,10 @@ export function PODetailPage() {
                             {isRateChanged && <span className="rounded bg-cyan-100 px-1.5 py-0.5 text-[10px] font-bold uppercase text-cyan-700">Rate Changed</span>}
                           </div>
                           <div className="font-mono text-xs text-muted">{item.item_code ?? `#${item.item_id}`}</div>
+                          <CombinationTag value={item} className="mt-1" />
+                          <POLinePacking poId={po.data.id} poStatus={po.data.status}
+                                         vendorStatus={po.data.vendor_status} line={item}
+                                         showChips={false} />
                           {item.delivery_days != null && <div className="text-xs text-emerald-700">Vendor quoted {item.delivery_days} day{item.delivery_days===1?"":"s"}</div>}
                         </td>
                         <td className="p-3 text-right">
@@ -414,22 +585,28 @@ export function PODetailPage() {
                             <div className="ml-auto flex max-w-[160px] flex-col items-end gap-1">
                               {isQtyChanged && <div className="text-[11px] font-semibold text-blue-700">was <span className="line-through">{prev.quantity}</span></div>}
                               <div className="flex items-center justify-end gap-1">
-                                <input
-                                  type="number"
+                                <QuantityInput
+                                  decimals={uomDecimals(item.uom_code)}
+                                  data-uom={item.uom_code ?? ""}
                                   min={1}
                                   max={original}
-                                  step="0.001"
                                   value={draftVal}
-                                  onChange={(e) => { setQtyDraft((s) => ({ ...s, [item.id]: e.target.value })); setQtyTouched(true); }}
+                                  aria-label={`Quantity for ${item.item_name ?? item.item_id}`}
+                                  onChange={(raw) => { setQtyDraft((s) => ({ ...s, [item.id]: raw })); setQtyTouched(true); }}
                                   className={`w-24 rounded-lg border px-2 py-1.5 text-right text-sm font-bold outline-none focus:ring-2 ${isIncrease ? "border-red-300 bg-red-50 text-red-700 ring-red-200" : isDecrease ? "border-amber-300 bg-amber-50 text-amber-800 ring-amber-200" : "border-emerald-200 bg-white text-ink ring-emerald-200"}`}
                                 />
                                 <span className="text-xs text-muted">{item.uom_code ?? ""}</span>
                               </div>
+                              {!!item.pack_breakdown?.length && (
+                                <PackQty entries={item.pack_breakdown} qty={item.quantity} uom={item.uom_code}
+                                         itemId={item.item_id} align="right" />
+                              )}
                             </div>
                           ) : (
                             <div className="flex flex-col items-end">
                               {isQtyChanged && <div className="text-[11px] font-semibold text-blue-700">was <span className="line-through">{prev.quantity}</span></div>}
-                              <div><span className="font-bold">{item.quantity}</span> <span className="text-xs text-muted">{item.uom_code ?? ""}</span></div>
+                              <PackQty entries={item.pack_breakdown} qty={item.quantity} uom={item.uom_code}
+                                       itemId={item.item_id} align="right" />
                             </div>
                           )}
                           {editable && isIncrease && <div className="mt-1 text-[11px] font-bold text-red-600">Increase not allowed</div>}
@@ -441,7 +618,13 @@ export function PODetailPage() {
                             <span>{money(item.rate)}</span>
                           </div>
                         </td>
-                        <td className="p-3 text-right">{item.tax_percent}%</td>
+                        <td className="p-3 text-right">
+                          {/* CGST+SGST within a state, IGST across one — decided by the
+                              order's own tax_region, never typed on a line. */}
+                          {(item.cgst_percent ?? 0) > 0
+                            ? <>CGST {item.cgst_percent}%<br />SGST {item.sgst_percent}%</>
+                            : <>IGST {item.igst_percent ?? item.tax_percent}%</>}
+                        </td>
                         <td className="p-3 text-right font-extrabold tabular-nums">
                           <div className="flex flex-col items-end">
                             {isRateChanged && <div className="text-[11px] font-semibold text-blue-700">was <span className="line-through">{money(prev.amount)}</span></div>}
@@ -455,7 +638,7 @@ export function PODetailPage() {
               </table>
             </div>
           )}
-          {isApprovalPending && linesExpanded && (
+          {canEditQty && linesExpanded && (
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <div className="text-xs text-muted">
                 {qtyChanges.length ? `${qtyChanges.length} line(s) changed` : "No quantity changes yet"} {hasQtyIncrease && <span className="font-bold text-red-600">· increase blocked</span>}
@@ -474,9 +657,12 @@ export function PODetailPage() {
         </div>
       </div>
 
+      </>)}
+
       {/* ── Chat — approver <=> raiser ───────────────────────────── */}
       <POApprovalChat poId={poId} />
 
+      {!(isDraft && editingDraft) && (<>
       {/* ── Totals — blue block ───────────────────────────────────── */}
       <div className="overflow-hidden rounded-2xl border border-blue-200 bg-gradient-to-br from-blue-50 via-indigo-50 to-white shadow-sm">
         <div className="h-1 w-full bg-gradient-to-r from-blue-500 via-indigo-500 to-sky-500" />
@@ -491,7 +677,12 @@ export function PODetailPage() {
               {[
                 { label: "Subtotal", value: po.data.sub_total, tint: "from-blue-50 to-white border-blue-100" },
                 { label: "Discount", value: po.data.discount_amount, tint: "from-violet-50 to-white border-violet-100" },
-                { label: "Tax", value: po.data.tax_amount, tint: "from-emerald-50 to-white border-emerald-100" },
+                ...(isIntraState
+                  ? [
+                    { label: "CGST", value: cgstTotal, tint: "from-emerald-50 to-white border-emerald-100" },
+                    { label: "SGST", value: sgstTotal, tint: "from-emerald-50 to-white border-emerald-100" },
+                  ]
+                  : [{ label: "IGST", value: igstTotal, tint: "from-emerald-50 to-white border-emerald-100" }]),
                 { label: "Freight", value: po.data.freight_amount, tint: "from-amber-50 to-white border-amber-100" },
               ].map((k) => (
                 <div key={k.label} className={`rounded-xl border bg-gradient-to-br p-3 ${k.tint}`}>
@@ -522,69 +713,17 @@ export function PODetailPage() {
         </div>
       </div>
 
-      {/* ── Addresses — rose block ────────────────────────────────── */}
-      <div className="overflow-hidden rounded-2xl border border-rose-200 bg-gradient-to-br from-rose-50 via-pink-50 to-white shadow-sm">
-        <div className="h-1 w-full bg-gradient-to-r from-rose-400 via-pink-400 to-rose-500" />
-        <div className="p-4 sm:p-5">
-          <div className="mb-3 flex items-center gap-2 text-rose-700">
-            <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-rose-500 text-white"><MapPin className="h-4 w-4"/></div>
-            <h2 className="text-sm font-extrabold uppercase tracking-widest">Addresses</h2>
-          </div>
-          <div className="grid gap-4 sm:grid-cols-2">
-            {[
-              { label: "Billing address", text: po.data.billing_address },
-              { label: "Shipping address", text: po.data.shipping_address },
-            ].map((f) => (
-              <div key={f.label} className="rounded-xl bg-white p-3 ring-1 ring-rose-100">
-                <div className="text-[11px] font-bold uppercase tracking-widest text-rose-700/70">{f.label}</div>
-                <div className="mt-1 whitespace-pre-line text-sm font-medium text-ink">{f.text || "—"}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
+      {/* Addresses and terms — filled in right here while the order is a draft. */}
+      <POAddressesTerms po={po.data} editable={isDraft && can("po.edit")} onSaved={refresh} />
 
-      {/* ── Terms — violet block ──────────────────────────────────── */}
-      <div className="overflow-hidden rounded-2xl border border-violet-200 bg-gradient-to-br from-violet-50 via-purple-50 to-white shadow-sm">
-        <div className="h-1 w-full bg-gradient-to-r from-violet-500 via-purple-500 to-fuchsia-500" />
-        <div className="p-4 sm:p-5">
-          <div className="mb-3 flex items-center gap-2 text-violet-700">
-            <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-violet-600 text-white"><FileText className="h-4 w-4"/></div>
-            <h2 className="text-sm font-extrabold uppercase tracking-widest">Terms & conditions</h2>
-          </div>
-          <div className="grid gap-3 sm:grid-cols-2">
-            {[
-              { label: "Payment terms", text: po.data.payment_terms },
-              { label: "Delivery terms", text: po.data.delivery_terms },
-              { label: "Material terms", text: po.data.material_terms },
-              { label: "Logistics terms", text: po.data.logistics_terms },
-            ].map((f) => (
-              <div key={f.label} className="rounded-xl bg-white p-3 ring-1 ring-violet-100">
-                <div className="text-[11px] font-bold uppercase tracking-widest text-violet-700/70">{f.label}</div>
-                <div className="mt-1 whitespace-pre-line text-sm font-medium text-ink">{f.text || "—"}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
+      </>)}
 
       {!isDraft && <POPaymentsPanel poId={poId} />}
 
-      {isDraft && (
-        <Can do="po.edit">
-          <div className="overflow-hidden rounded-2xl border border-indigo-200 bg-gradient-to-br from-indigo-50 to-white shadow-sm">
-            <div className="h-1 w-full bg-gradient-to-r from-indigo-500 to-violet-500" />
-            <div className="p-4">
-              <div className="mb-3 flex items-center justify-between">
-                <div className="flex items-center gap-2 text-indigo-700"><div className="flex h-8 w-8 items-center justify-center rounded-xl bg-indigo-600 text-white"><FilePen className="h-4 w-4"/></div><h2 className="text-sm font-extrabold uppercase tracking-widest">Order details</h2></div>
-                <Button variant="subtle" disabled={saveHeader.isPending} onClick={() => saveHeader.mutate()}>{saveHeader.isPending ? "Saving…" : "Save details"}</Button>
-              </div>
-              {saveHeader.error && <p className="mb-2 text-sm font-semibold text-red-600">{(saveHeader.error as Error).message}</p>}
-              <div className="rounded-xl bg-white p-3 ring-1 ring-indigo-100"><POHeaderFields value={header} onChange={(patch) => setHeader({ ...header, ...patch })} /></div>
-            </div>
-          </div>
-        </Can>
+      {canFix && (
+        <POCorrectionForm key={`${po.data.id}-${po.data.total_amount}-${po.data.items.length}`} po={po.data} onSaved={refresh} />
       )}
+
 
       {(po.data.revision_no ?? 0) > 0 && (
         <div className="overflow-hidden rounded-2xl border border-slate-200 bg-gradient-to-br from-slate-50 to-white shadow-sm">
@@ -651,13 +790,59 @@ export function PODetailPage() {
         </div>
       )}
 
+      {po.data.status === "RETURNED_FOR_CORRECTION" && (
+        <div className="overflow-hidden rounded-2xl border border-amber-300 bg-amber-50 shadow-sm p-4 text-sm">
+          <div className="flex items-center gap-2 font-bold text-amber-900">
+            <Undo2 className="h-4 w-4" />
+            Sent back to {po.data.correction?.owner_name ?? po.data.current_approver_name ?? "the previous approver"}
+            {po.data.correction?.returned_by_name && <> by {po.data.correction.returned_by_name}</>}
+          </div>
+          {po.data.correction?.reason && (
+            <p className="mt-2 rounded-xl bg-white p-2.5 font-medium text-ink ring-1 ring-amber-200">
+              Reason: {po.data.correction.reason}
+            </p>
+          )}
+          {po.data.can_resubmit_correction && (
+            <>
+              <p className="mt-2 text-amber-900">
+                {po.data.can_edit_correction
+                  ? "Edit the order below (vendor, items, quantities, rates, terms…), Save changes, then resubmit."
+                  : po.data.can_pass_correction_down
+                    ? "You can resubmit it as it is, or send it further back to the person below you."
+                    : "Add a comment if needed and resubmit."}
+              </p>
+              <div className="mt-3">
+                <Field label={po.data.can_pass_correction_down ? "Comment (required to send further back)" : "Comment (optional)"}>
+                  <Input value={fixComment} onChange={(e) => { setFixComment((e.target as HTMLInputElement).value); setFixError(""); }} placeholder="Visible to the approver" />
+                </Field>
+              </div>
+              {fixError && <p className="mt-2 font-semibold text-red-600">{fixError}</p>}
+              {resubmit.error && <p className="mt-2 font-semibold text-red-600">{(resubmit.error as Error).message}</p>}
+              {sendBackFurther.error && <p className="mt-2 font-semibold text-red-600">{(sendBackFurther.error as Error).message}</p>}
+              <div className="mt-3 flex justify-end gap-2">
+                {po.data.can_pass_correction_down && (
+                  <Button variant="subtle" disabled={sendBackFurther.isPending || resubmit.isPending} onClick={sendBackFurtherWithReason} className="border border-amber-400 bg-amber-100 text-amber-900 hover:bg-amber-200">
+                    <Undo2 className="h-4 w-4" /> {sendBackFurther.isPending ? "Sending…" : "Send further back"}
+                  </Button>
+                )}
+                <Button disabled={resubmit.isPending || sendBackFurther.isPending} onClick={() => resubmit.mutate()} className={TONE_SUBMIT}>
+                  <Send className="h-4 w-4" /> {resubmit.isPending ? "Resubmitting…" : "Resubmit for approval"}
+                </Button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       {canDecide && (
         <div className="overflow-hidden rounded-2xl border border-amber-300 bg-gradient-to-br from-amber-50 via-orange-50 to-white shadow-md">
           <div className="h-1 w-full bg-gradient-to-r from-amber-500 via-orange-500 to-amber-600" />
           <div className="p-4">
             <div className="mb-3 flex items-center gap-2 text-amber-800">
               <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-amber-500 text-white"><ShieldCheck className="h-4 w-4"/></div>
-              <h2 className="text-sm font-extrabold uppercase tracking-widest">Approve this order</h2>
+              <h2 className="text-sm font-extrabold uppercase tracking-widest">
+                {isAdmin && !po.data.awaiting_me ? "Approve this order · Admin Override" : "Approve this order"}
+              </h2>
               <span className="ml-auto hidden sm:inline text-xs font-semibold text-amber-700">Edited quantities will be sent to vendor</span>
             </div>
             {(po.data.pending_with?.length || po.data.current_approver_name) && (
@@ -666,16 +851,21 @@ export function PODetailPage() {
               </p>
             )}
             <Field label="Comments">
-              <Input value={comments} onChange={(e) => setComments((e.target as HTMLInputElement).value)} placeholder="Optional approval comment — visible in trail" />
+              <Input value={comments} onChange={(e) => { setComments((e.target as HTMLInputElement).value); setSendBackError(""); }} placeholder="Required for Send back and Reject, optional for Approve. Visible in trail" />
             </Field>
+            {sendBackError && <p className="mt-2 text-sm font-semibold text-red-600">{sendBackError}</p>}
             {decide.error && <p className="mt-2 text-sm font-semibold text-red-600">{(decide.error as Error).message}</p>}
+            {sendBack.error && <p className="mt-2 text-sm font-semibold text-red-600">{(sendBack.error as Error).message}</p>}
             <div className="mt-3 flex justify-end gap-2">
-              <Can do="po.reject">
+              {(can("po.approve") || isAdmin) && (
+                <Button variant="subtle" disabled={busy} onClick={sendBackWithReason} className="border border-amber-400 bg-amber-100 text-amber-900 hover:bg-amber-200"><Undo2 className="h-4 w-4"/> Send back</Button>
+              )}
+              {(can("po.reject") || isAdmin) && (
                 <Button className={TONE_REJECT} variant="danger" disabled={busy} onClick={() => void decideWithConfirm("reject")}><X className="h-4 w-4"/> Reject</Button>
-              </Can>
-              <Can do="po.approve">
-                <Button disabled={busy} onClick={() => void decideWithConfirm("approve")} className={TONE_APPROVE}><Check className="h-4 w-4"/> Approve</Button>
-              </Can>
+              )}
+              {(can("po.approve") || isAdmin) && (
+                <Button disabled={busy} onClick={() => void decideWithConfirm("approve")} className={TONE_APPROVE}><Check className="h-4 w-4"/> {isAdmin && !po.data.awaiting_me ? "Approve (Admin Override)" : "Approve"}</Button>
+              )}
             </div>
           </div>
         </div>

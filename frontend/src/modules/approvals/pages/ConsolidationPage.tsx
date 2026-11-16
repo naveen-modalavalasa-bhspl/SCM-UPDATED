@@ -11,9 +11,10 @@ import {
 } from "@/shared/components";
 import { splitQuantity } from "@/shared/quantity";
 import { approvalsApi } from "../api";
-import { useConsolidationDecisions, type ItemDecision } from "../consolidationDecisions";
+import { useConsolidationDecisions, type CycleDecisions } from "../consolidationDecisions";
+import { heldIndentIds, resolveItem } from "../consolidationLines";
 import type {
-  ConsolidatedItem, ConsolidatedItemAllocation, ConsolidationApprovalResult,
+  ConsolidatedItem, ConsolidationApprovalResult,
   ConsolidationBatch, ConsolidationDimension, ConsolidationFilterOptions,
   ConsolidationQuery,
 } from "../types";
@@ -36,74 +37,10 @@ export const formatQty = (value: number) => {
  *  where the module has always imported it from. */
 export { splitQuantity };
 
-/** Exclusion is by exact indent number — the list comes from picking real indents off
- *  the item's own page, never from free text that could half-match two of them.
- *
- *  `is_excluded` is the SERVER's answer: a rung below already dropped this line and it
- *  stays dropped, whatever this approver's draft says. Without it the same line was
- *  offered an Exclude button at every rung (BUG_SCM_0008) and came up as an ordinary
- *  zero once excluded (BUG_SCM_0007). */
-export const isExcluded = (allocation: ConsolidatedItemAllocation, excluded: string[]) =>
-  Boolean(allocation.is_excluded)
-  || excluded.includes(allocation.indent_no.toUpperCase());
-
-/** What one item row currently resolves to: the approver's total, who is out, and
- *  the per-indent split of what is left. Pure — the screen recomputes it on every
- *  keystroke rather than storing a split that could go stale against its inputs. */
-export function resolveItem(item: ConsolidatedItem, decision: ItemDecision | undefined) {
-  const allocations = item.allocations ?? [];
-  const excluded = (decision?.excluded ?? []).map((no) => no.toUpperCase());
-  const included = allocations.filter((a) => !isExcluded(a, excluded));
-  const droppedCount = allocations.length - included.length;
-
-  /** The most one indent may be passed on this item: what the rung below approved for
-   *  it, falling back to the request at the first rung. Never its share of somebody
-   *  else's ask. */
-  const capOf = (allocation: ConsolidatedItemAllocation) =>
-    Number.isFinite(allocation.ceiling_quantity)
-      ? allocation.ceiling_quantity
-      : allocation.requested_quantity;
-
-  const typed = decision?.approved?.trim();
-  const parsed = typed === undefined || typed === "" ? null : Number(typed);
-  const invalid = parsed !== null && (Number.isNaN(parsed) || parsed < 0);
-  // The batch total is worth no more than the ceilings still in play. Excluding an
-  // indent takes its ceiling out with it — offering the item's full total afterwards
-  // proposed quantities nobody was entitled to receive.
-  const ceiling = included.length === allocations.length
-    ? item.total_ceiling_quantity
-    : included.reduce((sum, a) => sum + capOf(a), 0);
-  const over = parsed !== null && !invalid && parsed > ceiling;
-  // Stepped to the unit BEFORE anything is shown or split. UOM-BOX is a countable
-  // unit, so 1.3 boxes is not a quantity — but the box only refused to step the
-  // arrows, and a typed 1.3 sailed through: the header read "1.3 going out", the
-  // split handed 1 to one indent and 0 to the rest, and 0.3 of a box existed
-  // nowhere. Down, like every other quantity door in the system, so a number that
-  // has cleared the ceiling can never grow back over it.
-  const stepped = (value: number) => {
-    const places = item.uom_decimals ?? 3;
-    const factor = 10 ** places;
-    return Math.floor(value * factor) / factor;
-  };
-  const total = parsed === null || invalid
-    ? stepped(ceiling)
-    : stepped(Math.min(parsed, ceiling));
-  /** The typed number carried more precision than the unit has. The screen says so
-   *  rather than silently showing a different figure than the one keyed in. */
-  const rounded = parsed !== null && !invalid && !over && stepped(parsed) !== parsed;
-
-  const shares = splitQuantity(
-    total,
-    included.map((a) => a.requested_quantity),
-    included.map(capOf),
-    item.uom_decimals,
-  );
-  const split = new Map<number, number>(allocations.map((a) => [a.line_id, 0]));
-  included.forEach((a, index) => split.set(a.line_id, shares[index]));
-
-  return { allocations, included, droppedCount, invalid, over, rounded,
-           ceiling, total, split };
-}
+/** What an item resolves to — each indent's own quantity, who is out, the totals — is
+ *  worked out in `../consolidationLines`, one pure place that the item page, this table
+ *  and Approve all all read. The approver now decides at the indent, so nothing here
+ *  shares a batch total out in proportion any more. */
 
 /** The filter bar, in display order. `param` is the query param the backend reads;
  *  `dimension` is the key its dropdown values arrive under.
@@ -290,7 +227,7 @@ function FilterBar({ options, value, onChange, onClear, search, onSearch }: {
  */
 function ItemList({ items, decisions, onOpen }: {
   items: ConsolidatedItem[];
-  decisions: Record<string, ItemDecision>;
+  decisions: CycleDecisions;
   onOpen: (item: ConsolidatedItem) => void;
 }) {
   const name = (item: ConsolidatedItem) => item.item_name ?? item.item_code ?? `Item ${item.item_id}`;
@@ -299,7 +236,7 @@ function ItemList({ items, decisions, onOpen }: {
    *  untouched default — an approver scanning the list needs to see at a glance
    *  which items they have already been into. */
   const state = (item: ConsolidatedItem) => {
-    const { total, ceiling, droppedCount, invalid, over } = resolveItem(item, decisions[String(item.item_id)]);
+    const { total, ceiling, droppedCount, invalid, over } = resolveItem(item, decisions);
     return { total, ceiling, droppedCount, invalid, over, edited: total !== ceiling || droppedCount > 0 };
   };
 
@@ -616,10 +553,10 @@ export function BatchCard({ batch, onBack }: {
   );
   const arrived = batch.indents.filter((row) => !frozenIds.has(row.id));
 
-  // A bad number anywhere in the batch blocks the whole approval: the split it feeds
-  // would be wrong for every indent holding that item, not just one.
+  // A bad number on any line blocks the whole approval, so nothing is sent while one
+  // box still reads out of range. The server judges every quantity again regardless.
   const blocked = batch.consolidated_items.some((item) => {
-    const { invalid, over } = resolveItem(item, decisions[String(item.item_id)]);
+    const { invalid, over } = resolveItem(item, decisions);
     return invalid || over;
   });
 
@@ -633,18 +570,10 @@ export function BatchCard({ batch, onBack }: {
    *
    *  Excluded on SOME items only is not a hold: those lines go out at zero and the
    *  rest at their share, which is an ordinary partial approval. */
-  const held = useMemo(() => {
-    const seen = new Map<number, boolean>();
-    for (const item of batch.consolidated_items) {
-      const excluded = (decisions[String(item.item_id)]?.excluded ?? [])
-        .map((no) => no.toUpperCase());
-      for (const allocation of item.allocations ?? []) {
-        const out = isExcluded(allocation, excluded);
-        seen.set(allocation.indent_id, (seen.get(allocation.indent_id) ?? true) && out);
-      }
-    }
-    return new Set([...seen].filter(([, all]) => all).map(([id]) => id));
-  }, [batch.consolidated_items, decisions]);
+  const held = useMemo(
+    () => heldIndentIds(batch.consolidated_items, decisions),
+    [batch.consolidated_items, decisions],
+  );
 
   /** How many indents Approve all actually sends — the button, the progress bar and
    *  the request all count the same set, so a held indent never shows up as one that
@@ -654,22 +583,18 @@ export function BatchCard({ batch, onBack }: {
 
   const approve = useMutation({
     mutationFn: async () => {
-      // Every item's split, flattened. A line nobody edited still ships its share,
-      // because the split of an untouched item is simply its full ceiling.
-      const lines = batch.consolidated_items.flatMap((item) => {
-        const { split } = resolveItem(item, decisions[String(item.item_id)]);
-        const dropped = (decisions[String(item.item_id)]?.excluded ?? [])
-          .map((no) => no.toUpperCase());
-        return (item.allocations ?? []).map((allocation) => ({
-          indent_id: allocation.indent_id,
-          line_id: allocation.line_id,
-          approved_quantity: split.get(allocation.line_id) ?? 0,
+      // Every line, flattened, each at the quantity its own box holds. A line nobody
+      // edited still ships its full ceiling.
+      const lines = batch.consolidated_items.flatMap((item) =>
+        resolveItem(item, decisions).lines.map((line) => ({
+          indent_id: line.allocation.indent_id,
+          line_id: line.allocation.line_id,
+          approved_quantity: line.value,
           // Said out loud, not left to be inferred from the zero: a line dropped from
           // the batch and a line approved at nothing are the same number and mean
           // completely different things (BUG_SCM_0004).
-          excluded: isExcluded(allocation, dropped),
-        }));
-      });
+          excluded: line.excluded,
+        })));
       // The frozen set, never whatever the server holds at click time: an indent that
       // joined the month while this screen was open has not been read by anybody here.
       const indentIds = batch.indents

@@ -65,4 +65,23 @@ describe("approvals api", () => {
       2, "/api/indents/12/return-for-correction", { comments: "correct the item" },
     );
   });
+
+  it("sends the chosen step when an indent is returned to an earlier one", async () => {
+    await approvalsApi.returnIndent(12, "start again", 0);
+    await approvalsApi.returnIndent(12, "fix the item", 2);
+    // Step 0 is the requester. It is a real answer, so it must be sent, not dropped.
+    expect(apiMock.post).toHaveBeenNthCalledWith(
+      1, "/api/indents/12/return-for-correction", { comments: "start again", target_sequence: 0 },
+    );
+    expect(apiMock.post).toHaveBeenNthCalledWith(
+      2, "/api/indents/12/return-for-correction", { comments: "fix the item", target_sequence: 2 },
+    );
+  });
+
+  it("asks the indents module which earlier steps a return can go to", async () => {
+    apiMock.get.mockResolvedValueOnce({ data: [{ sequence: 0, is_requester: true, is_default: false }] });
+    const targets = await approvalsApi.returnTargets(12);
+    expect(apiMock.get).toHaveBeenCalledWith("/api/indents/12/return-targets");
+    expect(targets).toEqual([{ sequence: 0, is_requester: true, is_default: false }]);
+  });
 });

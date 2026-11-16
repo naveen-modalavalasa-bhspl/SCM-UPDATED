@@ -90,6 +90,7 @@ AUDIT_ENTITY = "lgs_transport_requests"
 ZERO = Decimal("0")
 LOOKUP_LIMIT = 50
 MANUAL_COURIER_SETTING = "logistics.manual_courier_dispatch"
+THIRD_PARTY_VENDOR_SETTING = "logistics.send_third_party_to_vendor"
 
 
 def _d(value) -> Decimal:
@@ -113,8 +114,18 @@ async def manual_courier_dispatch_enabled(db: AsyncSession) -> bool:
     return (raw or "").strip().lower() in {"true", "1", "yes", "on"}
 
 
+async def send_third_party_to_vendor_enabled(db: AsyncSession) -> bool:
+    """Whether Third-party logistics sends tenders/quote requests to vendor portals.
+
+    When False, third-party logistics is handled directly at the dispatch desk
+    without sending quote requests to vendors.
+    """
+    raw = await get_setting(db, THIRD_PARTY_VENDOR_SETTING, "false")
+    return (raw or "").strip().lower() in {"true", "1", "yes", "on"}
+
+
 async def dispatch_policy(db: AsyncSession) -> dict:
-    """Everything the dispatch form needs in order to draw the Courier step.
+    """Everything the dispatch form needs in order to draw the Courier & Third-party step.
 
     Which form (the vendor dropdown or the typed name), and — when it is the typed
     one — exactly which boxes the service will hold the press back for. Served rather
@@ -129,6 +140,7 @@ async def dispatch_policy(db: AsyncSession) -> dict:
         # Either one satisfies it. A list, not a field, because that is the shape of
         # the rule — see MANUAL_COURIER_TRACKING_FIELDS.
         "manual_courier_tracking_fields": list(MANUAL_COURIER_TRACKING_FIELDS),
+        "send_third_party_to_vendor": await send_third_party_to_vendor_enabled(db),
     }
 
 
@@ -145,6 +157,64 @@ def _and_list(names: list[str]) -> str:
 # --------------------------------------------------------------------------- #
 #  Reads
 # --------------------------------------------------------------------------- #
+
+async def _decorate_tr_missing_fields(db: AsyncSession, doc: TransportRequest) -> None:
+    import json
+    if not (doc.from_warehouse_address or "").strip() and doc.from_warehouse_id:
+        from app.shared.models.warehouse import Warehouse
+        from app.platform.hcm.models import HcmOffice
+        wh = await db.get(Warehouse, doc.from_warehouse_id)
+        if wh:
+            if wh.address and wh.address.strip():
+                doc.from_warehouse_address = wh.address.strip()
+            elif wh.office_id:
+                office = await db.get(HcmOffice, wh.office_id)
+                if office:
+                    if office.address and office.address.strip():
+                        doc.from_warehouse_address = office.address.strip()
+                    else:
+                        parts = []
+                        if office.raw:
+                            try:
+                                raw_data = json.loads(office.raw) if isinstance(office.raw, str) else office.raw
+                                if isinstance(raw_data, dict):
+                                    for k in ("location", "mandal_name", "district_name", "state_name"):
+                                        v = raw_data.get(k)
+                                        if v and str(v).strip() and str(v).strip() not in parts:
+                                            parts.append(str(v).strip())
+                            except Exception:
+                                pass
+                        if not parts:
+                            if office.city and office.city.strip():
+                                parts.append(office.city.strip())
+                            if office.state and office.state.strip():
+                                parts.append(office.state.strip())
+                        if parts:
+                            doc.from_warehouse_address = ", ".join(parts)
+            if not doc.from_warehouse_address and wh.name:
+                doc.from_warehouse_address = wh.name
+
+    if (not (doc.contact_person or "").strip() or not (doc.contact_phone or "").strip()) and doc.dispatch_id:
+        from app.modules.warehouse.models import Dispatch
+        disp = await db.get(Dispatch, doc.dispatch_id)
+        if disp:
+            if not (doc.contact_person or "").strip() and disp.contact_person:
+                doc.contact_person = disp.contact_person
+            if not (doc.contact_phone or "").strip() and disp.contact_phone:
+                doc.contact_phone = disp.contact_phone
+
+    if (not (doc.contact_person or "").strip() or not (doc.contact_phone or "").strip()) and doc.indent_id:
+        from app.modules.indents.models import Indent
+        from app.platform.hcm.models import HcmEmployee
+        indent = await db.get(Indent, doc.indent_id)
+        if indent and indent.created_by_id:
+            creator = await db.get(HcmEmployee, indent.created_by_id)
+            if creator:
+                if not (doc.contact_person or "").strip() and creator.full_name:
+                    doc.contact_person = creator.full_name.strip()
+                if not (doc.contact_phone or "").strip() and creator.mobile:
+                    doc.contact_phone = creator.mobile.strip()
+
 
 async def get_tr(db: AsyncSession, tr_id: int, user=None) -> TransportRequest:
     """Load one shipment, applying the same scope as the transport register.
@@ -163,6 +233,7 @@ async def get_tr(db: AsyncSession, tr_id: int, user=None) -> TransportRequest:
     if doc is None:
         raise NotFoundError(f"Transport request {tr_id} not found")
     await _attach_package_quantities(db, doc)
+    await _decorate_tr_missing_fields(db, doc)
     return doc
 
 
@@ -219,7 +290,7 @@ async def _attach_package_quantities(
 
     by_item: dict[tuple[str, object], list[dict]] = {}
     for row in rows:
-        key = _package_quantity_key(SimpleNamespace(**row))
+        key = _package_quantity_key(SimpleNamespace(**{str(k): v for k, v in row.items()}))
         if key is None:
             continue
         by_item.setdefault(key, []).append({
@@ -279,7 +350,8 @@ async def _tr_scope(db: AsyncSession, user):
 
 
 async def _tr_readable(db: AsyncSession, user):
-    """What this login may READ on the register — the row scope, plus every INBOUND leg.
+    """What this login may READ on the register — the row scope, plus every INBOUND leg,
+    plus any shipment awaiting this user's approval in the workflow, plus workflow admins.
 
     ONE definition, because the three reads that used to carve the return out on their
     own had drifted into three different answers. `get_tr` exempted it, `_summary_scope`
@@ -295,8 +367,27 @@ async def _tr_readable(db: AsyncSession, user):
     inbound leg from a field warehouse is every logistics viewer's business. The scope
     still applies in full to outward legs.
     """
-    return or_(await _tr_scope(db, user),
-               TransportRequest.source_type.in_(INBOUND_SOURCES))
+    from app.platform.workflow.engine import is_workflow_admin
+    if await is_workflow_admin(db, user):
+        return literal(True)
+
+    conditions = [
+        await _tr_scope(db, user),
+        TransportRequest.source_type.in_(INBOUND_SOURCES),
+    ]
+
+    if user and getattr(user, "id", None):
+        from app.platform.workflow.models import Pending
+        conditions.append(
+            TransportRequest.id.in_(
+                select(Pending.doc_id).where(
+                    Pending.doc_type == "TRANSPORT_REQUEST",
+                    Pending.approver_id == user.id,
+                )
+            )
+        )
+
+    return or_(*conditions)
 
 
 # The paperwork that travels WITH the load, as opposed to the receipt evidence above,
@@ -480,7 +571,8 @@ def mode_suggestion(distance_km: float | None = None,
     return suggest_mode(distance_km, weight_kg, packages)
 
 
-def flow_catalogue(mode: str | None = None, *, manual_courier: bool = False) -> list[dict]:
+def flow_catalogue(mode: str | None = None, *, manual_courier: bool = False,
+                   send_third_party_to_vendor: bool = True) -> list[dict]:
     """The stepper, served rather than drawn from a constant in the screen.
 
     A tendered shipment has two stages the others do not. Letting the frontend decide
@@ -495,7 +587,9 @@ def flow_catalogue(mode: str | None = None, *, manual_courier: bool = False) -> 
         # to say, and the award half of "Provider accepts" is no different.
         "pending_help": stage.pending_help,
         "statuses": list(stage.statuses),
-    } for stage in flow_stages(mode, manual_courier=manual_courier)]
+    } for stage in flow_stages(
+        mode, manual_courier=manual_courier,
+        send_third_party_to_vendor=send_third_party_to_vendor)]
 
 
 #: The queues the logistics desk actually works, in the order the flow runs. Served
@@ -1558,6 +1652,69 @@ async def create_tr(db: AsyncSession, data, user) -> TransportRequest:
     if is_inbound(data.source_type) and not (data.to_location_name or "").strip():
         raise ValidationError("Name the warehouse this return is coming back to")
 
+    # SCM_0079: Auto-resolve from_warehouse_address and contact details if missing
+    import json
+    from_wh_address = getattr(data, "from_warehouse_address", None)
+    contact_p = data.contact_person
+    contact_ph = data.contact_phone
+
+    if data.dispatch_id and (not from_wh_address or not contact_p or not contact_ph):
+        from app.modules.warehouse.models import Dispatch
+        disp = await db.get(Dispatch, data.dispatch_id)
+        if disp:
+            if not from_wh_address and disp.warehouse_address:
+                from_wh_address = disp.warehouse_address
+            if not contact_p and disp.contact_person:
+                contact_p = disp.contact_person
+            if not contact_ph and disp.contact_phone:
+                contact_ph = disp.contact_phone
+
+    if not from_wh_address and data.from_warehouse_id:
+        from app.shared.models.warehouse import Warehouse
+        from app.platform.hcm.models import HcmOffice
+        wh = await db.get(Warehouse, data.from_warehouse_id)
+        if wh:
+            if wh.address and wh.address.strip():
+                from_wh_address = wh.address.strip()
+            elif wh.office_id:
+                office = await db.get(HcmOffice, wh.office_id)
+                if office:
+                    if office.address and office.address.strip():
+                        from_wh_address = office.address.strip()
+                    else:
+                        parts = []
+                        if office.raw:
+                            try:
+                                raw_data = json.loads(office.raw) if isinstance(office.raw, str) else office.raw
+                                if isinstance(raw_data, dict):
+                                    for k in ("location", "mandal_name", "district_name", "state_name"):
+                                        v = raw_data.get(k)
+                                        if v and str(v).strip() and str(v).strip() not in parts:
+                                            parts.append(str(v).strip())
+                            except Exception:
+                                pass
+                        if not parts:
+                            if office.city and office.city.strip():
+                                parts.append(office.city.strip())
+                            if office.state and office.state.strip():
+                                parts.append(office.state.strip())
+                        if parts:
+                            from_wh_address = ", ".join(parts)
+            if not from_wh_address and wh.name:
+                from_wh_address = wh.name
+
+    if (not contact_p or not contact_ph) and data.indent_id:
+        from app.modules.indents.models import Indent
+        from app.platform.hcm.models import HcmEmployee
+        indent = await db.get(Indent, data.indent_id)
+        if indent and indent.created_by_id:
+            creator = await db.get(HcmEmployee, indent.created_by_id)
+            if creator:
+                if not contact_p and creator.full_name:
+                    contact_p = creator.full_name.strip()
+                if not contact_ph and creator.mobile:
+                    contact_ph = creator.mobile.strip()
+
     doc = TransportRequest(
         # Same project the shipment is filed under, below.
         tr_no=await next_number(db, DocType.TRANSPORT_REQUEST.value.lower(),
@@ -1576,9 +1733,10 @@ async def create_tr(db: AsyncSession, data, user) -> TransportRequest:
         indent_id=data.indent_id, indent_no=data.indent_no,
         from_warehouse_id=data.from_warehouse_id,
         from_warehouse_name=data.from_warehouse_name,
+        from_warehouse_address=from_wh_address,
         to_location_name=data.to_location_name,
         delivery_address=data.delivery_address,
-        contact_person=data.contact_person, contact_phone=data.contact_phone,
+        contact_person=contact_p, contact_phone=contact_ph,
         distance_km=data.distance_km,
         project_id=data.project_id, project_name=data.project_name,
         expected_delivery=data.expected_delivery, remarks=data.remarks,
@@ -1706,9 +1864,15 @@ async def dispatch_consignment(db: AsyncSession, data, user) -> TransportRequest
         mode == TransportMode.COURIER.value
         and await manual_courier_dispatch_enabled(db)
     )
+    send_third_party_to_vendor = await send_third_party_to_vendor_enabled(db)
     # Whether the provider gets to answer with a price. Courier and third-party both
-    # use the tender path now; only a manual courier has no provider login to ask.
-    tendered = asks_provider_for_price(mode, manual_courier=manual_courier)
+    # use the tender path when configured; only a manual courier or direct third party
+    # has no provider quotation round.
+    tendered = asks_provider_for_price(
+        mode,
+        manual_courier=manual_courier,
+        send_third_party_to_vendor=send_third_party_to_vendor,
+    )
     manual_courier_name = (getattr(data, "manual_courier_name", None) or "").strip()
     if manual_courier:
         if chosen:
@@ -1727,12 +1891,11 @@ async def dispatch_consignment(db: AsyncSession, data, user) -> TransportRequest
     if rule.needs_carrier and not chosen and not manual_courier:
         raise ValidationError(
             "Choose the logistics provider(s) this consignment goes with")
-    # A booking is made with ONE provider. Courier and third-party are tenders, so they
-    # can name several; the desk-settled modes cannot.
+    # A booking is made with ONE provider. A tender can name several; the desk-settled modes cannot.
     if not tendered and len(chosen) > 1:
         raise ValidationError(
             f"A {rule.label.lower()} booking goes with one provider. "
-            "Choose third-party to send the same job to several and compare.")
+            "Choose third-party with vendor dispatch enabled to send the same job to several and compare.")
 
     method = getattr(data, "evaluation_method", None)
     if method and not evaluation.is_valid(method):
@@ -1813,12 +1976,12 @@ async def dispatch_consignment(db: AsyncSession, data, user) -> TransportRequest
     # project ladder was set up; the engine's normal fallback remains the authority on
     # who approves.  All other modes retain their existing no-ladder behaviour.
     if configured is None and not manual_courier:
-        _advance_after_approval(doc)
+        _advance_after_approval(doc, send_third_party_to_vendor=send_third_party_to_vendor)
         summary = settled_summary
         # "Confirm dispatch" on a settled mode is the load LEAVING, not a booking to
         # release on a second screen: the gate pass, the docket and the driver are all
         # on the form that was just pressed. `release_now` says so, and only a mode
-        # that needs no tender can be released here — a THIRD_PARTY job has no carrier
+        # that needs no tender can be released here — a tendered job has no carrier
         # yet, and READY is the earliest it can be one.
         if getattr(data, "release_now", False) and doc.status == TransportStatus.READY.value:
             await _release(db, doc, data, user)
@@ -1831,7 +1994,7 @@ async def dispatch_consignment(db: AsyncSession, data, user) -> TransportRequest
         # Reading the instance rather than assuming it is pending is what stops the
         # request standing still with no one holding it — same rule as `submit_tr`.
         if instance.status == InstanceStatus.APPROVED.value:
-            _advance_after_approval(doc)
+            _advance_after_approval(doc, send_third_party_to_vendor=send_third_party_to_vendor)
             summary = settled_summary
         else:
             doc.status = TransportStatus.PENDING_APPROVAL.value
@@ -1899,6 +2062,7 @@ async def dispatch_leg(db: AsyncSession, tr_id: int, data, user) -> TransportReq
     _check_mode_fields(doc, at_submit=True)
 
     manual_courier = _is_manual_courier_row(doc)
+    send_third_party_to_vendor = await send_third_party_to_vendor_enabled(db)
     doc.requested_position_id = (doc.requested_position_id
                                  or getattr(user, "active_position_id", None))
     raiser_role_id = await ladder.role_of_position(db, doc.requested_position_id)
@@ -2092,7 +2256,8 @@ async def update_tr(db: AsyncSession, tr_id: int, data, user) -> TransportReques
     for field in ("tr_date", "source_type", "source_id", "source_no", "issue_id",
                   "dispatch_id", "consignment_no",
                   "indent_id", "indent_no", "from_warehouse_id",
-                  "from_warehouse_name", "to_location_name", "delivery_address",
+                  "from_warehouse_name", "from_warehouse_address",
+                  "to_location_name", "delivery_address",
                   "contact_person", "contact_phone", "distance_km", "project_id",
                   "project_name", "expected_delivery", "remarks", "vehicle_number",
                   "driver_name", "driver_phone",
@@ -2112,7 +2277,12 @@ async def update_tr(db: AsyncSession, tr_id: int, data, user) -> TransportReques
         # here: a courier with a vendor account is sent for a price, so an edit that
         # re-picks the provider must re-ask rather than quietly booking the leg and
         # walking it on to AWAITING_CARRIER with no price on it.
-        tendered = asks_provider_for_price(doc.mode, manual_courier=manual_courier)
+        send_third_party_to_vendor = await send_third_party_to_vendor_enabled(db)
+        tendered = asks_provider_for_price(
+            doc.mode,
+            manual_courier=manual_courier,
+            send_third_party_to_vendor=send_third_party_to_vendor,
+        )
         if manual_courier:
             if chosen:
                 raise ValidationError(
@@ -2176,7 +2346,12 @@ async def update_tr(db: AsyncSession, tr_id: int, data, user) -> TransportReques
                 if workflow_status not in {
                         TransportStatus.DRAFT.value,
                         TransportStatus.PENDING_APPROVAL.value}:
-                    doc.status = TransportStatus.AWAITING_CARRIER.value
+                    is_third_party_desk = (
+                        not send_third_party_to_vendor
+                        and doc.mode == TransportMode.THIRD_PARTY.value
+                    )
+                    doc.status = (TransportStatus.READY.value if is_third_party_desk
+                                  else TransportStatus.AWAITING_CARRIER.value)
         elif not manual_courier and mode_changed:
             doc.quotes.clear()
             doc.awarded_quote_id = None
@@ -2235,7 +2410,8 @@ async def submit_tr(db: AsyncSession, tr_id: int, user) -> TransportRequest:
     # Reading it rather than assuming PENDING_APPROVAL is what stops the request
     # standing still with nobody holding it.
     if instance.status == InstanceStatus.APPROVED.value:
-        _advance_after_approval(doc)
+        send_third_party_to_vendor = await send_third_party_to_vendor_enabled(db)
+        _advance_after_approval(doc, send_third_party_to_vendor=send_third_party_to_vendor)
 
     await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.tr_no,
                       action=AuditAction.UPDATE, actor=user,
@@ -2247,7 +2423,8 @@ async def submit_tr(db: AsyncSession, tr_id: int, user) -> TransportRequest:
     return doc
 
 
-def _advance_after_approval(doc: TransportRequest) -> None:
+def _advance_after_approval(doc: TransportRequest, *,
+                            send_third_party_to_vendor: bool = False) -> None:
     """Where an approved request goes next.
 
     A shipment somebody outside still owes an answer on goes out to every invited
@@ -2261,7 +2438,12 @@ def _advance_after_approval(doc: TransportRequest) -> None:
     details were entered by the desk.
     """
     rule = mode_rule(doc.mode)
+    is_third_party_desk = (
+        not send_third_party_to_vendor
+        and doc.mode == TransportMode.THIRD_PARTY.value
+    )
     if (rule.needs_quotes and not _is_manual_courier_row(doc)
+            and not is_third_party_desk
             and doc.carrier_id is not None and not doc.quotes):
         # The general Shipments form still has a single provider picker. Treat that
         # pick as the first invitation, then let Provider Selection add more and award
@@ -2272,7 +2454,8 @@ def _advance_after_approval(doc: TransportRequest) -> None:
         ))
         doc.carrier_id = doc.carrier_name = None
         doc.status = TransportStatus.QUOTING.value
-    elif ((rule.needs_quotes and not _is_manual_courier_row(doc))
+    elif (((rule.needs_quotes and not is_third_party_desk)
+           and not _is_manual_courier_row(doc))
             or _awaiting_price(doc)):
         doc.status = TransportStatus.QUOTING.value
     else:
@@ -2294,7 +2477,8 @@ async def act_on_tr(db: AsyncSession, tr_id: int, action: str, user,
     instance = await engine.act(db, DocType.TRANSPORT_REQUEST.value, doc.id,
                                 action, user, comments, context=_context(doc))
     if instance.status == InstanceStatus.APPROVED.value:
-        _advance_after_approval(doc)
+        send_third_party_to_vendor = await send_third_party_to_vendor_enabled(db)
+        _advance_after_approval(doc, send_third_party_to_vendor=send_third_party_to_vendor)
     elif instance.status == InstanceStatus.REJECTED.value:
         doc.status = TransportStatus.REJECTED.value
 

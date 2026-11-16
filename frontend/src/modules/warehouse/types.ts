@@ -1,3 +1,4 @@
+import type { CombinationValue } from "@/shared/combination";
 /**
  * Warehouse module types.
  *
@@ -10,6 +11,7 @@
  * `uom_code`, every `*_name`), so a list screen renders from one payload and never
  * fans out to fetch a vendor or an item.
  */
+import type { PackEntry, PackEntryIn, PackHierarchy, PackLevel } from "@/shared/packing";
 
 /** The paginated envelope every list endpoint returns. */
 export interface Page<T> {
@@ -127,6 +129,12 @@ export interface UnlocatedStockStatus {
   placed_rows: number;
   placed_qty: number | string;
   placed_units: number;
+  stranded_units?: number;
+  stranded_items?: number;
+  stale_lines?: number;
+  stale_issue_ids?: number[];
+  repointed_lines?: number;
+  code_scope?: string | null;
 }
 
 /** `whs_warehouses`. */
@@ -564,6 +572,12 @@ export interface StorageTypeWrite {
 
 /** `inb_receipts`. `receipt_type` separates a gate entry from a purchase GRN. */
 export interface Receipt {
+  /** Whose paper it is on (2026-11-11); null on one older than organisations. */
+  organization_id?: number | null;
+  organization_name?: string | null;
+  org_department_id?: number | null;
+  org_department_name?: string | null;
+  fiscal_year?: string | null;
   id: number;
   grn_no: string;
   receipt_type: string;
@@ -648,7 +662,7 @@ export interface ReceiptRouting {
 }
 
 /** `inb_receipt_items`. */
-export interface ReceiptItem {
+export interface ReceiptItem extends CombinationValue {
   id: number;
   receipt_id: number;
   line_no: number;
@@ -682,9 +696,18 @@ export interface ReceiptItem {
   remarks?: string | null;
   serial_numbers?: string[] | null;
   imei_numbers?: string[] | null;
+  /** Packing (2026-10-08). `declared_pack_breakdown` is the supplier's despatch
+   *  note — fixed; `pack_breakdown` is what was counted, never over the declared. */
+  despatch_note_item_id?: number | null;
+  pack_hierarchy_id?: number | null;
+  pack_hierarchy_name?: string | null;
+  declared_pack_breakdown?: PackEntry[] | null;
+  declared_pack_text?: string | null;
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
 }
 
-export interface ReceiptItemWrite {
+export interface ReceiptItemWrite extends CombinationValue {
   id?: number;
   po_item_id?: number | null;
   indent_id?: number | null;
@@ -710,9 +733,33 @@ export interface ReceiptItemWrite {
   remarks?: string | null;
   serial_numbers?: string[] | null;
   imei_numbers?: string[] | null;
+  /** Packing (2026-10-08). `declared_pack_breakdown` is the supplier's despatch
+   *  note — fixed; `pack_breakdown` is what was counted, never over the declared. */
+  despatch_note_item_id?: number | null;
+  pack_hierarchy_id?: number | null;
+  pack_hierarchy_name?: string | null;
+  declared_pack_breakdown?: PackEntry[] | null;
+  declared_pack_text?: string | null;
+  pack_breakdown?: PackEntry[] | null;
+  /** CLIENT ONLY (2026-10-27): the packs a line was checked against at the gate when
+   *  no despatch note declared them — kept so re-opening "Check packages" still shows
+   *  the cartons that never arrived. Never read by the API. */
+  expected_pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
+  /** Display only: the buyer's answer when the supplier changed the packing. */
+  pack_change_status?: string | null;
+  ordered_pack_hierarchy_name?: string | null;
+  pack_change_reason?: string | null;
+  pack_change_note?: string | null;
 }
 
 export interface ReceiptWrite {
+  /** Whose paper it is on (2026-11-11); null on one older than organisations. */
+  organization_id?: number | null;
+  organization_name?: string | null;
+  org_department_id?: number | null;
+  org_department_name?: string | null;
+  fiscal_year?: string | null;
   receipt_type: string;
   grn_date: string;
   po_id?: number | null;
@@ -742,6 +789,12 @@ export interface ReceiptWrite {
 
 /** `inb_inspections`. */
 export interface Inspection {
+  /** Copied from its GRN (2026-11-11); null on one older than organisations. */
+  organization_id?: number | null;
+  organization_name?: string | null;
+  org_department_id?: number | null;
+  org_department_name?: string | null;
+  fiscal_year?: string | null;
   id: number;
   inspection_no: string;
   inspection_date: string;
@@ -756,6 +809,13 @@ export interface Inspection {
   total_items: number;
   passed_items: number;
   failed_items: number;
+  /** By QUANTITY, derived on read (SCM_0164 / 0165 / 0166) — see `qcSummary.ts`. */
+  inspected_qty?: number | string | null;
+  accepted_qty?: number | string | null;
+  rejected_qty?: number | string | null;
+  partial_items?: number | null;
+  pending_items?: number | null;
+  pass_rate?: number | null;
   inspector_id?: number | null;
   inspector_name?: string | null;
   remarks?: string | null;
@@ -772,7 +832,7 @@ export interface InspectionParameter {
 }
 
 /** `inb_inspection_items`. */
-export interface InspectionItem {
+export interface InspectionItem extends CombinationValue {
   id: number;
   inspection_id: number;
   receipt_item_id?: number | null;
@@ -791,9 +851,11 @@ export interface InspectionItem {
   remarks?: string | null;
   serial_numbers?: string[] | null;
   imei_numbers?: string[] | null;
+  accepted_pack_breakdown?: PackEntry[] | null;
+  rejected_pack_breakdown?: PackEntry[] | null;
 }
 
-export interface InspectionItemWrite {
+export interface InspectionItemWrite extends CombinationValue {
   id?: number;
   receipt_item_id?: number | null;
   item_id: number;
@@ -813,7 +875,13 @@ export interface InspectionItemWrite {
   rejection_reason?: string | null;
   remarks?: string | null;
   serial_numbers?: string[] | null;
+  /** Issued in packages (2026-10-26): units rejected out of each KEPT package. */
+  pack_rejections?: Record<string, number> | null;
   imei_numbers?: string[] | null;
+  /** Inward QC by the PACK (2026-10-27): of the GRN's counted packs, the ones kept
+   *  and the ones rejected. Both or neither; the server checks they add up. */
+  accepted_pack_breakdown?: PackEntry[] | null;
+  rejected_pack_breakdown?: PackEntry[] | null;
 }
 
 export interface InspectionWrite {
@@ -838,6 +906,13 @@ export interface OutboundInspection {
   total_items: number;
   passed_items: number;
   failed_items: number;
+  /** By QUANTITY, derived on read (SCM_0165) — see `qcSummary.ts`. */
+  inspected_qty?: number | string | null;
+  accepted_qty?: number | string | null;
+  rejected_qty?: number | string | null;
+  partial_items?: number | null;
+  pending_items?: number | null;
+  pass_rate?: number | null;
   inspector_id?: number | null;
   inspector_name?: string | null;
   remarks?: string | null;
@@ -848,7 +923,10 @@ export interface OutboundInspection {
   approved_at?: string | null;
 }
 
-export interface OutboundInspectionItem {
+export interface OutboundInspectionItem extends CombinationValue {
+  /** The packs this quantity travels in, read off the issue line (2026-10-22). */
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
   id: number;
   inspection_id: number;
   issue_item_id?: number | null;
@@ -868,7 +946,9 @@ export interface OutboundInspectionItem {
   serial_numbers?: string[] | null;
 }
 
-export interface OutboundInspectionItemWrite {
+export interface OutboundInspectionItemWrite extends CombinationValue {
+  /** Issued in packages (2026-10-26): units rejected out of each KEPT package. */
+  pack_rejections?: Record<string, number> | null;
   id?: number;
   issue_item_id?: number | null;
   item_id: number;
@@ -896,9 +976,30 @@ export interface OutboundInspectionWrite {
 }
 
 /** `whs_warehouse_items` — one putaway task per received line. */
-export interface Putaway {
+export interface Putaway extends CombinationValue {
+  /** Copied from its GRN (2026-11-11); null on one older than organisations. */
+  organization_id?: number | null;
+  organization_name?: string | null;
+  org_department_id?: number | null;
+  org_department_name?: string | null;
+  fiscal_year?: string | null;
+  /** A Storage container is mapped for the item (2026-10-27); not: the screen warns. */
+  storage_defined?: boolean;
   id: number;
   putaway_no: string;
+  /** Packing (2026-10-08) — served on the single task only. */
+  pack_hierarchy_id?: number | null;
+  pack_hierarchy_name?: string | null;
+  received_pack_breakdown?: PackEntry[] | null;
+  /** Storage containers are mapped for the item (2026-10-23): putaway shelves in
+   *  them, inside the received ladder, and the screen cannot change it. */
+  packing_fixed?: boolean;
+  storage_levels?: number[];
+  received_pack_text?: string | null;
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
+  pack_levels?: PackLevel[];
+  codes_per_pack?: boolean;
   grn_id?: number | null;
   grn_no?: string | null;
   grn_item_id?: number | null;
@@ -1014,6 +1115,8 @@ export interface PutawayCodes {
 export interface PutawayConfirm {
   actual_bin_id: number;
   qty?: number;
+  /** How the goods are shelved, in the receipt's hierarchy (2026-10-08). */
+  pack_breakdown?: PackEntryIn[] | null;
   /** The rung being put away. Omitted falls back to the task's own, then to the item's
    *  default putaway unit — so an untouched screen still measures the load. */
   item_packaging_id?: number | null;
@@ -1102,6 +1205,12 @@ export interface PickingWrite {
 
 /** `out_issues`. `direction` is `OUT` for an issue and `IN` for a return against one. */
 export interface Issue {
+  /** Whose paper it is on (2026-11-09); null on an issue older than organisations. */
+  organization_id?: number | null;
+  organization_name?: string | null;
+  org_department_id?: number | null;
+  org_department_name?: string | null;
+  fiscal_year?: string | null;
   id: number;
   issue_no: string;
   issue_type: string;
@@ -1127,6 +1236,21 @@ export interface Issue {
   /** Service area code of the destination office, resolved from HCM when the issue is
    *  served. Null for offices HCM holds no SAC for. */
   destination_office_sac?: string | null;
+  destination_warehouse_id?: number | null;
+  destination_warehouse_name?: string | null;
+  destination_warehouse_type?: string | null;
+  /** Only an LIP runs a vehicle and carries an SAC; null when the point is unknown. */
+  destination_needs_vehicle_and_sac?: boolean | null;
+  /** The Stock Transfer Order this issue executes (2026-10-29). DIRECT = raised on
+   *  its own; STR = produced by an STR's allocation. Its destination is frozen. */
+  sto_id?: number | null;
+  sto_no?: string | null;
+  sto_status?: string | null;
+  sto_kind?: "DIRECT" | "STR" | null;
+  sto_str_no?: string | null;
+  sto_from_warehouse_name?: string | null;
+  sto_to_warehouse_id?: number | null;
+  sto_to_warehouse_name?: string | null;
   direction: "OUT" | "IN";
   original_issue_id?: number | null;
   original_issue_no?: string | null;
@@ -1134,6 +1258,8 @@ export interface Issue {
    *  screen tells the two apart without asking a second question. */
   parent_issue_id?: number | null;
   parent_issue_no?: string | null;
+  /** Status to show: a split parent closed after its floor issues posted reads ISSUED. */
+  display_status?: string | null;
   floor_location_id?: number | null;
   floor_location_name?: string | null;
   /** Who holds that floor — the in-charge(s) a split piece was handed to. */
@@ -1171,6 +1297,10 @@ export interface Issue {
   /** Only the person an approved issue is with (or someone they report to) may pick
    *  its serials and issue it from stock. The server enforces the same rule. */
   can_issue_from_stock?: boolean;
+  /** A split parent whose floor pieces this login may issue all at once. */
+  can_issue_split?: boolean;
+  /** May swap auto-assigned asset/consumable codes: the issuer, or anyone who approved it. */
+  can_swap_codes?: boolean;
   /** Who submitted it for approval; shown until stock is posted. */
   submitted_by_name?: string | null;
   /**
@@ -1179,14 +1309,18 @@ export interface Issue {
    * unlocks once those 4 are confirmed. Gate the Acknowledge button on this.
    */
   can_acknowledge?: boolean;
-  /** On a split parent: the floor issues carrying its goods. */
+  /** The split family: on a parent its floor issues (`-001`, `-002` …), on a floor
+   *  issue its siblings, itself included. */
   child_issues?: {
     id: number;
     issue_no: string;
     status: IssueStatus;
+    floor_location_id?: number | null;
     floor_location_name?: string | null;
     is_stock_posted: boolean;
     total_qty: number;
+    total_items?: number;
+    in_charge_names?: string[];
   }[];
 }
 
@@ -1210,7 +1344,12 @@ export interface ApprovalEvent {
 }
 
 /** `out_issue_items`. */
-export interface IssueItem {
+export interface IssueItem extends CombinationValue {
+  /** On a SPLIT parent: the floor piece and line that carry this line now (2026-11-11). */
+  piece_issue_id?: number | null;
+  piece_issue_no?: string | null;
+  piece_line_id?: number | null;
+  piece_is_posted?: boolean;
   id: number;
   issue_id: number;
   line_no: number;
@@ -1219,6 +1358,9 @@ export interface IssueItem {
   item_code?: string | null;
   item_name?: string | null;
   uom_code?: string | null;
+  /** How many decimal places this line's unit allows — 0 for a whole-unit UOM.
+   *  Set by `get_issue`; `null` wherever the line was read without it. */
+  qty_decimals?: number | null;
   is_serial_tracked?: boolean;
   is_imei_tracked?: boolean;
   bin_id?: number | null;
@@ -1242,6 +1384,15 @@ export interface IssueItem {
   tracking_type?: TrackingType | null;
   /** The reserved units, stated in that same currency. */
   unit_keys?: string[] | null;
+  /** How many identifiers the line must name, when it is not one per unit — an item
+   *  issued in a container names one code per box (2026-10-24). */
+  codes_needed?: number | null;
+  /** Issued in a container (2026-10-26): the line names BOXES, one code per box. */
+  issue_in_boxes?: boolean;
+  /** Each box the line holds — what it takes of it, what the box holds, part or whole. */
+  box_codes?: IssueBox[] | null;
+  /** Set when the item's Issue container changed after its boxes were held. */
+  container_note?: string | null;
   /** Whether the item has identified units in stock at all. */
   has_units?: boolean;
   /**
@@ -1250,6 +1401,15 @@ export interface IssueItem {
    * cannot serve has to be visible while it is still editable.
    */
   units_available?: number | null;
+  /** The item's `requires_qi`: this line goes on the outward QC sheet. A line that
+   *  does not goes to logistics at its issued quantity. */
+  requires_qc?: boolean;
+  /** Packing (2026-10-08). */
+  pack_hierarchy_id?: number | null;
+  pack_hierarchy_name?: string | null;
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
+  break_bulk?: boolean;
 }
 
 export type UnitMode = "SERIAL" | "IMEI" | "CODE";
@@ -1270,7 +1430,7 @@ export interface TrackingTypeMeta {
 
 /** One (batch, bin) an issue line can draw from, and what it holds. The unit of a
  *  split: a quantity larger than any single source becomes several of these. */
-export interface IssueStockSource {
+export interface IssueStockSource extends CombinationValue {
   item_id: number;
   bin_id?: number | null;
   bin_code?: string | null;
@@ -1292,6 +1452,9 @@ export interface IssueStockSource {
    *  exactly what was reserved for it sees `available_qty` at zero over goods that
    *  are on the shelf and spoken for by itself. */
   own_reserved_qty: number;
+  /** What THIS direct issue reserved for itself when saved. Drawable by it, but not an
+   *  allocation — never read as one. */
+  issue_hold_qty?: number;
   total_qty: number;
   /** `available_qty + own_reserved_qty` — what a line here may actually take. */
   drawable_qty: number;
@@ -1315,6 +1478,8 @@ export interface IssueStockSource {
    *  FEFO swap past the same-day rule: an allocated batch with no codes may give way
    *  to the oldest batch that has them. */
   has_unit_codes?: boolean;
+  /** Set aside for other indents here — tradeable on save. */
+  other_indent_qty?: number | string;
 }
 
 /**
@@ -1336,20 +1501,50 @@ export interface UnitSupply {
   /** Counted only as far as `need + 1`, so a figure equal to that means "at least
    *  that many". `null` is "no answer" — never draw it as a shortfall. */
   available: number | null;
+  /** Same batch anywhere at this point — "same batch, other bay". */
+  batch_available?: number | null;
+  /** Any batch at this point — "whole point". */
+  point_available?: number | null;
 }
 
-export interface IssueItemWrite {
+/** Bay vs batch vs point code counts behind the picker's scope switch. */
+export interface SerialScopeCounts {
+  item_id: number;
+  exact: number | null;
+  batch: number | null;
+  point: number | null;
+  has_units: boolean;
+}
+
+export type CodeScopeLevel = "exact" | "batch" | "point";
+
+export interface IssueItemWrite extends CombinationValue {
   id?: number;
   indent_item_id?: number | null;
   item_id: number;
   item_code?: string | null;
   item_name?: string | null;
+  /** How many decimal places this item's unit allows — 0 for a whole-unit UOM
+   *  (Nos, Box…). Carried so the quantity inputs can refuse a typed fraction
+   *  before save (SCM_0080); stripped before the write. */
+  qty_decimals?: number | null;
   is_serial_tracked?: boolean;
   unit_mode?: UnitMode | null;
   tracking_type?: TrackingType | null;
   unit_keys?: string[] | null;
   has_units?: boolean;
   units_available?: number | null;
+  /** How many identifiers the line must name, when it is not one per unit — an item
+   *  issued in a container names one code per box (2026-10-24). */
+  codes_needed?: number | null;
+  /** Issued in a container (2026-10-26): the line names BOXES, one code per box. */
+  issue_in_boxes?: boolean;
+  /** Each box the line holds — what it takes of it, what the box holds, part or whole. */
+  box_codes?: IssueBox[] | null;
+  /** Set when the item's Issue container changed after its boxes were held. */
+  container_note?: string | null;
+  /** The issued quantity `codes_needed` was served for; a changed quantity drops it. */
+  codes_needed_at?: number | null;
   // Carried on the line so the form knows whether to ask for a batch. Set from the
   // chosen item, alongside is_serial_tracked, when the item is picked.
   is_batch_tracked?: boolean;
@@ -1367,6 +1562,11 @@ export interface IssueItemWrite {
   remarks?: string | null;
   serial_numbers?: string[] | null;
   imei_numbers?: string[] | null;
+  /** Issue in packs (2026-10-08): the packs set the issue qty. */
+  pack_hierarchy_id?: number | null;
+  pack_breakdown?: PackEntry[] | null;
+  /** Open a coded pack to give part of it — needs `issue.break_bulk`. */
+  break_bulk?: boolean;
 }
 
 export interface StockMovement {
@@ -1409,6 +1609,12 @@ export interface StockAvailability {
 }
 
 export interface IssueWrite {
+  /** Whose paper it is on (2026-11-09); null on an issue older than organisations. */
+  organization_id?: number | null;
+  organization_name?: string | null;
+  org_department_id?: number | null;
+  org_department_name?: string | null;
+  fiscal_year?: string | null;
   issue_type: string;
   issue_date: string;
   indent_id?: number | null;
@@ -1419,10 +1625,80 @@ export interface IssueWrite {
   vehicle_id?: number | null;
   vehicle_number?: string | null;
   issued_to_id?: number | null;
+  /** The stocking point chosen as the destination; wins over the derived one. */
+  destination_warehouse_id?: number | null;
   direction?: "OUT" | "IN";
   original_issue_id?: number | null;
   remarks?: string | null;
   items: IssueItemWrite[];
+}
+
+/** A point a direct issue can go to (`/options/issue-destinations`). */
+/** What a consignment, dispatch and handover inherit from the issue behind them
+ *  (`/issues/{id}/transfer-context`, `/consignments/{id}/transfer-context`). */
+export interface TransferContext {
+  issue_id: number;
+  issue_no: string;
+  kind: "STR" | "STO" | "INDENT" | "DIRECT";
+  reference_no?: string | null;
+  str_no?: string | null;
+  sto_no?: string | null;
+  indent_no?: string | null;
+  from_warehouse_name?: string | null;
+  destination_warehouse_id?: number | null;
+  destination_warehouse_name?: string | null;
+  destination_office_name?: string | null;
+  sac?: string | null;
+  department_name?: string | null;
+  project_name?: string | null;
+  issued_to_id?: number | null;
+  issued_to_name?: string | null;
+  issued_to_code?: string | null;
+  issued_to_phone?: string | null;
+  vehicle_number?: string | null;
+}
+
+/** An approved STO leaving a point, with the issue that executes it
+ *  (`/options/stos`). Picking one opens that issue — it is never drafted twice. */
+export interface StoIssueOption {
+  id: number;
+  sto_no: string;
+  kind: "DIRECT" | "STR";
+  str_no?: string | null;
+  from_warehouse_id: number;
+  from_warehouse_name?: string | null;
+  to_warehouse_id: number;
+  to_warehouse_name?: string | null;
+  issue_id?: number | null;
+  issue_no?: string | null;
+  issue_status?: string | null;
+  item_count: number;
+  requested_qty: number;
+}
+
+export interface IssueDestinationOption {
+  warehouse_id: number;
+  code?: string | null;
+  name: string;
+  warehouse_type?: string | null;
+  office_id?: number | null;
+  office_name?: string | null;
+  sac?: string | null;
+  vehicle_number?: string | null;
+}
+
+/** A person a direct issue can be issued to (`/options/issue-employees`). */
+export interface IssueEmployeeOption {
+  id: number;
+  code?: string | null;
+  name: string;
+  /** HCM position codes held, primary post first. */
+  position_codes?: string[];
+  position_name?: string | null;
+  office_id?: number | null;
+  office_name?: string | null;
+  department_name?: string | null;
+  project_name?: string | null;
 }
 
 /** `out_dispatches`. */
@@ -1433,6 +1709,9 @@ export interface Dispatch {
   dispatch_date: string;
   warehouse_id: number;
   warehouse_name?: string | null;
+  /** Snapshotted off the warehouse at the moment this consignment was raised
+   *  (SCM_0053) — carried into a transport leg's own from_warehouse_address. */
+  warehouse_address?: string | null;
   to_warehouse_id?: number | null;
   to_warehouse_name?: string | null;
   customer_id?: number | null;
@@ -1494,10 +1773,31 @@ export interface Dispatch {
   sources?: DispatchSource[];
   /** See Issue.can_approve — whose turn it is, not who holds the permission. */
   can_approve?: boolean;
+  /** Each issue line's packs, once per line — rows are one per unit (2026-10-22). */
+  line_packs?: DispatchLinePacks[];
+  /** Carton › box for each package code it carries (2026-10-28). */
+  box_paths?: Record<string, PackPathRef[]>;
+}
+
+export interface DispatchLinePacks {
+  issue_item_id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  batch_no?: string | null;
+  quantity: number;
+  delivered_qty: number;
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
+  delivered_pack_breakdown?: PackEntry[] | null;
+  delivered_pack_text?: string | null;
 }
 
 /** `out_dispatch_items`. */
-export interface DispatchItem {
+export interface DispatchItem extends CombinationValue {
+  /** The package (box / strip) this row carries (2026-10-26). */
+  box_code?: string | null;
   id: number;
   dispatch_id: number;
   line_no: number;
@@ -1548,6 +1848,12 @@ export interface DispatchPackage {
   packed_by_name?: string | null;
   packed_at?: string | null;
   public_scan_token?: string | null;
+  /** The packs this carton holds, per issue line (2026-10-22). */
+  item_packs?: Array<{
+    issue_item_id?: number | null; item_id: number; batch_id?: number | null;
+    quantity: string | number; pack_hierarchy_id?: number | null;
+    pack_breakdown?: PackEntry[] | null; pack_text?: string | null;
+  }> | null;
 }
 
 /** `out_dispatch_events` — the custody/cold-chain trail. */
@@ -1567,7 +1873,7 @@ export interface DispatchEvent {
   recorded_by_name?: string | null;
 }
 
-export interface DispatchItemWrite {
+export interface DispatchItemWrite extends CombinationValue {
   id?: number;
   package_id?: number | null;
   issue_id?: number | null;
@@ -1653,6 +1959,10 @@ export interface ConsignmentPackageItemWrite {
   quantity: number;
   rate?: number | null;
   remarks?: string | null;
+  /** How THIS carton holds the line (2026-10-22): its own share in packs, worked out
+   *  for its quantity and changeable with "Change packing". */
+  pack_hierarchy_id?: number | null;
+  pack_breakdown?: PackEntry[] | null;
 }
 
 export interface ConsignmentPackageWrite {
@@ -1694,6 +2004,12 @@ export interface ConsignmentWrite {
 }
 
 export interface IssueDispatchSourceItem extends DispatchItemWrite {
+  /** Issued in PACKAGES (2026-10-26): each package the line sends on and what it
+   *  carries after outward QC. A carton names which of them it holds. */
+  box_codes?: { code: string; quantity: number; name?: string | null; path?: PackPathRef[] | null }[];
+  /** The packs this quantity travels in, read off the issue line (2026-10-22). */
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
   indent_no?: string | null;
   issue_id?: number | null;
   issue_no?: string | null;
@@ -1711,6 +2027,8 @@ export interface IssueDispatchSourceItem extends DispatchItemWrite {
   is_imei_tracked?: boolean;
   /** What the codes on this row are — serial, IMEI, asset tag or consumable code. */
   tracking_type?: TrackingType | null;
+  /** Went through outward QC (true) or out without needing it (false). */
+  requires_qc?: boolean;
   serial_numbers?: string[];
   /** serial -> IMEI, so a handset's number shows beside the unit it belongs to. */
   imei_by_serial?: Record<string, string>;
@@ -2164,7 +2482,7 @@ export interface PurchaseReturnDossier {
 }
 
 /** `pro_return_items`. */
-export interface PurchaseReturnItem {
+export interface PurchaseReturnItem extends CombinationValue {
   id: number;
   return_id: number;
   line_no: number;
@@ -2281,7 +2599,7 @@ export interface VendorDetail {
   gstin?: string | null;
 }
 
-export interface ItemDetail {
+export interface ItemDetail extends CombinationValue {
   item_id: number;
   item_code?: string | null;
   item_name?: string | null;
@@ -2679,6 +2997,9 @@ export interface DispatchReceiptSource {
 
 export interface ItemOption extends Option {
   uom_code?: string | null;
+  /** How many decimal places this item's unit allows — 0 for a whole-unit UOM
+   *  (Nos, Box…). Lets the issue form refuse a typed fraction before save. */
+  qty_decimals?: number | null;
   is_batch_tracked?: boolean;
   is_serial_tracked?: boolean;
   is_imei_tracked?: boolean;
@@ -2693,7 +3014,7 @@ export interface ItemOption extends Option {
 
 /** An open PO line the GRN screen pulls in when a PO is chosen. */
 /** One line of what the vendor says they sent, ready to become a receipt line. */
-export interface DespatchPrefillLine {
+export interface DespatchPrefillLine extends CombinationValue {
   po_item_id?: number | null;
   item_id: number;
   item_code?: string | null;
@@ -2705,6 +3026,21 @@ export interface DespatchPrefillLine {
   batch_no?: string | null;
   mfg_date?: string | null;
   expiry_date?: string | null;
+  /** Off the item master: what the unit needs at the gate (2026-10-21). */
+  is_asset?: boolean;
+  is_serial_tracked?: boolean;
+  is_imei_tracked?: boolean;
+  /** The supplier's packing, declared and fixed, and the count to start from. */
+  despatch_note_item_id?: number | null;
+  pack_hierarchy_id?: number | null;
+  pack_hierarchy_name?: string | null;
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
+  counted_pack_breakdown?: PackEntry[] | null;
+  pack_change_status?: string | null;
+  ordered_pack_hierarchy_name?: string | null;
+  pack_change_reason?: string | null;
+  pack_change_note?: string | null;
 }
 
 /** A vendor's despatch note in the shape the receipt form needs — the paperwork the
@@ -2726,7 +3062,7 @@ export interface DespatchPrefill {
   lines: DespatchPrefillLine[];
 }
 
-export interface PoLineOption {
+export interface PoLineOption extends CombinationValue {
   po_item_id: number;
   item_id: number;
   item_code?: string | null;
@@ -2736,8 +3072,17 @@ export interface PoLineOption {
   received_qty: number;
   pending_qty: number;
   rate?: number | null;
+  /** Off the item master: what the unit needs at the gate (2026-10-21). */
+  is_asset?: boolean;
+  is_serial_tracked?: boolean;
+  is_imei_tracked?: boolean;
   indent_id?: number | null;
   indent_no?: string | null;
+  /** What is still owed, in whole packs of the order's hierarchy. */
+  pack_hierarchy_id?: number | null;
+  pack_hierarchy_name?: string | null;
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
 }
 
 export interface PoPrefill {
@@ -2751,6 +3096,9 @@ export interface PoPrefill {
    *  one to receive again — offering it prefilled with the whole ordered quantity is
    *  how one order came to be received twice. */
   lines: PoLineOption[];
+  /** The lines with nothing left, so a line added by hand can be named as already
+   *  received before Save. */
+  settled_lines?: PoLineOption[];
   /** How many lines the order has altogether, so an empty `lines` can be told apart
    *  from an empty order. */
   total_lines?: number;
@@ -2924,6 +3272,80 @@ export interface ProjectLot {
   held_qty: number;
   holds: ProjectLotHold[];
   is_unit_tracked: boolean;
+  /** Packing (2026-10-08): the row's project (part of its key) and how it is bagged. */
+  project_id?: number | null;
+  pack_text?: string | null;
+  packs?: PackEntry[];
+  loose_qty?: number | null;
+  pack_unreconciled?: boolean;
+  /** Packs here under their level's minimum, and part packs (2026-10-11). */
+  pack_below_min?: number;
+  pack_part_packs?: number;
+}
+
+/** One physical pack on the shelf, with whatever stands inside it. */
+export interface ShelfPack {
+  id: number;
+  hu_code: string;
+  code_kind: string;
+  level: number;
+  pack_name?: string | null;
+  pack_size: number;
+  /** What it really holds (2026-10-11) — less than `pack_size` for a part pack. */
+  content_qty?: number;
+  is_part?: boolean;
+  /** Under its level's minimum: allowed, flagged until it is repacked. */
+  below_min?: boolean;
+  min_fill?: number | null;
+  /** Coded at its own level: may be wrapped, never split (except by break bulk). */
+  is_atom: boolean;
+  status: string;
+  source_no?: string | null;
+  contents: ShelfPack[];
+}
+
+/** One stock row pack by pack — what the repack screen draws. */
+export interface LotPacks {
+  stock_id: number;
+  item_id: number;
+  warehouse_id: number;
+  bin_id: number;
+  batch_id: number;
+  project_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  bin_code?: string | null;
+  batch_no?: string | null;
+  total_qty: number;
+  available_qty: number;
+  reserved_qty: number;
+  loose_qty: number;
+  pack_text?: string | null;
+  /** Packs here under their minimum, and part packs (2026-10-11). */
+  below_min?: number;
+  part_packs?: number;
+  codes_per_pack: boolean;
+  serialised: boolean;
+  hierarchies: (PackHierarchy & {
+    in_use: boolean;
+    /** The smallest level a repack may choose: a code cannot be split. */
+    coded_floor: number;
+    /** FULL outermost packs per level. */
+    top_counts: Record<string, number>;
+    /** The outermost PART packs, one per pack. A repack keeps one only where the
+     *  target names a pack of that level holding exactly that. */
+    top_parts?: { level: number; fill: number; below_min?: boolean }[];
+    packs: ShelfPack[];
+  })[];
+}
+
+export interface PackSummaryRow {
+  stock_id: number;
+  packs: PackEntry[];
+  loose_qty: number;
+  pack_text?: string | null;
+  unreconciled: boolean;
 }
 
 export interface ProjectHold {
@@ -2981,4 +3403,141 @@ export interface ProjectHoldRelease {
   for_project_id?: number | null;
   /** Where the released stock is moved to: a release is a Stock Movement Order. */
   destination_bin_id: number;
+}
+
+
+/** A pack around another one, outermost first (2026-10-28). */
+export interface PackPathRef { code: string; name?: string | null; level?: number | null }
+
+/** A pack directly inside another (2026-10-28) — a strip in a box. */
+export interface PackInner { code: string; name?: string | null; level?: number | null; carries: number; part?: boolean }
+
+/** One box an issue line holds (2026-10-26). */
+export interface IssueBox {
+  code: string;
+  pack_name?: string | null;
+  take: number;
+  holds: number;
+  size: number;
+  part: boolean;
+  /** Its own name, the packs around it, and the packs inside it (2026-10-28). */
+  name?: string | null;
+  path?: PackPathRef[] | null;
+  inner?: PackInner[] | null;
+}
+
+/** One box an issue line could name — `GET /issues/box-sources` (2026-10-26). */
+export interface BoxSource {
+  id: number;
+  code: string;
+  pack_name?: string | null;
+  holds: number;
+  size: number;
+  part: boolean;
+  batch_no?: string | null;
+  bin_code?: string | null;
+  held_by_this_issue: boolean;
+  held_by?: string | null;
+  /** The pack it sits in — the carton the picker groups it under (2026-10-27). */
+  level?: number | null;
+  parent_id?: number | null;
+  parent_code?: string | null;
+  parent_pack_name?: string | null;
+  parent_holds?: number | null;
+  parent_size?: number | null;
+  /** With `with_units`: the serials / IMEIs / codes inside, in order. */
+  units?: string[] | null;
+  /** Every pack around it, outermost first (2026-10-28). */
+  path?: PackPathRef[] | null;
+}
+
+/** One sticker for a posted issue or an acknowledged receipt (2026-10-28). */
+export interface DocLabelRow {
+  key: string;
+  kind: "PACK" | "UNIT";
+  code: string;
+  /** A serial / IMEI tracked unit's own numbers (2026-11-02). */
+  serial_number?: string | null;
+  imei?: string | null;
+  line_id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  pack_name?: string | null;
+  qty: number;
+  pack_size: number;
+  part: boolean;
+  batch_no?: string | null;
+  expiry_date?: string | null;
+  brand_name?: string | null;
+  variant_name?: string | null;
+  model_name?: string | null;
+  depth: number;
+  parent_code?: string | null;
+  packs_inside?: string | null;
+  qr_token?: string | null;
+  /** The Box-label queue row still waiting for this pack. */
+  label_id?: number | null;
+  /** A part pack cut by this issue at posting. */
+  new_here: boolean;
+  /** The packs around it, outermost first (2026-10-28). */
+  path?: PackPathRef[] | null;
+  /** A parent label printed on top for context, not a pack that left. */
+  context?: boolean;
+  /** A pack the line itself issued (not one inside it, not a parent). */
+  issued?: boolean;
+}
+
+export interface DocLabelLine {
+  line_id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  qty: number;
+  brand_name?: string | null;
+  variant_name?: string | null;
+  model_name?: string | null;
+  batch_no?: string | null;
+  packs: number;
+  inner_packs: number;
+  units: number;
+}
+
+export interface DocLabels {
+  document_type: "ISSUE" | "RECEIPT";
+  document_id: number;
+  document_no: string;
+  document_date?: string | null;
+  from_name?: string | null;
+  to_name?: string | null;
+  lines: DocLabelLine[];
+  labels: DocLabelRow[];
+}
+
+export type BoxLabelReason = "PUTAWAY" | "CONVERTED" | "RECODED" | "PART_BOX";
+
+/** A queued (or printed) label for one box code (2026-10-26). */
+export interface BoxLabel {
+  id: number;
+  handling_unit_id: number;
+  hu_code: string;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  bin_code?: string | null;
+  batch_no?: string | null;
+  pack_name?: string | null;
+  content_qty: number | string;
+  pack_size: number | string;
+  uom_code?: string | null;
+  reason: BoxLabelReason;
+  source_no?: string | null;
+  status: "QUEUED" | "PRINTED";
+  printed_at?: string | null;
+  printed_by_name?: string | null;
+  created_at?: string | null;
 }

@@ -8,10 +8,13 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.shared.org_scope_schemas import OrgScopeIn, OrgScopeOut
 from app.shared.time import not_in_past
 from app.shared.limits import (  # request-size guards, see the module
     Annotated, BatchDocuments, BatchIds, DocumentLines, MAX_BATCH_IDS, MAX_DOCUMENT_LINES,
+    SerialList,
 )
+from app.shared.masters.combinations import CombinationIn, CombinationOut
 
 
 class StockRow(BaseModel):
@@ -30,6 +33,14 @@ class StockRow(BaseModel):
     expiry_date: date | None = None
     project_id: int
     project_name: str | None = None
+    # The combination (2026-10-23): one row per brand / variant / model. 0 and no
+    # name when none was named — the screen shows nothing then.
+    brand_id: int = 0
+    variant_id: int = 0
+    model_id: int = 0
+    brand_name: str | None = None
+    variant_name: str | None = None
+    model_name: str | None = None
     # A JSON list on the table — a lot holds many units. Sent as a list so the screen
     # can say "…and 84 more" instead of pretending a lot has one identity.
     serial_number: list[str] | None = None
@@ -37,6 +48,12 @@ class StockRow(BaseModel):
     consumable_code: str | None = None
     available_qty: float
     reserved_qty: float
+    #: The part of `reserved_qty` that is an indent's QUANTITY hold. An indent sets
+    #: aside a quantity of the item at the point, never a batch or a location — the
+    #: batch is chosen FEFO when it is issued — so screens show this at item level and
+    #: not as "reserved" on this lot. `available_qty` is left as it is, because stock
+    #: transfer and every "is there enough" check read it.
+    indent_held_qty: float = 0
     transit_qty: float = 0
     total_qty: float
     # REQ_032 — the outward pipeline for this ITEM at this POINT (not this lot), READ
@@ -92,6 +109,8 @@ class MovementRow(BaseModel):
     serial_numbers: list[str] | None = None
     asset_code: str | None = None
     consumable_code: str | None = None
+    # How the movement was packed, snapshotted when it was written (2026-10-08).
+    pack_text: str | None = None
     # Every unit code this movement carried, for an item that is not serial-tracked —
     # where the code IS the unit's identity. A list, because the screen's code column
     # lists and copies them one per line; `asset_code` / `consumable_code` above stay
@@ -139,6 +158,41 @@ class MovementSummaryOut(BaseModel):
     total_out: float
 
 
+class StockGroupBatch(BaseModel):
+    """One batch inside an item-at-point card: what the bayRADAR card expands to."""
+    batch_id: int
+    batch_no: str | None = None
+    expiry_date: date | None = None
+    total_qty: float = 0
+    available_qty: float = 0
+    reserved_qty: float = 0
+    indent_held_qty: float = 0
+    bins: int = 0
+    bin_codes: list[str] = []
+
+
+class StockGroupRow(BaseModel):
+    """One item at one point: the grouped stock balance row.
+
+    Lots are detail, not the list — one card per item per warehouse/MDP/LIP with
+    the reserved quantity on the face and the batches one tap away.
+    """
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    category_name: str | None = None
+    uom_code: str | None = None
+    uom_name: str | None = None
+    warehouse_id: int
+    warehouse_name: str | None = None
+    total_qty: float = 0
+    available_qty: float = 0
+    reserved_qty: float = 0
+    indent_held_qty: float = 0
+    lots: int = 0
+    batches: list[StockGroupBatch] = []
+
+
 class TransferIn(BaseModel):
     item_id: int
     quantity: float = Field(gt=0)
@@ -149,7 +203,7 @@ class TransferIn(BaseModel):
     remarks: str | None = None
 
 
-class MRItemOut(BaseModel):
+class MRItemOut(CombinationOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     line_no: int
@@ -158,6 +212,8 @@ class MRItemOut(BaseModel):
     item_name: str | None = None
     uom_code: str | None = None
     quantity: float
+    # The ceiling: what the line asked for when raised (2026-11-03).
+    requested_quantity: float | None = None
     ordered_quantity: float
     indent_item_id: int | None = None
     remarks: str | None = None
@@ -188,6 +244,14 @@ class MROut(MRListRow):
     # of the same ladder, and the screen has to know which hat is on. Advice for the
     # buttons only; `engine.act` re-checks and is the gate (rule 6).
     can_act: bool = False
+    # Set while RETURNED_FOR_CORRECTION: who it went back to, who sent it and the
+    # (compulsory) reason; and whether THIS login is the one who can resubmit it.
+    correction: dict | None = None
+    can_resubmit_correction: bool = False
+    # Only the raiser edits a sent-back MR; an approver holding it resubmits or passes
+    # it further down.
+    can_edit_correction: bool = False
+    can_pass_correction_down: bool = False
     project_name: str | None = None
     remarks: str | None = None
     approved_at: datetime | None = None
@@ -215,6 +279,24 @@ class MRCreateIn(BaseModel):
     items: list[MRLineIn] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
     indent_id: int | None = None
     indent_no: str | None = None
+    priority: str | None = None
+    required_by: date | None = None
+    remarks: str | None = None
+
+    _no_past_required_by = field_validator("required_by")(
+        lambda cls, v: not_in_past(v, "Required by"))
+
+
+class MRCorrectionLineIn(BaseModel):
+    """One line of a corrected MR. `id` keeps an existing line; none adds one."""
+    id: int | None = None
+    item_id: int
+    quantity: float = Field(gt=0)
+
+
+class MRCorrectionIn(BaseModel):
+    """The raiser's full edit of a sent-back MR - the create form's fields."""
+    items: list[MRCorrectionLineIn] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
     priority: str | None = None
     required_by: date | None = None
     remarks: str | None = None
@@ -286,7 +368,7 @@ class AllocationLineOut(BaseModel):
     status: str
 
 
-class AllocationDecisionIn(BaseModel):
+class AllocationDecisionIn(CombinationIn):
     """One decision: this indent line gets this much, out of this warehouse.
     quantity may be 0 -- "give nothing now" is a decision, not a missing value."""
     indent_item_id: int
@@ -299,6 +381,10 @@ class AllocationDecisionIn(BaseModel):
     warehouse_id: int | None = None
     project_id: int = 0
     remarks: str | None = None
+    #: Why another brand than the indent asked for (2026-10-24). Optional.
+    substitution_reason: str | None = Field(default=None, max_length=300)
+    #: Give stock with no brand recorded (2026-10-24) — untagged rows only.
+    no_brand: bool = False
 
 
 class AllocationIn(BaseModel):
@@ -331,7 +417,7 @@ class AllocApproveIn(BaseModel):
     revisions: list[AllocationRevisionIn] = Field(default_factory=list, max_length=MAX_DOCUMENT_LINES)
 
 
-class AllocationLineAvailability(BaseModel):
+class AllocationLineAvailability(CombinationOut):
     """What one allocation line could actually be given, read right now.
 
     `free` is the shelf at the chosen point less what other un-approved allocations
@@ -381,7 +467,7 @@ class AllocationBatchOut(BaseModel):
     failed: list[AllocationBatchFailureOut] = Field(default_factory=list)
 
 
-class AllocationItemOut(BaseModel):
+class AllocationItemOut(CombinationOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     indent_item_id: int
@@ -394,6 +480,10 @@ class AllocationItemOut(BaseModel):
     warehouse_id: int | None = None
     warehouse_name: str | None = None
     remarks: str | None = None
+    #: The brand the indent asked for, when another was given — and why.
+    substituted_from: str | None = None
+    substitution_reason: str | None = None
+    no_brand: bool = False
 
 
 class AllocationListRow(BaseModel):
@@ -428,19 +518,33 @@ class AdjustmentItemIn(BaseModel):
     reads the system figure itself and derives the direction and the correction, so
     a screen holding a stale system number cannot post the wrong difference. A DIRECT
     line (a known write-off) sends `direction` and `quantity` instead.
+
+    `serial_numbers` are the unit codes the write-off covers, on coded items. The
+    warehouse module (which owns them, via a hook) retires exactly these rows so
+    the issue screen stops offering goods the audit just declared gone; a code not
+    on this line's item/batch/bin is refused, which is what keeps the remarks-text
+    workaround from coming back. Empty on anything the shelf holds without codes.
     """
     item_id: int
     bin_id: int = 0
     batch_id: int = 0
     project_id: int = 0
+    # The brand / variant / model counted (2026-10-31). 100 of Brand A and 50 of Brand
+    # B on one shelf are two balances, so they are two lines, each counted and written
+    # off on its own. A number is that combination exactly (0 = stock with no brand
+    # recorded); None counts every combination at the lot together — the old shape.
+    brand_id: int | None = None
+    variant_id: int | None = None
+    model_id: int | None = None
     physical_qty: float | None = Field(default=None, ge=0)
     direction: str | None = None  # IN | OUT, direct lines only
     quantity: float | None = Field(default=None, gt=0)
+    serial_numbers: Annotated[list[str], SerialList] = []
     unit_cost: float = 0.0
     remarks: str | None = None
 
 
-class AdjustmentIn(BaseModel):
+class AdjustmentIn(OrgScopeIn):
     warehouse_id: int
     # Validated against AdjustmentReason in the service, not typed as the enum here, so
     # a bad value comes back as the app's own error shape rather than a Pydantic 422.
@@ -479,11 +583,17 @@ class AdjustmentItemOut(BaseModel):
     system_qty: float | None = None
     physical_qty: float | None = None
     unit_cost: float | None = 0.0
+    # The unit codes an OUT line writes off — what the audit retired, read back so
+    # the screen can say which of them died rather than only how many.
+    serial_numbers: list[str] | None = None
     remarks: str | None = None
 
 
-class AdjustmentListRow(BaseModel):
+class AdjustmentListRow(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
+    #: The project its number is drawn under (2026-11-11).
+    project_id: int | None = None
+    project_name: str | None = None
     id: int
     adjustment_no: str
     warehouse_id: int
@@ -519,12 +629,23 @@ class StockLotRow(BaseModel):
     days_to_expiry: int | None = None
     available_qty: float
     reserved_qty: float
+    #: See `StockRow.indent_held_qty`.
+    indent_held_qty: float = 0
     total_qty: float
     project_name: str | None = None
     serial_number: str | None = None
     asset_code: str | None = None
     # Warehouse -> zone -> rack -> ... -> bin, walked up whs_warehouse_locations.
     location_path: list[str] = []
+
+
+class IndentSetAside(BaseModel):
+    """One indent's quantity hold on an item at a point (no batch, no location)."""
+    indent_id: int
+    indent_no: str | None = None
+    quantity: float
+    since: datetime | None = None
+    by_name: str | None = None
 
 
 class StockDetailOut(BaseModel):
@@ -540,6 +661,9 @@ class StockDetailOut(BaseModel):
     total_reserved: float
     total_on_hand: float
     lots: list[StockLotRow] = []
+    #: What indents have set aside of this item at this point — quantity only.
+    set_aside_total: float = 0
+    set_aside: list[IndentSetAside] = []
 
 
 class ReplenishmentRuleIn(BaseModel):
@@ -694,13 +818,13 @@ class NearExpiryAlertRow(BaseModel):
 
 # ---------------- STO (Stock Transfer Order) Schemas ----------------
 
-class STOItemIn(BaseModel):
+class STOItemIn(CombinationIn):
     item_id: int
     requested_qty: float = Field(gt=0)
     remarks: str | None = None
 
 
-class STOIn(BaseModel):
+class STOIn(OrgScopeIn):
     from_warehouse_id: int
     to_warehouse_id: int
     from_project_id: int = 0
@@ -709,7 +833,7 @@ class STOIn(BaseModel):
     items: Annotated[list[STOItemIn], DocumentLines]
 
 
-class STOItemOut(BaseModel):
+class STOItemOut(CombinationOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     item_id: int
@@ -722,10 +846,13 @@ class STOItemOut(BaseModel):
     remarks: str | None = None
 
 
-class STOListRow(BaseModel):
+class STOListRow(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     sto_no: str
+    #: The project the number is drawn under (2026-11-09); not whose stock moves.
+    project_id: int | None = None
+    project_name: str | None = None
     from_warehouse_id: int
     from_warehouse_name: str | None = None
     to_warehouse_id: int

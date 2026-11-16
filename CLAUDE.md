@@ -111,6 +111,63 @@ A module only creates tables with its own prefix.
 Indent → PO (`indent_id`) → GRN (`po_id`) → Stock → Issue (`grn_id`/`indent_id`).
 Handoffs: `create_po_from_indent`, `create_grn_from_po`, `qc_pass → move_stock`.
 
+### Organisations: chosen once, carried forward, in the number, never NA (2026-11-05)
+
+**The directory** (`platform/org_directory`, `ORG_SYNC_URL` + `ORG_SYNC_API_KEY`) is a feed
+that is not HCM. `mst_organizations` and `mst_org_departments` are read-only copies keyed
+on the feed's id, with **no link between them**: the feed states none, and equal ids
+across the lists mean nothing. Settings > Organisation Masters has a tab for each. A bad
+answer changes nothing (`parse_feed`); a row leaving the feed goes inactive. It runs after
+every HCM sync and from Sync now. `hcm_departments` and Settings > Company are untouched
+and still serve everything outside procurement.
+
+**The rule** (`platform/doc_numbering/scope.py`): on Requisition, Consolidation, RFQ, Quotation,
+Quote Change Request, PO and Despatch Note, organisation and department/project are copied
+from the document before, or selected on this one, or the save is refused.
+`{COMPANY}` is the organisation's first 3 letters and `{PROJECT}` the project, else the
+department, through `org_scope.number_args`, the only place a number's scope is decided.
+A draft takes a new number when its selection moves; submitted, all of it is fixed; on a
+linked document the organisation is fixed from the start; one sheet cannot mix
+organisations. There is deliberately no `{DEPT}` token: a document with only a project
+would print NA in it.
+
+- **A requisition raised by MR approval** has nobody at a form, so it holds `DRAFT-<mr>-<hex>`
+  (`holding_number`) until the buyer selects the organisation, which is when it takes its
+  number, and it cannot be submitted before that.
+- **Older documents are left alone (decided).** No organisation and a real number means
+  its fields, number and rules are exactly as before, on the server (`uses_org`) and on
+  screen (`isOlderDocument`, `legacy`). Their old numbers keep their NA.
+- **A supplier cannot select.** A quotation or despatch note raised from an older RFQ or
+  PO is numbered as it always was and may read NA. Buyer-raised documents off older ones
+  do ask (the award leaves the PO to `PriceComparePage`'s dialog via `OrganisationRequired`).
+- **Outside procurement** (`next_number` with no `company`) nothing changed: GRNs, issues
+  and transfers still use Settings > Company and can read NA without a project.
+- Tests: `org_directory/tests/`, `procurement/tests/test_org_scope.py`,
+  `frontend/.../procurement/tests/orgScope.test.ts`. Migration `d8f2b4a6c1e3`.
+
+### The document number card: fields follow the series (2026-11-05)
+
+Top of a document form: `DocumentNumberCard` (`shared/components`, rules in
+`shared/documentNumber.ts`) over `platform/doc_numbering` (`GET /api/document-numbering/
+{doc_type}/card` and `/preview`). Fields, options and every part of the number are SERVED
+off `sys_doc_series`, so a pattern edit needs no screen edit. Organisation, project and
+department are asked even when a pattern does not print them (`in_number: false`), because
+the next document copies them. `DocumentScopeStrip` is the read-only version for documents
+nobody fills a card for. Rolled out module by module: **Procurement is done**; indents,
+inventory, warehouse, logistics and returns are next and still number as below.
+
+- **The year is worked out from the date.** `next_number` never reads the year on the series
+  row, which nothing updates, and which kept printing an old year after 31 March. A form may
+  pick this year or last (`selectable_fiscal_years`); a linked document never inherits the
+  year (`orgValueCarried`, `number_args(carried=True)`).
+- **What fails silently if narrowed:** a pattern with {FY} has one counter per year
+  (`scope_key_for`, `...|FY:2026-27`), and a yearly reset is skipped on it. Without both,
+  picking last year repeats a number. `d9e3b5c7a1f4` moved existing counters under their year.
+- **Defaults** (`openingValues`) never overwrite what a source supplied: organisation from
+  `ORG_DEFAULT_NAME` (`.env`), else the first with a "please check" tag; project from HCM,
+  then the browser's last choice, then the first with the tag; year today's.
+- A form passes `ready` in the same update that copies its source, or the defaults run first.
+
 ### Fulfilment: one desk, and a signed allocation is terminal (2026-08-21)
 
 **The Fulfilment Queue and Allocation Approvals are ONE screen** — the **Fulfilment
@@ -171,6 +228,137 @@ under row locks before settling, because with `NO_APPROVAL` there is no later lo
 check; and `create_mr_from_shortfall` deduplicates per indent **line**, not per indent
 — per indent was enough while a shortage was raised once, and rounds of serving mean a
 later shortage on the same indent is a different shortage that was being dropped.
+
+### An STR names its SOURCE; each approver's scope decides the act (2026-11-04)
+
+- **Source is required on an STR** (`ind_indents.source_warehouse_id` + name/code
+  snapshot, migration `c7e1a5f3d9b4`): refused on create, on edit and on submit
+  without one (`indents._resolve_str_source`). The list is SERVED,
+  `GET /api/indents/options/str-sources` → `locations.same_rank_points`: the points of
+  posts at the SAME HCM RANK (`hcm_positions.role_id`) on the SAME TIER as the
+  raiser's own point, network-wide, less his own — no role name in code. The tier is
+  needed beside the rank: one rank (Store Keeper) staffs LIPs, MDPs and the main
+  warehouse. "Which point is mine" reads ANY link (`own_linked_points`): an OE / DM /
+  RM is linked to the branch MDP under a non-stocking section, so the shelf rule
+  (`held_location_ids`) would say they hold nothing. The server does NOT re-check the
+  rank on save (decided).
+- **Approval** (`approvals/fulfilment.py`, `StrSourcePanel`, wording in `strDecision.ts`):
+  `GET .../str-source` says whether the source is in the approver's scope
+  (`location_ids_for_user`), the frozen ladder (`levels`, `next_level`, `_is_last_level`),
+  what is already allocated and which of his points could serve it. In scope → **Approve
+  & allocate from source** (`POST .../str-allocate`, through `issue_from_my_stock`,
+  capped by what the point has free; the rest travels on). Outside → **Approve and forward
+  to next level** (reason required). Either way, where the source cannot serve it → **Change
+  source to my point** (reason required, recorded in `ind_str_source_changes`, shown on the
+  route card), then allocate or only forward (`POST .../str-forward`). The STR's "Serve
+  from own stock" button is hidden — one door.
+- **Served in full ends the approval; only a remainder climbs (decided 2026-11-05).**
+  `approve_indent` ends the ladder when nothing is owed. What fails SILENTLY if narrowed:
+  a signed allocation RESERVES but drafts no issue while the STR is in approval
+  (`indents._fulfilment_drafts`), `_settle_indent_approval` leaves the ending to that press,
+  and the end hands over every signed allocation TOGETHER (`_finish_str_approval` →
+  `_draft_str_issues` — the warehouse drafts `allocated − issued` per point, so one at a
+  time the second of two from one point drafts nothing). A rejection or a return
+  withdraws them and frees the stock (`allocations.withdraw_for_indent`). An STR's
+  allocation states `requested_qty` = what it gives, or the remainder would raise a material
+  request before the levels above were asked.
+- **The approval screen edits what is LEFT and signs the WHOLE line** (`signedTotal`).
+  Sending the field alone turned "10, with 6 served" into an approved 4, read as nothing
+  owed, and the 4 still owed vanished. This was true of every indent type. A line may not
+  be signed below what is allocated (`assert_str_approvable`).
+- **Last level, source outside scope, something still owed → refused**
+  (`assert_str_approvable`, decided 2026-11-05; replaces "approved to the source's desk").
+  "Last" is the configured ladder running out, never HCM. The approver changes the source,
+  returns or rejects, and the screen says an admin adds the level on Settings > Approvals
+  Config. A source IN scope still goes to the Fulfilment Desk, where
+  `list_indents(to_serve=True)` shows an approved STR only to logins that can draw from
+  its source (`drawable_warehouse_ids`; None = unrestricted still sees all). The
+  allocation proposal carries `str_source_warehouse_id` and every line opens on it.
+- **Vehicle / SAC** follow the delivery point's TIER, served as `needs_vehicle_and_sac`
+  (bottom rung only) on the indent detail and on `/api/stocking-points/mine` — the form
+  no longer compares the point type to "LIP".
+- Tests: `indents/tests/test_str_source.py`, `approvals/tests/strSourcePanel.test.tsx`.
+
+### Stock transfers: siblings, a frozen destination, one receiving desk (2026-10-29)
+
+- **A direct STO goes between SIBLINGS.** `whs_warehouses` has no parent column; a
+  point's parent is READ off the reporting tree (`locations.parent_points`: the nearest
+  higher-tier point held by an ancestor of any holder). `create_sto` refuses two points
+  whose parents are both known and differ; an unknown parent is a gap in HCM, never a
+  refusal. `GET /api/stock/sto/destinations` serves exactly that set to the form.
+- **An STO's issue goes where the order was approved to.** `draft_issue_for_sto`
+  carries `to_warehouse_id` onto the issue, `_record_sto_for_str_issue` does the same
+  for an STR's order, and `update_issue` overwrites the client's destination with the
+  order's — the screen's lock (`LockedDestination`) is only the visible half. Issues
+  are served `sto_id/sto_no/sto_kind/sto_to_warehouse_*` (`_decorate_indent_types`).
+  The issue form's four tiles (STR / STO / Indent / Direct, `IssueTypeTiles`) are
+  presentation over the two backend `IssueType`s. Picking an STO on a NEW issue opens
+  the issue it already has (`/options/stos`) — never a second draft.
+- **Transfer context is read, never copied.** `issue_transfer_context` /
+  `consignment_transfer_context` serve STR/STO no, destination, department, project,
+  issued-to (code, phone), SAC, vehicle to the consignment form, the Dispatch confirm
+  screen (`TransferContextStrip`) and the in-person handover prefill (empty boxes only).
+- **Every transfer is received on Inventory > Stock Transfer > Acknowledgements**
+  (`TransferAcknowledgements`, `ackPaths.ts`), at `/inventory/transfers/acknowledgements/*`
+  — the same `AcknowledgementDetailPage`, mounted twice; an STR opened at the old
+  `/indents/...` address redirects. Direct STOs come from
+  `/acknowledgements/stock-transfers` (`_direct_issue_for(sto=True)`, which also admits
+  the holder of the order's destination for a hand-over) and are signed through the
+  direct-issue receipt, whose `credit_arrival` books the destination shelf. An STR is
+  signable by its raiser OR whoever holds the shelf its STO is bound for
+  (`indents._receives_str`, used by acknowledge, attach, remove and — on a miss only —
+  `_assert_can_view_indent`). Do NOT put that point lookup into `_indent_visibility`:
+  every indent read would pay two queries for it.
+
+### A stock audit only takes stock off, and names what it takes (2026-10-31)
+
+- **Never an addition.** `inventory.service.AUDIT_REASONS` (CYCLE_COUNT, DAMAGE, EXPIRY,
+  SHORTAGE, QUALITY_REJECTION, OTHER) — EXCESS / OPENING_BALANCE stay in the enum for old
+  rows only. A count above the system figure, a direct IN line and an inward reason are
+  all refused on create; the inward auto-approve path is gone (every write-off waits for
+  an approver or its STOCK_ADJUSTMENT chain); an old pending audit with an IN line can be
+  rejected, never approved. Found stock comes in on a goods receipt.
+- **Per brand / variant / model.** `AdjustmentItemIn.brand_id/variant_id/model_id` (None =
+  every combination, the old shape): the system figure, the duplicate key and the
+  write-off (`_write_off_combo` → `move_stock_out`) are that combination's only. A line
+  saved before this (0/0/0, not `combination_any`) draws unbranded stock, else any.
+- **Codes, per LOT** (`warehouse/audit_writeoff.py`): UNITS (serial/IMEI lot with units →
+  exactly N picked by hand), CODES (asset/consumable lot, or a box-only lot of an item
+  issued in containers → whole packs at any level + unit codes, total exactly N),
+  QUANTITY (no codes). Validated when RAISED (`inventory.hooks.ON_ADJUSTMENT_VALIDATE`)
+  and again under lock when POSTED (`ON_ADJUSTMENT_OUT` → `write_off`): a picked pack is
+  consumed with every unit inside scrapped; a picked unit shrinks its pack; ancestors
+  shrink; a pack and something inside it, a held pick, or one code on two lines are
+  refused. Units and packs carry NO brand, so brands at one batch + location share one
+  pool; `reconcile_key` is skipped on such a mixed lot (it reads one balance row).
+- **Screen**: `/inventory/adjustments/new` (`StockAuditFormPage`, a full form — the modal
+  `StockAuditForm` is gone), fed by `/api/warehouse/stock-audit/{items,lots,sources}`;
+  `WriteOffPicker` + pure `auditPick.ts` (whole packs first in "Suggest"; serials never
+  auto-picked). Tests: `warehouse/tests/test_audit_writeoff.py`, `inventory/tests/
+  auditPick.test.ts`.
+
+### An asked-for quantity may come DOWN, never go up (2026-11-03)
+
+`app/shared/ceiling.py` (`assert_not_raised`, `ceiling_of`). Raising is new demand — a
+new document with its own approval, never a number changed under a signature.
+- **Material request**: `inv_material_request_items.requested_quantity` is set when the
+  MR is raised (both doors submit at once). `revise_mr_items` (approver) and
+  `correct_mr` (raiser after send-back) may lower or remove, never raise, and a
+  correction may not add an item the MR never asked for or swap a line's item.
+- **Requisition**: `pro_requisition_items.requested_quantity` — set at creation when
+  drawn from MRs (`lock=True`), at SUBMIT for a hand-made one (free while DRAFT).
+  `update_requisition` rewrites lines, so ceilings are carried by item + combination
+  (`_req_line_key`); `submit_requisition` reads lines off the table, not `req.items`
+  (stale after an edit).
+- **Quotation amendment**: buyer's `propose_quote_change` and supplier's counter in
+  `accept_quote_change` are capped at the RFQ line quantity (`_rfq_asked`).
+- **Every change is recorded**: `inv_mr_qty_changes` / `pro_requisition_qty_changes`
+  (from, to, ceiling, stage, who, post, why), served at `/quantity-changes` and drawn
+  by the shared `QuantityChanges` card. Screens state the cap before Save (`LinePicker`
+  `original_quantity` + `overCap`, MR detail/correction, quote change modal, supplier
+  counter). Migrations `a7c9e1b3d5f8`, `b9d1f3a5c7e0`. Tests: `shared/tests/
+  test_ceiling.py`, `inventory/tests/test_mr_quantity_ceiling.py`, `procurement/tests/
+  test_quantity_ceiling.py`.
 
 ### An order is received ONCE, and what it still owes is READ (2026-09-08)
 
@@ -323,6 +511,73 @@ catch it.
 The picker is scoped to one pick's own batch and bin (it always was) and now SAYS so,
 because a correctly short list reads as missing stock otherwise. Parity is checked per
 PICK: ten units over two bins with all ten codes on the first used to look complete.
+
+### Material issues: floor pieces, holds, and one indent never issued twice (2026-10-07)
+
+**A floor split numbers its children off the parent** — `…/WHI0013-001`, `-002` — via
+`_next_child_issue_no`, counted over every child ever cut (cancelled ones included) so a
+re-split never reprints a number. The screen draws the family (`SplitFamilyCard`) on the
+parent AND on every child (`child_issues` serves siblings on a child).
+
+**Double issue is refused at four doors, and each fails SILENTLY if narrowed:**
+- `_guard_issue_indent_caps` — per TIER, approved quantity (chain legs are the same units).
+- `_guard_point_reservation` — an indent line with a hold anywhere may take at most what
+  is reserved AT THIS POINT minus other UNPOSTED issues' claims (`_unposted_claims`). This
+  is what stops a second draft for the same three units; `indent_options` and
+  `indent_issue_source` net the same claims, so the dropdown offers exactly what the save
+  accepts. Skipped at a forwarding point (`_forwarding_point`).
+- `_guard_network_own_stock` — across EVERY point, `issued − arrived on a DISPATCH
+  receipt for the indent` (own stock, not pass-through) may not pass approved. The
+  per-tier cap alone let the main warehouse re-serve an indent the LIP had already served.
+- `post_issue` re-runs the cap and the network check against every OTHER live issue.
+
+A split parent whose children are all cancelled returns to APPROVED **only if the indent
+still has room for it**; otherwise it CLOSES having served nothing (`_sync_split_parent`) —
+a fresh issue raised while it was split must not be doubled by the parent coming back.
+
+**A direct issue (no indent) holds its own stock** under `RefType.ISSUE_HOLD`
+(`_hold_direct_issue_stock`): taken on every save (released first), released on cancel and
+reject, consumed by `post_issue`, handed piece by piece to floor children on a split.
+`allocation.reserve_at` is the exact-spot reserve it uses (rule 7). `issue_stock_sources`
+serves it as `issue_hold_qty`, apart from `own_reserved_qty`, so a manual issue's own hold
+is never read as an allocation (which would switch the FEFO lock on). Open direct issues
+saved before this: `scripts.hold_open_direct_issues` (`--apply`).
+
+**The one FEFO swap past the same-day rule** (`_coded_swap_verdict`, mirrored by
+`issueSplits.codedSwapBatches`): an item that must leave with a code per unit, allocated
+out of a batch with NO free coded units, may move to the OLDEST batch here that has them —
+never a later one. The hold relocates with it on save. `stock-sources` serves
+`codes_required` / `has_unit_codes` (bounded EXISTS probes, never a COUNT).
+
+`_realign_issue_reservations` reads a line naming a batch but no bay as "that batch,
+wherever it stands" — it used to try relocating the hold onto bay 0, which does not exist.
+
+Scenario tests: `warehouse/tests/test_issue_split_and_holds.py` (DB-backed).
+
+### Codes, QC and packing follow the issue LINE, not the batch (2026-10-07)
+
+**Asset/consumable codes are auto-assigned on every save** (`_auto_fill_codes`, from
+`_reserve_issue_serials`): a CODE-mode line (`_unit_mode` — never SERIAL or IMEI) is
+topped up FIFO from its OWN batch and bay via `_claim_units`, and the codes are held on
+the units under the line's stamp, so they survive submit and approval. Codes the
+storekeeper named stand. Serial and IMEI lines are untouched and still "picked after
+approval". Project-held units are not auto-claimed (`_CLAIMED_REMARK_PREFIXES`).
+
+**One batch from two bays is two lines all the way down.** After posting, units are
+stamped per DOCUMENT; `_attribute_units_to_lines` hands them back by exact (batch, bay),
+then batch, then item — plain line order gave the first line every unit of the batch.
+`issue_dispatch_source`, the outward QC seed and `_apply_outbound_inspection_lines` all
+read `_issue_units_by_line`; never group a posted issue's units by (item, batch).
+`out_dispatch_items.issue_item_id` (+ `bin_code`, `c2e4a6b8d0f1`) carries the line onto
+the consignment; `_apply_consignment_packages` holds a named line to its own accepted
+quantity and its own codes, and `ConsignmentForm.lineKey` keys rows on it.
+
+**Outward QC follows the item's `requires_qi`.** Only those lines go on the sheet
+(`_line_needs_outward_qc`); an issue with none is NOT_REQUIRED and consignable at once.
+`CONSIGNABLE_QC` and `INSPECTABLE_QC` are disjoint — an issue is offered to exactly one
+desk. A sheet that failed everything still leaves unchecked lines packable
+(`_outbound_qc_verdict` → PARTIAL). Tests: `test_issue_line_units.py` (pure),
+`test_issue_auto_codes.py` (DB).
 
 ### A pick may move; FEFO decides how far (2026-09-08)
 
@@ -505,6 +760,370 @@ On the screen it is `ItemProofStrip`, one per line in `PackageLineRow`: amber un
 there is a picture, green after, with the shots themselves at thumbnail size and one
 `capture="environment"` press that opens the rear camera on a phone.
 
+
+### Pack hierarchies: one item, several ways to pack it, counted in one unit (2026-10-08)
+
+A tablet is bought in strips of 10 and in strips of 15 at the same time. Each is a
+**pack hierarchy** (`mst_pack_hierarchies`, "Strip of 10") whose **levels** are the
+`mst_item_packaging` rungs that name it (Strip = 10 TAB → Box = 10 Strip → Carton =
+12 Box). A pack never changes hierarchy — a tablet cannot leave a 10-strip for a
+15-strip without a factory — so every document line names ONE hierarchy and a
+**breakdown** inside it: "1 Carton + 10 Box + 20 Strip". Level 0 is LOOSE.
+
+**Every quantity column still means base units.** PO, despatch, GRN, stock, ledger,
+reservations, indents: unchanged. The breakdown (`pack_hierarchy_id` + `pack_breakdown`
+JSON on PO, despatch-note, GRN, putaway and issue lines) is HOW those units are
+bagged, and the server makes it add up — a client never states a pack size. Entries
+are snapshotted (`name`, `size`, `hierarchy`), so a document reads the same after the
+master is edited. The arithmetic is `shared/packing.py` (pure, mirrored by
+`frontend/src/shared/packing/packing.ts`); the ladders come from
+`shared/masters/packs.py`, two queries for any number of items.
+
+Master rules, all PER HIERARCHY (`apply_item_packaging`): levels contiguous; a
+container type at most once (across hierarchies it is fine — both go into a Box); one
+default putaway unit. One default hierarchy per item. A rung's size cannot change, and
+a rung or hierarchy cannot be retired, while live packs on the shelf use it.
+
+**The flow, door by door:**
+
+- **PO** — each line is described in a hierarchy (the buyer's choice, else the item's
+  default in whole packs). `procurement/packing.sync_po_packing` runs on EVERY write
+  that creates lines or moves a quantity (all three creation paths, amend, approver
+  trim, revert); a trimmed line is rescaled in the same hierarchy.
+- **Despatch note** — the supplier states packs; `despatched_qty` is their total.
+  Other levels of the order's hierarchy are free. A DIFFERENT hierarchy is allowed,
+  must carry `pack_change_reason`, goes PENDING (`PackChangeStatus`) and notifies the
+  buyer on submit. The buyer answers on the PO (`/pos/{id}/pack-changes/...`,
+  `po.pack_change`): ACCEPT rewrites the PO line's hierarchy, DECLINE tells the
+  supplier why. Neither blocks the gate — goods at the gate are goods at the gate —
+  but the receipt shows the answer.
+- **GRN** — `warehouse/packing.receipt_line_packing`. Against a despatch-note line the
+  packing is DECLARED: copied from the note, never from the client, and fixed. The
+  count may only come up SHORT, level by level (`packing.assert_within`), and
+  `received_qty` is the count's total. This runs BEFORE `_assert_po_fulfilment`, which
+  must cap the counted quantity, not the typed one.
+- **Putaway** — the hierarchy is the receipt's (fixed); the levels may change (a carton
+  opened into boxes). `shelve` makes one `whs_handling_units` row per pack and links the
+  units it placed (`whs_serial_numbers.handling_unit_id`). It runs BEFORE `move_stock`
+  so the ledger row can carry `pack_text`.
+- **Stock** — loose is NEVER stored: it is `total_qty` minus what the live packs hold.
+  `pack_summary` serves "2 Carton + 3 Box + 14 loose TAB" to the Lots tab, Stock
+  Balance and anything else (`POST /api/warehouse/packs/summary`, by `stk_balance` id).
+  Packs claiming more than the balance (stock moved by a path that knows no packs) are
+  capped on read and flagged `unreconciled`; `reconcile_key` puts the rows right.
+- **Repack** (Lots tab, `stock.repack`, `packing.plan_repack`) — keeps every pack it can
+  so codes survive, opens the rest, carves a pack shelved whole into its children,
+  forms new parents bottom-up. Never the quantity, never the hierarchy. Not a stock
+  movement: no ledger row; the audit row is the record.
+- **Issue** — a pick may be stated in packs (its quantity is their total). After
+  posting, `settle_issue` settles the packs off the units that actually left.
+
+**Codes belong to the BASE UNIT, never to a pack (2026-10-22).** Every unit of a
+code-tracked item is coded at putaway, exactly as before; a pack is only a labelled
+container around units (`PK-…`), shown as packs everywhere and issued, counted and
+coded per unit. `packing.codes_per_pack` is always False — the one switch every caller
+asks. This REVERSED the 2026-10-08 "coded pack is an atom" rule: an atom could be
+wrapped but never split, so most repacks of code-tracked stock were refused and any
+part of a pack needed a break bulk at the issue desk. Do not bring it back.
+`scripts.unatom_packs` (`--apply`) turned the live atoms into plain packs, keeping
+their codes so labels already on cartons still scan. `break_bulk` and
+`issue.break_bulk` remain in the schema and do nothing.
+
+**An issue pick's QUANTITY is the truth; its packs describe it.** `issue_line_packing`
+never changes `issued_qty`: packs that add up are kept, stale ones are worked out again
+in the same hierarchy, a pick with none is stated in the item's default hierarchy.
+`IssuePickPacking` keeps them in step on screen; "Change packing" changes the mix,
+never the total.
+
+**Downstream reads the issue line, derived on read** — no packing columns on the
+consignment, outward QC or acknowledgement. `packing.issue_line_packs` gives a line's
+packs for any quantity (its own when it is all of it, else whole packs of the same
+hierarchy); `merge_breakdowns` adds several lines' up. A consignment stores one row
+PER UNIT for a coded item, so its packs are served once per issue line as
+`DispatchDetail.line_packs`, never per row. `_receipt_lines_packed` puts the sent packs
+on a receiving point's GRN lines (one hierarchy per line, else left loose), so the
+destination shelves the same cartons and its stock balance shows them.
+
+**A lot may hold packs of several hierarchies at once.** The repack screen shows all
+of them and repacks the one picked, over its own packs plus everything loose; the
+others are untouched.
+
+What fails SILENTLY if narrowed: `_claim_units` orders loose units first, then PART
+packs, then pack by pack (packs are created smallest-first, so ids climb with size) —
+order by plain id and an automatic pick opens a full pack while loose units stand
+beside it.
+
+Scenario tests: `shared/tests/test_packing.py` (pure), `warehouse/tests/
+test_packing_shelf.py` and `procurement/tests/test_po_packing.py` (DB).
+
+### Packaging by usage (2026-10-23)
+
+Masters › Packaging has three sub-tabs: **Container Types** (`mst_packaging`),
+**Item Packaging Variants** (ladders per item AND brand — `mst_pack_hierarchies.brand_id`,
+NULL = "All brands"; the default ladder is per item + brand; moved off the item form)
+and **Container Usage** (`mst_item_container_usage`, many-to-many: one row per item,
+container type, usage — INDENT, PURCHASE, STORAGE, ISSUE, CONSUMPTION; package 0 =
+loose). `packs.pack_options` decorates every ladder with its brand and every level with
+its usages, so screens filter by usage from one read (`levelsFor`, `usage` prop on
+`PackBreakdownEditor`). **A usage with nothing mapped behaves exactly as before** —
+that is what keeps unconfigured items working; `scripts.setup_container_usage` seeds
+only Storage (from the default putaway rung) and single-brand ladder brands.
+
+Where packing may change, and where not:
+- PO / supplier quote / despatch note: any PURCHASE container of any ladder of the
+  item (`procurement.packing.assert_purchase_packs`, default `purchase_breakdown`).
+- Putaway: FIXED to the STORAGE containers of the received ladder (`shelve` ignores
+  the client's packs when Storage is mapped; `putaway_packing.packing_fixed`).
+- Issue: stated in ISSUE containers; a different packing only when Storage ≠ Issue,
+  inside the same ladder (`issue_line_packing`, `canRepackAtIssue`).
+- Outward QC: read-only. Consignment: splits within one ladder (`splitting`).
+  Stock Segregation › Lots: Repack hidden (`REPACK_ON_LOTS`).
+
+**Codes follow the ISSUE container**, replacing "codes belong to the base unit" for
+items issued in a container: `shelve` splits each storage pack down to the issue
+level (`split_down`) and those packs carry the codes; `_place_unit_codes` mints no
+per-unit code for such an item (`packs.issues_in_containers`), so its lots hold no
+unit rows and the per-lot serial rule issues them by quantity. Changing an item's
+Issue container fires `packs.ON_ISSUE_USAGE_CHANGED` → `recode_item`: every lot NOT
+held by a document has its inner packs closed (codes retired, reason recorded) and
+re-split at the new level; held lots are counted and left alone. Items issued loose
+keep one code per base unit, exactly as before.
+
+### The code tree: carton, box AND unit each carry a code (2026-10-27)
+
+REVERSES the 2026-10-23 "codes follow the ISSUE container / no per-unit code" rule.
+For a unit-tracked item (serial, IMEI, or asset / consumable code):
+
+- **Putaway** (`packing.shelve`, `_units_tracked`) splits every Storage pack all the way
+  down to level 1 — carton → its boxes → their strips — each its own
+  `whs_handling_units` row and code, and `_place_unit_codes` mints a code for EVERY base
+  unit (the `issues_in_containers` skip is gone). Units link to the innermost packs.
+  Issue-level packs still get the item-format `…-BOX` code; the others `PK-…`. A label is
+  queued for every pack made. Other items split only to their Issue container, as before.
+- **`box_codes.needs_rebox` accepts the tree**: a pack below the Issue level INSIDE a box
+  of that level is correct. Narrow it back and every issue save re-boxes the lot and
+  throws the tree away (`test_code_tree.py`).
+- **Masters rule** (`packs._assert_issue_within_storage`, mirrored on Container Usage):
+  per hierarchy, every Issue level ≤ the SMALLEST Storage level.
+- **Putaway screen**: "Received as" is now **Stored as** (the shelf packs); with Storage
+  mapped the editor offers only those levels (`onlyLevels`), and space is measured on
+  the Storage rung; with none mapped the screen WARNS (`storage_defined`) and never
+  offers to define it — that is a master.
+- **Scanning**: `scan()` resolves a pack code (`box_codes.scan_pack`) and a unit code
+  (`scan_unit`) to live details — item, location, packs/units inside, batch, expiry,
+  brand / variant / model, holder. Public label tokens gained kinds `h` (pack) and `u`
+  (unit); a label's QR opens `/c/<token>` (read-only, no holder, no unit codes).
+- **Labels** (`_label_rows`): parent first, children indented, each with `qr_token`; the
+  sticker prints a Code128 barcode of the code AND the live-details QR.
+- **Material Issue** (`PackagePickerModal`, replaces `BoxCodesModal`): the cartons at the
+  pick's batch and location, "take N boxes" per carton (part-opened cartons first),
+  codes auto-selected and swappable; a second Issue level nests (strips out of a box not
+  taken whole). `box_sources` serves `parent_*`, `level`, every Issue level, and with
+  `with_units` the serials inside — so a SERIAL/IMEI line of such an item picks packages
+  first, then its unique numbers ONE BY ONE, by hand (scanned or tapped) — the
+  packages only narrow the list, nothing is ever auto-selected for a serial or IMEI
+  (still the per-unit serial path on the server).
+  `hold_line` accepts a named code at ANY Issue level and never names a pack inside one
+  already named.
+- **Silent unit codes**: `hold_line` stamps the units inside the boxes with the line's
+  marker; `_mark_serials` flips them, `_land_units` moves them, `land_packages` re-seats
+  them in the same boxes at the destination. QC / consignment / acknowledgement still
+  work by package (box lines are detected before any unit expansion); the codes surface
+  again in the destination's stock balance.
+
+Existing box-only stock is NOT converted (decided 2026-10-27); lots coded the old way
+keep issuing by box with no unit rows.
+
+### The package picker answers in a sentence; labels print per DOCUMENT (2026-10-28)
+
+**Picker** (`PackagePickerModal`, rules in `warehouse/packPick.ts`, pure and tested):
+it opens on a SUGGESTED pick (`suggestPick`: carton by carton, opened cartons first,
+whole packs while they fit, the remainder out of ONE box — its strips when the item
+has a second Issue level, part-opened boxes first) and states it in one sentence
+(`pickSentence`, "Take 4 boxes + 5 strips from carton …0572"). Each carton is a grid
+of box tiles, each tile a bar of its strips. What fails silently if undone: **`rollUp`
+turns every strip of a box back into the box** — without it a carton read "0" while
+its boxes had been emptied strip by strip. Serial / IMEI lines are two steps
+(packages, then numbers) and the numbers are still NEVER auto-selected. The issue
+line cell says the held mix in pack names (`heldMix`), and its packages count is
+only editable as packages while every held pack is the same one — a mix of boxes and
+strips is edited in base units (counting 45 strips as "45 boxes" and multiplying an
+edit by the box size was the defect).
+
+**Labels for a document** (`warehouse/issue_labels.py`, `DocLabelsDialog`):
+`GET /issues/{id}/labels` — refused until `is_stock_posted` (part packs get codes AT
+posting) — serves every pack the line issued (`line_boxes` plus consignment
+`box_code`s, since landing clears the issue stamp), parent first with everything
+inside each, the part pack cut at posting flagged `new_here`, and every asset /
+consumable code. **Never a serial or an IMEI** (decided 2026-10-28: the maker's label
+is on the goods). `GET /dispatches/{id}/received-labels` serves only rows with
+`delivered_qty > 0` — what the site acknowledged, at what arrived. `…/printed` writes
+an audit row and ticks any queued Box label it covered. Doors: the issue page (header
+button + a banner right after posting), Labels & Printing › Issue labels, and the
+acknowledgement page per consignment. The dialog picks whole document or chosen
+items, package levels, codes, Barcode/QR/both, Code128/39, thermal-roll and A4
+presets or a custom size, fields, text size and copies; settings and named presets
+are per USER in the browser (`docLabels.ts`) — no table, by decision. `LabelSticker`
+is the one sticker drawing, used by Box labels too.
+
+**2026-11-02 reversals**: issue/receipt labels now print SERIAL and IMEI units too, but
+only for an item tracked by them (`issue_labels._unit_rows`; an untracked unit with no
+asset/consumable code is still skipped), each row carrying `serial_number` + `imei`.
+The QR carries the details AS TEXT by default (`docLabels.qrDetailsText`, setting `qr`
+DETAILS | LINK; Box labels has the same switch) so any phone camera shows them; the
+signed `/c/<token>` link is the opt-in. Box labels is a cascade — warehouse → item →
+batch → location (`GET /box-labels/facets`; `list_labels` takes `item_id`, `batch_id`,
+`bin_id`, read off the PACK, 0 = none).
+
+**Mixed Issue levels stay** (decided 2026-10-28): a line may hold 4 box codes + 5 strip
+codes; codes are NOT forced to the smallest level. What changed is how they are SHOWN:
+
+- `box_codes.pack_context` / `decorate_packs` serve each package's `path` (outermost
+  first) and `inner` (packs still inside it — live ones, or for a pack that left, the
+  ones closed at the SAME moment; a strip taken out earlier is not inside). Wired into
+  `line_view` (issue line `box_codes`), the consignment source, both acknowledgement
+  builders, `box_sources` (`path`) and the dispatch detail (`box_paths`).
+- Outward QC and the receiving site (`PackageCheckModal`) draw the packages as
+  carton › box › strip, keep/reject (arrived/missing) a whole group in one press (a
+  receipt group asks to confirm), and check a kept box STRIP BY STRIP — those roll up
+  into the box's own figure (`innerLost`), so the server contract is unchanged; every
+  strip gone rejects the box whole. The consignment "Pick packages" groups the same
+  way ("Put all N here" skips packages already in another carton). The packing-list
+  print lists each carton's rows with their codes under carton › box.
+- The issue picker is a drill-down (`buildTree` from `path`): top packs first, each
+  level a sheet over the last inside ONE dialog, one history entry per level so the
+  phone's back button closes one level (every entry is taken back off on close). Any
+  Issue level can be ticked; a non-Issue pack only opens ("Take everything inside").
+  Serial / IMEI lines get the units as the last level, still never auto-selected.
+- Labels carry `path`; a carton (and an opened box) is printed once per document as a
+  parent label on top (`context`, "Include parent labels", on by default). A part pack
+  cut at posting is parented to the pack the shelf box sits in, so its label has a path.
+- Empty shells: `boxes_at` never offers a pack holding 0, and `settle_on_post` closes
+  every live pack of the item that holds nothing (`_close_empty_shells`).
+
+### Unit codes travel INSIDE their packs, at every level (2026-10-28)
+
+NA/104/2026-27/STO0002 (LIP→LIP, raised from an STR) delivered two strips with no
+codes: every code at the source pointed at a box still standing at the central
+warehouse, and everything that moves a pack moves only the units LINKED to it — so the
+strips left, the codes stayed "available" at the source (more codes than stock), and
+the receiving LIP got none. One code path serves LIP→LIP, MDP→MDP and WH→WH, for an
+STR-driven issue and a direct STO alike, so it was every transfer of an item issued in
+a container.
+
+- `box_codes.seat_stray_units` seats a unit linked to a pack NOT standing at its own
+  point (and a loose unit beyond what lies loose in its lot) into the live packs of its
+  lot that hold fewer units than their contents, innermost first. Run by `hold_line`
+  (before the boxes are held), `rebox_lot` (before boxes are cut) and `land_packages`
+  (with `loosen_rest`). A unit a document reserved is never moved.
+- **A box issued WHOLE keeps its tree** (`settle_on_post` restores `parent_id` after
+  `_consume`, which clears it): its carton is its path, its strips stay linked to it.
+  Closed packs are never counted as content — every reader of `parent_id` filters LIVE.
+  Without this the 2026-10-28 grouping and strip checks only ever saw PART packs.
+- **A package that arrives whole lands with what left inside it** (`_land_inside`:
+  packs closed at the same `closed_at`, re-opened INSIDE at the destination, same
+  codes). One that arrives short lands as one pack holding what arrived.
+- `unlocated.place` moves the live packs at bin 0 with the stock and units — a transfer
+  landing at a bin-managed warehouse otherwise left its boxes at no location.
+- `hold_line`'s "not claimed by another document" test ANDs the prefixes (it ORed
+  negations, which let any claimed unit through).
+- A box line posting with fewer unit codes than it carries, on a lot that has codes, is
+  logged (`_mark_serials`) — never silent again.
+- A direct STO asking for more than the source has free is refused when raised and
+  when approved (`inventory._assert_sto_stock`); it used to be approved and then
+  strand at "To issue" because the issue draft failed inside the swallowed hook. The
+  hook runners read the document number BEFORE running (a rollback expires the row and
+  reading it after raised MissingGreenlet — a 500 for the approver).
+
+History: `scripts.reseat_unit_codes` (preview; `--apply`) seats stray codes in place,
+fills packages that landed short from the sender's codes BEYOND its stock (never one
+still on its shelf), and lists lots still over. Tests: `warehouse/tests/
+test_codes_travel.py` (LIP/MDP/WH, DB), `inventory/tests/test_sto_stock_check.py`.
+
+### An item issued in a container is issued by the BOX (2026-10-26)
+
+`warehouse/box_codes.py`. When Container Usage maps an ISSUE container, the issue line
+names BOXES — one code per box (`whs_handling_units.hu_code`, item-format `…-BOX`) —
+never one per base unit. A box is held by an issue line through
+`whs_handling_units.held_by` (the same `Reserved for issue X line Y` marker a unit
+carries) and `held_qty` (how much of it the line takes, NULL = all); migration
+`c3e5a7b9d1f4`.
+
+- **Save** (`hold_line`, from `_reserve_issue_serials`): named codes first (scanned,
+  picked in `BoxCodesModal`, or the screen's echo; an OLD per-unit code finds its box),
+  then an exact fill, whole boxes fullest first, then the smallest box covering the
+  rest. The unit rows inside are stamped too, so posting moves the history with them.
+  A code of this item that is no longer a box here (old container, consumed) is
+  re-made, never refused. `codes_needed` = boxes; `issue_in_boxes`, `box_codes`,
+  `container_note` are served per line.
+- **Post** (`settle_on_post`, before `_mark_serials`): a whole box is CONSUMED under
+  its code; PART of a box leaves as a NEW part box with a new code (label queued) and
+  the shelf box KEEPS its code, holding less. A box line is never topped up with loose
+  units (`_claim_issue_units`) and is exempt from the per-unit count checks.
+- **Old stock** (per-unit codes from before the mapping): `scripts.setup_container_usage
+  --apply` re-boxes every lot (`rebox_lot`): whole boxes, then ONE part box for the
+  remainder; unit codes stay on their unit rows inside the box as hidden history.
+  Checked per lot (stock, unit count, boxes ≤ stock), rolled back on any difference;
+  lots held by an open issue are skipped and listed. Units linked to a box at another
+  point are detached first.
+- **Issue container changed later**: `packing.recode_item` re-boxes every lot no open
+  ISSUE holds (an allocation's reserved quantity is no reason to wait); a lot an issue
+  holds is re-cut when that issue is next saved (`ensure_issue_level`, refused while a
+  DIFFERENT issue holds it), and an issue still holding old-container boxes may not
+  submit or post (`check_line`).
+- **Putaway**: `shelve` codes the issue-level boxes in item format and boxes the loose
+  remainder as a part box.
+- **Labels**: every new box code is queued in `whs_box_labels` (PUTAWAY, CONVERTED,
+  RECODED, PART_BOX) and printed from Inventory › Labels & Printing › Box labels.
+- **Downstream, by the PACKAGE** (migration `d5f7b9c1e3a6`). Outward QC: a package is
+  kept or rejected whole, and units rejected out of a kept one are recorded against it
+  (`whs_inspection_items.pack_rejections`); accepted = what the kept packages carry
+  less those units, EXACTLY. `box_codes.packages_after_qc` is what each package
+  carries on. Consignment: whole packages per carton, named in the row's
+  `serial_numbers`, one `out_dispatch_items` row per package (`box_code`, quantity);
+  a package in two cartons is refused; carton packs come from the packages
+  (`carton_packs`). Acknowledgement: each carton lists its packages; the site marks
+  them arrived / missing / short (`AcknowledgeLineIn.package_receipts`, code -> what
+  arrived), validated against the line's packages and written onto the receipt
+  remarks and audit. Screens: `PackageCheckModal` (shared, QC + receipt), the
+  consignment "Pick packages" picker, and the issue's package-count Issue qty.
+
+### Part packs: the size is a ceiling, not a rule (2026-10-11)
+
+A level's size is the STANDARD — the most one pack holds. A carton of 600 may really
+hold 500: a breakdown entry says so with `fill` ("1 Carton (500 of 600)", `qty` packs
+each holding `fill`), and `base_of` is `sum(qty x held)`. On the shelf it is
+`whs_handling_units.content_qty` (NULL = full); read it through `packing.held(hu)`,
+never `pack_size` alone. Migration `c8e0a2b4d6f9`.
+
+- **One line stays one line.** The remainder is a part pack INSIDE the line's packing,
+  never a second document line — every per-line rule (PO received-by-line, indent
+  "on order", the issue guards) keeps counting what it always counted.
+- **Packing never changes an ordered quantity.** On the PO (form and detail) the
+  quantity is typed; the hierarchy and level only describe it, the remainder as one
+  part pack (`greedyWithPart`). `repack_po_line` refuses any breakdown that does not
+  add up to the line.
+- **Minimum fill** (`mst_item_packaging.min_fill_qty`, base units, never above the
+  level's size). Refused where a pack is MADE — PO (`stamp_line`, `repack_po_line`),
+  putaway (`shelve` with the storekeeper's packs), a repack's NEW part packs. Only
+  warned where it is a fact — despatch note, GRN count (`packing.warnings`), and a
+  putaway fed from such a count falls back to whole packs + loose.
+- **Taking from a plain pack shrinks it in place** (`settle_issue`, `reconcile_key`
+  via `_take_inside`): it stays the pack it was, every pack around it shrinks too, and
+  one under its floor is flagged (`below_min` on `pack_summary` / `lot_packs`) until
+  somebody repacks it. It is never broken up on its own. CODED packs (atoms) keep the
+  break-bulk rule unchanged.
+- **Repack** keeps a part pack only where the target names one of that level holding
+  exactly that (`packing.split_target` → `plan_repack(partial=)`); otherwise it opens
+  and is carved into the whole packs below it plus loose.
+- Two part packs of one level on one line: warned, never refused.
+
+On screen: `PackQty` is the quantity cell everywhere a line is packed (the packs, the
+base quantity in the item's own UOM under them, and a Hierarchy button opening
+`HierarchyLadder`); `PackBreakdownEditor` lists part packs under the tiles. Every lot
+on Stock Segregation > Lots carries Repack (amber when a pack is under its floor). The
+supplier portal's Profile > Packing tab (`GET /api/supplier/items/packing`) lists the
+hierarchies of the vendor's own mapped items only, scoped on the token.
 
 ### The outward leg (doc Phase D+E), under Logistics
 
@@ -1281,10 +1900,27 @@ built against a different backend contract and is to be rewritten (see
 - Item codes are `L1L2L3-GEN-0001`. The serial is a locked `MAX+1` per
   category+general prefix, assigned once at create and **never** regenerated on an edit — stock,
   ledger rows and documents point at the code the item was created with. Brand and
-  manufacturer are validated on the item but are not part of the code: one general
-  name sold by several brands is one item row per brand sharing the prefix and
-  differing only in the serial. Rows created before the change keep their longer
-  `L1L2L3-GEN-BRAND-MFR-0001` shape, which is never rewritten.
+  manufacturer are validated on the item but are not part of the code. Rows created
+  before the change keep their longer `L1L2L3-GEN-BRAND-MFR-0001` shape, which is
+  never rewritten.
+- **One item row per code; brands are combinations of it (2026-10-23).** Creating an
+  item whose general name already has a code adds the brand to THAT item
+  (`crud.UseExistingRow`, answered with `merged_into_existing`) instead of a second
+  row with the same code. Rows created the old way (one row per brand, same code) are
+  merged by `scripts.consolidate_item_brands` (preview by default, `--apply` to save;
+  run after `alembic upgrade head` + bootstrap, with a backup): the oldest active row
+  survives, every sibling's lines/ledger/reservations/units move to it tagged with the
+  sibling's brand (a sibling with no brand stays untagged), stock landing on one lot
+  is summed, a clashing serial gets a suffix (`SN123-BETA` / `SN123-2`), and each code
+  is saved ONLY if its stock, ledger, units, reservations and document row counts are
+  identical before and after — otherwise that code is rolled back and reported. It
+  also maps every item's old `brand_id` and tags the untagged stock of an item with
+  exactly one brand. Until it runs, the mapping screen and the Brands tab already read
+  every row of a code as one item.
+- **Serials are demanded per LOT** (`warehouse.service._lot_has_units`): a lot with no
+  recorded unit — stock from a sibling that was never tracked — is issued, moved and
+  QC'd by quantity even when the item master says tracked. Bounded EXISTS, never a
+  COUNT over `whs_serial_numbers`.
 - Tax lives on `mst_hsn_codes` and is read at PO/GRN time, never copied onto an item.
   `mst_items.purchase_price` survives as the stock-valuation cost fallback, fed by
   GRN and hidden from the item form.

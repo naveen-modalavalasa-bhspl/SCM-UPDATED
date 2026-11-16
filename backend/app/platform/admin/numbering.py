@@ -12,7 +12,7 @@ from app.platform.settings.models import DocSeries
 from app.platform.settings.service import write_audit
 from app.shared.enums import AuditAction, DocType, ResetPolicy
 from app.shared.numbering import (
-    DEFAULT_PATTERN, current_period, normalise_pattern, render, tokens_in,
+    DEFAULT_PATTERN, _fiscal_year, current_period, normalise_pattern, render, tokens_in,
 )
 
 # What each token stands for, shown on the screen so an admin can compose a pattern
@@ -20,9 +20,9 @@ from app.shared.numbering import (
 TOKENS = (
     ("{PREFIX}", "the prefix on this row, e.g. IND"),
     ("{SEQ:5}", "the running number, padded to 5 digits"),
-    ("{FY}", "financial year, e.g. 2026-27"),
-    ("{COMPANY}", "company name from Settings > Company"),
-    ("{PROJECT}", "the project the document belongs to"),
+    ("{FY}", "financial year, worked out from today and changing by itself on 1 April"),
+    ("{COMPANY}", "the document's organisation (procurement); elsewhere, Settings > Company"),
+    ("{PROJECT}", "the document's project, or its department when it has no project"),
     ("{YYYY}", "calendar year, e.g. 2026"),
     ("{YY}", "2-digit year, e.g. 26"),
     ("{MM}", "month number, 01-12"),
@@ -62,7 +62,7 @@ def preview(s: DocSeries) -> str:
         )
     except (KeyError, ValueError, IndexError):
         return "invalid pattern"
-    return render(s.pattern or DEFAULT_PATTERN, s.prefix, s.fiscal_year,
+    return render(s.pattern or DEFAULT_PATTERN, s.prefix, _fiscal_year(),
                   (s.last_number or 0) + 1, **SAMPLE)
 
 
@@ -75,7 +75,7 @@ _LABELS = {"doc_type": "Document type", "fiscal_year": "Fiscal year",
            "prefix": "Prefix", "pattern": "Pattern"}
 
 
-def _validate(data) -> None:
+def _validate(data, current_doc_type: str | None = None) -> None:
     for field, limit in _LIMITS.items():
         value = getattr(data, field, None) or ""
         if len(value) > limit:
@@ -89,7 +89,12 @@ def _validate(data) -> None:
         raise ValidationError(
             "Prefix is plain text, e.g. IND — it is not expanded. Put "
             "{COMPANY}, {PROJECT} or a date token in Pattern instead")
-    if data.doc_type not in {t.value for t in DocType}:
+    # A row's OWN doc type is always accepted on edit. `next_number` auto-creates
+    # series under the caller's key ("mr", "po", "lot", "adj"), most of them lowercase
+    # and some not in DocType at all, so checking them against the enum made those
+    # rows impossible to edit — their pattern could never be changed from the screen.
+    if (data.doc_type != current_doc_type
+            and data.doc_type not in {t.value for t in DocType}):
         raise ValidationError(
             f"doc_type must be one of {', '.join(t.value for t in DocType)}")
     if data.reset_policy not in {p.value for p in ResetPolicy}:
@@ -148,7 +153,7 @@ async def update_series(db: AsyncSession, series_id: int, data, actor) -> dict:
     row = await db.get(DocSeries, series_id)
     if row is None:
         raise NotFoundError("Document series not found")
-    _validate(data)
+    _validate(data, current_doc_type=row.doc_type)
     before = series_out(row)
     # last_number is intentionally absent from the payload: see the module docstring.
     for key, value in data.model_dump().items():

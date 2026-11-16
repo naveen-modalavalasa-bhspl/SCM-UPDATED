@@ -184,3 +184,14 @@ __all__ = [
     "assert_serial_budget", "Annotated",
     "RUNTIME_LIMITS", "set_runtime_limits", "limit",
 ]
+
+
+#: Entries in one pack breakdown ("1 Carton + 10 Box + 20 Strip" is three). A
+#: hierarchy rarely has more than five levels; twelve leaves room and no more.
+MAX_PACK_ENTRIES = 12
+
+#: Physical packs (`whs_handling_units` rows) one putaway, repack or issue may create.
+#: Each pack is a row and, for a code-tracked item, a minted code; a breakdown of
+#: "40,000 Strip" is the same flood of rows the serial budget exists to stop. Put
+#: away in a bigger pack level, or in several presses.
+MAX_PACKS_PER_REQUEST = 5_000

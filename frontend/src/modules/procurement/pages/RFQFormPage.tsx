@@ -1,13 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Card, ErrorBanner, Field, FormActions, Input, Textarea, PageHeader, Select, useToast } from "@/shared/components";
+import { Switch } from "@heroui/react";
+import { Truck } from "lucide-react";
+import { Card, DocumentNumberCard, ErrorBanner, Field, FormActions, Input, Textarea, PageHeader, Select, useToast } from "@/shared/components";
 import { Button } from "../components/ActionButton";
 import { api } from "@/shared/api/client";
 import { consolidationApi, requisitionApi, rfqApi } from "../api";
 import { blankLine, LinePicker, type DraftLine } from "../components/LinePicker";
-import { OrgFields, type OrgValue } from "../components/OrgFields";
-import { todayIst } from "@/shared/datetime";
+import { emptyOrgValue, OrgFields, orgMissing, orgPayload, orgValueCarried, orgValueFrom, type OrgValue } from "../components/OrgFields";
+import { departmentOf, isOlderDocument } from "../orgScope";
+import { fmtDate, todayIst } from "@/shared/datetime";
+import { comboFrom, comboPayload } from "@/shared/combination";
 
 interface MasterVendor {
   id: number;
@@ -39,12 +43,16 @@ export function RFQFormPage() {
   // Empty means "use the default" — the backend decides what that is, so the form
   // never has to carry a copy of it.
   const [evaluationMethod, setEvaluationMethod] = useState("");
+  // Off: the suppliers are not asked for freight, and the portal shows no field for it.
+  const [freightRequired, setFreightRequired] = useState(false);
   // Carried from the source document where there is one, and typed where there is not:
   // an RFQ raised cold still has to say who is buying, for where, on whose budget and
   // on whose paper. Same four fields the requisition form asks for.
-  const [org, setOrg] = useState<OrgValue>({
-    departmentId: "", warehouseId: "", projectId: "", companyName: "",
-  });
+  const [org, setOrg] = useState<OrgValue>(emptyOrgValue());
+  const [triedOrg, setTriedOrg] = useState(false);
+  // Set in the same update that copies the source, so the card's defaults only ever see
+  // what the source left empty.
+  const [seeded, setSeeded] = useState(!editing && !fromRequisition && !fromConsolidation);
   const [chosenVendors, setChosenVendors] = useState<number[]>([]);
   const [vendorSearch, setVendorSearch] = useState("");
   const [lines, setLines] = useState<DraftLine[]>([blankLine()]);
@@ -111,13 +119,8 @@ export function RFQFormPage() {
     setDueDate(existing.due_date ?? "");
     setTerms(existing.terms ?? "");
     setEvaluationMethod(existing.evaluation_method ?? "");
-    setOrg({
-      departmentId: existing.department_id ?? "",
-      warehouseId: existing.warehouse_id ?? "",
-      warehouseName: existing.warehouse_name ?? "",
-      projectId: existing.project_id ?? "",
-      companyName: existing.company_name ?? "",
-    });
+    setFreightRequired(Boolean(existing.freight_required));
+    setOrg(orgValueFrom(existing));
     // Who was invited, which is now the whole of what this form holds about vendors.
     // An RFQ saved before allocation moved to the comparison may still carry old
     // per-supplier invitation quantities. Re-saving a draft intentionally normalizes
@@ -132,6 +135,7 @@ export function RFQFormPage() {
       original_quantity: String(item.quantity),
       uom_code: item.uom_code,
       required_date: item.required_date ?? "",
+      combo: comboFrom(item),
     })));
   }, [existing]);
 
@@ -141,13 +145,8 @@ export function RFQFormPage() {
   useEffect(() => {
     if (!source) return;
     setTitle(`Quotation for ${source.req_no}`);
-    setOrg({
-      departmentId: source.department_id ?? "",
-      warehouseId: source.warehouse_id ?? "",
-      warehouseName: source.warehouse_name ?? "",
-      projectId: source.project_id ?? "",
-      companyName: source.company_name ?? "",
-    });
+    setOrg(orgValueCarried(source));
+    setSeeded(true);
     setTerms((current) => current || source.remarks || "");
     setLines(source.items.map((item) => ({
       item_id: item.item_id,
@@ -157,19 +156,15 @@ export function RFQFormPage() {
       original_quantity: String(item.quantity),
       uom_code: item.uom_code,
       required_date: item.required_date ?? "",
+      combo: comboFrom(item),
     })));
   }, [source]);
 
   useEffect(() => {
     if (!sourceConsolidation) return;
     setTitle(`Quotation for ${sourceConsolidation.cons_no}`);
-    setOrg({
-      departmentId: "",
-      warehouseId: sourceConsolidation.warehouse_id ?? "",
-      warehouseName: sourceConsolidation.warehouse_name ?? "",
-      projectId: sourceConsolidation.project_id ?? "",
-      companyName: "",
-    });
+    setOrg(orgValueCarried(sourceConsolidation));
+    setSeeded(true);
     setTerms((current) => current || sourceConsolidation.remarks || "");
     setLines(sourceConsolidation.items.map((item) => ({
       item_id: item.item_id,
@@ -179,6 +174,7 @@ export function RFQFormPage() {
       original_quantity: String(item.approved_qty),
       uom_code: item.uom_code,
       required_date: item.required_date ?? "",
+      combo: comboFrom(item),
     })));
   }, [sourceConsolidation]);
 
@@ -203,6 +199,31 @@ export function RFQFormPage() {
     return [...byId.values()].sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
   }, [vendorsByItem]);
 
+  // Raised before organisations: keeps its old fields, and is asked for nothing new.
+  const legacy = isOlderDocument(existing, existing?.rfq_no);
+  // Past a draft all of it is fixed; on a linked tender the organisation always is.
+  const bookingLocked = Boolean(existing && !legacy && existing.status !== "DRAFT");
+  const orgLocked = Boolean(
+    source?.organization_id || sourceConsolidation?.organization_id
+    || (existing?.organization_id && (existing.requisition_id || existing.consolidation_id)),
+  );
+
+  // SCM_0172: the date box greys out past days, but a TYPED date went straight
+  // through it and the RFQ was raised already closed. Said under the field, and Save
+  // stays off until it is fixed. A date this RFQ was already saved with is left alone
+  // until somebody changes it — same rule the server applies on edit.
+  const today = todayIst();
+  const dueDateError = dueDate && dueDate < today && dueDate !== (existing?.due_date ?? "")
+    ? `This date has passed. Pick today (${fmtDate(today)}) or later.`
+    : null;
+  const pastLine = lines.find((line) => !line.id && line.item_id !== ""
+    && line.required_date && line.required_date < today);
+  const dateProblem = dueDateError
+    ? "The closing date has already passed."
+    : pastLine
+      ? `"Needed by" for ${pastLine.item_name || pastLine.item_code || "a line"} has already passed.`
+      : null;
+
   const save = useMutation({
     mutationFn: () => {
       const usable = lines.filter((l) => l.item_id !== "" && Number(l.quantity) > 0);
@@ -211,10 +232,8 @@ export function RFQFormPage() {
         due_date: dueDate || null,
         terms: terms || null,
         evaluation_method: evaluationMethod || null,
-        warehouse_id: org.warehouseId === "" ? null : org.warehouseId,
-        project_id: org.projectId === "" ? null : org.projectId,
-        department_id: org.departmentId === "" ? null : org.departmentId,
-        company_name: org.companyName || null,
+        freight_required: freightRequired,
+        ...orgPayload(org, legacy),
         // Suppliers only. Splitting a line between them is a decision taken against
         // PRICES, and at this point nobody has any — see the note on the section
         // below. `vendor_allocations` is deliberately not sent: the service reads
@@ -226,6 +245,7 @@ export function RFQFormPage() {
           quantity: Number(line.quantity),
           uom_code: line.uom_code ?? null,
           required_date: line.required_date || null,
+          ...comboPayload(line.combo),
         })),
       };
       return editing
@@ -244,6 +264,10 @@ export function RFQFormPage() {
   });
 
   const submit = () => {
+    if (dateProblem) {
+      setProblem(`${dateProblem} Pick today or a later date.`);
+      return;
+    }
     const usable = lines.filter((l) => l.item_id !== "" && Number(l.quantity) > 0);
     if (!usable.length) {
       setProblem("Add at least one line with an item and a quantity.");
@@ -257,6 +281,12 @@ export function RFQFormPage() {
     }
     if (!chosenVendors.length) {
       setProblem("Pick at least one supplier to send this RFQ to.");
+      return;
+    }
+    const missing = legacy ? null : orgMissing(org);
+    if (missing) {
+      setTriedOrg(true);
+      setProblem(missing);
       return;
     }
     setProblem(null);
@@ -288,10 +318,10 @@ export function RFQFormPage() {
           </p>
           <dl className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-5">
             {[
-              ["Department", source.department_name],
+              ["Organisation", source.organization_name ?? source.company_name],
+              ["Department", departmentOf(source)],
               ["Shipment Address", source.warehouse_name],
               ["Project", source.project_name],
-              ["Company", source.company_name],
               ["Priority", source.priority ?? "Normal"],
             ].map(([label, value]) => (
               <div key={label}>
@@ -318,6 +348,8 @@ export function RFQFormPage() {
           </p>
           <dl className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-5">
             {[
+              ["Organisation", sourceConsolidation.organization_name],
+              ["Department", sourceConsolidation.org_department_name],
               ["Project", sourceConsolidation.project_name],
               ["Status", sourceConsolidation.status],
               ["Approved By", sourceConsolidation.approved_by_name],
@@ -337,19 +369,33 @@ export function RFQFormPage() {
         </Card>
       )}
 
+      {!legacy && (
+        <div className="mb-4">
+          <DocumentNumberCard
+            docType="RFQ" value={org} ready={seeded} showInvalid={triedOrg}
+            locks={{ all: bookingLocked, organisation: orgLocked }}
+            savedNumber={existing?.rfq_no}
+            source={source ? { label: source.req_no, to: `/procurement/requisitions/${source.id}` }
+              : sourceConsolidation ? { label: sourceConsolidation.cons_no, to: `/procurement/consolidations/${sourceConsolidation.id}` }
+                : null}
+            onChange={(patch) => setOrg((current) => ({ ...current, ...patch }))}
+          />
+        </div>
+      )}
+
       <Card className="space-y-5 p-5">
-        {/* Editable either way: a requisition pre-fills them, and an RFQ raised cold
-          * has nowhere else to get them from. */}
-        <OrgFields value={org} onChange={(patch) => setOrg({ ...org, ...patch })} />
+        <OrgFields value={org} legacy={legacy} disabled={bookingLocked}
+                   onChange={(patch) => setOrg((current) => ({ ...current, ...patch }))} />
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
           <Field label="Title">
             <Input value={title} onChange={(e) => setTitle(e.target.value)}
                    placeholder="What is being bought" />
           </Field>
-          <Field label="Closes on" hint="After this date vendors can read but not quote.">
+          <Field label="Closes on" hint="After this date vendors can read but not quote."
+                 error={dueDateError}>
             {/* A closing date behind us shuts the RFQ the moment it is raised. */}
-            <Input type="date" min={todayIst()} value={dueDate}
+            <Input type="date" min={today} value={dueDate} isInvalid={!!dueDateError}
                    onChange={(e) => setDueDate(e.target.value)} />
           </Field>
           <Field label="Terms">
@@ -369,6 +415,26 @@ export function RFQFormPage() {
             />
           </Field>
         </div>
+
+        {/* Whether the suppliers quote freight. Off, their portal shows no field for it
+          * and any freight sent is saved as 0. */}
+        <label className={`flex min-h-11 cursor-pointer items-center gap-3 rounded-xl border px-4 py-3 transition-colors ${
+          freightRequired ? "border-brand/50 bg-brand-050/40" : "border-line bg-content1"}`}>
+          <span className={`grid h-9 w-9 shrink-0 place-items-center rounded-lg ${
+            freightRequired ? "bg-brand text-white" : "bg-content2 text-muted"}`}>
+            <Truck className="h-4 w-4" aria-hidden />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block text-sm font-semibold text-ink">Ask suppliers to quote freight</span>
+            <span className="block text-xs text-muted">
+              {freightRequired
+                ? "Suppliers will see a Freight field on their quotation."
+                : "Off — suppliers quote without freight; the Freight field is hidden on their portal."}
+            </span>
+          </span>
+          <Switch isSelected={freightRequired} onValueChange={setFreightRequired}
+                  aria-label="Ask suppliers to quote freight" />
+        </label>
 
         <div>
           <h2 className="mb-3 text-sm font-semibold text-ink">
@@ -441,7 +507,8 @@ export function RFQFormPage() {
 
         <FormActions>
           <Button variant="subtle" onClick={() => nav("/procurement/rfqs")}>Cancel</Button>
-          <Button disabled={save.isPending} onClick={submit}>
+          <Button disabled={save.isPending || !!dateProblem} onClick={submit}
+                  title={dateProblem ?? undefined}>
             {editing ? "Save changes" : "Create RFQ"}
           </Button>
         </FormActions>

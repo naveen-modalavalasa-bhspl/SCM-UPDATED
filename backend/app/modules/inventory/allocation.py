@@ -7,7 +7,9 @@ posts. That is why this deliberately does not go through move_stock(), and why
 CLAUDE.md rule 7 is split: physical changes via move_stock(), reservation columns via
 this module, and nothing else assigns to stk_balance.
 """
+import collections
 from dataclasses import dataclass
+from types import SimpleNamespace
 from decimal import Decimal
 
 from sqlalchemy import func, select
@@ -22,6 +24,25 @@ from app.shared.models.base import utcnow
 ZERO = Decimal("0")
 
 
+def matches_combination(stock, combination: dict | None) -> bool:
+    """Does a balance row hold the brand / variant / model a line names (2026-10-23)?
+    No combination named — None, or brand 0 — matches every row; `no_brand` matches
+    only rows with no brand recorded (stock booked in before brands were)."""
+    if combination and combination.get("no_brand"):
+        return not int(stock.brand_id or 0)
+    if not combination or not int(combination.get("brand_id") or 0):
+        return True
+    return ((int(stock.brand_id or 0), int(stock.variant_id or 0), int(stock.model_id or 0))
+            == (int(combination.get("brand_id") or 0), int(combination.get("variant_id") or 0),
+                int(combination.get("model_id") or 0)))
+
+
+def _combo_of(stock) -> dict:
+    """The combination columns a reservation copies off its balance row."""
+    return {"brand_id": int(stock.brand_id or 0), "variant_id": int(stock.variant_id or 0),
+            "model_id": int(stock.model_id or 0)}
+
+
 @dataclass(frozen=True)
 class ConsumedStock:
     """The exact stock dimensions released for a physical issue."""
@@ -32,6 +53,11 @@ class ConsumedStock:
     batch_id: int
     project_id: int
     quantity: Decimal
+    # Which brand / variant / model the slice is (2026-10-23), so the posting moves
+    # stock out of that row and no other.
+    brand_id: int = 0
+    variant_id: int = 0
+    model_id: int = 0
 
 
 def _d(value) -> Decimal:
@@ -42,8 +68,12 @@ async def reserve(db: AsyncSession, item_id: int, qty, ref_type: str, ref_id: in
                   ref_no: str | None, user, *, project_id: int = NO_PROJECT,
                   warehouse_types: list[str] | None = None,
                   warehouse_ids: list[int] | None = None,
-                  ref_line_id: int | None = None, item=None) -> tuple[Decimal, Decimal]:
+                  ref_line_id: int | None = None, item=None,
+                  combination: dict | None = None) -> tuple[Decimal, Decimal]:
     """Reserve up to `qty`. Returns (reserved, shortfall).
+
+    `combination` (brand / variant / model) narrows it to that combination's stock;
+    None draws from any.
 
     A partial reservation is a normal outcome, not an error: an indent for 100 when 60
     are on hand should reserve 60 and let the caller raise an MR for the other 40.
@@ -61,7 +91,8 @@ async def reserve(db: AsyncSession, item_id: int, qty, ref_type: str, ref_id: in
         taken = await take_from_holds(
             db, item_id=item_id, project_id=project_id, qty=remaining,
             ref_type=ref_type, ref_id=ref_id, ref_no=ref_no, ref_line_id=ref_line_id,
-            user=user, warehouse_ids=warehouse_ids, warehouse_types=warehouse_types)
+            user=user, warehouse_ids=warehouse_ids, warehouse_types=warehouse_types,
+            combination=combination)
         remaining -= taken
         reserved_total += taken
         if remaining <= ZERO:
@@ -73,6 +104,7 @@ async def reserve(db: AsyncSession, item_id: int, qty, ref_type: str, ref_id: in
     rows = await availability.candidate_stock(db, item_id, project_id,
                                               warehouse_types, strategy,
                                               warehouse_ids=warehouse_ids)
+    rows = [row for row in rows if matches_combination(row, combination)]
 
     for stock in rows:
         if remaining <= ZERO:
@@ -86,6 +118,7 @@ async def reserve(db: AsyncSession, item_id: int, qty, ref_type: str, ref_id: in
         db.add(Reservation(
             stock_id=stock.id, item_id=item_id, warehouse_id=stock.warehouse_id,
             bin_id=stock.bin_id, batch_id=stock.batch_id, project_id=stock.project_id,
+            **_combo_of(stock),
             quantity=take, ref_type=ref_type, ref_id=ref_id, ref_no=ref_no,
             ref_line_id=ref_line_id, status=ReservationStatus.ACTIVE.value,
             created_by_id=getattr(user, "id", None),
@@ -96,6 +129,57 @@ async def reserve(db: AsyncSession, item_id: int, qty, ref_type: str, ref_id: in
 
     await db.flush()
     return reserved_total, remaining
+
+
+async def reserve_at(db: AsyncSession, *, item_id: int, qty, warehouse_id: int,
+                     bin_id: int | None, batch_id: int | None, ref_type: str,
+                     ref_id: int, ref_no: str | None, ref_line_id: int | None,
+                     user, combination: dict | None = None) -> Decimal:
+    """Reserve `qty` at the exact (bin, batch) a document line names. Returns what
+    could be reserved; the caller decides whether a shortfall is an error.
+
+    `reserve` above walks the warehouse by pick strategy — right for an allocation,
+    which decides WHERE the goods come from. A document line has already decided, so
+    this takes its stock from that spot alone. 0/None on bin or batch means "the line
+    names none": every balance row under the other heading is eligible, freest first.
+    Row-locked, so two drafts saved at once cannot both claim the same units.
+    """
+    want = _d(qty)
+    if want <= ZERO:
+        return ZERO
+    stmt = select(Stock).where(Stock.item_id == item_id,
+                               Stock.warehouse_id == warehouse_id,
+                               Stock.available_qty > 0)
+    if bin_id:
+        stmt = stmt.where(Stock.bin_id == bin_id)
+    if batch_id:
+        stmt = stmt.where(Stock.batch_id == batch_id)
+    if combination and int(combination.get("brand_id") or 0):
+        stmt = stmt.where(Stock.brand_id == int(combination["brand_id"]),
+                          Stock.variant_id == int(combination.get("variant_id") or 0),
+                          Stock.model_id == int(combination.get("model_id") or 0))
+    rows = (await db.execute(stmt.order_by(Stock.id).with_for_update())).scalars().all()
+    taken = ZERO
+    for stock in sorted(rows, key=lambda row: -(row.available_qty or ZERO)):
+        if taken >= want:
+            break
+        part = min(want - taken, stock.available_qty or ZERO)
+        if part <= ZERO:
+            continue
+        stock.available_qty = (stock.available_qty or ZERO) - part
+        stock.reserved_qty = (stock.reserved_qty or ZERO) + part
+        db.add(Reservation(
+            stock_id=stock.id, item_id=item_id, warehouse_id=stock.warehouse_id,
+            bin_id=stock.bin_id, batch_id=stock.batch_id, project_id=stock.project_id,
+            **_combo_of(stock),
+            quantity=part, ref_type=ref_type, ref_id=ref_id, ref_no=ref_no,
+            ref_line_id=ref_line_id, status=ReservationStatus.ACTIVE.value,
+            created_by_id=getattr(user, "id", None),
+            created_by_name=getattr(user, "full_name", None),
+        ))
+        taken += part
+    await db.flush()
+    return taken
 
 
 # ---------------- project holds ----------------
@@ -198,7 +282,8 @@ async def take_from_holds(db: AsyncSession, *, item_id: int, project_id: int, qt
                           warehouse_ids: list[int] | None = None,
                           warehouse_types: list[str] | None = None,
                           bin_id: int | None = None,
-                          batch_id: int | None = None) -> Decimal:
+                          batch_id: int | None = None,
+                          combination: dict | None = None) -> Decimal:
     """Draw up to `qty` of a project's held stock for that project's own document.
 
     With a `ref_type` the reservation MOVES from the hold onto the document — neither
@@ -237,6 +322,9 @@ async def take_from_holds(db: AsyncSession, *, item_id: int, project_id: int, qt
         for res in await _active(db, RefType.PROJECT_HOLD.value, ph.id, None):
             if taken >= want or spare <= ZERO:
                 break
+            if combination and not matches_combination(
+                    await db.get(Stock, res.stock_id), combination):
+                continue
             give = min(_d(res.quantity), want - taken, spare)
             spare -= give
             res.status = ReservationStatus.CONSUMED.value
@@ -390,6 +478,307 @@ async def release_one(db: AsyncSession, reservation_id: int) -> Reservation:
     return res
 
 
+def _shift(db: AsyncSession, res: Reservation, part: Decimal, owner) -> None:
+    """Hand `part` of one hold row to `owner`'s document, on the SAME balance row.
+
+    Only the labels move — ref_type, ref_id, ref_no, ref_line_id — so `reserved_qty`
+    and `available_qty` on the row are exactly what they were. Splits the row when only
+    part of it changes hands, so each document's quantity stays one honest number.
+    """
+    if part >= _d(res.quantity):
+        res.ref_type, res.ref_id = owner.ref_type, owner.ref_id
+        res.ref_no, res.ref_line_id = owner.ref_no, owner.ref_line_id
+        return
+    res.quantity = _d(res.quantity) - part
+    db.add(Reservation(
+        stock_id=res.stock_id, item_id=res.item_id, warehouse_id=res.warehouse_id,
+        bin_id=res.bin_id, batch_id=res.batch_id, project_id=res.project_id,
+        quantity=part, ref_type=owner.ref_type, ref_id=owner.ref_id,
+        ref_no=owner.ref_no, ref_line_id=owner.ref_line_id,
+        status=ReservationStatus.ACTIVE.value,
+        created_by_id=res.created_by_id, created_by_name=res.created_by_name,
+    ))
+
+
+async def swap_holds(
+    db: AsyncSession,
+    ref_type: str,
+    ref_id: int,
+    *,
+    ref_line_id: int,
+    item_id: int,
+    warehouse_id: int,
+    wanted: dict[tuple[int, int], Decimal],
+    pinned: dict[tuple[int, int, int, int], Decimal] | None = None,
+    combination: dict | None = None,
+) -> Decimal:
+    """Let an issue take the batch it picked even when ANOTHER indent's hold sits on it.
+
+    An indent sets aside a QUANTITY of an item at a point (2026-10-12). Which balance
+    row carries that hold is bookkeeping: the batch is chosen FEFO when the goods are
+    issued, so whichever indent is issued first gets the earliest-expiring stock. When
+    the storekeeper picks batch X for indent B while indent A's hold happens to sit on
+    X, the two holds simply trade rows — A's part moves to where B's hold was, B's to
+    X. Only the labels change (`_shift`), so every `reserved_qty` / `available_qty` is
+    untouched and so is each indent's total.
+
+    `pinned` is what OTHER open issues have explicitly picked, per
+    (indent, indent line, bin, batch): those holds are somebody's named goods and are
+    never traded away, or that issue would post from a row it does not name.
+
+    Called BEFORE `relocate`, which then covers any remaining gap out of FREE stock.
+    Returns the quantity traded. Does not commit.
+
+    `combination` (2026-10-23): only holds of the line's own brand / variant / model
+    trade, on both sides — so neither indent ends up holding a combination it did not
+    have.
+    """
+    pinned = pinned or {}
+    wanted = {_slot(*key): _d(qty) for key, qty in wanted.items() if _d(qty) > ZERO}
+    mine: dict[tuple[int, int], list[Reservation]] = {}
+    for res in await _active(db, ref_type, ref_id, ref_line_id):
+        if res.item_id == item_id and res.warehouse_id == warehouse_id and (
+                not combination
+                or matches_combination(await db.get(Stock, res.stock_id), combination)):
+            mine.setdefault(_slot(res.bin_id, res.batch_id), []).append(res)
+    held = {key: sum((_d(r.quantity) for r in rows), ZERO) for key, rows in mine.items()}
+    surplus_rows = [r for key, rows in mine.items()
+                    if held[key] > wanted.get(key, ZERO) for r in rows]
+    spare = {key: held[key] - wanted.get(key, ZERO)
+             for key in held if held[key] > wanted.get(key, ZERO)}
+    traded = ZERO
+
+    for key, qty in wanted.items():
+        need = qty - held.get(key, ZERO)
+        if need <= ZERO or not spare:
+            continue
+        free = sum((_d(row.available_qty) for row in await _stock_at(
+            db, item_id=item_id, warehouse_id=warehouse_id,
+            bin_id=key[0], batch_id=key[1])
+            if matches_combination(row, combination)), ZERO)
+        need -= free
+        if need <= ZERO:
+            continue
+        others = list((await db.execute(
+            select(Reservation).where(
+                Reservation.ref_type == RefType.RESERVATION.value,
+                Reservation.status == ReservationStatus.ACTIVE.value,
+                Reservation.item_id == item_id,
+                Reservation.warehouse_id == warehouse_id,
+                Reservation.bin_id == key[0], Reservation.batch_id == key[1],
+            ).order_by(Reservation.id).with_for_update()
+        )).scalars().all())
+        if combination:
+            others = [o for o in others
+                      if matches_combination(await db.get(Stock, o.stock_id), combination)]
+        # Per other indent line, what is not pinned by an open issue of theirs.
+        free_of_pins: dict[tuple[int, int], Decimal] = {}
+        for o in others:
+            owner = (o.ref_id, o.ref_line_id or 0)
+            if o.ref_type == ref_type and o.ref_id == ref_id and (o.ref_line_id or 0) == ref_line_id:
+                continue
+            free_of_pins[owner] = free_of_pins.get(owner, ZERO) + _d(o.quantity)
+        for owner in free_of_pins:
+            free_of_pins[owner] = max(ZERO, free_of_pins[owner]
+                                      - pinned.get((owner[0], owner[1], key[0], key[1]), ZERO))
+        for o in others:
+            owner = (o.ref_id, o.ref_line_id or 0)
+            if need <= ZERO:
+                break
+            if owner not in free_of_pins or free_of_pins[owner] <= ZERO:
+                continue
+            while need > ZERO and free_of_pins[owner] > ZERO and _d(o.quantity) > ZERO:
+                # One of MY rows that is surplus to what this issue wants.
+                donor = next((r for r in surplus_rows
+                              if _d(r.quantity) > ZERO
+                              and spare.get(_slot(r.bin_id, r.batch_id), ZERO) > ZERO), None)
+                if donor is None:
+                    break
+                donor_key = _slot(donor.bin_id, donor.batch_id)
+                part = min(need, free_of_pins[owner], _d(o.quantity),
+                           _d(donor.quantity), spare[donor_key])
+                if part <= ZERO:
+                    break
+                mine_label = SimpleNamespace(ref_type=donor.ref_type, ref_id=donor.ref_id,
+                                             ref_no=donor.ref_no, ref_line_id=donor.ref_line_id)
+                their_label = SimpleNamespace(ref_type=o.ref_type, ref_id=o.ref_id,
+                                              ref_no=o.ref_no, ref_line_id=o.ref_line_id)
+                _shift(db, o, part, mine_label)          # X: theirs -> mine
+                _shift(db, donor, part, their_label)     # Y: mine -> theirs
+                if part >= _d(donor.quantity) and donor.ref_id != ref_id:
+                    surplus_rows.remove(donor)
+                spare[donor_key] -= part
+                if spare[donor_key] <= ZERO:
+                    spare.pop(donor_key)
+                free_of_pins[owner] -= part
+                need -= part
+                traded += part
+                if o.ref_id == ref_id and (o.ref_line_id or 0) == ref_line_id:
+                    break  # the whole row changed hands
+    await db.flush()
+    return traded
+
+
+@dataclass(frozen=True)
+class FloatResult:
+    """Where the damaged quantity's holds ended up: how much was re-placed and
+    how much had nowhere healthy to go."""
+
+    moved: Decimal = ZERO
+    released: Decimal = ZERO
+
+
+async def float_out_of_damage(
+    db: AsyncSession,
+    stock: Stock,
+    qty,
+    user,
+) -> FloatResult:
+    """Write a damaged quantity off a balance row that carries holds.
+
+    `move_stock` decrements ONLY `available_qty`: on a partially reserved row it
+    would drive the columns negative, and on a fully reserved one it refuses. A
+    stock audit must not trip over an indent's set-aside — the hold is a QUANTITY
+    (fulfilment design, 2026-10-12), so the damaged share of it is cancelled off
+    this row and every holding document is made whole against the point's
+    EARLIEST-EXPIRING UNEXPIRED free stock. `swap_holds` is not used here: an
+    audit is nobody's pick, so nothing has earned a trade. What no healthy row can
+    cover is left released — the indent is owed again and the desk answers from
+    live stock, never from a hold the shelf cannot back.
+
+    Returns how much was re-placed and how much was released with nowhere to go;
+    the caller halves the movement and nothing else. The caller posts the OUT
+    against this row AFTER this returns — `available_qty` here covers the damaged
+    quantity only while the transaction has not committed, and the movement
+    removes it. Locks the reservation rows and every sibling balance row of the
+    item at this point. Does not commit."""
+    result = FloatResult()
+    qty = _d(qty)
+    if qty <= ZERO:
+        return result
+
+    from datetime import timedelta
+
+    from app.shared.time import today as ist_today
+
+    reservations = list((await db.execute(
+        select(Reservation).where(
+            Reservation.stock_id == stock.id,
+            Reservation.status == ReservationStatus.ACTIVE.value,
+        ).order_by(Reservation.id).with_for_update()
+    )).scalars().all())
+    if not reservations:
+        return result
+
+    held = sum((_d(r.quantity) for r in reservations), ZERO)
+    if held < (stock.reserved_qty or ZERO):
+        raise ValidationError(
+            f"This balance carries {stock.reserved_qty} reserved but only {held} "
+            f"of it is explained by active holds, so the write-off cannot see what "
+            "it would be taking from. Ask the lead to reconcile the reservations "
+            "before the audit is approved."
+        )
+    take = min(qty, held)
+
+    now = utcnow()
+    # 1. Cancel the damaged share off the row, oldest reservation first, splitting a
+    #    row when only part of it is eaten. Every released part is recorded against
+    #    its document so step 2 owes that document the same amount back.
+    cancelled: list[tuple[Reservation, Decimal]] = []
+    left = take
+    for res in reservations:
+        if left <= ZERO:
+            break
+        part = min(_d(res.quantity), left)
+        if part <= ZERO:
+            continue
+        if part >= _d(res.quantity):
+            res.status = ReservationStatus.RELEASED.value
+            res.released_at = now
+        else:
+            res.quantity = _d(res.quantity) - part
+            db.add(Reservation(
+                stock_id=res.stock_id, item_id=res.item_id,
+                warehouse_id=res.warehouse_id, bin_id=res.bin_id,
+                batch_id=res.batch_id, project_id=res.project_id,
+                quantity=part, ref_type=res.ref_type, ref_id=res.ref_id,
+                ref_no=res.ref_no, ref_line_id=res.ref_line_id,
+                status=ReservationStatus.RELEASED.value,
+                created_by_id=res.created_by_id,
+                created_by_name=res.created_by_name,
+                released_at=now,
+            ))
+        cancelled.append((res, part))
+        left -= part
+    stock.reserved_qty = (stock.reserved_qty or ZERO) - take
+    stock.available_qty = (stock.available_qty or ZERO) + take
+    await db.flush()
+
+    # 2. Make every document whole out of the point's free unexpired stock of the
+    #    item — expiry ascending (FEFO: good stock the auditor did not write off),
+    #    never the damaged row or its slot, unlocking nothing another document
+    #    already holds. What cannot be covered stays released.
+    horizon = ist_today() + timedelta(days=1_000_000)
+    rows = list((await db.execute(
+        select(Stock).where(
+            Stock.item_id == stock.item_id,
+            Stock.warehouse_id == stock.warehouse_id,
+            Stock.available_qty > ZERO,
+            Stock.id != stock.id,
+        ).order_by(
+            Stock.expiry_date.is_(None), Stock.expiry_date.asc(), Stock.id,
+        ).with_for_update()
+    )).scalars().all())
+    healthy = [r for r in rows
+               if _slot(r.bin_id, r.batch_id) != _slot(stock.bin_id, stock.batch_id)
+               and (r.expiry_date or horizon) > ist_today()]
+
+    owed: dict[tuple[str, int, int], list] = collections.defaultdict(list)
+    for res, part in cancelled:
+        owed[(res.ref_type, res.ref_id, res.ref_line_id)].append((res, part))
+
+    # Where the hold ended up, per holding document — how much landed on healthy
+    # stock and how much had nowhere healthy to go (released back open).
+    moved = ZERO
+    released = ZERO
+
+    for (ref_type, ref_id, ref_line_id), parts in owed.items():
+        need = sum((_d(p) for _r, p in parts), ZERO)
+        if need <= ZERO:
+            continue
+        sample = parts[0][0]
+        # Swept by hand, not via reserve(): the healthy list is already expiry-
+        # ordered, already excludes expired rows and the condemned (bin, batch), and
+        # is already row-locked. reserve() would re-read the pool and could re-point
+        # the hold onto the row this audit just condemned, which move_stock_out
+        # would then refuse.
+        remaining = need
+        for target in healthy:
+            if remaining <= ZERO:
+                break
+            grabbed = min(remaining, _d(target.available_qty or ZERO))
+            if grabbed <= ZERO:
+                continue
+            target.available_qty = _d(target.available_qty) - grabbed
+            target.reserved_qty = (target.reserved_qty or ZERO) + grabbed
+            db.add(Reservation(
+                stock_id=target.id, item_id=sample.item_id,
+                warehouse_id=target.warehouse_id,
+                bin_id=target.bin_id, batch_id=target.batch_id,
+                project_id=target.project_id, quantity=grabbed,
+                ref_type=ref_type, ref_id=ref_id, ref_no=sample.ref_no,
+                ref_line_id=ref_line_id, status=ReservationStatus.ACTIVE.value,
+                created_by_id=getattr(user, "id", None),
+                created_by_name=getattr(user, "full_name", None),
+            ))
+            remaining -= grabbed
+        moved += need - remaining
+        released += remaining
+
+    await db.flush()
+    return FloatResult(moved=moved, released=released)
+
+
 @dataclass(frozen=True)
 class Relocation:
     """One hold that moved, in the words a screen can repeat back."""
@@ -443,6 +832,7 @@ async def relocate(
     ref_no: str | None = None,
     user=None,
     label: str | None = None,
+    combination: dict | None = None,
 ) -> list[Relocation]:
     """Move an existing hold onto the (bin, batch) a document now names.
 
@@ -473,6 +863,10 @@ async def relocate(
             continue
         if warehouse_id is not None and res.warehouse_id != warehouse_id:
             continue
+        # Only this line's brand / variant / model (2026-10-23).
+        if combination and not matches_combination(
+                await db.get(Stock, res.stock_id), combination):
+            continue
         held.setdefault(_slot(res.bin_id, res.batch_id), []).append(res)
     if not held:
         return []
@@ -499,8 +893,9 @@ async def relocate(
     # there is not moving, so it is not capacity either way.
     room: dict[tuple[int, int], Decimal] = {}
     for key in deficit:
-        rows = await _stock_at(db, item_id=subject, warehouse_id=point,
-                               bin_id=key[0], batch_id=key[1])
+        rows = [row for row in await _stock_at(db, item_id=subject, warehouse_id=point,
+                                               bin_id=key[0], batch_id=key[1])
+                if matches_combination(row, combination)]
         room[key] = sum((row.available_qty or ZERO for row in rows), ZERO)
 
     placeable = sum((min(need, room.get(key, ZERO))
@@ -569,6 +964,8 @@ async def relocate(
                                      bin_id=key[0], batch_id=key[1]):
             if remaining <= ZERO:
                 break
+            if not matches_combination(stock, combination):
+                continue
             take = min(remaining, stock.available_qty or ZERO)
             if take <= ZERO:
                 continue
@@ -577,7 +974,7 @@ async def relocate(
             db.add(Reservation(
                 stock_id=stock.id, item_id=subject, warehouse_id=stock.warehouse_id,
                 bin_id=stock.bin_id, batch_id=stock.batch_id,
-                project_id=stock.project_id, quantity=take,
+                project_id=stock.project_id, quantity=take, **_combo_of(stock),
                 ref_type=ref_type, ref_id=ref_id,
                 ref_no=ref_no or sample.ref_no, ref_line_id=ref_line_id,
                 status=ReservationStatus.ACTIVE.value,
@@ -631,6 +1028,7 @@ async def consume_for_issue(
     warehouse_id: int | None = None,
     bin_id: int | None = None,
     batch_id: int | None = None,
+    combination: dict | None = None,
 ) -> list[ConsumedStock]:
     """Consume an exact quantity and return the balance slices it came from.
 
@@ -673,6 +1071,10 @@ async def consume_for_issue(
             raise ValidationError(
                 f"Reservation {res.id} points to a stock balance that no longer exists"
             )
+        # The issue line's brand / variant / model (2026-10-23): a hold on another
+        # combination belongs to another line.
+        if not matches_combination(stock, combination):
+            continue
         if (stock.reserved_qty or ZERO) < take:
             raise ValidationError(
                 f"Reservation {res.id} is not backed by enough reserved stock"
@@ -711,6 +1113,7 @@ async def consume_for_issue(
             batch_id=res.batch_id,
             project_id=res.project_id,
             quantity=take,
+            **_combo_of(stock),
         ))
         if remaining is not None:
             remaining -= take

@@ -68,6 +68,7 @@ SETTINGS_SPEC = {
     }),
     "logistics": (LogisticsSettings, {
         "manual_courier_dispatch": ("logistics.manual_courier_dispatch", "bool"),
+        "send_third_party_to_vendor": ("logistics.send_third_party_to_vendor", "bool"),
     }),
     "security": (SecuritySettings, {
         # The SAME key `procurement.quote_otp.SETTING_KEY` reads at verification

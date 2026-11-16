@@ -1,3 +1,4 @@
+import type { PackEntry } from "@/shared/packing";
 /** The transport leg — types mirroring `backend/app/modules/logistics/schemas.py`.
  *
  * Kept apart from `types.ts`, which describes the older GRN/issue surface. The two
@@ -47,6 +48,7 @@ export interface DispatchPolicy {
   manual_courier_dispatch: boolean;
   manual_courier_required_fields: string[];
   manual_courier_tracking_fields: string[];
+  send_third_party_to_vendor?: boolean;
 }
 
 /** What the leg is carrying, which is also WHICH WAY it runs. RETURN is the same
@@ -163,6 +165,9 @@ export interface Consignment {
   status: string;
   warehouse_id: number;
   warehouse_name?: string | null;
+  /** SCM_0053: the origin's address, carried into the transport leg this
+   *  consignment is dispatched on. */
+  warehouse_address?: string | null;
   to_warehouse_id?: number | null;
   to_warehouse_name?: string | null;
   destination_office_id?: number | null;
@@ -226,6 +231,21 @@ export interface ConsignmentPackage {
 export interface ConsignmentDetail extends Consignment {
   items: ConsignmentLine[];
   packages: ConsignmentPackage[];
+  /** Each issue line's packs, once per line (2026-10-22) — the rows are per unit. */
+  line_packs?: ConsignmentLinePacks[];
+}
+
+export interface ConsignmentLinePacks {
+  issue_item_id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  batch_no?: string | null;
+  quantity: number;
+  delivered_qty: number;
+  pack_breakdown?: PackEntry[] | null;
+  delivered_pack_breakdown?: PackEntry[] | null;
 }
 
 // --------------------------------------------------------------------------- //
@@ -814,6 +834,9 @@ export interface TransportRequest {
   indent_no?: string | null;
   from_warehouse_id?: number | null;
   from_warehouse_name?: string | null;
+  /** The origin's address (SCM_0053) — what the DC/DOD gate pass prints under
+   *  "From". Carried off the consignment's own warehouse_address. */
+  from_warehouse_address?: string | null;
   to_location_name?: string | null;
   delivery_address?: string | null;
   contact_person?: string | null;
@@ -1057,6 +1080,9 @@ export interface TRInput {
   indent_no?: string | null;
   from_warehouse_id?: number | null;
   from_warehouse_name?: string | null;
+  /** The origin's address (SCM_0053) — what the DC/DOD gate pass prints under
+   *  "From". Carried off the consignment's own warehouse_address. */
+  from_warehouse_address?: string | null;
   to_location_name?: string | null;
   delivery_address?: string | null;
   contact_person?: string | null;

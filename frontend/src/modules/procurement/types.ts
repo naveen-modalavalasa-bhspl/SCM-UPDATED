@@ -1,6 +1,11 @@
-export interface POItem {
+import type { OrgScope } from "./orgScope";
+import type { CombinationValue } from "@/shared/combination";
+import type { PackEntry, PackEntryIn, PackHierarchy } from "@/shared/packing";
+export interface POItem extends CombinationValue {
   id: number;
   item_id: number;
+  /** An indent stands behind the line: its quantity is the indent's. */
+  indent_item_id?: number | null;
   item_code?: string | null;
   item_name?: string | null;
   uom_code?: string | null;
@@ -12,6 +17,43 @@ export interface POItem {
    *  a PO raised from an indent — nobody quoted, so nobody promised. */
   delivery_days?: number | null;
   received_quantity: number;
+  /** Which half of `tax_percent` is law, decided by the order's own `tax_region` —
+   *  only one pair is ever non-zero on a given order. Derived server-side, never
+   *  typed here. */
+  cgst_percent?: number;
+  sgst_percent?: number;
+  igst_percent?: number;
+  cgst_amount?: number;
+  sgst_amount?: number;
+  igst_amount?: number;
+  /** How the line is to be packed (2026-10-08), with its sentence served. */
+  pack_hierarchy_id?: number | null;
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
+  pack_hierarchy_name?: string | null;
+}
+
+/** A supplier's change of pack hierarchy on a despatch note, and the buyer's answer. */
+export interface POPackChange {
+  id: number;
+  despatch_note_id: number;
+  dn_no: string;
+  dn_status: string;
+  po_item_id?: number | null;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  despatched_qty: number;
+  status: "PENDING" | "ACCEPTED" | "DECLINED";
+  ordered_hierarchy_name?: string | null;
+  sent_hierarchy_name?: string | null;
+  sent_pack_text?: string | null;
+  pack_breakdown?: PackEntry[] | null;
+  reason?: string | null;
+  decision_note?: string | null;
+  decided_by_name?: string | null;
+  decided_at?: string | null;
 }
 
 /** One frozen stage of a PO's payment terms (advance, against delivery, ...). */
@@ -19,7 +61,7 @@ export interface POMilestone {
   id: number; seq: number; stage: string; percent: number; due_days: number;
 }
 
-export interface PurchaseOrder {
+export interface PurchaseOrder extends OrgScope {
   id: number;
   po_no: string;
   po_date?: string | null;
@@ -34,12 +76,23 @@ export interface PurchaseOrder {
   rfq_no?: string | null;
   quotation_id?: number | null;
   quotation_no?: string | null;
+  /** "Copy as new PO": the order this one was pre-filled from. A reference only. */
+  copied_from_po_id?: number | null;
+  copied_from_po_no?: string | null;
   vendor_id: number;
   vendor_name?: string | null;
+  // Stored snapshot (vendor_gstin), plus the two facts it decides — derived at read
+  // time, never stored. See service.tax_region on the backend.
+  vendor_gstin?: string | null;
+  tax_region?: string | null;
+  company_gstin?: string | null;
   facility_id?: number | null;
   facility_name?: string | null;
   project_id?: number | null;
   project_name?: string | null;
+  /** Booked to a department instead of a project (exactly one on a hand-raised order). */
+  department_id?: number | null;
+  department_name?: string | null;
   status: string;
   sub_total: number;
   discount_amount: number;
@@ -64,10 +117,27 @@ export interface PurchaseOrder {
    *  wearing a position the ladder named. Served by the backend because a screen can
    *  only see the status and its own permissions, and neither answers "is it with me". */
   awaiting_me?: boolean;
+  /** Set while RETURNED_FOR_CORRECTION: who it went back to, who sent it and why. */
+  correction?: {
+    owner_name?: string | null;
+    returned_by_name?: string | null;
+    returned_from_stage?: string | null;
+    returned_at?: string | null;
+    reason?: string | null;
+  } | null;
+  /** True only for the person it was sent back to. */
+  can_resubmit_correction?: boolean;
+  /** Only the raiser may edit a sent-back PO. */
+  can_edit_correction?: boolean;
+  /** An approver holding it may pass it one rung further down. */
+  can_pass_correction_down?: boolean;
   /** What the vendor said about the order we sent them. Null means never sent. */
   vendor_status?: string | null;
   vendor_responded_at?: string | null;
   vendor_response_note?: string | null;
+  /** enums.DespatchStatus, derived from the vendor's submitted despatch notes:
+   *  PARTIALLY_DISPATCHED | DISPATCHED, null while nothing has been sent. */
+  despatch_status?: string | null;
   /** Server-calculated: accepted and not yet despatched. */
   amendment_allowed?: boolean;
   /** 0 is the original order; every amendment adds one. */
@@ -101,6 +171,8 @@ export interface POAmend extends POHeader {
     quantity: number;
     rate: number;
     tax_percent?: number;
+    pack_hierarchy_id?: number | null;
+    pack_breakdown?: PackEntryIn[] | null;
   }[] | null;
 }
 
@@ -118,7 +190,7 @@ export interface POApprovalQtyLine {
   quantity: number;
 }
 
-export interface POListRow {
+export interface POListRow extends OrgScope {
   id: number;
   po_no: string;
   vendor_name?: string | null;
@@ -126,6 +198,9 @@ export interface POListRow {
   status: string;
   /** Two orders can both read SENT_TO_VENDOR while only one has been agreed. */
   vendor_status?: string | null;
+  /** enums.DespatchStatus, derived from the vendor's submitted despatch notes:
+   *  PARTIALLY_DISPATCHED | DISPATCHED, null while nothing has been sent. */
+  despatch_status?: string | null;
   revision_no?: number;
   total_amount: number;
   /** Who the approval engine is waiting on RIGHT NOW, read live by the server.
@@ -143,7 +218,12 @@ export interface POListRow {
  *  raising one, so a term agreed with a vendor prints the same whichever route the
  *  order came in by. Discount and freight are document money, never per line. */
 export interface POHeader {
+  fiscal_year?: string | null;
+  organization_id?: number | null;
+  org_department_id?: number | null;
   project_id?: number | null;
+  /** The alternative to a project — an order is booked to ONE of the two. */
+  department_id?: number | null;
   remarks?: string | null;
   payment_terms?: string | null;
   /** The payment-term master; picking one freezes its milestones on the order. */
@@ -166,7 +246,32 @@ export interface POCreate extends POHeader {
     quantity: number;
     rate: number;
     tax_percent?: number;
+    pack_hierarchy_id?: number | null;
+    pack_breakdown?: PackEntryIn[] | null;
   }[];
+  copied_from_po_id?: number | null;
+}
+
+/** An existing order's content for the New PO form — `GET /api/pos/{id}/copy`.
+ *  Already checked against today's masters: anything no longer usable is blank or
+ *  left out, and `warnings` says what. Nothing is saved until the form is. */
+export interface POCopyTemplate extends POHeader {
+  source_po_id: number;
+  source_po_no: string;
+  source_po_date?: string | null;
+  vendor_id?: number | null;
+  vendor_name?: string | null;
+  expected_date?: string | null;
+  lines: ({
+    item_id: number;
+    item_code?: string | null;
+    item_name?: string | null;
+    uom_code?: string | null;
+    quantity: number;
+    rate: number;
+    tax_percent: number;
+  } & CombinationValue)[];
+  warnings: string[];
 }
 
 /** Everything the awarded quotation does not already say. Vendor, lines, rates and
@@ -177,7 +282,7 @@ export interface POFromQuotation extends POHeader {
 
 /* ------------------------------------------------------------------ Requisition */
 
-export interface ReqItem {
+export interface ReqItem extends CombinationValue {
   id: number;
   line_no: number;
   item_id: number;
@@ -185,6 +290,9 @@ export interface ReqItem {
   item_name?: string | null;
   uom_code?: string | null;
   quantity: number;
+  /** The ceiling (2026-11-03): null on a hand-made draft, which its author may still
+   *  change freely; once set the line may be lowered, never raised. */
+  requested_quantity?: number | null;
   ordered_qty: number;
   estimated_rate: number;
   estimated_amount: number;
@@ -193,7 +301,7 @@ export interface ReqItem {
   indent_no?: string | null;
 }
 
-export interface ReqListRow {
+export interface ReqListRow extends OrgScope {
   id: number;
   req_no: string;
   req_date?: string | null;
@@ -220,7 +328,7 @@ export interface ReqListRow {
 //  Consolidated buying sheet
 // --------------------------------------------------------------------------- //
 
-export interface ConsolidationItem {
+export interface ConsolidationItem extends CombinationValue {
   id: number;
   line_no: number;
   item_id: number;
@@ -257,7 +365,7 @@ export interface ConsolidationSource {
   estimated_value: number;
 }
 
-export interface ConsolidationListRow {
+export interface ConsolidationListRow extends OrgScope {
   id: number;
   cons_no: string;
   cons_date?: string | null;
@@ -293,6 +401,9 @@ export interface Consolidation extends ConsolidationListRow {
 }
 
 export interface ConsolidationCreate {
+  organization_id?: number | null;
+  org_department_id?: number | null;
+  fiscal_year?: string | null;
   requisition_ids: number[];
   title?: string | null;
   period_label?: string | null;
@@ -346,6 +457,8 @@ export interface MRCandidate {
 }
 
 export interface ReqFromMRs {
+  organization_id?: number | null;
+  org_department_id?: number | null;
   mr_ids: number[];
   warehouse_id?: number | null;
   project_id?: number | null;
@@ -357,6 +470,8 @@ export interface ReqFromMRs {
 }
 
 export interface ReqCreate {
+  organization_id?: number | null;
+  org_department_id?: number | null;
   warehouse_id?: number | null;
   project_id?: number | null;
   department_id?: number | null;
@@ -377,7 +492,7 @@ export interface ReqCreate {
 
 /* -------------------------------------------------------------------------- RFQ */
 
-export interface RFQItem {
+export interface RFQItem extends CombinationValue {
   id: number;
   line_no: number;
   item_id: number;
@@ -407,7 +522,7 @@ export interface RFQVendor {
   live_allocated_quantities?: Record<string, number> | null;
 }
 
-export interface RFQListRow {
+export interface RFQListRow extends OrgScope {
   id: number;
   rfq_no: string;
   title: string | null;
@@ -428,6 +543,20 @@ export interface RFQListRow {
    *  wearing a position the ladder named. Served by the backend because a screen can
    *  only see the status and its own permissions, and neither answers "is it with me". */
   awaiting_me?: boolean;
+  /** Set while RETURNED_FOR_CORRECTION: who it went back to, who sent it and why. */
+  correction?: {
+    owner_name?: string | null;
+    returned_by_name?: string | null;
+    returned_from_stage?: string | null;
+    returned_at?: string | null;
+    reason?: string | null;
+  } | null;
+  /** True only for the person it was sent back to. */
+  can_resubmit_correction?: boolean;
+  /** Only the raiser may edit it once sent back to them. */
+  can_edit_correction?: boolean;
+  /** An approver holding it may pass it one rung further down. */
+  can_pass_correction_down?: boolean;
   /** Freeze Prices (2026-09-26): the tender is closed to pricing. Suppliers can no
    *  longer quote or change prices; POs can be raised against its quotations. */
   is_price_frozen?: boolean;
@@ -445,6 +574,8 @@ export interface RFQ extends RFQListRow {
   consolidation_no?: string | null;
   /** How the quotes are ranked. Null means the backend default. */
   evaluation_method?: string | null;
+  /** The buyer asks suppliers to quote freight. Off, the portal shows no Freight field. */
+  freight_required?: boolean;
   warehouse_id?: number | null;
   warehouse_name?: string | null;
   project_id?: number | null;
@@ -485,10 +616,13 @@ export interface RFQ extends RFQListRow {
 }
 
 export interface RFQCreate {
+  organization_id?: number | null;
+  org_department_id?: number | null;
   title?: string | null;
   requisition_id?: number | null;
   consolidation_id?: number | null;
   evaluation_method?: string | null;
+  freight_required?: boolean;
   warehouse_id?: number | null;
   project_id?: number | null;
   /** Typed only on an RFQ raised cold — a requisition's own values win otherwise. */
@@ -526,7 +660,17 @@ export interface RFQInvite {
 
 /* -------------------------------------------------------------------- Quotation */
 
-export interface QuoteItem {
+export interface QuoteItem extends CombinationValue {
+  /** What the BUYER asked for on the RFQ (2026-10-26), and whether this offer is
+   *  another brand / variant / model. */
+  requested_brand_id?: number;
+  requested_brand_name?: string | null;
+  requested_variant_id?: number;
+  requested_variant_name?: string | null;
+  requested_model_id?: number;
+  requested_model_name?: string | null;
+  requested_any?: boolean;
+  brand_changed?: boolean;
   id: number;
   line_no: number;
   rfq_item_id?: number | null;
@@ -552,7 +696,8 @@ export interface QuoteItem {
   required_date?: string | null;
 }
 
-export interface QuoteListRow {
+export interface QuoteListRow extends OrgScope {
+  project_name?: string | null;
   id: number;
   quotation_no: string;
   rfq_id: number;
@@ -612,11 +757,20 @@ export interface QuoteChangeLine {
   proposed_rate: number;
   proposed_discount_percent: number;
   note?: string | null;
+  /** The brand as quoted and as proposed (2026-10-26). */
+  current_brand_id?: number;
+  current_variant_id?: number;
+  current_model_id?: number;
+  current_combination?: string | null;
+  proposed_brand_id?: number | null;
+  proposed_variant_id?: number | null;
+  proposed_model_id?: number | null;
+  proposed_combination?: string | null;
 }
 
 /** A Change Request: the buyer's ask on a supplier's quotation. Status words the
  *  desk reads: Awaiting supplier / Accepted / Declined / Withdrawn / Superseded. */
-export interface QuoteChangeRequest {
+export interface QuoteChangeRequest extends OrgScope {
   id: number;
   quotation_id: number;
   rfq_id: number;
@@ -707,6 +861,9 @@ export interface QuoteSubmit {
 /** One vendor's offer on one RFQ line, split the way a buyer reads it. The backend
  *  computes it from the same lines the ranking read — never re-derive it here. */
 export interface ComparisonCell {
+  /** The brand quoted, and whether it is not what the RFQ asked for (2026-10-26). */
+  combination?: string | null;
+  brand_changed?: boolean;
   quotation_id: number;
   vendor_id: number;
   vendor_name?: string | null;
@@ -724,6 +881,8 @@ export interface ComparisonCell {
 }
 
 export interface ComparisonRow {
+  /** What the RFQ asked for — a brand / variant / model, or "Any brand". */
+  requested_combination?: string | null;
   rfq_item_id: number;
   item_id: number;
   item_code?: string | null;
@@ -811,7 +970,7 @@ export interface VendorProfile {
 
 /** One line the vendor says is on the vehicle. Keyed to the ORDER line, never to a
  *  free item choice — a despatch note answers a purchase order. */
-export interface DespatchItem {
+export interface DespatchItem extends CombinationValue {
   id: number;
   line_no: number;
   po_item_id?: number | null;
@@ -824,9 +983,19 @@ export interface DespatchItem {
   mfg_date?: string | null;
   expiry_date?: string | null;
   remarks?: string | null;
+  /** How the supplier packed it (2026-10-08), and the buyer's answer to a change. */
+  pack_hierarchy_id?: number | null;
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
+  pack_hierarchy_name?: string | null;
+  pack_change_status?: "NONE" | "PENDING" | "ACCEPTED" | "DECLINED" | null;
+  ordered_pack_hierarchy_name?: string | null;
+  pack_change_reason?: string | null;
+  pack_change_note?: string | null;
 }
 
-export interface DespatchNote {
+export interface DespatchNote extends OrgScope {
+  project_name?: string | null;
   id: number;
   dn_no: string;
   dn_date?: string | null;
@@ -846,6 +1015,8 @@ export interface DespatchNote {
   remarks?: string | null;
   submitted_at?: string | null;
   created_at: string;
+  /** Last change — the only stamp a CANCELLED note has (SCM_0162). */
+  updated_at?: string | null;
   items: DespatchItem[];
 }
 
@@ -856,6 +1027,9 @@ export interface DespatchLineWrite {
   mfg_date?: string | null;
   expiry_date?: string | null;
   remarks?: string | null;
+  pack_hierarchy_id?: number | null;
+  pack_breakdown?: PackEntryIn[] | null;
+  pack_change_reason?: string | null;
 }
 
 export interface DespatchNoteWrite {
@@ -874,7 +1048,7 @@ export interface DespatchNoteWrite {
 
 /** A PO line as the vendor sees it. `pending_qty` is what is still owed, so a second
  *  delivery opens with the remainder rather than the whole order. */
-export interface VendorPOLine {
+export interface VendorPOLine extends CombinationValue {
   po_item_id: number;
   item_id: number;
   item_code?: string | null;
@@ -885,9 +1059,15 @@ export interface VendorPOLine {
   pending_qty: number;
   rate?: number | null;
   amount?: number | null;
+  /** How the order asks for it to be packed, and every hierarchy the item has. */
+  pack_hierarchy_id?: number | null;
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
+  pack_hierarchy_name?: string | null;
+  pack_options?: PackHierarchy[];
 }
 
-export interface VendorPO {
+export interface VendorPO extends OrgScope {
   id: number;
   po_no: string;
   po_date?: string | null;
@@ -900,6 +1080,9 @@ export interface VendorPO {
   vendor_status?: string | null;
   vendor_responded_at?: string | null;
   vendor_response_note?: string | null;
+  /** enums.DespatchStatus, derived from the vendor's submitted despatch notes:
+   *  PARTIALLY_DISPATCHED | DISPATCHED, null while nothing has been sent. */
+  despatch_status?: string | null;
   revision_no?: number;
   amendment_reason?: string | null;
   /** The order was issued to this vendor once and has since been amended, so it
@@ -916,7 +1099,7 @@ export interface VendorPO {
   despatch_notes: DespatchNote[];
 }
 
-export interface VendorPOListRow {
+export interface VendorPOListRow extends OrgScope {
   id: number;
   po_no: string;
   vendor_status?: string | null;
@@ -926,6 +1109,9 @@ export interface VendorPOListRow {
   status: string;
   total_amount: number;
   despatch_note_count: number;
+  /** enums.DespatchStatus, derived from the vendor's submitted despatch notes:
+   *  PARTIALLY_DISPATCHED | DISPATCHED, null while nothing has been sent. */
+  despatch_status?: string | null;
   under_revision?: boolean;
 }
 
@@ -1633,4 +1819,16 @@ export interface DemandPoolResponse {
   page: number;
   size: number;
   total: number;
+}
+
+
+/** One item mapped to the signed-in vendor, and every way it may be packed
+ *  (`GET /api/supplier/items/packing`, 2026-10-11). */
+export interface VendorItemPacking {
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  vendor_item_code?: string | null;
+  hierarchies: PackHierarchy[];
 }

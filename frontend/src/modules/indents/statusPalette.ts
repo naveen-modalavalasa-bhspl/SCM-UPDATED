@@ -31,6 +31,11 @@ export const STATUS_INDICATOR: Record<string, string> = {
   ORDERED: "bg-blue-600",
   REJECTED: "bg-bad",
   CLOSED: "bg-ok",
+  QC_PASSED: "bg-ok",
+  QC_IN_PROGRESS: "bg-warn",
+  IN_CONSIGNMENT: "bg-info",
+  IN_TRANSIT: "bg-info",
+  DELIVERED: "bg-ok",
 };
 
 export const STATUS_COLOR: Record<string, string> = {
@@ -49,6 +54,11 @@ export const STATUS_COLOR: Record<string, string> = {
   REJECTED: "var(--color-bad)",
   CLOSED: "var(--color-ok)",
   CANCELLED: "var(--color-bad)",
+  QC_PASSED: "var(--color-ok)",
+  QC_IN_PROGRESS: "var(--color-warn)",
+  IN_CONSIGNMENT: "var(--color-info)",
+  IN_TRANSIT: "var(--color-info)",
+  DELIVERED: "var(--color-ok)",
 };
 
 export const DEFAULT_STATUS_COLOR = "var(--color-neutral)";

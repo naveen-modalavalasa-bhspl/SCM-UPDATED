@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, ShoppingCart, Trash2 } from "lucide-react";
+import { ArrowRightLeft, Plus, Repeat2, ShoppingCart, Trash2 } from "lucide-react";
 import { Can, PageHeader, Button, Card, Field, Input, Select } from "@/shared/components";
 import { createAllocation, createMaterialRequest, getAllocationProposal } from "../api";
 // A LIP or an MDP is a distribution rung, never the default shelf — see
@@ -13,9 +13,78 @@ import { alerts } from "@/modules/alerts";
 import type { AllocationDecision, AllocationProposalLine } from "../types";
 import { TONE_SUBMIT } from "@/shared/components/tones";
 import { TONE_MINT } from "@/shared/components/tones";
+import {
+  CombinationPicker, CombinationTag, combinationKey, combinationLabel, inStockOptions,
+  type CombinationValue,
+} from "@/shared/combination";
 
-/** One "give this much, out of this warehouse" row. A line can carry several. */
-type Split = { qty: string; wh: string };
+/** One "give this much, out of this warehouse" row. A line can carry several. An Any
+ *  line also says which brand / variant / model the row gives (2026-10-23). */
+type Split = { qty: string; wh: string; combo?: CombinationValue; reason?: string };
+
+/** A line whose indent named its combination. The desk may still give ANOTHER brand
+ *  in stock (2026-10-24) — recorded on the allocation as a brand change. */
+const named = (line: AllocationProposalLine) => !!line.brand_id;
+
+/** The combination the indent asked for, as a picker value. */
+const askedFor = (line: AllocationProposalLine): CombinationValue | undefined => named(line) ? {
+  brand_id: line.brand_id, variant_id: line.variant_id || null, model_id: line.model_id || null,
+  brand_name: line.brand_name ?? null, variant_name: line.variant_name ?? null,
+  model_name: line.model_name ?? null, combination_any: false,
+} : undefined;
+
+/** Does this row give another brand than the indent named? */
+const isSubstitute = (line: AllocationProposalLine, combo?: CombinationValue) =>
+  named(line) && !!(combo?.brand_id || combo?.no_brand)
+  && combinationKey(combo) !== combinationKey(askedFor(line));
+
+/** A pick that names something — a brand, or stock with no brand recorded. */
+const picked = (combo?: CombinationValue) => !!(combo?.brand_id || combo?.no_brand);
+
+/** Other brands of a named line, free at any point — "Other brands in stock". */
+const otherBrandsFree = (line: AllocationProposalLine) => !named(line) ? 0
+  : line.warehouses.flatMap((w) => w.combinations ?? [])
+      .filter((c) => !c.no_brand && combinationKey(c) !== combinationKey(askedFor(line)))
+      .reduce((sum, c) => sum + c.available_qty, 0);
+
+/** Free stock with NO brand recorded, at any point (2026-10-24) — booked in before
+ *  brands were, so it can serve any line, recorded as a brand change. */
+const noBrandFree = (line: AllocationProposalLine) =>
+  line.warehouses.flatMap((w) => w.combinations ?? [])
+    .filter((c) => c.no_brand).reduce((sum, c) => sum + c.available_qty, 0);
+
+/** What a point holds of each combination, as picker options with quantities. */
+const combosAt = (line: AllocationProposalLine, wh: string) => inStockOptions(
+  line.item_id,
+  (line.warehouses.find((w) => String(w.warehouse_id) === wh)?.combinations ?? [])
+    .map((c) => ({ ...c, qty: c.available_qty })));
+
+/** Free stock of ONE combination at every point that holds it, most first — the
+ *  answer to "if I give this brand, where can it come from?". */
+const brandNetwork = (line: AllocationProposalLine, combo?: CombinationValue) => {
+  if (!picked(combo)) return [];
+  const key = combinationKey(combo);
+  return orderPoints(line.warehouses)
+    .map((w) => ({
+      warehouse: w,
+      qty: (w.combinations ?? []).filter((c) => combinationKey(c) === key)
+        .reduce((sum, c) => sum + c.available_qty, 0),
+    }))
+    .filter((row) => row.qty > 0)
+    .sort((a, b) => b.qty - a.qty);
+};
+
+/** The rung a point sits on, in the words the floor uses. */
+const tierWord = (type?: string | null) => {
+  const t = (type ?? "").toUpperCase();
+  return t === "LIP" ? "LIP" : t === "MDP" ? "MDP" : "Warehouse";
+};
+
+const TIER_CHIP: Record<string, string> = {
+  Warehouse: "bg-brand/10 text-brand",
+  MDP: "bg-info-bg text-info",
+  LIP: "bg-ok-bg text-ok",
+};
 
 /**
  * Where a person decides how much stock an indent actually gets.
@@ -57,14 +126,22 @@ export function AllocationPage() {
     if (!data) return;
     const seed: Record<number, Split[]> = {};
     for (const line of data.lines) {
-      const best = [...line.warehouses]
+      // An STR asked for one point (2026-11-04): open on it whenever it holds the item
+      // and this login may draw from it. The storekeeper can still change it.
+      const asked = data.str_source_warehouse_id
+        ? line.warehouses.find((w) => w.warehouse_id === data.str_source_warehouse_id && w.available_qty > 0)
+        : undefined;
+      const best = asked ?? [...line.warehouses]
         .filter((w) => !isChainPoint(w) && w.available_qty > 0)
         .sort((a, b) => b.available_qty - a.available_qty)[0];
-      const suggested = Math.min(line.requested_qty, best?.available_qty ?? 0);
-      seed[line.indent_item_id] = [{
-        qty: String(suggested),
-        wh: best ? String(best.warehouse_id) : "",
-      }];
+      const wh = best ? String(best.warehouse_id) : "";
+      // A named line opens on what the indent asked for; an Any line on the
+      // combination the point holds most of.
+      const top = named(line) ? askedFor(line) : combosAt(line, wh)[0];
+      const suggested = Math.min(line.requested_qty,
+                                 !named(line) && top ? (top as { stock_qty?: number }).stock_qty ?? 0
+                                   : best?.available_qty ?? 0);
+      seed[line.indent_item_id] = [{ qty: String(suggested), wh, combo: top }];
     }
     setDecisions(seed);
   }, [data]);
@@ -75,8 +152,15 @@ export function AllocationPage() {
 
   /** Free stock at one warehouse for one line. No warehouse picked means nothing
    *  can be taken, so any quantity against it is over. */
-  const shelfAt = (line: AllocationProposalLine, warehouseId: string) =>
-    line.warehouses.find((w) => String(w.warehouse_id) === warehouseId)?.available_qty ?? 0;
+  const shelfAt = (line: AllocationProposalLine, warehouseId: string,
+                   combo?: CombinationValue) => {
+    const point = line.warehouses.find((w) => String(w.warehouse_id) === warehouseId);
+    if (picked(combo) && !(named(line) && !isSubstitute(line, combo))) {
+      return combosAt(line, warehouseId)
+        .find((o) => combinationKey(o) === combinationKey(combo))?.stock_qty ?? 0;
+    }
+    return point?.available_qty ?? 0;
+  };
 
   /**
    * The most this split may hold: what is left of the request, and never more than
@@ -90,7 +174,8 @@ export function AllocationPage() {
   const ceilingFor = (line: AllocationProposalLine, splits: Split[], index: number) => {
     const others = splits.reduce(
       (sum, sp, i) => (i === index ? sum : sum + Number(sp.qty || 0)), 0);
-    return Math.max(0, Math.min(line.requested_qty - others, shelfAt(line, splits[index]?.wh ?? "")));
+    return Math.max(0, Math.min(line.requested_qty - others,
+                                shelfAt(line, splits[index]?.wh ?? "", splits[index]?.combo)));
   };
 
   const clampQty = (line: AllocationProposalLine, splits: Split[], index: number, raw: string) => {
@@ -115,15 +200,26 @@ export function AllocationPage() {
    * from that list — it can never add a point the caller was not offered.
    */
   const pointsFor = (line: AllocationProposalLine, splits: Split[], index: number) => {
-    const taken = new Set(
-      splits.filter((_, i) => i !== index).map((s) => s.wh).filter(Boolean));
-    return line.warehouses.filter((w) => !taken.has(String(w.warehouse_id)));
+    const others = splits.filter((s, i) => i !== index && s.wh);
+    return line.warehouses.filter((w) => {
+      const wh = String(w.warehouse_id);
+      const combos = combosAt(line, wh);
+      if (!combos.length) return !others.some((s) => s.wh === wh);
+      const used = new Set(others.filter((s) => s.wh === wh && s.combo?.brand_id)
+        .map((s) => combinationKey(s.combo)));
+      return combos.some((o) => !used.has(combinationKey(o)));
+    });
   };
+
+  /** Every (point, combination) a line could still be served from — what "Take some
+   *  from another warehouse" may add a row for. */
+  const sourcesOf = (line: AllocationProposalLine) => line.warehouses.reduce(
+    (sum, w) => sum + Math.max(1, combosAt(line, String(w.warehouse_id)).length), 0);
 
   /** Anything still promising stock that is not there. The backend refuses these, so
    *  the submit button has no business being live while one is on screen. */
   const overSplits = (data?.lines ?? []).filter((line: AllocationProposalLine) =>
-    splitsOf(line.indent_item_id).some((s) => Number(s.qty || 0) > shelfAt(line, s.wh)));
+    splitsOf(line.indent_item_id).some((s) => Number(s.qty || 0) > shelfAt(line, s.wh, s.combo)));
 
   // Raising is per LINE, so one line's request cannot fail the whole screen and the
   // mutation carries the line it was fired for.
@@ -168,6 +264,14 @@ export function AllocationPage() {
           requested_qty: i === 0 ? line.requested_qty : 0,
           quantity: Number(s.qty || 0),
           warehouse_id: s.wh ? Number(s.wh) : null,
+          // An Any line's pick settles it; a named line sends a pick only when it is
+          // ANOTHER brand, with why — the server records the change (2026-10-24).
+          ...((!named(line) || isSubstitute(line, s.combo)) && picked(s.combo) ? {
+            brand_id: s.combo?.brand_id || null, variant_id: s.combo?.variant_id ?? null,
+            model_id: s.combo?.model_id ?? null, no_brand: !s.combo?.brand_id,
+          } : {}),
+          ...(isSubstitute(line, s.combo) && s.reason?.trim()
+            ? { substitution_reason: s.reason.trim() } : {}),
         })),
       );
       return createAllocation(id, payload, remarks || undefined);
@@ -221,9 +325,57 @@ export function AllocationPage() {
         much to give and from where. Nothing is reserved until this is approved.
       </p>
 
+      {/* The point the STR asked for (2026-11-04). Every line opens on it when this
+          login can draw from it; the dropdown still offers the rest. */}
+      {data.str_source_warehouse_name && (() => {
+        const offered = data.lines.some((line) =>
+          line.warehouses.some((w) => w.warehouse_id === data.str_source_warehouse_id));
+        return (
+          <div className={`mb-4 flex items-start gap-3 rounded-2xl border p-3.5 ${
+            offered ? "border-brand/30 bg-brand-050/50" : "border-warn/30 bg-warn-bg/50"}`}>
+            <span className={`grid h-9 w-9 shrink-0 place-items-center rounded-xl ${
+              offered ? "bg-brand text-white" : "bg-warn text-white"}`}>
+              <ArrowRightLeft className="h-4 w-4" aria-hidden />
+            </span>
+            <div className="min-w-0 text-sm">
+              <p className="font-semibold text-ink">
+                Requested source: {data.str_source_warehouse_name}
+              </p>
+              <p className="text-xs text-muted">
+                {offered
+                  ? "Lines open on this point where it holds the item. Change a line only if it cannot be served from here."
+                  : "You cannot draw from this point. It belongs to that point's own fulfilment desk."}
+              </p>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* Every fulfilment-queue row opens this screen, including the ones with no
           decision left in them. Saying so here — with a link to whatever is already
           promising the goods — beats four different destinations and a red error. */}
+      {data.allocatable && data.allocations.length > 0 && (
+        <Card className="mb-4 p-3 bg-content2/40 border-line/70">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-xs font-semibold text-muted">
+              Previous allocation rounds for this indent:
+            </span>
+            <div className="flex flex-wrap gap-2">
+              {data.allocations.map((allocation) => (
+                <Button
+                  key={allocation.id}
+                  variant="subtle"
+                  className="h-8 text-xs px-2.5"
+                  onClick={() => nav(`/inventory/allocation-approvals/${allocation.id}`)}
+                >
+                  {allocation.allocation_no} · {allocation.status.replace(/_/g, " ").toLowerCase()}
+                </Button>
+              ))}
+            </div>
+          </div>
+        </Card>
+      )}
+
       {!data.allocatable && (
         <Card className="mb-4 p-4">
           <p className="text-sm font-semibold text-ink">{data.blocked_reason}</p>
@@ -257,7 +409,7 @@ export function AllocationPage() {
           // stock the branch already had.
           const unavailable = Math.max(0, short - Math.max(0, line.available_total - giving));
           const withheld = short - unavailable;
-          const overWarehouse = splits.some((s) => Number(s.qty || 0) > shelfAt(line, s.wh));
+          const overWarehouse = splits.some((s) => Number(s.qty || 0) > shelfAt(line, s.wh, s.combo));
 
           return (
             <Card key={line.indent_item_id} className="p-4">
@@ -268,6 +420,20 @@ export function AllocationPage() {
                 <div>
                   <span className="mono text-xs text-muted">{line.item_code}</span>
                   <h3 className="font-semibold text-ink">{line.item_name}</h3>
+                  <div className="mt-1 flex flex-wrap items-center gap-2">
+                    <CombinationTag value={line} />
+                    {otherBrandsFree(line) > 0 && (
+                      <span className="rounded-full bg-info-bg px-2 py-0.5 text-[11px] font-semibold text-info">
+                        Other brands in stock · {otherBrandsFree(line)} {line.uom_code}
+                      </span>
+                    )}
+                    {noBrandFree(line) > 0 && (
+                      <span className="rounded-full bg-content2 px-2 py-0.5 text-[11px] font-semibold text-ink-700 ring-1 ring-line"
+                            title="Stock booked in before brands were recorded. Pick it as “No brand”.">
+                        No brand recorded · {noBrandFree(line)} {line.uom_code}
+                      </span>
+                    )}
+                  </div>
                 </div>
                 <div className="text-sm text-muted">
                   {/* Not "asked": the backend already subtracts what an approved or
@@ -306,11 +472,14 @@ export function AllocationPage() {
               ) : (
                 <div className="space-y-2">
                   {splits.map((s, i) => (
-                    <div key={i} className="flex items-end gap-2">
+                    <div key={i} className="space-y-2">
+                    <div className="flex items-end gap-2">
                       {/* Both controls sit in a <Field> so their labels share a
                           baseline — Select's own label floats inside the box and
                           would sit a row below the Input's. */}
-                      <div className="grid flex-1 items-start gap-x-4 gap-y-3 sm:grid-cols-2">
+                      <div className={`grid flex-1 items-start gap-x-4 gap-y-3 ${
+                        line.warehouses.some((w) => combosAt(line, String(w.warehouse_id)).length)
+                          ? "sm:grid-cols-3" : "sm:grid-cols-2"}`}>
                         <Field label={i === 0 ? "From warehouse" : ""}>
                           <Select
                             ariaLabel="From warehouse"
@@ -320,23 +489,54 @@ export function AllocationPage() {
                             // holding 8 cannot leave 50 sitting in the box.
                             onChange={(v) => {
                               const next = [...splits];
-                              next[i] = { ...next[i], wh: v };
+                              // A new point starts on the combination it holds most of.
+                              const combo = named(line) ? askedFor(line) : combosAt(line, v)[0];
+                              next[i] = { ...next[i], wh: v, combo };
                               set(line.indent_item_id, i,
-                                  { wh: v, qty: clampQty(line, next, i, next[i].qty) });
+                                  { wh: v, combo, qty: clampQty(line, next, i, next[i].qty) });
                             }}
                             placeholder="— none —"
                             // Warehouses first, then the distribution points, each
                             // saying what it is — see `isChainPoint`.
-                            options={orderPoints(pointsFor(line, splits, i)).map((w) => ({
-                              value: String(w.warehouse_id),
-                              label: `${w.warehouse_name} (${w.available_qty} free)`
-                                + (isChainPoint(w) ? " · distribution point" : ""),
-                            }))}
+                            // With a brand chosen, each point also says how much of
+                            // THAT brand it holds — the total alone hides that the
+                            // biggest store may have none of it.
+                            options={orderPoints(pointsFor(line, splits, i)).map((w) => {
+                              const ofBrand = picked(s.combo)
+                                ? brandNetwork(line, s.combo)
+                                    .find((r) => r.warehouse.warehouse_id === w.warehouse_id)?.qty ?? 0
+                                : null;
+                              return {
+                                value: String(w.warehouse_id),
+                                label: `${w.warehouse_name} (`
+                                  + (ofBrand !== null
+                                    ? `${ofBrand} of ${combinationLabel(s.combo)} · ` : "")
+                                  + `${w.available_qty} free)`
+                                  + (isChainPoint(w) ? " · distribution point" : ""),
+                              };
+                            })}
                           />
                         </Field>
+                        {line.warehouses.some((w) => combosAt(line, String(w.warehouse_id)).length) && (
+                          <Field label={i === 0 ? "Brand · variant · model" : ""}>
+                            <CombinationPicker
+                              options={combosAt(line, s.wh)}
+                              value={s.combo}
+                              uom={line.uom_code}
+                              ariaLabel="Brand, variant and model"
+                              onChange={(combo) => {
+                                const next = [...splits];
+                                next[i] = { ...next[i], combo };
+                                set(line.indent_item_id, i,
+                                    { combo, qty: clampQty(line, next, i, next[i].qty) });
+                              }}
+                            />
+                          </Field>
+                        )}
                         <Field label={i === 0 ? `Give (${line.uom_code ?? ""})` : ""}>
                           <Input
                             type="number"
+                            data-uom={line.uom_code ?? ""}
                             min={0}
                             max={ceilingFor(line, splits, i)}
                             value={s.qty}
@@ -355,12 +555,75 @@ export function AllocationPage() {
                         </Button>
                       )}
                     </div>
+                    {picked(s.combo) && brandNetwork(line, s.combo).length > 0 && (
+                      <div className="rounded-lg border border-line bg-content2/60 px-3 py-2">
+                        <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted">
+                          {combinationLabel(s.combo)} free across the network ·{" "}
+                          <span className="tabular text-ink">
+                            {brandNetwork(line, s.combo).reduce((sum, r) => sum + r.qty, 0)}
+                          </span>{" "}{line.uom_code}
+                        </p>
+                        <div className="flex flex-wrap gap-1.5">
+                          {brandNetwork(line, s.combo).map(({ warehouse: w, qty }) => {
+                            const here = String(w.warehouse_id) === s.wh;
+                            const tier = tierWord(w.warehouse_type);
+                            const taken = !here && splits.some((o, j) => j !== i
+                              && o.wh === String(w.warehouse_id)
+                              && combinationKey(o.combo) === combinationKey(s.combo));
+                            return (
+                              <button
+                                key={w.warehouse_id}
+                                type="button"
+                                disabled={here || taken}
+                                title={here ? "This row draws from here"
+                                  : taken ? "Another row already draws this brand from here"
+                                  : `Take ${combinationLabel(s.combo)} from ${w.warehouse_name}`}
+                                onClick={() => {
+                                  const next = [...splits];
+                                  next[i] = { ...next[i], wh: String(w.warehouse_id) };
+                                  set(line.indent_item_id, i, {
+                                    wh: String(w.warehouse_id),
+                                    qty: clampQty(line, next, i, next[i].qty),
+                                  });
+                                }}
+                                className={`inline-flex min-h-8 items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition ${
+                                  here ? "border-brand bg-brand/10 font-semibold text-brand"
+                                    : "border-line bg-content1 text-ink-700 hover:border-brand/60 hover:text-brand disabled:opacity-50"}`}
+                              >
+                                <span className={`rounded px-1 py-px text-[10px] font-bold uppercase ${TIER_CHIP[tier]}`}>
+                                  {tier}
+                                </span>
+                                <span className="max-w-[12rem] truncate">{w.warehouse_name}</span>
+                                <span className="tabular font-semibold">{qty}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                    {isSubstitute(line, s.combo) && (
+                      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-warning/30 bg-warning/5 px-3 py-2">
+                        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-warning">
+                          <Repeat2 size={14} aria-hidden />
+                          Brand changed from {combinationLabel(askedFor(line))} to {combinationLabel(s.combo)}
+                        </span>
+                        <input
+                          value={s.reason ?? ""}
+                          maxLength={300}
+                          onChange={(e) => set(line.indent_item_id, i, { reason: e.target.value })}
+                          placeholder="Reason (optional)"
+                          aria-label="Reason for the brand change"
+                          className="h-9 min-w-[12rem] flex-1 rounded-lg border border-line bg-content1 px-3 text-sm outline-none focus:border-brand"
+                        />
+                      </div>
+                    )}
+                    </div>
                   ))}
                   {/* Off once every point holding this item is already on a row —
                       the row it would add could only ever be blank. */}
                   <Button
                     variant="subtle"
-                    disabled={splits.filter((s) => s.wh).length >= line.warehouses.length}
+                    disabled={splits.filter((s) => s.wh).length >= sourcesOf(line)}
                     onClick={() => addSplit(line.indent_item_id)}
                   >
                     <Plus size={14} /> Take some from another warehouse

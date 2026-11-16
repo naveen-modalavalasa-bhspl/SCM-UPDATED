@@ -1,11 +1,13 @@
+import type { QuantityChangeRow } from "@/shared/components";
 import { api } from "@/shared/api/client";
 import type { Paginated } from "@/shared/types";
+import type { PackEntryIn } from "@/shared/packing";
 import type {
   ApprovalTrail,
   Comparison, Consolidation, ConsolidationCreate, ConsolidationListRow,
   ConsolidationSource, DespatchNote, DespatchNoteWrite, EvaluationMethodOption,
-  MRCandidate, POAmend, POCreate, POFromQuotation, POHeader, POListRow, PORevision,
-  PurchaseOrder, VendorPO,
+  MRCandidate, POAmend, POCopyTemplate, POCreate, POPackChange, POFromQuotation, POHeader, POListRow, PORevision,
+  PurchaseOrder, VendorItemPacking, VendorPO,
   VendorPOListRow, VendorReturnDetail, VendorReturnListRow,
   VendorReturnReceiptInput,
   VendorReturnDecisionInput, VendorReturnSettlementInput,
@@ -20,6 +22,13 @@ import type {
   ConsolidationStats, DemandPoolRow, LedgerStats, POStats, QuoteStats, ReqStats,
   RFQStats,
 } from "./types";
+
+/** A whole edit of an order not yet signed: a draft, or one sent back for correction. */
+type POEditBody = POHeader & {
+  vendor_id?: number | null;
+  expected_date?: string | null;
+  lines: { id?: number | null; item_id: number; quantity: number; rate: number; tax_percent: number }[];
+};
 
 export const poApi = {
   list: (params: { 
@@ -62,6 +71,10 @@ export const poApi = {
   openForGrn: (params: { page?: number; size?: number } = {}) =>
     api.get<Paginated<POListRow>>("/api/pos/open-for-grn", { params }).then((r) => r.data),
   get: (id: number) => api.get<PurchaseOrder>(`/api/pos/${id}`).then((r) => r.data),
+  /** "Copy as new PO": an order's content for the New PO form. Saves nothing and
+   *  draws no number — that happens when the form is saved through `create`. */
+  copyTemplate: (id: number) =>
+    api.get<POCopyTemplate>(`/api/pos/${id}/copy`).then((r) => r.data),
   /** Raised by hand, with no indent or quotation behind it. */
   create: (data: POCreate) =>
     api.post<PurchaseOrder>("/api/pos", data).then((r) => r.data),
@@ -78,6 +91,24 @@ export const poApi = {
     api.put<PurchaseOrder>(`/api/pos/${id}`, data).then((r) => r.data),
   /** Revise an order that has already gone out. Files the old version away, bumps the
    *  revision and sends it back through approval — and back to the vendor to accept. */
+  /** The raiser's full edit of a PO sent back to them — same fields as create. */
+  correct: (id: number, data: POEditBody) =>
+    api.put<PurchaseOrder>(`/api/pos/${id}/correction`, data).then((r) => r.data),
+  /** The full edit of a DRAFT order — same body as `correct`. */
+  editDraft: (id: number, data: POEditBody) =>
+    api.put<PurchaseOrder>(`/api/pos/${id}/draft`, data).then((r) => r.data),
+  /** Change how a line is packed: hierarchy, levels, count (2026-10-08). */
+  repackLine: (id: number, lineId: number, body: {
+    pack_hierarchy_id: number; pack_breakdown: PackEntryIn[];
+  }) => api.put<PurchaseOrder>(`/api/pos/${id}/lines/${lineId}/packing`, body)
+    .then((r) => r.data),
+  /** Supplier changes of packing on this order's despatch notes. */
+  packChanges: (id: number) =>
+    api.get<{ items: POPackChange[] }>(`/api/pos/${id}/pack-changes`).then((r) => r.data.items),
+  decidePackChange: (id: number, lineId: number, accept: boolean, note?: string) =>
+    api.post<POPackChange>(
+      `/api/pos/${id}/pack-changes/${lineId}/${accept ? "accept" : "decline"}`,
+      { note: note || null }).then((r) => r.data),
   amend: (id: number, data: POAmend) =>
     api.post<PurchaseOrder>(`/api/pos/${id}/amend`, data).then((r) => r.data),
   revisions: (id: number) =>
@@ -87,6 +118,14 @@ export const poApi = {
     api.post<PurchaseOrder>(`/api/pos/${id}/approve`, { comments }).then((r) => r.data),
   reject: (id: number, comments = "") =>
     api.post<PurchaseOrder>(`/api/pos/${id}/reject`, { comments }).then((r) => r.data),
+  /** Back ONE rung (previous approver, or the raiser at the first rung). Reason required. */
+  sendBack: (id: number, comments: string) =>
+    api.post<PurchaseOrder>(`/api/pos/${id}/send-back`, { comments }).then((r) => r.data),
+  resubmitCorrection: (id: number, comments = "") =>
+    api.post<PurchaseOrder>(`/api/pos/${id}/resubmit-correction`, { comments }).then((r) => r.data),
+  /** An approver it was sent back to passes it one rung further down. Reason required. */
+  sendBackFurther: (id: number, comments: string) =>
+    api.post<PurchaseOrder>(`/api/pos/${id}/send-back-further`, { comments }).then((r) => r.data),
   sendToVendor: (id: number) =>
     api.post<PurchaseOrder>(`/api/pos/${id}/send-to-vendor`).then((r) => r.data),
   /** Discussion thread — approver asks, raiser replies — flat per PO, append-only. */
@@ -100,6 +139,10 @@ export const poApi = {
 };
 
 export const requisitionApi = {
+  /** Every recorded quantity change, oldest first (2026-11-03). */
+  quantityChanges: (id: number) =>
+    api.get<{ items: QuantityChangeRow[] }>(`/api/requisitions/${id}/quantity-changes`)
+      .then((r) => r.data.items),
   list: (params: {
     status?: string; search?: string; pending_for_me?: boolean;
     page?: number; size?: number;
@@ -207,6 +250,14 @@ export const rfqApi = {
     api.post<RFQ>(`/api/rfqs/${id}/approve`, { comments }).then((r) => r.data),
   reject: (id: number, comments = "") =>
     api.post<RFQ>(`/api/rfqs/${id}/reject`, { comments }).then((r) => r.data),
+  /** Back ONE rung (previous approver, or the raiser at the first rung). Reason required. */
+  sendBack: (id: number, comments: string) =>
+    api.post<RFQ>(`/api/rfqs/${id}/send-back`, { comments }).then((r) => r.data),
+  resubmitCorrection: (id: number, comments = "") =>
+    api.post<RFQ>(`/api/rfqs/${id}/resubmit-correction`, { comments }).then((r) => r.data),
+  /** An approver it was sent back to passes it one rung further down. Reason required. */
+  sendBackFurther: (id: number, comments: string) =>
+    api.post<RFQ>(`/api/rfqs/${id}/send-back-further`, { comments }).then((r) => r.data),
   close: (id: number) => api.post<RFQ>(`/api/rfqs/${id}/close`).then((r) => r.data),
   cancel: (id: number) => api.post<RFQ>(`/api/rfqs/${id}/cancel`).then((r) => r.data),
   invites: (id: number) =>
@@ -218,11 +269,15 @@ export const rfqApi = {
   evaluationMethods: () =>
     api.get<EvaluationMethodOption[]>("/api/rfqs/evaluation-methods")
       .then((r) => r.data),
+  /** Approved requisitions with neither an RFQ nor a consolidation sheet on them
+   *  yet — the Approved Requisitions tab's own rows (SCM_0058). */
+  candidates: (params: { project_id?: number; page?: number; size?: number } = {}) =>
+    api.get<Paginated<ReqListRow>>("/api/rfqs/candidates", { params }).then((r) => r.data),
   award: (id: number, quotation_ids: number[], comments = "", generate_pos = true) =>
     api.post<RFQ>(`/api/rfqs/${id}/award`, { quotation_ids, comments, generate_pos }).then((r) => r.data),
   awardSplit: (
     id: number,
-    allocations: { item_id: number; vendor_id: number; quantity: number }[],
+    allocations: { item_id: number; rfq_item_id?: number; vendor_id: number; quantity: number }[],
     comments = "",
     generate_pos = true,
   ) => api.post<RFQ>(`/api/rfqs/${id}/award`, { allocations, comments, generate_pos }).then((r) => r.data),
@@ -255,6 +310,7 @@ export const rfqApi = {
     lines: {
       quotation_item_id: number; proposed_quantity: number;
       proposed_rate: number; proposed_discount_percent: number; note?: string;
+      brand_id?: number | null; variant_id?: number | null; model_id?: number | null;
     }[];
   }) =>
     api.post<QuoteChangeRequest>(`/api/rfqs/quotations/${quoteId}/change-requests`, body)
@@ -294,6 +350,10 @@ export const supplierApi = {
   login: (username: string, password: string) =>
     api.post<VendorToken>("/api/supplier/login", { username, password }).then((r) => r.data),
   me: () => api.get<VendorProfile>("/api/supplier/me").then((r) => r.data),
+  /** The packing of the items mapped to this vendor (Profile > Packing, 2026-10-11).
+   *  Scoped server-side on the vendor id in the token. */
+  itemPacking: () =>
+    api.get<{ items: VendorItemPacking[] }>("/api/supplier/items/packing").then((r) => r.data.items),
   /* --- the vendor's own bell (2026-08-21) --- */
   /** Scoped server-side on the vendor id in the token; there is no id to pass. */
   notifications: (params: { unread_only?: boolean; page?: number; size?: number } = {}) =>

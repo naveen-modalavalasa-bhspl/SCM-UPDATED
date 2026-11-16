@@ -4,10 +4,12 @@ import { useQueryClient, type Query } from "@tanstack/react-query";
 import { useAuth } from "@/shared/auth/AuthContext";
 import type { CompanyProfile } from "./companyProfile";
 import type { Paginated, Option } from "@/shared/types";
+import type { ReturnTarget } from "@/modules/approvals/types";
 import type {
-  Acknowledgement, AcknowledgeLine, ActivityRow, DirectIssueAck,
+  Acknowledgement, AcknowledgeLine, ActivityRow, DirectIssueAck, StockTransferAck,
   BomChoice, BomChoiceItem, FulfilmentStep, Indent, IndentCreate, IndentListRow, IndentJourney,
   IndentNotification, IndentStats, IndentUpdate, RaiserTracking, ReceiptAttachment,
+  StrSourceOption,
 } from "./types";
 
 export interface IndentQueryParams {
@@ -70,6 +72,8 @@ export const indentKeys = {
     [...indentKeys.all(scope), "regions"] as const,
   vehicles: (scope: IndentAccountScope, search: string = "") =>
     [...indentKeys.all(scope), "vehicles", search] as const,
+  strSources: (scope: IndentAccountScope) =>
+    [...indentKeys.all(scope), "str-sources"] as const,
   journey: (scope: IndentAccountScope, id: number) =>
     [...indentKeys.all(scope), "journey", INDENT_JOURNEY_CONTRACT_VERSION, id] as const,
   shipments: (scope: IndentAccountScope, id: number) =>
@@ -211,8 +215,10 @@ export const indentApi = {
    * update, because the request body carries whatever item id the caller sent.
    */
   eligibleItems: (search?: string) =>
-    api.get<{ id: number; code: string; name: string; uom_code?: string | null;
-              category_name?: string | null }[]>(
+    api.get<{
+      id: number; code: string; name: string; uom_code?: string | null;
+      category_name?: string | null
+    }[]>(
       "/api/indents/eligible-items", { params: { search: search || undefined } },
     ).then((r) => r.data),
   offices: () => api.get<{ items: Option[] }>("/api/indents/options/offices").then((r) => r.data.items),
@@ -230,6 +236,10 @@ export const indentApi = {
     api.get<Option[]>("/api/indents/options/vehicles", {
       params: toSearchParams({ search }),
     }).then((r) => r.data),
+  /** Where an STR may ask stock to come from: the points held at the raiser's rank,
+   *  on the raiser's own tier, network-wide, less the raiser's own (2026-11-04). */
+  strSources: () =>
+    api.get<StrSourceOption[]>("/api/indents/options/str-sources").then((r) => r.data),
   get: (id: number, signal?: AbortSignal) =>
     api.get<Indent>(`/api/indents/${id}`, { signal }).then((r) => r.data),
   journey: (id: number, signal?: AbortSignal) =>
@@ -249,11 +259,24 @@ export const indentApi = {
     api.put<Indent>(`/api/indents/${id}`, data).then((r) => r.data),
   delete: (id: number) => api.delete<void>(`/api/indents/${id}`).then((r) => r.data),
   submit: (id: number) => api.post<Indent>(`/api/indents/${id}/submit`).then((r) => r.data),
-  returnForCorrection: (id: number, comments: string) =>
-    api.post<Indent>(`/api/indents/${id}/return-for-correction`, { comments })
+  returnForCorrection: (id: number, comments: string, targetSequence?: number) =>
+    api.post<Indent>(`/api/indents/${id}/return-for-correction`, {
+      comments,
+      ...(targetSequence === undefined ? {} : { target_sequence: targetSequence }),
+    })
       .then((r) => r.data),
   resubmitCorrection: (id: number) =>
     api.post<Indent>(`/api/indents/${id}/resubmit-correction`).then((r) => r.data),
+  /** Earlier steps this person may send the indent back to: an approver returning it,
+   *  or the correction owner passing it further back. */
+  returnTargets: (id: number) =>
+    api.get<ReturnTarget[]>(`/api/indents/${id}/return-targets`).then((r) => r.data),
+  /** The correction owner sends a returned indent further back, down to the requester. */
+  sendCorrectionBack: (id: number, comments: string, targetSequence?: number) =>
+    api.post<Indent>(`/api/indents/${id}/send-correction-back`, {
+      comments,
+      ...(targetSequence === undefined ? {} : { target_sequence: targetSequence }),
+    }).then((r) => r.data),
   approve: (id: number, comments: string) =>
     api.post<Indent>(`/api/indents/${id}/approve`, { comments }).then((r) => r.data),
   reject: (id: number, comments: string) =>
@@ -267,17 +290,24 @@ export const indentApi = {
    * Served by the warehouse module because the issue and dispatch evidence lives
    * there; the screen is an indents screen all the same.
    */
-  myAcknowledgements: (params: { search?: string; status?: string;
-                                 only_actionable?: boolean; indent_type?: string[] } = {}) =>
+  myAcknowledgements: (params: {
+    search?: string; status?: string;
+    only_actionable?: boolean; indent_type?: string[]
+  } = {}) =>
     // URLSearchParams so `indent_type` repeats (`?indent_type=A&indent_type=B`) the
     // way FastAPI reads a list, not axios's `indent_type[]=`.
     api.get<Acknowledgement[]>("/api/warehouse/acknowledgements/mine",
-                               { params: toSearchParams(params) })
+      { params: toSearchParams(params) })
       .then((r) => r.data),
 
   /** Direct (no-indent) material issues handed to me, to confirm I got them. */
   myDirectIssues: (params: { search?: string; only_actionable?: boolean } = {}) =>
     api.get<DirectIssueAck[]>("/api/warehouse/acknowledgements/direct-issues", { params })
+      .then((r) => r.data),
+
+  /** Direct STOs arriving at a point I hold (2026-10-29). */
+  myStockTransferAcks: (params: { search?: string; only_actionable?: boolean } = {}) =>
+    api.get<StockTransferAck[]>("/api/warehouse/acknowledgements/stock-transfers", { params })
       .then((r) => r.data),
 
   /** One direct issue in the indent acknowledgement's own shape, so the same
@@ -298,7 +328,7 @@ export const indentApi = {
    * the backend opens the claim from them.
    */
   acknowledge: (id: number, lines: AcknowledgeLine[],
-                receipt: { condition?: string; remarks?: string } = {}) =>
+    receipt: { condition?: string; remarks?: string } = {}) =>
     api.post<Indent>(`/api/indents/${id}/acknowledge`, { lines, ...receipt })
       .then((r) => r.data),
 
@@ -365,8 +395,9 @@ export function receiptApi(kind: ReceiptKind) {
       upload: indentApi.uploadReceiptAttachment,
       download: indentApi.downloadReceiptAttachment,
       remove: indentApi.deleteReceiptAttachment,
-      acknowledge: (id: number, lines: AcknowledgeLine[]) =>
-        indentApi.acknowledge(id, lines) as Promise<unknown>,
+      acknowledge: (id: number, lines: AcknowledgeLine[],
+        receipt: { condition?: string; remarks?: string } = {}) =>
+        indentApi.acknowledge(id, lines, receipt) as Promise<unknown>,
     };
   }
   return {
@@ -387,8 +418,9 @@ export function receiptApi(kind: ReceiptKind) {
         .then((r) => r.data as Blob),
     remove: (attachmentId: number) =>
       api.delete<void>(`${DIRECT}/attachments/${attachmentId}`).then((r) => r.data),
-    acknowledge: (id: number, lines: AcknowledgeLine[]) =>
-      api.post<Acknowledgement>(`${DIRECT}/${id}/acknowledge`, { lines })
+    acknowledge: (id: number, lines: AcknowledgeLine[],
+      receipt: { condition?: string; remarks?: string } = {}) =>
+      api.post<Acknowledgement>(`${DIRECT}/${id}/acknowledge`, { lines, ...receipt })
         .then((r) => r.data) as Promise<unknown>,
   };
 }

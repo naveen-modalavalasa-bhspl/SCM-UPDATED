@@ -7,6 +7,7 @@ import type { Column } from "@/shared/components";
 import { useQuery } from "@tanstack/react-query";
 import { Active, Code } from "./common";
 import { CODE_RULE, RATE_RULE } from "./constants";
+import { BrandItemMappingPanel } from "../components/BrandItemMappingPanel";
 
 export function ItemsTab() {
   return <ItemMasterTab />;
@@ -293,4 +294,12 @@ export function BrandsTab() {
       onDeactivate={mastersApi.brands.deactivate}
     />
   );
+}
+
+/** The Brand Item Mapping screen: select items (by category tree) on the left,
+ *  select brands on the right, then Save to create all combinations at once.
+ *  Below the panels: one row per item showing all its mapped brands with a View
+ *  button to drill into individual mappings. */
+export function BrandItemMappingTab() {
+  return <BrandItemMappingPanel />;
 }

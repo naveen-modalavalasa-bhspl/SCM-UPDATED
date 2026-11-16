@@ -49,21 +49,11 @@ export function FeaturesTab() {
 export function PackagingTab() {
   return (
     <>
-      <div className="mb-3 rounded-xl bg-content2 px-4 py-3 text-sm text-muted">
-        Maintain reusable <strong className="text-body">container types</strong> such as
-        Packet, Box, Tote and Euro-pallet, together with the{" "}
-        <strong className="text-body">physical spec of the container itself</strong> —
-        its outer box empty, what it weighs empty, and whether it may be stacked or
-        turned. The warehouse checks a bin against those measurements, so a container
-        left unmeasured is one no location can say it has room for.
-        <br />
-        How <em>much</em> a container holds is not here: the same box takes 50 SIM cards
-        or 4 litres of oil, so the quantity and the loaded weight belong to each item on
-        its own Packaging tab.
-      </div>
+      <h2 className="mb-3 text-lg font-semibold text-ink">Container Types</h2>
       <MasterCrud<MasterPackaging>
-        title="Package" queryKey="packaging" searchable
+        title="Container type" queryKey="packaging" searchable
         managePerm="master.packaging.manage"
+        newActions={[{ label: "Container Type", preset: {} }]}
         columns={[
           { key: "code", header: "Code", render: (r) => <Code>{r.code}</Code> },
           { key: "name", header: "Name", render: (r) => r.name },

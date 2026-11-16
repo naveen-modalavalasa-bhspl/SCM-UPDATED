@@ -23,7 +23,9 @@ export const qty = (value: number) => Number(value ?? 0).toLocaleString();
 
 /** The most it makes sense to confirm today: what reached you but is unconfirmed. */
 export const receivable = (line: AcknowledgementLine) =>
-  Math.max(line.dispatched_quantity - line.received_quantity, 0);
+  // Goods already turned away have arrived and been accounted for: they are not offered
+  // for acknowledgement a second time.
+  Math.max(line.dispatched_quantity - line.received_quantity - (line.rejected_quantity ?? 0), 0);
 
 export const outstanding = (line: AcknowledgementLine) =>
   Math.max(line.approved_quantity - line.received_quantity, 0);
@@ -135,10 +137,17 @@ export const STAGE_HINT: Partial<Record<LineStage, string>> = {
  * has not been fulfilled.
  */
 export function displayStatus(row: Acknowledgement) {
+  const hasReceived = row.lines.some((line) => Number(line.received_quantity ?? 0) > 0);
+  const hasOutstanding = row.lines.some((line) => outstanding(line) > 0);
+
+  if (hasReceived && hasOutstanding) {
+    return INDENT_STATUS.PARTIALLY_FULFILLED;
+  }
+  if (!hasOutstanding && hasReceived) {
+    return INDENT_STATUS.CLOSED;
+  }
   if (row.status !== INDENT_STATUS.CLOSED) return row.status;
-  return row.lines.some((line) => outstanding(line) > 0)
-    ? INDENT_STATUS.PARTIALLY_FULFILLED
-    : INDENT_STATUS.CLOSED;
+  return hasOutstanding ? INDENT_STATUS.PARTIALLY_FULFILLED : INDENT_STATUS.CLOSED;
 }
 
 /** One line of summary for a whole indent, so the row says something without opening. */

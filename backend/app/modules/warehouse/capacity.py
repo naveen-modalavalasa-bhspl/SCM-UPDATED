@@ -57,7 +57,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError
-from app.shared.models.master import Item, ItemPackaging, Packaging
+from app.shared.models.master import Item, ItemPackaging, PackHierarchy, Packaging
 from app.shared.models.warehouse import BIN_TYPES, Bin
 
 ZERO = Decimal("0")
@@ -247,10 +247,18 @@ async def pack_ladders(db: AsyncSession, item_ids) -> dict[int, list[Pack]]:
     if not ids:
         return {}
 
+    # One item may carry several pack hierarchies (2026-10-08). Each is its own ladder
+    # with its own level 1, so the running product is kept PER HIERARCHY and the
+    # default hierarchy's rungs come first — that is the one an unspecified movement
+    # is measured in.
+    # One query: the hierarchy is joined only to ORDER the rungs (default first), so
+    # reading a ladder costs exactly what it did before hierarchies existed.
     rungs = (await db.execute(
         select(ItemPackaging)
+        .outerjoin(PackHierarchy, PackHierarchy.id == ItemPackaging.hierarchy_id)
         .where(ItemPackaging.item_id.in_(ids), ItemPackaging.is_active.is_(True))
-        .order_by(ItemPackaging.item_id, ItemPackaging.level)
+        .order_by(ItemPackaging.item_id, PackHierarchy.is_default.desc(),
+                  ItemPackaging.hierarchy_id, ItemPackaging.level)
     )).scalars().all()
     packages = {
         p.id: p for p in (await db.execute(
@@ -260,16 +268,19 @@ async def pack_ladders(db: AsyncSession, item_ids) -> dict[int, list[Pack]]:
     } if rungs else {}
 
     out: dict[int, list[Pack]] = {item_id: [] for item_id in ids}
-    running: dict[int, Decimal] = {}
-    broken: set[int] = set()
+    running: dict[tuple, Decimal] = {}
+    seen: dict[tuple, int] = {}
+    broken: set[tuple] = set()
     for rung in rungs:
-        if rung.item_id in broken:
+        key = (rung.item_id, getattr(rung, "hierarchy_id", None))
+        if key in broken:
             continue
-        if rung.level != len(out[rung.item_id]) + 1:
-            broken.add(rung.item_id)
+        if rung.level != seen.get(key, 0) + 1:
+            broken.add(key)
             continue
-        base = running.get(rung.item_id, ONE) * (_pos(rung.quantity) or ONE)
-        running[rung.item_id] = base
+        seen[key] = rung.level
+        base = running.get(key, ONE) * (_pos(rung.quantity) or ONE)
+        running[key] = base
 
         container = packages.get(rung.package_id)
         own = _box(rung.length_cm, rung.width_cm, rung.height_cm)

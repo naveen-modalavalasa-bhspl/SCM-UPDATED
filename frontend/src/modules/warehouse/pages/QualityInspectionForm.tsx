@@ -1,9 +1,15 @@
-import { Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
+import {
+  Button, Can, ConfirmModal, DocumentScopeStrip, ErrorBanner, Field, Input, PackageCheckModal,
+  PageHeader, Select, StatusPill,
+} from "@/shared/components";
+import {
+  type PackEntry, baseOf, checkFrom, checkSummary, expandPacks, shrinkWithin, splitByCheck,
+} from "@/shared/packing";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
-import { ArrowLeft, FileText, Plus, ScanLine, Trash2 } from "lucide-react";
+import { ArrowLeft, Boxes, FileText, Plus, ScanLine, Trash2 } from "lucide-react";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
 import { Lookup } from "../components/Lookup";
@@ -11,11 +17,13 @@ import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { InspectionLinkedDocuments } from "../components/LinkedDocuments";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import {
-  cancelInspection, completeInspection, createInspection, employeeOptions, getInspection,
+  cancelInspection, completeInspection, createInspection, getInspection,
   getReceipt, grnOptions,
   updateInspection, warehouseOptions,
 } from "../api";
-import { fmtQty, num, percent, today } from "../format";
+import { fmtQty, num, today } from "../format";
+import { deriveResult, qcRate, qcSentence, summarizeQc } from "../qcSummary";
+import { QcResultBadge, QcVerdictPanel, QcVerdictStrip } from "../components/QcVerdict";
 import { resolveAcceptedUnits } from "../qcUnits";
 import { alerts } from "@/modules/alerts";
 import { useAuth } from "@/shared/auth/AuthContext";
@@ -23,6 +31,7 @@ import type {
   Inspection, InspectionItemWrite, InspectionParameter, InspectionWrite, Receipt,
 } from "../types";
 import { usePointLabel } from "../usePointLabel";
+import { CombinationTag, comboFrom } from "@/shared/combination";
 
 /**
  * Inspect a receipt line by line.
@@ -37,24 +46,12 @@ import { usePointLabel } from "../usePointLabel";
  * reading is not something a vendor can be held to.
  */
 
-const RESULTS = [
-  { value: "PENDING", label: "Pending" },
-  { value: "PASSED", label: "Passed" },
-  { value: "FAILED", label: "Failed" },
-  { value: "PARTIAL", label: "Partial" },
-];
 
 /** The GRN picker on this screen, narrowed server-side to deliveries still awaiting QC.
  *  Declared out here so the `Lookup` gets a stable function and does not refetch on
  *  every keystroke of the rest of the form. */
 const awaitingQcOptions = (search?: string) => grnOptions(search, undefined, true);
 
-const deriveResult = (inspected: number, accepted: number): InspectionItemWrite["result"] => {
-  if (inspected <= 0) return "PENDING";
-  if (accepted >= inspected) return "PASSED";
-  if (accepted <= 0) return "FAILED";
-  return "PARTIAL";
-};
 
 const parseCodes = (arr: any): string[] | null => {
   if (!arr) return null;
@@ -99,13 +96,15 @@ export default function QualityInspectionForm({
   const [paramsFor, setParamsFor] = useState<number | null>(null);
   const [serialsFor, setSerialsFor] = useState<number | null>(null);
   const [paramsForImeis, setParamsForImeis] = useState<number | null>(null);
+  /** The line whose packs are being inspected one by one (2026-10-27). */
+  const [packsFor, setPacksFor] = useState<number | null>(null);
 
   /* The inspector is whoever is standing at the bench. Left at "pick one" it was a
    * list of every active employee in HCM with the person actually inspecting somewhere
    * in it, so a signed inspection could carry anybody's name. Prefilled from the
-   * login, and once only — same rule as the receiving point: clearing it to name a
-   * colleague must not have it written straight back. Still editable; a bench where
-   * one person inspects and another signs off is a real arrangement. */
+   * login and shown read-only (SCM_0097): the server records the signed-in user on
+   * create and keeps that inspector on every edit, so a picker here would only offer
+   * a choice the save ignores. */
   const { me } = useAuth();
   const prefilledInspector = useRef(false);
   useEffect(() => {
@@ -132,6 +131,7 @@ export default function QualityInspectionForm({
       items: (doc.items ?? []).map((l) => ({
         id: l.id,
         receipt_item_id: l.receipt_item_id,
+        ...comboFrom(l),
         item_id: l.item_id,
         batch_no: l.batch_no,
         inspected_qty: num(l.inspected_qty),
@@ -146,6 +146,8 @@ export default function QualityInspectionForm({
         // "nothing rejected", where [] would mean "every unit rejected".
         serial_numbers: parseCodes(l.serial_numbers),
         imei_numbers: parseCodes(l.imei_numbers),
+        accepted_pack_breakdown: l.accepted_pack_breakdown ?? null,
+        rejected_pack_breakdown: l.rejected_pack_breakdown ?? null,
       })),
     });
   }, [doc]);
@@ -179,13 +181,17 @@ export default function QualityInspectionForm({
   const delivery = grn ?? pulled;
 
   const deliveryMeta = useMemo(() => {
-    const byLine = new Map<number, { is_serial_tracked?: boolean, serials: string[], is_imei_tracked?: boolean, imeis: string[] }>();
+    const byLine = new Map<number, { is_serial_tracked?: boolean, serials: string[], is_imei_tracked?: boolean, imeis: string[], packs: PackEntry[] | null, uom?: string | null }>();
     for (const line of delivery?.items ?? []) {
       byLine.set(line.id, {
         is_serial_tracked: line.is_serial_tracked,
         serials: parseCodes(line.serial_numbers) ?? [],
         is_imei_tracked: line.is_imei_tracked,
         imeis: parseCodes(line.imei_numbers) ?? [],
+        // What the GRN COUNTED, in packs — what QC keeps or rejects pack by pack.
+        packs: line.pack_breakdown?.some((e) => e.level > 0 && num(e.qty) > 0)
+          ? line.pack_breakdown : null,
+        uom: line.uom_code,
       });
     }
     return byLine;
@@ -213,6 +219,26 @@ export default function QualityInspectionForm({
     if (!receiptItemId) return null;
     const meta = deliveryMeta.get(receiptItemId);
     return meta?.serials?.length ? meta.serials : null;
+  };
+
+  /** The packs the GRN counted for a line, when QC can decide it pack by pack: the
+   *  whole delivery is being inspected (a part inspection judges units, not packs). */
+  const receivedPacks = (index: number | null): PackEntry[] | null => {
+    if (index === null) return null;
+    const line = form.items[index];
+    const meta = line?.receipt_item_id ? deliveryMeta.get(line.receipt_item_id) : undefined;
+    if (!meta?.packs) return null;
+    return Math.abs(baseOf(meta.packs) - num(line.inspected_qty)) < 1e-6 ? meta.packs : null;
+  };
+  /** A line's pack verdict as the modal reads it: what was decided, else the accepted
+   *  quantity cut down out of the counted packs (how a typed number reads). */
+  const packCheckOf = (index: number) => {
+    const ref = receivedPacks(index) ?? [];
+    const packs = expandPacks(ref);
+    const line = form.items[index];
+    const kept = line.accepted_pack_breakdown
+      ?? shrinkWithin(ref, Math.min(num(line.accepted_qty), baseOf(ref)));
+    return { packs, check: checkFrom(packs, kept) };
   };
 
   /** The GRN IMEIs behind an inspection line. */
@@ -255,6 +281,7 @@ export default function QualityInspectionForm({
         items: (receipt.items ?? []).filter((l) => l.requires_qi).map((l) => ({
           receipt_item_id: l.id,
           item_id: l.item_id,
+          ...comboFrom(l),
           item_code: l.item_code,
           item_name: l.item_name,
           batch_no: l.batch_no,
@@ -314,37 +341,49 @@ export default function QualityInspectionForm({
           rejected = Math.max(inspected - accepted, 0);
         }
 
+        // A pack verdict that no longer adds up — the number was typed, or the serials
+        // picked a different count — is dropped rather than sent: the server refuses
+        // packs that disagree with the quantity, and the typed number is the newer word.
+        const packsAgree = !next.accepted_pack_breakdown
+          || (Math.abs(baseOf(next.accepted_pack_breakdown) - accepted) < 1e-6
+              && Math.abs(accepted + baseOf(next.rejected_pack_breakdown) - inspected) < 1e-6);
         return {
           ...next,
           accepted_qty: accepted,
           rejected_qty: rejected,
-          // An explicitly chosen result wins; otherwise it follows the split.
-          result: patch.result ?? deriveResult(inspected, accepted),
+          ...(packsAgree ? {} : { accepted_pack_breakdown: null, rejected_pack_breakdown: null }),
+          // SCM_0164: the result FOLLOWS the split, always — the server derives it the
+          // same way on save. A hand-picked "Passed" over two rejected units was the
+          // line saying one thing and its quantities another.
+          result: deriveResult(inspected, accepted),
         };
       }),
     }));
 
-  /** A line is seeded PENDING when the receipt raises the inspection, and the server
-   *  derives its real result from the accepted/inspected split on save
-   *  (`_derive_result`). Counting the stored PENDING as neither pass nor fail is how
-   *  the confirm modal announced "0 pass, 0 fail" over a full sheet of accepted lines.
-   *  Count what the save is about to write, by the same rule. */
+  /** A line's result, live: always its own split (SCM_0164), which is what the save
+   *  writes — the server derives it the same way. A line seeded PENDING with a full
+   *  split is counted as what it is about to be, not as nothing; that is how the
+   *  confirm dialog once announced "0 pass, 0 fail" over a sheet of accepted lines. */
   const resultOf = (line: InspectionItemWrite) =>
-    line.result && line.result !== "PENDING"
-      ? line.result
-      : deriveResult(num(line.inspected_qty), num(line.accepted_qty));
+    deriveResult(num(line.inspected_qty), num(line.accepted_qty));
 
-  const totals = useMemo(
-    () => ({
-      lines: form.items.length,
-      passed: form.items.filter((l) => resultOf(l) === "PASSED").length,
-      failed: form.items.filter((l) => resultOf(l) === "FAILED").length,
-      partial: form.items.filter((l) => resultOf(l) === "PARTIAL").length,
-      inspected: form.items.reduce((s, l) => s + num(l.inspected_qty), 0),
-      rejected: form.items.reduce((s, l) => s + num(l.rejected_qty), 0),
-    }),
+  /** Every total on this screen, by QUANTITY (SCM_0164 / 0165 / 0166) — the panel,
+   *  the strip under the lines, the Document card and the confirm dialog all read it,
+   *  so none of them can disagree with another. See `../qcSummary`. */
+  const summary = useMemo(
+    () => summarizeQc(form.items.map((line) => ({ ...line, result: resultOf(line) }))),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [form.items],
   );
+  /** The unit, named only when every line shares one: "10 PCS" is a fact, "10 units"
+   *  over a box of strips and a carton of bottles is not. */
+  const sharedUom = useMemo(() => {
+    const uoms = new Set(form.items.map((line, i) =>
+      savedLine(i)?.uom_code ?? deliveryMeta.get(line.receipt_item_id ?? 0)?.uom ?? ""));
+    const [only] = uoms;
+    return uoms.size === 1 && only ? only : undefined;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.items, deliveryMeta, doc]);
 
   const locked = !!doc && doc.status !== "DRAFT" && doc.status !== "IN_PROGRESS";
 
@@ -456,6 +495,7 @@ export default function QualityInspectionForm({
               {saved?.item_name ?? l.item_name ?? "—"}
               {l.batch_no ? ` · batch ${l.batch_no}` : ""}
             </div>
+            <CombinationTag value={saved ?? l} className="mt-1" />
           </div>
         );
       },
@@ -478,16 +518,38 @@ export default function QualityInspectionForm({
       key: "accepted",
       header: "Accepted",
       numeric: true,
-      width: "w-28",
-      render: (l, i) => (
-        <QtyInput
-          ariaLabel={`Accepted quantity, line ${i + 1}`}
-          value={l.accepted_qty}
-          max={num(l.inspected_qty)}
-          disabled={locked}
-          onChange={(v) => patchLine(i, { accepted_qty: v })}
-        />
-      ),
+      width: "min-w-[9rem] w-36",
+      render: (l, i) => {
+        const ref = receivedPacks(i);
+        const verdict = ref ? packCheckOf(i) : null;
+        const lost = verdict ? splitByCheck(verdict.packs, verdict.check).lostQty : 0;
+        return (
+          <div className="space-y-1">
+            <QtyInput
+              ariaLabel={`Accepted quantity, line ${i + 1}`}
+              value={l.accepted_qty}
+              max={num(l.inspected_qty)}
+              disabled={locked}
+              onChange={(v) => patchLine(i, { accepted_qty: v })}
+            />
+            {/* Pack by pack (2026-10-27): reject a carton whole, or a few units out of
+                one that is kept — the accepted quantity follows. */}
+            {verdict && (
+              <button type="button" onClick={() => setPacksFor(i)}
+                      title={locked ? "View which packs were kept" : "Keep or reject each pack"}
+                      className={`flex min-h-9 w-full items-center justify-end gap-1.5 rounded-lg border px-2 text-[11px] font-semibold transition-colors ${
+                        lost > 0 ? "border-bad/30 bg-bad/5 text-bad hover:bg-bad/10"
+                          : "border-line text-brand hover:border-brand hover:bg-brand-050"}`}>
+                <Boxes className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                <span className="truncate">
+                  {checkSummary(verdict.packs, verdict.check, "rejected")}
+                  {!l.accepted_pack_breakdown && lost > 0 && " · check packs"}
+                </span>
+              </button>
+            )}
+          </div>
+        );
+      },
     },
     {
       key: "rejected",
@@ -507,16 +569,10 @@ export default function QualityInspectionForm({
     {
       key: "result",
       header: "Result",
-      width: "w-36",
-      render: (l, i) => (
-        <Select
-          value={l.result}
-          onChange={(v) => patchLine(i, { result: v as InspectionItemWrite["result"] })}
-          options={RESULTS}
-          isDisabled={locked}
-          ariaLabel={`Result, line ${i + 1}`}
-        />
-      ),
+      width: "w-32",
+      // Shown, not picked (SCM_0164): it follows the accepted / rejected split, as the
+      // save does. A dropdown here let a line read "Passed" over rejected units.
+      render: (l) => <QcResultBadge result={resultOf(l)} />,
     },
     {
       key: "defect",
@@ -634,6 +690,8 @@ export default function QualityInspectionForm({
           </>
         }
       />
+      {/* Copied from its GRN (2026-11-11); nothing on an older one. */}
+      {doc && <DocumentScopeStrip doc={{ ...doc, project_name: grn?.project_name ?? null }} number={doc.inspection_no} className="mb-4" />}
 
       <ErrorBanner error={save.error ?? pullReceipt.error} />
 
@@ -642,9 +700,19 @@ export default function QualityInspectionForm({
           <MetaRow label="Number" value={<span className="font-mono">{doc.inspection_no}</span>} />
           <MetaRow label="Status" value={<StatusPill status={doc.status} />} />
           <MetaRow label="Type" value={doc.inspection_type} />
+          {/* SCM_0165: accepted ÷ inspected QUANTITY, live off the lines on screen. It
+              was passed LINES ÷ all lines off the last save, so a new inspection read
+              0 % and a line keeping 8 of 10 counted as nothing passed. */}
           <MetaRow
             label="Pass rate"
-            value={<span className="tabular">{percent(doc.passed_items, doc.total_items)}%</span>}
+            value={<span className={`tabular font-semibold ${summary.passRate === null ? "text-muted"
+              : summary.rejected > 0 ? "text-warn" : "text-ok"}`}>{qcRate(summary.passRate)}</span>}
+          />
+          <MetaRow
+            label="Rejected quantity"
+            value={<span className={`tabular font-semibold ${summary.rejected > 0 ? "text-bad" : "text-muted"}`}>
+              {fmtQty(summary.rejected)}{sharedUom ? ` ${sharedUom}` : ""}
+            </span>}
           />
         </MetaCard>
       )}
@@ -712,27 +780,21 @@ export default function QualityInspectionForm({
             />
           </Field>
           <Field label="Inspector">
-            <Lookup
-              name="employees"
-              load={employeeOptions}
-              value={form.inspector_id ?? ""}
-              isDisabled={locked}
-              // The options list is capped, so the signed-in inspector is not
-              // guaranteed to be in it — without this their own name renders as the
-              // placeholder on a document that plainly has one.
-              fallback={me ? [{
-                id: me.employee.id,
-                code: me.employee.code ?? "",
-                name: me.employee.name,
-              }] : undefined}
-              onChange={(v) => set("inspector_id", v === "" ? null : v)}
-              placeholder="Inspector"
-            />
+            <Input value={(editing ? doc?.inspector_name : me?.employee?.name) ?? "—"} disabled />
           </Field>
         </div>
       </Section>
 
-      <Section title="Lines" hint="Result follows the accepted/rejected split unless you override it.">
+      {/* SCM_0164 / 0165 / 0166: how the inspection is going, by quantity, live as the
+          numbers are typed — before the lines, because it is the first thing asked. */}
+      {form.items.length > 0 && (
+        <div className="mb-4">
+          <QcVerdictPanel summary={summary} uom={sharedUom}
+                          title={locked ? "Inspection result" : "Inspection so far"} />
+        </div>
+      )}
+
+      <Section title="Lines" hint="Each line's result follows its accepted and rejected quantities.">
         <LinesEditor
           rows={form.items}
           columns={columns}
@@ -741,21 +803,14 @@ export default function QualityInspectionForm({
           minTableWidth="min-w-[1280px]"
           keyOf={(_, i) => i}
           onRemove={locked ? undefined : (i) => set("items", form.items.filter((_, x) => x !== i))}
-          rowTone={(l) => (l.result === "FAILED" ? "bg-bad-bg/40" : undefined)}
+          rowTone={(l) => {
+            const result = resultOf(l);
+            return result === "FAILED" ? "bg-bad-bg/40" : result === "PARTIAL" ? "bg-warn-bg/40" : undefined;
+          }}
           empty="Pick a GRN above to pull its lines in."
-          footer={
-            <div className="flex flex-wrap justify-end gap-x-6 gap-y-1 text-sm">
-              <span className="text-muted">{totals.lines} lines</span>
-              <span className="text-ok">Passed <b className="tabular">{totals.passed}</b></span>
-              <span className={totals.failed > 0 ? "text-bad" : "text-muted"}>
-                Failed <b className="tabular">{totals.failed}</b>
-              </span>
-              <span className="text-ink">Inspected <b className="tabular">{fmtQty(totals.inspected)}</b></span>
-              <span className={totals.rejected > 0 ? "text-bad" : "text-muted"}>
-                Rejected <b className="tabular">{fmtQty(totals.rejected)}</b>
-              </span>
-            </div>
-          }
+          // SCM_0166: every line in exactly one bucket — Partial included, which the
+          // old Passed / Failed pair left out — beside the quantities they came from.
+          footer={<QcVerdictStrip summary={summary} uom={sharedUom} />}
         />
       </Section>
 
@@ -867,6 +922,36 @@ export default function QualityInspectionForm({
         }}
       />
 
+      {packsFor !== null && form.items[packsFor] && (() => {
+        const index = packsFor;
+        const line = form.items[index];
+        const { packs, check } = packCheckOf(index);
+        const tracked = isSerialTracked(index) || isImeiTracked(index);
+        const saved = savedLine(index);
+        return (
+          <PackageCheckModal
+            open
+            mode="qc"
+            readOnly={locked}
+            packName={packs.find((p) => p.level > 0)?.entry.name ?? "pack"}
+            uom={saved?.uom_code ?? deliveryMeta.get(line.receipt_item_id ?? 0)?.uom}
+            itemLabel={[saved?.item_code ?? line.item_code, saved?.item_name ?? line.item_name,
+                        line.batch_no ? `batch ${line.batch_no}` : null].filter(Boolean).join(" · ")
+              + (tracked ? " — then pick the accepted serials / IMEIs to match" : "")}
+            packages={packs}
+            value={check}
+            onClose={() => setPacksFor(null)}
+            onSave={(next) => {
+              const { kept, lost, keptQty } = splitByCheck(packs, next);
+              patchLine(index, {
+                accepted_qty: keptQty,
+                accepted_pack_breakdown: kept,
+                rejected_pack_breakdown: lost.length ? lost : null,
+              });
+            }}
+          />
+        );
+      })()}
       <SerialNumbersModal
         isOpen={serialsFor !== null}
         onClose={() => setSerialsFor(null)}
@@ -895,19 +980,22 @@ export default function QualityInspectionForm({
         isOpen={confirming}
         title="Complete this inspection?"
         message={
-          <>
-            The result is written back onto the GRN lines: {totals.passed} pass, {totals.failed} fail
-            {totals.partial > 0 && <>, {totals.partial} partial</>}, <b>{fmtQty(totals.rejected)}</b>{" "}
-            rejected. The inspection can no longer be edited.
-            {totals.failed > 0 && (
-              <Chip size="sm" variant="flat" color="danger" className="ml-2">
-                Failed lines will block the receipt from posting in full
+          <div className="space-y-3">
+            <p className="font-semibold text-ink">{qcSentence(summary, sharedUom ?? "units")}</p>
+            <QcVerdictStrip summary={summary} uom={sharedUom} />
+            <p>
+              The result is written back onto the GRN lines and the inspection can no
+              longer be edited.
+            </p>
+            {summary.rejected > 0 && (
+              <Chip size="sm" variant="flat" color="danger">
+                {fmtQty(summary.rejected)}{sharedUom ? ` ${sharedUom}` : ""} rejected will not go into stock
               </Chip>
             )}
-          </>
+          </div>
         }
         confirmLabel="Complete"
-        danger={totals.failed > 0}
+        danger={summary.failed > 0}
         busy={complete.isPending}
         error={complete.error}
         onConfirm={() => complete.mutate()}

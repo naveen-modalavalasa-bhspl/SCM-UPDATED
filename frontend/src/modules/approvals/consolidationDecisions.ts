@@ -5,29 +5,39 @@ import { useCallback, useMemo, useSyncExternalStore } from "react";
  *
  * A consolidation is a GROUP BY over the pending queue and is stored nowhere, so
  * there is no server-side draft either: nothing is written until the approver hits
- * Approve all and the per-indent quantities go out. But the decisions now outlive a
- * single screen — the totals are set on an item's own page and spent on the
- * consolidation page's Approve all — so they cannot live in either page's `useState`,
- * which unmounts the moment you navigate between the two.
+ * Approve all and the per-indent quantities go out. But the decisions outlive a
+ * single screen — they are set on an item's own page and spent on the consolidation
+ * page's Approve all — so they cannot live in either page's `useState`, which
+ * unmounts the moment you navigate between the two.
  *
  * Kept per cycle, in sessionStorage: a draft belongs to this sitting at this desk.
  * A new tab starts clean, and closing the tab throws the draft away rather than
  * leaving stale numbers to be approved next week against a queue that has moved on.
+ *
+ * ONE ENTRY PER INDENT LINE (2026-11-06). The draft used to hold one batch total and one
+ * list of excluded indent numbers per ITEM, and a proportional split turned those into
+ * the quantity each indent got. The approver now decides at the indent: each line
+ * carries its own quantity and its own excluded flag, so the draft is exactly what will
+ * be sent and nothing is derived from a total. The key is the line id, which is unique
+ * across every item and every indent of the cycle.
  */
 
-const STORAGE_PREFIX = "scm-erp:approvals:consolidation:draft:v1:";
+// v2: the shape changed. A v1 draft (a batch total per item) means nothing here, and
+// reading it as if it did would approve numbers nobody typed on a line.
+const STORAGE_PREFIX = "scm-erp:approvals:consolidation:draft:v2:";
 
-export interface ItemDecision {
-  /** What the approver typed as the item's batch total. "" means "the full ceiling". */
+export interface LineDecision {
+  /** What the approver typed for this indent's line. "" means "the full ceiling". */
   approved: string;
-  /** Indent numbers getting nothing — their share goes to the rest. Exact, uppercase. */
-  excluded: string[];
+  /** Dropped from this item for this indent: it gets nothing, and the flag is sent to the
+   *  server as such (an excluded line and a line approved at zero are not the same). */
+  excluded: boolean;
 }
 
-/** Keyed by `item_id`, one entry per item the approver has actually touched. */
-export type CycleDecisions = Record<string, ItemDecision>;
+/** Keyed by `line_id`, one entry per line the approver has actually touched. */
+export type CycleDecisions = Record<string, LineDecision>;
 
-export const EMPTY_DECISION: ItemDecision = { approved: "", excluded: [] };
+export const EMPTY_DECISION: LineDecision = { approved: "", excluded: false };
 
 const EMPTY: CycleDecisions = {};
 
@@ -37,25 +47,23 @@ const listeners = new Set<() => void>();
 
 const storageKey = (cycle: string) => `${STORAGE_PREFIX}${cycle}`;
 
-/** An untouched item is absent, not stored empty, so a decision map only ever holds
+/** An untouched line is absent, not stored empty, so a decision map only ever holds
  *  what the approver actually changed — and `{}` means "nothing decided yet". */
-const isEmpty = (decision: ItemDecision) =>
-  decision.approved.trim() === "" && decision.excluded.length === 0;
+const isEmpty = (decision: LineDecision) =>
+  decision.approved.trim() === "" && !decision.excluded;
 
 function parse(raw: string | null): CycleDecisions {
   if (!raw) return EMPTY;
   try {
-    const parsed = JSON.parse(raw) as Record<string, Partial<ItemDecision>> | null;
+    const parsed = JSON.parse(raw) as Record<string, Partial<LineDecision>> | null;
     if (!parsed || typeof parsed !== "object") return EMPTY;
     const state: CycleDecisions = {};
-    for (const [itemId, value] of Object.entries(parsed)) {
-      const decision: ItemDecision = {
+    for (const [lineId, value] of Object.entries(parsed)) {
+      const decision: LineDecision = {
         approved: typeof value?.approved === "string" ? value.approved : "",
-        excluded: Array.isArray(value?.excluded)
-          ? value.excluded.filter((no): no is string => typeof no === "string")
-          : [],
+        excluded: value?.excluded === true,
       };
-      if (!isEmpty(decision)) state[itemId] = decision;
+      if (!isEmpty(decision)) state[lineId] = decision;
     }
     return Object.keys(state).length === 0 ? EMPTY : state;
   } catch {
@@ -100,39 +108,48 @@ export function useConsolidationDecisions(cycle: string) {
   const key = storageKey(cycle);
   const decisions = useSyncExternalStore(subscribe, () => snapshot(key), getServerSnapshot);
 
-  const patch = useCallback((itemId: number, next: Partial<ItemDecision>) => {
-    const current = snapshot(key);
-    const merged: ItemDecision = { ...EMPTY_DECISION, ...current[String(itemId)], ...next };
-    const updated = { ...current };
-    if (isEmpty(merged)) delete updated[String(itemId)];
-    else updated[String(itemId)] = merged;
-    persist(key, updated);
-  }, [key]);
-
-  const setApproved = useCallback(
-    (itemId: number, approved: string) => patch(itemId, { approved }), [patch],
+  /** Apply several lines' changes in ONE write, so a whole-indent action is one render
+   *  and one storage write rather than one per line. */
+  const patchMany = useCallback(
+    (entries: Array<[number, Partial<LineDecision>]>) => {
+      if (entries.length === 0) return;
+      const current = snapshot(key);
+      const updated = { ...current };
+      for (const [lineId, next] of entries) {
+        const merged: LineDecision = { ...EMPTY_DECISION, ...current[String(lineId)], ...next };
+        if (isEmpty(merged)) delete updated[String(lineId)];
+        else updated[String(lineId)] = merged;
+      }
+      persist(key, updated);
+    },
+    [key],
   );
 
-  /** Exclude/restore one indent on one item. A toggle rather than a set-this-list
-   *  call, because that is the only thing either screen does to the list. */
-  const toggleExcluded = useCallback((itemId: number, indentNo: string) => {
-    const no = indentNo.trim().toUpperCase();
-    if (!no) return;
-    const current = snapshot(key)[String(itemId)] ?? EMPTY_DECISION;
-    patch(itemId, {
-      excluded: current.excluded.includes(no)
-        ? current.excluded.filter((value) => value !== no)
-        : [...current.excluded, no],
-    });
-  }, [key, patch]);
+  const setApproved = useCallback(
+    (lineId: number, approved: string) => patchMany([[lineId, { approved }]]),
+    [patchMany],
+  );
 
-  const includeAll = useCallback((itemId: number) => patch(itemId, { excluded: [] }), [patch]);
+  /** Set many lines' quantities at once — what a percentage reduction does. */
+  const setApprovedMany = useCallback(
+    (entries: Array<{ lineId: number; approved: string }>) =>
+      patchMany(entries.map(({ lineId, approved }) => [lineId, { approved }])),
+    [patchMany],
+  );
+
+  /** Exclude or restore any number of lines: one line (a row's own button) or every
+   *  line of an indent in the cycle ("remove from all items"). */
+  const setExcluded = useCallback(
+    (lineIds: number[], excluded: boolean) =>
+      patchMany(lineIds.map((lineId) => [lineId, { excluded }])),
+    [patchMany],
+  );
 
   /** Drop the whole cycle — what an approval does, once the indents have gone on. */
   const clearCycle = useCallback(() => persist(key, EMPTY), [key]);
 
   return useMemo(
-    () => ({ decisions, setApproved, toggleExcluded, includeAll, clearCycle }),
-    [clearCycle, decisions, includeAll, setApproved, toggleExcluded],
+    () => ({ decisions, setApproved, setApprovedMany, setExcluded, clearCycle }),
+    [clearCycle, decisions, setApproved, setApprovedMany, setExcluded],
   );
 }

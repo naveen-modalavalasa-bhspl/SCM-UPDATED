@@ -20,6 +20,12 @@ import { usePointLabel } from "../../usePointLabel";
  * what actually refuses it.
  */
 
+/** A main store keeps storage locations unless somebody says otherwise; every other
+ *  type starts in bulk. Only a NEW warehouse follows this — flipping an existing one
+ *  moves its stock into the Unlocated location, which is not a side effect of
+ *  re-typing it. */
+const binManagedByDefault = (type: string) => type === "MAIN";
+
 const TYPES = [
   { value: "CENTRAL", label: "Central warehouse" },
   { value: "MAIN", label: "Main store" },
@@ -39,7 +45,7 @@ const EMPTY: WarehouseWrite = {
   latitude: null,
   longitude: null,
   incharge_id: null,
-  is_bin_managed: false,
+  is_bin_managed: binManagedByDefault("MAIN"),
   requires_inward: null,
   is_active: true,
 };
@@ -61,6 +67,8 @@ export default function WarehouseForm() {
 
   const [form, setForm] = useState<WarehouseWrite>(EMPTY);
   const [touched, setTouched] = useState(false);
+  // Once the user flips "Bin managed" themselves, a type change no longer overrides it.
+  const [binChosen, setBinChosen] = useState(false);
 
   const { data: existing, isLoading } = useQuery({
     queryKey: ["wh-warehouse", id],
@@ -80,7 +88,7 @@ export default function WarehouseForm() {
         latitude: existing.latitude ?? null,
         longitude: existing.longitude ?? null,
         incharge_id: existing.incharge_id ?? null,
-        is_bin_managed: existing.is_bin_managed,
+        is_bin_managed: existing.warehouse_type === "MAIN" ? true : existing.is_bin_managed,
         requires_inward: existing.requires_inward ?? null,
         is_active: existing.is_active,
       });
@@ -90,9 +98,26 @@ export default function WarehouseForm() {
   const set = <K extends keyof WarehouseWrite>(key: K, value: WarehouseWrite[K]) =>
     setForm((f) => ({ ...f, [key]: value }));
 
+  const setType = (type: string) => {
+    const isMain = type === "MAIN";
+    setForm((f) => ({
+      ...f,
+      warehouse_type: type,
+      is_bin_managed: isMain ? true : (editing || binChosen ? f.is_bin_managed : binManagedByDefault(type)),
+    }));
+    if (isMain) {
+      setBinChosen(false);
+    }
+  };
+
   const save = useMutation({
-    mutationFn: () =>
-      editing ? updateWarehouse(Number(id), form) : createWarehouse(form),
+    mutationFn: () => {
+      const payload = {
+        ...form,
+        is_bin_managed: form.warehouse_type === "MAIN" ? true : form.is_bin_managed,
+      };
+      return editing ? updateWarehouse(Number(id), payload) : createWarehouse(payload);
+    },
     onSuccess: (saved) => {
       qc.invalidateQueries({ queryKey: ["wh-warehouses"] });
       qc.invalidateQueries({ queryKey: ["wh-warehouse", String(saved.id)] });
@@ -153,7 +178,7 @@ export default function WarehouseForm() {
           <Field label="Type">
             <Select
               value={form.warehouse_type}
-              onChange={(v) => set("warehouse_type", v || "MAIN")}
+              onChange={(v) => setType(v || "MAIN")}
               options={TYPES}
               ariaLabel="Warehouse type"
             />
@@ -207,10 +232,7 @@ export default function WarehouseForm() {
           <label className="flex items-start gap-3">
             <Switch
               isSelected={form.warehouse_type === "CENTRAL"}
-              onValueChange={(value) => set(
-                "warehouse_type",
-                value ? "CENTRAL" : "MAIN",
-              )}
+              onValueChange={(value) => setType(value ? "CENTRAL" : "MAIN")}
               aria-label="Central warehouse"
             />
             <span>
@@ -223,16 +245,24 @@ export default function WarehouseForm() {
 
           <label className="flex items-start gap-3">
             <Switch
-              isSelected={form.is_bin_managed}
-              onValueChange={(v) => set("is_bin_managed", v)}
+              isSelected={form.warehouse_type === "MAIN" ? true : form.is_bin_managed}
+              isDisabled={form.warehouse_type === "MAIN"}
+              onValueChange={(v) => { setBinChosen(true); set("is_bin_managed", v); }}
               aria-label="Bin managed"
             />
             <span>
-              <span className="block text-sm font-medium text-body">Bin managed</span>
+              <span className="flex items-center gap-2">
+                <span className="block text-sm font-medium text-body">Bin managed</span>
+                {form.warehouse_type === "MAIN" && (
+                  <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-emerald-700 ring-1 ring-emerald-200">
+                    Always On for Main Store
+                  </span>
+                )}
+              </span>
               <span className="block text-xs text-muted">
-                On: putaway and picking ask for a bin, and stock is tracked per bin. Off: the
-                site stocks in bulk and every document leaves the bin empty. Changing this on a
-                site that already holds stock is refused.
+                {form.warehouse_type === "MAIN"
+                  ? "Main store warehouses are automatically bin managed to track putaway and locations."
+                  : "On: putaway and picking ask for a bin, and stock is tracked per bin. Off: the site stocks in bulk and every document leaves the bin empty. Changing this on a site that already holds stock is refused."}
               </span>
             </span>
           </label>

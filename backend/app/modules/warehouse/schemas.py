@@ -6,6 +6,8 @@ what a user can actually set — `grn_no`, every `*_name`, every rollup and ever
 status are decided by the service, and accepting them from the client would let a
 caller invent its own document number or mark its own issue approved.
 """
+from app.shared.packing import PACK_ENTRIES, PackEntryIn, describe as describe_packs
+from app.shared.org_scope_schemas import OrgScopeIn, OrgScopeOut
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
@@ -23,6 +25,7 @@ from app.shared.limits import (  # request-size guards, see the module
     MAX_BATCH_IDS, MAX_DOCUMENT_LINES, MAX_SERIALS_PER_LINE,
     assert_serial_budget,
 )
+from app.shared.masters.combinations import CombinationIn, CombinationOut
 
 ORM = ConfigDict(from_attributes=True)
 
@@ -106,6 +109,13 @@ class UnlocatedStockStatus(BaseModel):
     placed_rows: int = 0
     placed_qty: Decimal = Decimal("0")
     placed_units: int = 0
+    # Filled by the audit/repair read: why codes can be missing after the switch.
+    stranded_units: int = 0
+    stranded_items: int = 0
+    stale_lines: int = 0
+    stale_issue_ids: list[int] = []
+    repointed_lines: int = 0
+    code_scope: str | None = None
 
 
 class WarehouseWrite(BaseModel):
@@ -658,7 +668,7 @@ class StorageTypeWrite(BaseModel):
 # Inward
 # ---------------------------------------------------------------------------
 
-class ReceiptItemWrite(BaseModel):
+class ReceiptItemWrite(CombinationIn):
     """`accepted_qty` is what you are keeping; rejected and short are derived from
     it by the service, so they are not accepted here."""
     id: int | None = None
@@ -691,6 +701,14 @@ class ReceiptItemWrite(BaseModel):
     # serial and IMEI cells instead of hiding the numbers it was handed.
     is_serial_tracked: bool = False
     is_imei_tracked: bool = False
+    # Packing (2026-10-08). `despatch_note_item_id` ties the line to the supplier's
+    # despatch line, whose packing is DECLARED and fixed — the service copies it from
+    # there, never from the client. `pack_breakdown` is what was COUNTED: the same
+    # packs, each at most what was declared. With no despatch note the storekeeper
+    # states the packing directly. Either way `received_qty` is the count's total.
+    despatch_note_item_id: int | None = None
+    pack_hierarchy_id: int | None = None
+    pack_breakdown: Annotated[list[PackEntryIn], PACK_ENTRIES] | None = None
 
     @field_validator("received_qty", "ordered_qty")
     @classmethod
@@ -700,7 +718,7 @@ class ReceiptItemWrite(BaseModel):
         return v
 
 
-class ReceiptWrite(BaseModel):
+class ReceiptWrite(OrgScopeIn):
     receipt_type: ReceiptType = ReceiptType.PURCHASE
     grn_date: date
     po_id: int | None = None
@@ -744,7 +762,7 @@ class ReceiptWrite(BaseModel):
         return self
 
 
-class ReceiptItemRead(_Read):
+class ReceiptItemRead(CombinationOut, _Read):
     id: int
     receipt_id: int
     line_no: int
@@ -779,9 +797,31 @@ class ReceiptItemRead(_Read):
     remarks: str | None = None
     serial_numbers: list[str] | None = None
     imei_numbers: list[str] | None = None
+    despatch_note_item_id: int | None = None
+    pack_hierarchy_id: int | None = None
+    pack_hierarchy_name: str | None = None
+    declared_pack_breakdown: list[dict] | None = None
+    declared_pack_text: str | None = None
+    pack_breakdown: list[dict] | None = None
+    pack_text: str | None = None
+
+    @model_validator(mode="after")
+    def _describe_packing(self):
+        if self.pack_breakdown and not self.pack_text:
+            self.pack_text = describe_packs(self.pack_breakdown, self.uom_code)
+        if self.declared_pack_breakdown and not self.declared_pack_text:
+            self.declared_pack_text = describe_packs(self.declared_pack_breakdown, self.uom_code)
+        if not getattr(self, "pack_hierarchy_name", None):
+            for src in (self.pack_breakdown, self.declared_pack_breakdown):
+                name = next((e.get("hierarchy") for e in src or []
+                             if e.get("hierarchy")), None)
+                if name:
+                    self.pack_hierarchy_name = name
+                    break
+        return self
 
 
-class ReceiptRead(_Read):
+class ReceiptRead(OrgScopeOut, _Read):
     id: int
     grn_no: str
     receipt_type: str
@@ -881,7 +921,7 @@ class ReceiptRouting(BaseModel):
     direct_lines: list[ReceiptRouteLine] = Field(default_factory=list)
 
 
-class PoLineOption(BaseModel):
+class PoLineOption(CombinationOut):
     """An open PO line, so the GRN form fills itself from the order."""
     po_item_id: int
     indent_id: int | None = None
@@ -893,6 +933,68 @@ class PoLineOption(BaseModel):
     received_qty: Decimal
     pending_qty: Decimal
     rate: Decimal | None = None
+    # What the unit needs at the gate, off the item master (2026-10-21): without these
+    # a prefilled line read as untracked and the serial/IMEI capture never appeared.
+    is_asset: bool = False
+    is_serial_tracked: bool = False
+    is_imei_tracked: bool = False
+    # How the ORDER asks for it to be packed — the starting point for a receipt that
+    # has no despatch note to declare the packing.
+    pack_hierarchy_id: int | None = None
+    pack_hierarchy_name: str | None = None
+    pack_breakdown: list[dict] | None = None
+    pack_text: str | None = None
+
+    @model_validator(mode="after")
+    def _describe_packing(self):
+        if self.pack_breakdown and not self.pack_text:
+            self.pack_text = describe_packs(self.pack_breakdown, self.uom_code)
+        if not getattr(self, "pack_hierarchy_name", None):
+            for src in (self.pack_breakdown,):
+                name = next((e.get("hierarchy") for e in src or []
+                             if e.get("hierarchy")), None)
+                if name:
+                    self.pack_hierarchy_name = name
+                    break
+        return self
+
+
+class IssueDestinationOption(BaseModel):
+    """One stocking point a direct issue can be sent to, with what follows from it."""
+    warehouse_id: int
+    code: str | None = None
+    name: str
+    warehouse_type: str | None = None
+    office_id: int | None = None
+    office_name: str | None = None
+    sac: str | None = None
+    vehicle_number: str | None = None
+
+
+class IssueDestinationPage(BaseModel):
+    items: list[IssueDestinationOption] = Field(default_factory=list)
+    #: Matches before the cap, so the picker can say "keep typing".
+    total: int = 0
+
+
+class IssueEmployeeOption(BaseModel):
+    """One person a direct issue can be issued to, with their office."""
+    id: int
+    code: str | None = None
+    name: str
+    #: The HCM position codes this person holds, primary post first.
+    position_codes: list[str] = Field(default_factory=list)
+    #: The primary post's role (or position name).
+    position_name: str | None = None
+    office_id: int | None = None
+    office_name: str | None = None
+    department_name: str | None = None
+    project_name: str | None = None
+
+
+class IssueEmployeePage(BaseModel):
+    items: list[IssueEmployeeOption] = Field(default_factory=list)
+    total: int = 0
 
 
 class PoPrefill(BaseModel):
@@ -905,6 +1007,9 @@ class PoPrefill(BaseModel):
     #: Only the lines with something still outstanding. A fully received line is not
     #: one to receive again — see `service.po_lines`.
     lines: list[PoLineOption] = Field(default_factory=list)
+    #: The lines with NOTHING left — never prefilled, served so the form can name one a
+    #: storekeeper adds by hand as already received, before Save rather than after.
+    settled_lines: list[PoLineOption] = Field(default_factory=list)
     #: How many lines the order has altogether, so a screen can say "nothing left"
     #: rather than drawing an empty list and leaving the storekeeper to wonder whether
     #: the order was empty, the call failed, or the goods are already in.
@@ -971,6 +1076,10 @@ class InspectionItemWrite(BaseModel):
     remarks: str | None = None
     serial_numbers: Annotated[list[str], SerialList] | None = None
     imei_numbers: Annotated[list[str], SerialList] | None = None
+    # Decided by the PACK (2026-10-27): which of the GRN's counted packs were kept and
+    # which rejected. Both or neither; they must add up to what was inspected.
+    accepted_pack_breakdown: Annotated[list[PackEntryIn], PACK_ENTRIES] | None = None
+    rejected_pack_breakdown: Annotated[list[PackEntryIn], PACK_ENTRIES] | None = None
 
 
 class InspectionWrite(BaseModel):
@@ -995,7 +1104,7 @@ class InspectionWrite(BaseModel):
         return self
 
 
-class InspectionItemRead(_Read):
+class InspectionItemRead(CombinationOut, _Read):
     id: int
     inspection_id: int
     receipt_item_id: int | None = None
@@ -1014,9 +1123,11 @@ class InspectionItemRead(_Read):
     remarks: str | None = None
     serial_numbers: list[str] | None = None
     imei_numbers: list[str] | None = None
+    accepted_pack_breakdown: list[dict] | None = None
+    rejected_pack_breakdown: list[dict] | None = None
 
 
-class InspectionRead(_Read):
+class InspectionRead(OrgScopeOut, _Read):
     id: int
     inspection_no: str
     inspection_date: date
@@ -1031,6 +1142,16 @@ class InspectionRead(_Read):
     total_items: int
     passed_items: int
     failed_items: int
+    # SCM_0164 / 0165 / 0166: the same inspection by QUANTITY, derived on read
+    # (`service.inspection_quantity_summary`), never stored. The three LINE counts above
+    # put a partly rejected line in neither bucket; these are what a pass rate and a
+    # "rejected" total are made of. None on a row nothing has summarised.
+    inspected_qty: Decimal | None = None
+    accepted_qty: Decimal | None = None
+    rejected_qty: Decimal | None = None
+    partial_items: int | None = None
+    pending_items: int | None = None
+    pass_rate: float | None = None
     inspector_id: int | None = None
     inspector_name: str | None = None
     remarks: str | None = None
@@ -1054,6 +1175,9 @@ class OutboundInspectionItemWrite(BaseModel):
     rejection_reason: str | None = None
     remarks: str | None = None
     serial_numbers: dict[str, list[str]] | list[str] | None = None
+    #: Issued in packages (2026-10-26): units rejected out of each KEPT package,
+    #: {code: qty}. A package rejected whole is simply left out of the accepted codes.
+    pack_rejections: dict[str, float] | None = None
 
 class OutboundInspectionWrite(BaseModel):
     inspection_date: date
@@ -1064,7 +1188,7 @@ class OutboundInspectionWrite(BaseModel):
     items: Annotated[list[OutboundInspectionItemWrite], DocumentLines] = []
 
 
-class OutboundInspectionItemRead(_Read):
+class OutboundInspectionItemRead(CombinationOut, _Read):
     id: int
     inspection_id: int
     issue_item_id: int | None = None
@@ -1088,6 +1212,11 @@ class OutboundInspectionItemRead(_Read):
     # proof, 32 occurrences in sys_app_logs). A read model must be able to render what
     # the column actually holds; the WRITE side still takes strings and is unchanged.
     serial_numbers: dict[str, list[str]] | list[str] | list[dict] | None = None
+    pack_rejections: dict[str, float] | None = None
+    # The packs this quantity travels in, read off the issue line (2026-10-22).
+    pack_breakdown: list[dict] | None = None
+    pack_text: str | None = None
+
 
 class OutboundInspectionRead(_Read):
     id: int
@@ -1101,6 +1230,16 @@ class OutboundInspectionRead(_Read):
     total_items: int
     passed_items: int
     failed_items: int
+    # SCM_0164 / 0165 / 0166: the same inspection by QUANTITY, derived on read
+    # (`service.inspection_quantity_summary`), never stored. The three LINE counts above
+    # put a partly rejected line in neither bucket; these are what a pass rate and a
+    # "rejected" total are made of. None on a row nothing has summarised.
+    inspected_qty: Decimal | None = None
+    accepted_qty: Decimal | None = None
+    rejected_qty: Decimal | None = None
+    partial_items: int | None = None
+    pending_items: int | None = None
+    pass_rate: float | None = None
     inspector_id: int | None = None
     inspector_name: str | None = None
     remarks: str | None = None
@@ -1121,12 +1260,14 @@ class OutboundInspectionDetail(OutboundInspectionRead):
 # Putaway
 # ---------------------------------------------------------------------------
 
-class PutawayRead(_Read):
+class PutawayRead(OrgScopeOut, CombinationOut, _Read):
     """The task plus the labels the queue screen shows. The `*_name` fields are
     filled by the service from the masters, because `whs_warehouse_items` carries
     only ids — it is a work queue, not a document."""
     id: int
     putaway_no: str | None = None
+    # Is a Storage container mapped for the item (2026-10-27)? Not: the screen warns.
+    storage_defined: bool = False
     grn_id: int | None = None
     grn_no: str | None = None
     grn_item_id: int | None = None
@@ -1178,6 +1319,19 @@ class PutawayRead(_Read):
     #: Every rung this item could be put away in, so the screen can offer the choice
     #: without a second round trip.
     packs: list["HandlingUnit"] = Field(default_factory=list)
+    # Packing (2026-10-08): the receipt's hierarchy (fixed), the packing arriving
+    # from the receipt (what was counted at the gate) and, once confirmed, how it was
+    # shelved. `pack_levels` is the hierarchy's ladder for the re-pack picker.
+    pack_hierarchy_id: int | None = None
+    pack_hierarchy_name: str | None = None
+    received_pack_breakdown: list[dict] | None = None
+    received_pack_text: str | None = None
+    pack_breakdown: list[dict] | None = None
+    pack_text: str | None = None
+    pack_levels: list[dict] = Field(default_factory=list)
+    #: True when the item's codes are minted per pack: the shelved levels decide the
+    #: smallest pack this stock can ever be split into without a break bulk.
+    codes_per_pack: bool = False
     # Filled only on the response to `confirm`: what the shelf looked like at the
     # moment of the press, including an overflow if there was one. A full bin never
     # stops a putaway, so this is how the screen gets to say it happened.
@@ -1328,9 +1482,13 @@ class PutawayConfirm(BaseModel):
     remarks: str | None = None
     serial_numbers: list[str] | None = None
     imei_numbers: list[str] | None = None
+    # How the goods are shelved (2026-10-08). The hierarchy is the receipt's and is
+    # fixed; the levels may change — a carton opened into its boxes, loose strips
+    # boxed. Must add up to `qty`. One `whs_handling_units` row is made per pack.
+    pack_breakdown: Annotated[list[PackEntryIn], PACK_ENTRIES] | None = None
 
 
-class StockMovementWrite(BaseModel):
+class StockMovementWrite(CombinationIn):
     movement_type: str = Field(default="BIN_TO_BIN", max_length=30)
     warehouse_id: int
     source_bin_id: int
@@ -1386,7 +1544,7 @@ class StockAvailabilityRead(BaseModel):
     batch_no: str | None = None
 
 
-class StockMovementOrderItemWrite(BaseModel):
+class StockMovementOrderItemWrite(CombinationIn):
     item_id: int
     source_bin_id: int
     destination_bin_id: int
@@ -1401,7 +1559,7 @@ class StockMovementOrderItemWrite(BaseModel):
         return self
 
 
-class StockMovementOrderWrite(BaseModel):
+class StockMovementOrderWrite(OrgScopeIn):
     warehouse_id: int
     reason: str | None = Field(default=None, max_length=500)
     items: list[StockMovementOrderItemWrite] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
@@ -1545,7 +1703,7 @@ class PickingDetail(PickingRead):
 # Issues
 # ---------------------------------------------------------------------------
 
-class IssueItemWrite(BaseModel):
+class IssueItemWrite(CombinationIn):
     id: int | None = None
     indent_item_id: int | None = None
     item_id: int
@@ -1563,9 +1721,15 @@ class IssueItemWrite(BaseModel):
     remarks: str | None = None
     serial_numbers: Annotated[list[str], SerialList] | None = None
     imei_numbers: Annotated[list[str], SerialList] | None = None
+    # Issue in packs (2026-10-08): "2 Box + 5 Strip". When given, the issue quantity
+    # is its total — the server works it out. `break_bulk` opens a coded pack to give
+    # part of it, and needs `issue.break_bulk`.
+    pack_hierarchy_id: int | None = None
+    pack_breakdown: Annotated[list[PackEntryIn], PACK_ENTRIES] | None = None
+    break_bulk: bool = False
 
 
-class IssueWrite(BaseModel):
+class IssueWrite(OrgScopeIn):
     issue_type: IssueType = IssueType.DIRECT
     issue_date: date
     indent_id: int | None = None
@@ -1579,6 +1743,9 @@ class IssueWrite(BaseModel):
     # dropped on the way in and the column was written from `vehicle_id` alone.
     vehicle_number: str | None = Field(default=None, max_length=50)
     issued_to_id: int | None = None
+    # The stocking point chosen as the destination (any LIP / MDP / warehouse but the
+    # origin). Optional — without it the destination is derived as before.
+    destination_warehouse_id: int | None = None
     direction: IssueDirection = IssueDirection.OUT
     original_issue_id: int | None = None
     remarks: str | None = None
@@ -1597,7 +1764,13 @@ class IssueWrite(BaseModel):
         return self
 
 
-class IssueItemRead(_Read):
+class IssueItemRead(CombinationOut, _Read):
+    #: On a SPLIT parent (2026-11-11): the floor piece and line that carry this line now.
+    #: Its serials are listed and saved against that piece line.
+    piece_issue_id: int | None = None
+    piece_issue_no: str | None = None
+    piece_line_id: int | None = None
+    piece_is_posted: bool = False
     id: int
     issue_id: int
     line_no: int
@@ -1606,6 +1779,10 @@ class IssueItemRead(_Read):
     item_code: str | None = None
     item_name: str | None = None
     uom_code: str | None = None
+    # How many decimal places this line's unit allows — 0 for a whole-unit UOM.
+    # Set by `get_issue`, never a column; an ORM row read with no decoration
+    # (a listing, say) keeps the safe `None` default rather than a wrong 0.
+    qty_decimals: int | None = None
     is_serial_tracked: bool = False
     bin_id: int | None = None
     bin_code: str | None = None
@@ -1632,6 +1809,16 @@ class IssueItemRead(_Read):
     tracking_type: str | None = None
     # The reserved units, stated in that same currency.
     unit_keys: list[str] | None = None
+    #: How many identifiers the line must name (2026-10-24). One per unit, except for
+    #: an item issued in a container: one per container (a box), whatever the lot's
+    #: older per-unit codes say. None = one per unit.
+    codes_needed: int | None = None
+    #: Issued in a container (2026-10-26): the line names boxes; each box it holds
+    #: (code, how much of it the line takes, what it holds, part or whole) and — when
+    #: the Issue container changed after they were held — the sentence that says so.
+    issue_in_boxes: bool = False
+    box_codes: list[dict] | None = None
+    container_note: str | None = None
     # Whether this item has identified units in stock at all, so a bulk consumable
     # line does not offer a picker with nothing in it.
     has_units: bool = False
@@ -1640,6 +1827,28 @@ class IssueItemRead(_Read):
     # that could never be posted while the batch is still editable — after approval
     # the batch is frozen. See `_issue_unit_supply`.
     units_available: int | None = None
+    # The item's `requires_qi`: does this line go on the outward QC sheet. A line that
+    # does not goes to logistics at its issued quantity — see `post_issue`.
+    requires_qc: bool = False
+    # Packing (2026-10-08).
+    pack_hierarchy_id: int | None = None
+    pack_hierarchy_name: str | None = None
+    pack_breakdown: list[dict] | None = None
+    pack_text: str | None = None
+    break_bulk: bool = False
+
+    @model_validator(mode="after")
+    def _describe_packing(self):
+        if self.pack_breakdown and not self.pack_text:
+            self.pack_text = describe_packs(self.pack_breakdown, self.uom_code)
+        if not getattr(self, "pack_hierarchy_name", None):
+            for src in (self.pack_breakdown,):
+                name = next((e.get("hierarchy") for e in src or []
+                             if e.get("hierarchy")), None)
+                if name:
+                    self.pack_hierarchy_name = name
+                    break
+        return self
 
 
 class UnitSupplyPick(BaseModel):
@@ -1670,7 +1879,7 @@ class UnitSupplyQuery(BaseModel):
 
 class UnitSupplyRead(_Read):
     """What one pick could name. `available` is `null` when there is no answer — the
-    item carries no identified units at this point, or the quantity is past the probe
+    item carries no identified units at this warehouse at all, or the quantity is past the probe
     ceiling — which is NOT the same as zero, and a screen must not draw it as a
     shortfall."""
     item_id: int
@@ -1681,6 +1890,25 @@ class UnitSupplyRead(_Read):
     has_units: bool = False
     #: Counted only as far as `need + 1`, so a figure equal to that means "at least".
     available: int | None = None
+    #: Fallback pools for the same pick: same batch anywhere at this point, and any
+    #: batch at this point. The picker names them "Same batch, other bay" and
+    #: "Any batch here" so a stranded pick still finds its codes.
+    batch_available: int | None = None
+    point_available: int | None = None
+
+
+class SerialScopeCounts(BaseModel):
+    """How many codable units each widening circle holds.
+
+    exact: the bay + batch named. batch: the batch anywhere at this point.
+    point: the item anywhere at this point. Bounded to `need + 1` each, so a
+    figure equal to that means "at least".
+    """
+    item_id: int
+    exact: int | None = None
+    batch: int | None = None
+    point: int | None = None
+    has_units: bool = False
 
 
 class IssueStockSourceFetchIn(BaseModel):
@@ -1689,9 +1917,151 @@ class IssueStockSourceFetchIn(BaseModel):
     indent_id: int | None = None
     # Lots held for this project are offered as the document's own.
     project_id: int | None = None
+    #: The issue being edited, so its own picks are not counted as pinned by "another" (and a direct issue's own hold is stock it may draw).
+    issue_id: int | None = None
 
 
-class IssueStockSource(_Read):
+class BoxSourceRead(BaseModel):
+    """One box an issue line could name (2026-10-26): its code, what it holds, and
+    who holds it — this issue, another one, or nobody."""
+    id: int
+    code: str
+    pack_name: str | None = None
+    holds: float
+    size: float
+    part: bool = False
+    batch_no: str | None = None
+    bin_code: str | None = None
+    held_by_this_issue: bool = False
+    held_by: str | None = None
+    # The pack it sits in — the carton the picker groups it under (2026-10-27) — its
+    # own level, and on request the serials / IMEIs / codes inside it.
+    level: int | None = None
+    parent_id: int | None = None
+    parent_code: str | None = None
+    parent_pack_name: str | None = None
+    parent_holds: float | None = None
+    parent_size: float | None = None
+    units: list[str] | None = None
+    # Every pack around it, outermost first: [{code, name, level}] (2026-10-28).
+    path: list[dict] = Field(default_factory=list)
+
+
+class BoxLabelRead(_Read):
+    """A queued (or printed) label for one box code (2026-10-26)."""
+    id: int
+    handling_unit_id: int
+    hu_code: str
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    warehouse_id: int
+    warehouse_name: str | None = None
+    bin_code: str | None = None
+    batch_no: str | None = None
+    pack_name: str | None = None
+    content_qty: Decimal
+    pack_size: Decimal
+    uom_code: str | None = None
+    reason: str
+    source_no: str | None = None
+    status: str
+    printed_at: datetime | None = None
+    printed_by_name: str | None = None
+    created_at: datetime | None = None
+    # Where the label sits in the carton → box tree, and what its sticker prints
+    # (2026-10-27). `qr_token` opens live, read-only details on any phone.
+    parent_code: str | None = None
+    depth: int = 0
+    root_id: int | None = None
+    level: int | None = None
+    packs_inside: str | None = None
+    expiry_date: date | None = None
+    brand_name: str | None = None
+    variant_name: str | None = None
+    model_name: str | None = None
+    qr_token: str | None = None
+
+
+class BoxLabelPrintedIn(BaseModel):
+    ids: list[int] = Field(min_length=1, max_length=MAX_BATCH_IDS)
+
+
+class DocLabelRow(BaseModel):
+    """One sticker for a posted issue or an acknowledged receipt (2026-10-28):
+    a PACK (carton, box, strip — parent first, `depth` under it) or a UNIT (an asset /
+    consumable code, or — for a serial / IMEI tracked item — its serial or IMEI,
+    2026-11-02)."""
+    key: str
+    kind: str
+    code: str
+    serial_number: str | None = None
+    imei: str | None = None
+    line_id: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    pack_name: str | None = None
+    qty: float
+    pack_size: float
+    part: bool = False
+    batch_no: str | None = None
+    expiry_date: date | None = None
+    brand_name: str | None = None
+    variant_name: str | None = None
+    model_name: str | None = None
+    depth: int = 0
+    parent_code: str | None = None
+    packs_inside: str | None = None
+    qr_token: str | None = None
+    # The Box-label queue row still waiting for this pack, ticked off when printed here.
+    label_id: int | None = None
+    # A part pack cut by this issue at posting.
+    new_here: bool = False
+    # The packs around it, outermost first: [{code, name}] (2026-10-28).
+    path: list[dict] = Field(default_factory=list)
+    # A parent label (a carton, an opened box) printed on top for context, not a pack
+    # that left; and whether this row is a pack the line itself issued.
+    context: bool = False
+    issued: bool = False
+
+
+class DocLabelLine(BaseModel):
+    line_id: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    qty: float
+    brand_name: str | None = None
+    variant_name: str | None = None
+    model_name: str | None = None
+    batch_no: str | None = None
+    packs: int = 0
+    inner_packs: int = 0
+    units: int = 0
+
+
+class DocLabels(BaseModel):
+    document_type: str
+    document_id: int
+    document_no: str
+    document_date: date | None = None
+    from_name: str | None = None
+    to_name: str | None = None
+    lines: list[DocLabelLine]
+    labels: list[DocLabelRow]
+
+
+class DocLabelsPrintedIn(BaseModel):
+    """What was printed: the queued Box labels it covers, and how many stickers."""
+    label_ids: list[int] = Field(default_factory=list, max_length=MAX_BATCH_IDS)
+    printed: int = Field(ge=0, le=100_000)
+    reprint: bool = False
+
+
+class IssueStockSource(CombinationOut, _Read):
     """One (batch, bin) an issue line can draw from, with what it holds.
 
     The unit of the split: a quantity larger than any single source is spread over
@@ -1717,6 +2087,11 @@ class IssueStockSource(_Read):
     available_qty: Decimal
     reserved_qty: Decimal = Decimal("0")
     own_reserved_qty: Decimal = Decimal("0")
+    #: Set aside for OTHER indents here, tradeable on save (holds float between batches).
+    other_indent_qty: Decimal = Decimal("0")
+    # What THIS direct issue reserved for itself on save (ISSUE_HOLD). Drawable by it,
+    # but not an allocation.
+    issue_hold_qty: Decimal = Decimal("0")
     total_qty: Decimal = Decimal("0")
     drawable_qty: Decimal
     # The two OUTER quantities this location's numbers sit inside: what the whole
@@ -1742,7 +2117,7 @@ class TrackingTypeRead(_Read):
     hint: str
 
 
-class IssueRead(_Read):
+class IssueRead(OrgScopeOut, _Read):
     id: int
     issue_no: str
     issue_type: str
@@ -1765,6 +2140,24 @@ class IssueRead(_Read):
     destination_office_id: int | None = None
     destination_office_name: str | None = None
     destination_office_sac: str | None = None
+    destination_warehouse_id: int | None = None
+    destination_warehouse_name: str | None = None
+    #: MAIN / MDP / LIP of the chosen destination point, for its badge.
+    destination_warehouse_type: str | None = None
+    #: Whether the destination runs a vehicle and carries an SAC — an LIP only. None
+    #: when the point is unknown (the screen then keeps both rows).
+    destination_needs_vehicle_and_sac: bool | None = None
+    #: The Stock Transfer Order this issue executes (2026-10-29). `sto_kind` is DIRECT
+    #: for an order raised on its own, STR for the one an STR's allocation produced.
+    #: The destination of such an issue is the order's and is frozen on it.
+    sto_id: int | None = None
+    sto_no: str | None = None
+    sto_status: str | None = None
+    sto_kind: str | None = None
+    sto_str_no: str | None = None
+    sto_from_warehouse_name: str | None = None
+    sto_to_warehouse_id: int | None = None
+    sto_to_warehouse_name: str | None = None
     direction: str
     original_issue_id: int | None = None
     original_issue_no: str | None = None
@@ -1777,6 +2170,9 @@ class IssueRead(_Read):
     # Who holds that floor — the floor in-charge(s) this piece was handed to.
     floor_in_charge_names: list[str] = []
     status: str
+    #: What the status pill says. Same as `status` except a split parent CLOSED after
+    #: its floor issues posted, which reads ISSUED (`_decorate_indent_types`).
+    display_status: str | None = None
     total_items: int
     total_qty: Decimal
     total_value: Decimal
@@ -1811,6 +2207,10 @@ class IssueDetail(IssueRead):
     # True only for the person an approved issue is with, or someone above them on the
     # HCM reporting line. `post_issue` and `set_issue_serials` enforce the same rule.
     can_issue_from_stock: bool = False
+    #: A SPLIT parent whose floor pieces this login may issue all at once.
+    can_issue_split: bool = False
+    # Swap auto-assigned asset/consumable codes: the issuer, or anyone who approved it.
+    can_swap_codes: bool = False
     # Whoever submitted it for approval (the workflow's starter), shown as "Submitted
     # by" until stock is posted and `issued_by_name` is stamped.
     submitted_by_name: str | None = None
@@ -1823,12 +2223,16 @@ class IssueDetail(IssueRead):
 
 
 class IssueChildRead(BaseModel):
+    """One floor issue of a split — on a parent its children, on a child its siblings."""
     id: int
     issue_no: str
     status: str
+    floor_location_id: int | None = None
     floor_location_name: str | None = None
     is_stock_posted: bool = False
     total_qty: Decimal = Decimal(0)
+    total_items: int = 0
+    in_charge_names: list[str] = []
 
 
 IssueDetail.model_rebuild()
@@ -1838,7 +2242,7 @@ IssueDetail.model_rebuild()
 # Dispatch
 # ---------------------------------------------------------------------------
 
-class DispatchItemWrite(BaseModel):
+class DispatchItemWrite(CombinationIn):
     id: int | None = None
     package_id: int | None = None
     issue_id: int | None = None
@@ -1846,6 +2250,7 @@ class DispatchItemWrite(BaseModel):
     # The issue LINE, so one batch drawn from two bays stays two rows. See
     # `out_dispatch_items.issue_item_id`.
     issue_item_id: int | None = None
+    bin_code: str | None = None
     mr_id: int | None = None
     mr_no: str | None = None
     indent_id: int | None = None
@@ -1910,6 +2315,10 @@ class ConsignmentPackageItemWrite(BaseModel):
     quantity: Decimal
     rate: Decimal | None = None
     remarks: str | None = None
+    # How THIS carton holds the line, when the packer changed it (2026-10-22). Blank:
+    # worked out for this quantity in the issue line's hierarchy. Must add up.
+    pack_hierarchy_id: int | None = None
+    pack_breakdown: Annotated[list[PackEntryIn], PACK_ENTRIES] | None = None
 
 
 class ConsignmentPackageWrite(BaseModel):
@@ -1989,11 +2398,13 @@ class AcknowledgeWrite(BaseModel):
     lines: Annotated[list[AcknowledgeLine], DocumentLines] = []
 
 
-class DispatchItemRead(_Read):
+class DispatchItemRead(CombinationOut, _Read):
     id: int
     dispatch_id: int
     line_no: int
     package_id: int | None = None
+    # The package (box / strip) this row carries, for an item issued in packages.
+    box_code: str | None = None
     issue_id: int | None = None
     issue_no: str | None = None
     issue_item_id: int | None = None
@@ -2019,6 +2430,22 @@ class DispatchItemRead(_Read):
     remarks: str | None = None
 
 
+class DispatchLinePacks(BaseModel):
+    """One issue line's packs on a consignment — sent, and arrived (2026-10-22)."""
+    issue_item_id: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    batch_no: str | None = None
+    quantity: Decimal
+    delivered_qty: Decimal = Decimal("0")
+    pack_breakdown: list[dict] | None = None
+    pack_text: str | None = None
+    delivered_pack_breakdown: list[dict] | None = None
+    delivered_pack_text: str | None = None
+
+
 class DispatchPackageRead(_Read):
     id: int
     dispatch_id: int
@@ -2035,6 +2462,8 @@ class DispatchPackageRead(_Read):
     packed_by_name: str | None = None
     packed_at: datetime | None = None
     public_scan_token: str | None = None
+    #: The packs this carton holds, per issue line (2026-10-22).
+    item_packs: list[dict] | None = None
 
 
 class DispatchEventRead(_Read):
@@ -2077,6 +2506,10 @@ class DispatchRead(_Read):
     dispatch_date: date
     warehouse_id: int
     warehouse_name: str | None = None
+    # SCM_0053: snapshotted off the warehouse at the moment this consignment was
+    # raised — what the Dispatch screen carries into a transport leg's own
+    # from_warehouse_address, which is what the gate pass prints.
+    warehouse_address: str | None = None
     to_warehouse_id: int | None = None
     to_warehouse_name: str | None = None
     customer_id: int | None = None
@@ -2140,6 +2573,10 @@ class DispatchDetail(DispatchRead):
     can_approve: bool = False
     #: Opaque signed capability printed in the QR; it reveals no application route.
     public_scan_token: str | None = None
+    #: Each issue line's packs, once per line — the rows are one per unit.
+    line_packs: list[DispatchLinePacks] = []
+    # Carton › box for each package code on it: {code: [{code, name, level}]} (2026-10-28).
+    box_paths: dict[str, list[dict]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -2248,7 +2685,7 @@ class ReturnWrite(BaseModel):
     vendor_gstin: str | None = Field(default=None, max_length=20)
 
 
-class ReturnItemRead(_Read):
+class ReturnItemRead(CombinationOut, _Read):
     id: int
     return_id: int
     line_no: int
@@ -2640,7 +3077,7 @@ class VendorDetailOut(BaseModel):
     gstin: str | None = None
 
 
-class ItemDetailOut(BaseModel):
+class ItemDetailOut(CombinationOut):
     item_id: int
     item_code: str | None = None
     item_name: str | None = None
@@ -3682,6 +4119,10 @@ class SerialRead(_Read):
     item_code: str | None = None
     item_name: str | None = None
     is_asset: bool = False
+    #: The package (box / strip) the unit sits in, if any (2026-10-26).
+    package_code: str | None = None
+    package_name: str | None = None
+    package_holds: float | None = None
     serial_number: str
     imei: str | None = None
     batch_id: int | None = None
@@ -3809,6 +4250,9 @@ class LocationOption(Option):
 
 class ItemOption(Option):
     uom_code: str | None = None
+    # How many decimal places this item's unit allows — 0 for a whole-unit UOM.
+    # Lets the issue form refuse a typed fraction before save (SCM_0080).
+    qty_decimals: int | None = None
     is_batch_tracked: bool = False
     is_serial_tracked: bool = False
     is_imei_tracked: bool = False
@@ -3823,7 +4267,7 @@ class ItemOption(Option):
     location_count: int | None = None
 
 
-class IndentIssueSource(BaseModel):
+class IndentIssueSource(OrgScopeOut):
     indent_id: int
     indent_no: str
     warehouse_id: int
@@ -3843,6 +4287,8 @@ class IndentIssueSource(BaseModel):
     destination_office_id: int | None = None
     destination_office_name: str | None = None
     destination_office_sac: str | None = None
+    #: Only an LIP runs a vehicle and carries an SAC; None when no point resolves.
+    destination_needs_vehicle_and_sac: bool | None = None
     items: list[IssueItemWrite] = []
 
 
@@ -3896,14 +4342,21 @@ class IssueDispatchSourceItem(DispatchItemWrite):
     expiry_date: date | None = None
     is_serial_tracked: bool = False
     is_imei_tracked: bool = False
-    # Where the issue line drew it from, so two rows of one batch say which bay.
-    bin_code: str | None = None
     # SERIAL / IMEI / ASSET / CONSUMABLE / NONE — what the codes on this row are.
     tracking_type: str | None = None
+    # Whether this line went through outward QC, or out without needing it.
+    requires_qc: bool = False
     serial_numbers: list[str] = []
     # serial -> IMEI, so the packing screen shows the handset's number beside the
     # unit it belongs to rather than making the receiving point retype it.
     imei_by_serial: dict[str, str] = {}
+    # Issued in PACKAGES (2026-10-26): each package the line sends on and what it
+    # carries after outward QC — {code, quantity}. A carton names which of them it
+    # holds (in `serial_numbers`); no unit code per piece is asked for.
+    box_codes: list[dict] = []
+    # The packs this quantity travels in, read off the issue line (2026-10-22).
+    pack_breakdown: list[dict] | None = None
+    pack_text: str | None = None
 
 
 class IssueDispatchSource(BaseModel):
@@ -3990,6 +4443,13 @@ class DirectIssueAckLine(BaseModel):
     issued_qty: Decimal = Decimal("0")
 
 
+class DirectIssueConsignment(BaseModel):
+    dispatch_id: int
+    dispatch_no: str
+    status: str | None = None
+    package_count: int = 0
+
+
 class DirectIssueAckRow(BaseModel):
     """A material issue raised against no indent, as its recipient sees it.
 
@@ -4009,6 +4469,17 @@ class DirectIssueAckRow(BaseModel):
     acknowledged_at: datetime | None = None
     can_acknowledge: bool = False
     lines: list[DirectIssueAckLine] = []
+    #: The consignments carrying this issue, each with how many packages it holds.
+    consignments: list[DirectIssueConsignment] = []
+
+
+class StockTransferAckRow(DirectIssueAckRow):
+    """A direct STO's issue arriving at the caller's point (2026-10-29): the receipt
+    row on Inventory > Stock Transfer > Acknowledgements, with the order it executes."""
+    sto_id: int | None = None
+    sto_no: str | None = None
+    from_warehouse_name: str | None = None
+    to_warehouse_name: str | None = None
 
 
 class IssueSerialLineIn(BaseModel):
@@ -4077,7 +4548,7 @@ class IssueBatchIn(BaseModel):
     issue_ids: Annotated[list[int], BatchIds]
 
 
-class DespatchPrefillLine(BaseModel):
+class DespatchPrefillLine(CombinationOut):
     """One line of what the vendor says they sent, ready to become a receipt line."""
     po_item_id: int | None = None
     item_id: int
@@ -4090,6 +4561,39 @@ class DespatchPrefillLine(BaseModel):
     batch_no: str | None = None
     mfg_date: date | None = None
     expiry_date: date | None = None
+    # What the unit needs at the gate, off the item master (2026-10-21): without these
+    # a prefilled line read as untracked and the serial/IMEI capture never appeared.
+    is_asset: bool = False
+    is_serial_tracked: bool = False
+    is_imei_tracked: bool = False
+    # The supplier's packing, DECLARED and read-only on the receipt (2026-10-08).
+    despatch_note_item_id: int | None = None
+    pack_hierarchy_id: int | None = None
+    pack_hierarchy_name: str | None = None
+    pack_breakdown: list[dict] | None = None
+    pack_text: str | None = None
+    # When the supplier sent a different hierarchy from the order's: the buyer's
+    # answer, so the gate knows before booking it in.
+    pack_change_status: str | None = None
+    ordered_pack_hierarchy_name: str | None = None
+    pack_change_reason: str | None = None
+    pack_change_note: str | None = None
+    #: The count the receipt starts from: the declared packing, read inside what the
+    #: order still owes when that is less.
+    counted_pack_breakdown: list[dict] | None = None
+
+    @model_validator(mode="after")
+    def _describe_packing(self):
+        if self.pack_breakdown and not self.pack_text:
+            self.pack_text = describe_packs(self.pack_breakdown, self.uom_code)
+        if not getattr(self, "pack_hierarchy_name", None):
+            for src in (self.pack_breakdown,):
+                name = next((e.get("hierarchy") for e in src or []
+                             if e.get("hierarchy")), None)
+                if name:
+                    self.pack_hierarchy_name = name
+                    break
+        return self
 
 
 class DespatchPrefill(BaseModel):
@@ -4283,7 +4787,7 @@ class StockEditLineIn(BaseModel):
     changes: dict[str, str | None] = Field(max_length=10)
 
 
-class StockEditIn(BaseModel):
+class StockEditIn(OrgScopeIn):
     warehouse_id: int
     reason: str = Field(max_length=500)
     remarks: str | None = None
@@ -4307,8 +4811,11 @@ class StockEditItemRead(BaseModel):
     changes: dict
 
 
-class StockEditListRow(BaseModel):
+class StockEditListRow(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
+    #: The project its number is drawn under (2026-11-11).
+    project_id: int | None = None
+    project_name: str | None = None
     id: int
     edit_no: str
     warehouse_id: int
@@ -4426,3 +4933,27 @@ class ProjectLotRead(BaseModel):
     held_qty: Decimal
     holds: list[ProjectLotHold] = []
     is_unit_tracked: bool = False
+    # Packing (2026-10-08): the balance row's project — part of its key — and how
+    # the quantity is bagged, as a sentence and as the outermost packs.
+    project_id: int | None = None
+    pack_text: str | None = None
+    packs: list[dict] = []
+    loose_qty: Decimal | None = None
+    pack_unreconciled: bool = False
+    # Part packs here, and how many are under their level's minimum — allowed, but
+    # flagged until somebody repacks them (2026-10-11).
+    pack_below_min: int = 0
+    pack_part_packs: int = 0
+
+
+class PackSummaryIn(BaseModel):
+    """Which stock rows a screen wants the packing of — by `stk_balance` id."""
+    stock_ids: Annotated[list[int], BatchIds]
+
+
+class RepackIn(BaseModel):
+    """How one stock row should be packed afterwards: a breakdown in ONE of the
+    item's hierarchies, holding exactly what the row holds (loose included)."""
+    pack_hierarchy_id: int
+    target: Annotated[list[PackEntryIn], Field(min_length=1, max_length=12)]
+    reason: str | None = Field(default=None, max_length=300)

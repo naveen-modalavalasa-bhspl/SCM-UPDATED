@@ -2,12 +2,15 @@ import { useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useReactToPrint } from "react-to-print";
 import { QRCodeSVG } from "qrcode.react";
-import { Printer, Check, Info } from "lucide-react";
+import { Printer, Check, Info, Box, Tag, Truck } from "lucide-react";
 import { Button, Card, PageHeader } from "@/shared/components";
 import { FilterBar, FilterSelect } from "../components/FilterBar";
 import { LoadingRows } from "../components/PageStates";
-import { getStockBalances, getWarehouses } from "../api";
+import { BoxLabelsPanel } from "../components/BoxLabelsPanel";
+import { IssueLabelsPanel } from "../components/IssueLabelsPanel";
+import { getStockBalances, getWarehouses, listBoxLabels } from "../api";
 import type { StockBalanceItem } from "../types";
+import { guardNumberKeys } from "@/shared/quantity";
 
 /**
  * Label printing for shelf/bin stickers.
@@ -62,7 +65,75 @@ const pageStyle = `
   }
 `;
 
+/** Item labels (stock rows) and Box labels (the print queue of box codes, 2026-10-26). */
 export function LabelsPage() {
+  const [tab, setTab] = useState<"items" | "boxes" | "issues">("items");
+  const [boxSize, setBoxSize] = useState("50x25");
+  const queued = useQuery({
+    queryKey: ["box-labels", "QUEUED-count"],
+    queryFn: () => listBoxLabels({ status: "QUEUED", size: 1 }),
+    staleTime: 30_000,
+  });
+  const tabs = (
+    <div role="tablist" aria-label="Label kind"
+         className="mb-4 inline-flex rounded-xl border border-line bg-content2/60 p-1">
+      {([["items", "Item labels", Tag], ["boxes", "Box labels", Box], ["issues", "Issue labels", Truck]] as const).map(([key, label, Icon]) => (
+        <button key={key} role="tab" aria-selected={tab === key} type="button"
+                onClick={() => setTab(key)}
+                className={`inline-flex min-h-10 items-center gap-2 rounded-lg px-4 text-sm font-medium transition-colors ${
+                  tab === key ? "bg-content1 text-ink shadow-sm" : "text-muted hover:text-ink"}`}>
+          <Icon className="h-4 w-4" aria-hidden /> {label}
+          {key === "boxes" && (queued.data?.total ?? 0) > 0 && (
+            <span className="rounded-full bg-brand px-1.5 text-[10px] font-bold leading-4 text-white">
+              {queued.data?.total}
+            </span>
+          )}
+        </button>
+      ))}
+    </div>
+  );
+  if (tab === "issues") {
+    return (
+      <div>
+        <PageHeader eyebrow="Inventory" title="Labels & Printing" />
+        {tabs}
+        <p className="mb-4 flex items-start gap-2 rounded-lg border border-line/70 bg-content2 p-3 text-sm text-body">
+          <Info className="mt-0.5 h-4 w-4 shrink-0 text-muted" />
+          <span>
+            Labels for everything a <strong>posted</strong> issue sent — whole issue or item by item,
+            as a barcode, a QR or both, on a thermal roll or an A4 sheet.
+          </span>
+        </p>
+        <IssueLabelsPanel />
+      </div>
+    );
+  }
+  if (tab === "boxes") {
+    return (
+      <div>
+        <PageHeader eyebrow="Inventory" title="Labels & Printing" />
+        {tabs}
+        <p className="mb-4 flex items-start gap-2 rounded-lg border border-line/70 bg-content2 p-3 text-sm text-body">
+          <Info className="mt-0.5 h-4 w-4 shrink-0 text-muted" />
+          <span>
+            Every new <strong>box code</strong> lands here — boxed at putaway, old stock grouped into
+            boxes, a re-code after the issue container changed, and the part box cut at the issue desk.
+            Print, stick, then <strong>Mark printed</strong>.
+          </span>
+        </p>
+        <div className="mb-3 w-56">
+          <FilterSelect value={boxSize} onChange={setBoxSize} placeholder="Label size"
+                        options={SIZES} allowEmpty={false} />
+        </div>
+        <BoxLabelsPanel size={boxSize} dim={DIMENSIONS[boxSize] ?? DIMENSIONS["50x25"]}
+                        pageStyle={pageStyle} />
+      </div>
+    );
+  }
+  return <ItemLabels tabs={tabs} />;
+}
+
+function ItemLabels({ tabs }: { tabs: React.ReactNode }) {
   const [search, setSearch] = useState("");
   const [warehouseId, setWarehouseId] = useState("");
   const [size, setSize] = useState("70x40");
@@ -119,6 +190,7 @@ export function LabelsPage() {
           </Button>
         }
       />
+      {tabs}
 
       <p className="mb-4 flex items-start gap-2 rounded-lg border border-line/70 bg-content2 p-3 text-sm text-body">
         <Info className="mt-0.5 h-4 w-4 shrink-0 text-muted" />
@@ -192,7 +264,7 @@ export function LabelsPage() {
                   </button>
                   {picked[r.id] && (
                     <input
-                      type="number"
+                      type="number" onKeyDown={guardNumberKeys}
                       min={1}
                       value={copies[r.id] ?? "1"}
                       aria-label={`Copies for ${r.item_code}`}

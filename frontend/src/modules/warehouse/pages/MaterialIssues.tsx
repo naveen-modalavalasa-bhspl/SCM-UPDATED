@@ -40,6 +40,11 @@ const STATUSES = [
   { value: "CANCELLED", label: "Cancelled" },
 ];
 
+/** Mirrors `service.INSPECTABLE_QC`: an issue the QC desk can still open. One whose
+ *  items need no outward QC (NOT_REQUIRED) goes straight to packing instead. */
+const canInspect = (r: { qc_status?: string | null }) =>
+  !!r.qc_status && ["PENDING", "FAILED"].includes(r.qc_status);
+
 export default function MaterialIssues({
   direction = "OUT",
   title = "Material issues",
@@ -57,8 +62,6 @@ export default function MaterialIssues({
      "AP39TL9499" and the indent number appeared nowhere on the screen. */
   const sourceOf = (r: Issue): SourceRefCandidate[] => [
     { label: r.indent_type === "STR" ? "STR" : "Indent", no: r.indent_no, to: r.indent_id ? `/indents/${r.indent_id}` : null },
-    // No detail screen for a picklist yet, so this one reads as text.
-    { label: "Picklist", no: r.pick_no },
     {
       label: "Return of",
       no: r.original_issue_no,
@@ -77,8 +80,12 @@ export default function MaterialIssues({
           <div className="font-mono text-xs font-semibold text-ink">{r.issue_no}</div>
           <div className="text-[11px] text-muted">{fmtDate(r.issue_date)}</div>
           {r.parent_issue_no && (
-            <div className="text-[11px] text-muted">
-              Split of <span className="font-mono">{r.parent_issue_no}</span>
+            <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted">
+              <span className="rounded bg-brand-050 px-1.5 py-px font-mono font-bold text-brand">
+                floor piece {r.issue_no.startsWith(r.parent_issue_no)
+                  ? r.issue_no.slice(r.parent_issue_no.length) : ""}
+              </span>
+              of <span className="font-mono">{r.parent_issue_no}</span>
               {r.floor_location_name ? ` · ${r.floor_location_name}` : ""}
             </div>
           )}
@@ -135,9 +142,18 @@ export default function MaterialIssues({
       header: "With",
       hideOnNarrow: true,
       render: (r) => (
-        <span className="text-sm text-muted">
-          {r.currently_with ?? "—"}
-        </span>
+        <div className="text-sm">
+          {r.currently_with ? (
+            <span className="text-muted">{r.currently_with}</span>
+          ) : r.issued_by_name ? (
+            <div>
+              <span className="text-ink font-medium">{r.issued_by_name}</span>
+              <div className="text-[10px] text-muted font-normal">Issued by</div>
+            </div>
+          ) : (
+            <span className="text-muted">—</span>
+          )}
+        </div>
       ),
     },
     {
@@ -152,16 +168,21 @@ export default function MaterialIssues({
         }`}>
           {r.qc_status}
         </span>
+      ) : r.qc_status === "NOT_REQUIRED" && r.direction === "OUT" && r.is_stock_posted ? (
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-muted"
+              title="None of these items requires outward QC — ready to pack">
+          Not required
+        </span>
       ) : <span className="text-muted text-[11px] uppercase tracking-wider">N/A</span>,
     },
-    { key: "status", header: "Status", render: (r) => <StatusPill status={r.status} /> },
+    { key: "status", header: "Status", render: (r) => <StatusPill status={r.display_status ?? r.status} /> },
     {
       key: "actions",
       header: "",
       className: "w-24 text-right",
       render: (r) => (
         <div className="flex justify-end gap-1">
-          {r.qc_status && (["PENDING", "PARTIAL", "FAILED"].includes(r.qc_status) || (r.qc_status === "NOT_REQUIRED" && r.direction === "OUT" && r.is_stock_posted)) && (
+          {canInspect(r) && (
             <button
               type="button"
               aria-label={`QC ${r.issue_no}`}
@@ -232,7 +253,7 @@ export default function MaterialIssues({
         <div className="space-y-1">
           <div className="flex items-center justify-between gap-2">
             <span className="font-mono text-xs font-semibold text-ink">{r.issue_no}</span>
-            <StatusPill status={r.status} />
+            <StatusPill status={r.display_status ?? r.status} />
           </div>
           {r.parent_issue_no && (
             <div className="text-[11px] text-muted">
@@ -242,7 +263,7 @@ export default function MaterialIssues({
           <div className="flex items-center justify-between gap-2">
             <div className="truncate text-sm text-body">{r.issued_to_name ?? r.department_name ?? "—"}</div>
             <div className="flex items-center gap-1">
-              {r.qc_status && (["PENDING", "PARTIAL", "FAILED"].includes(r.qc_status) || (r.qc_status === "NOT_REQUIRED" && r.direction === "OUT" && r.is_stock_posted)) && (
+              {canInspect(r) && (
                 <button
                   type="button"
                   className="text-primary hover:bg-primary-50 p-1 rounded"

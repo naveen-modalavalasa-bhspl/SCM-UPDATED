@@ -1,26 +1,43 @@
-import { Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
+import {
+  Button, Can, ConfirmModal, DocumentNumberCard, ErrorBanner, Field, Input, PackageCheckModal,
+  PageHeader, Select, StatusPill,
+} from "@/shared/components";
+import {
+  docNumberPayload, docNumberValueFrom, emptyDocNumberValue, type DocNumberLocks,
+  type DocNumberValue,
+} from "@/shared/documentNumber";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, ArrowLeft, FileText, ScanLine, Send } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Boxes, CheckCircle2, FileText, ScanLine, Send } from "lucide-react";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { DateInput, LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
+import { ReceiptLinePacking } from "../components/ReceiptLinePacking";
+import {
+  type PackEntry, PackQty, baseOf, checkFrom, checkSummary, expandPacks, greedy, hierarchyOf,
+  packable, shrinkWithin, splitByCheck, usePackOptions,
+} from "@/shared/packing";
 import { Lookup } from "../components/Lookup";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { ReceiptLinkedDocuments } from "../components/LinkedDocuments";
 import { ReceiptRoutingPanel } from "../components/ReceiptRouting";
-import { SerialNumbersModal } from "../components/SerialNumbersModal";
+import { UnitCodesModal } from "../components/UnitCodesModal";
 import {
-  binOptions, completeReceipt, convertReceiptToGrn, createReceipt, forwardArrival,
+  completeReceipt, convertReceiptToGrn, createReceipt, forwardArrival,
   despatchNoteOptions, dispatchReceiptSource, gateEntryOptions, getDespatchPrefill,
   getPoLines, getReceipt, getReceiptRouting, incomingDispatchOptions, itemOptions, poOptions,
-  routeParkedReceipt, submitReceipt, myWarehouseOptions, updateReceipt, uploadAttachment, vendorOptions,
+  receiptScope, routeParkedReceipt, submitReceipt, myWarehouseOptions, updateReceipt,
+  uploadAttachment, vendorOptions,
 } from "../api";
 
 import { fmtMoney, fmtQty, num, rate2, today } from "../format";
 import { alerts } from "@/modules/alerts";
+import { useAuth } from "@/shared/auth/AuthContext";
 import type { ItemOption, Receipt, ReceiptItemWrite, ReceiptWrite } from "../types";
 import { useMyPoint, usePointLabel } from "../usePointLabel";
+import {
+  CombinationPicker, CombinationTag, comboFrom, pickCombination, useCombinationOptions,
+} from "@/shared/combination";
 
 /**
  * One form for both a gate entry and a GRN — they are one `inb_receipts` row at two
@@ -111,6 +128,18 @@ const LOCAL_RECEIPT_TYPES = new Set(["DISPATCH", "DIRECT"]);
 /** The rungs below the main store. Mirrors LocationTier on the backend. */
 const LOCAL_POINT_TYPES = new Set(["MDP", "LIP"]);
 
+/** Two counts in ONE hierarchy, added level by level (a part pack keeps its fill). */
+function mergePacks(a?: PackEntry[] | null, b?: PackEntry[] | null): PackEntry[] | null {
+  if (!a?.length || !b?.length) return null;
+  const out = new Map<string, PackEntry>();
+  for (const e of [...a, ...b]) {
+    const key = `${e.level}|${e.fill ?? ""}`;
+    const had = out.get(key);
+    out.set(key, had ? { ...had, qty: num(had.qty) + num(e.qty) } : { ...e });
+  }
+  return [...out.values()].sort((x, y) => y.level - x.level);
+}
+
 const lifeDateLabel = (line?: Pick<ReceiptItemWrite, "is_asset"> | null) =>
   line?.is_asset ? "Warranty" : "Expiry";
 
@@ -119,6 +148,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
   const { id } = useParams();
   const nav = useNavigate();
   const qc = useQueryClient();
+  const { can } = useAuth();
   const editing = !!id && id !== "new";
   const isGrn = mode === "PURCHASE";
 
@@ -144,6 +174,11 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     items: [],
   });
   const [touched, setTouched] = useState(false);
+  // Organisation, project / department and year (2026-11-11): copied from the PO,
+  // despatch note or transfer when it carries them, else selected here, opening on the
+  // defaults. `olderScope`: a receipt older than organisations keeps its number as it was.
+  const [scope, setScope] = useState<DocNumberValue>(emptyDocNumberValue);
+  const [olderScope, setOlderScope] = useState(false);
   const [vendorName, setVendorName] = useState<string>("");
   const [sourceGateId, setSourceGateId] = useState<number | null>(null);
 
@@ -181,13 +216,17 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
 
   // Documents picked before the first save: they have no receipt to hang off yet.
   const [stagedFiles, setStagedFiles] = useState<File[]>([]);
-  const [serialLine, setSerialLine] = useState<number | null>(null);
-  const [imeiLine, setImeiLine] = useState<number | null>(null);
+  /** The line whose Serial / IMEI popup is open — it opens on every line of that item. */
+  const [codesLine, setCodesLine] = useState<number | null>(null);
+  /** The line whose packs are being checked one by one (2026-10-27). */
+  const [packCheckLine, setPackCheckLine] = useState<number | null>(null);
   const [confirming, setConfirming] = useState<"submit" | "complete" | null>(null);
 
   /** Loading a saved receipt back into the editable shape. */
   useEffect(() => {
     if (!doc) return;
+    setScope(docNumberValueFrom(doc));
+    setOlderScope(!doc.organization_id);
     setForm({
       receipt_type: doc.receipt_type,
       grn_date: doc.grn_date,
@@ -213,6 +252,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         po_item_id: l.po_item_id,
         indent_id: l.indent_id,
         item_id: l.item_id,
+        ...comboFrom(l),
         item_code: l.item_code,
         item_name: l.item_name,
         uom_code: l.uom_code,
@@ -232,6 +272,10 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         remarks: l.remarks,
         serial_numbers: parseCodes(l.serial_numbers),
         imei_numbers: parseCodes(l.imei_numbers),
+        despatch_note_item_id: l.despatch_note_item_id ?? null,
+        pack_hierarchy_id: l.pack_hierarchy_id ?? null,
+        declared_pack_breakdown: l.declared_pack_breakdown ?? null,
+        pack_breakdown: l.pack_breakdown ?? null,
       })),
     });
     if (doc.vendor_name) setVendorName(doc.vendor_name);
@@ -272,15 +316,23 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         po_item_id: line.po_item_id,
         indent_id: line.indent_id ?? undefined,
         item_id: line.item_id,
+        ...comboFrom(line),
         item_code: line.item_code,
         item_name: line.item_name,
         uom_code: line.uom_code,
+        // Off the item master, served with the line: without them a PO line read as
+        // untracked and the gate was never asked for its serials or IMEIs.
+        is_asset: !!line.is_asset,
+        is_serial_tracked: !!line.is_serial_tracked,
+        is_imei_tracked: !!line.is_imei_tracked,
         ordered_qty: num(line.ordered_qty),
         // What is still owed, as the count to confirm rather than a figure to trust:
         // the storekeeper overwrites it with what actually turned up.
         received_qty: line.pending_qty != null ? num(line.pending_qty) as any : num(line.ordered_qty) as any,
         accepted_qty: line.pending_qty != null ? num(line.pending_qty) as any : num(line.ordered_qty) as any,
         rate: rate2(line.rate),
+        pack_hierarchy_id: line.pack_hierarchy_id ?? null,
+        pack_breakdown: line.pack_breakdown ?? null,
       }));
       // Nothing outstanding is an ANSWER, and a toast that scrolls away is not where
       // it belongs: the storekeeper is standing at a delivery and needs to know the
@@ -389,9 +441,13 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           ...emptyLine(),
           po_item_id: line.po_item_id ?? undefined,
           item_id: line.item_id,
+          ...comboFrom(line),
           item_code: line.item_code,
           item_name: line.item_name,
           uom_code: line.uom_code,
+          is_asset: !!line.is_asset,
+          is_serial_tracked: !!line.is_serial_tracked,
+          is_imei_tracked: !!line.is_imei_tracked,
           ordered_qty: num(line.ordered_qty),
           // What the vendor says is on the vehicle, as the count to CONFIRM. The
           // storekeeper overwrites it with what is physically there, and the gap is
@@ -402,6 +458,15 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           batch_no: line.batch_no,
           mfg_date: line.mfg_date,
           expiry_date: line.expiry_date,
+          // The supplier's packing is DECLARED: copied once, fixed at the gate.
+          despatch_note_item_id: line.despatch_note_item_id ?? null,
+          pack_hierarchy_id: line.pack_hierarchy_id ?? null,
+          declared_pack_breakdown: line.pack_breakdown ?? null,
+          pack_breakdown: line.counted_pack_breakdown ?? line.pack_breakdown ?? null,
+          pack_change_status: line.pack_change_status ?? null,
+          ordered_pack_hierarchy_name: line.ordered_pack_hierarchy_name ?? null,
+          pack_change_reason: line.pack_change_reason ?? null,
+          pack_change_note: line.pack_change_note ?? null,
         })),
       }));
       if (prefill.vendor_name) setVendorName(prefill.vendor_name);
@@ -449,6 +514,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           po_item_id: line.po_item_id,
           indent_id: line.indent_id,
           item_id: line.item_id,
+          ...comboFrom(line),
           item_code: line.item_code,
           item_name: line.item_name,
           uom_code: line.uom_code,
@@ -502,7 +568,6 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     queryFn: () => myWarehouseOptions(),
     staleTime: 5 * 60_000,
   });
-  const binManaged = !!warehouses.find((w) => w.id === form.warehouse_id)?.is_bin_managed;
 
   /* A new receipt opens at the point the person is standing in. Left at "pick one",
    * a storekeeper tagged to a single LIP inwarded a delivery into an unrelated MDP,
@@ -531,11 +596,88 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     setForm((f) => ({ ...f, [key]: value }));
 
   /** Every line edit runs through here so the derived quantities stay derived. */
+  // Pack hierarchies of every item on the receipt, in one call (2026-10-08).
+  const packOptions = usePackOptions(form.items.map((line) => line.item_id));
+  /** A line whose quantity comes from its packs — the received box follows them. */
+  const isPacked = (line: ReceiptItemWrite) =>
+    !!line.pack_breakdown?.length && packable(packOptions.data?.[line.item_id]).length > 0;
+  /** Units with every code the item needs — a handset with a serial and no IMEI is
+   *  not a coded unit. */
+  const unitsCoded = (line: ReceiptItemWrite) => {
+    const counts = [
+      ...(line.is_serial_tracked ? [line.serial_numbers?.length ?? 0] : []),
+      ...(line.is_imei_tracked ? [line.imei_numbers?.length ?? 0] : []),
+    ];
+    return counts.length ? Math.min(...counts) : 0;
+  };
+  /** What the despatch note declared for a line, in base units — or null for none. */
+  const declaredQty = (line: ReceiptItemWrite) =>
+    line.declared_pack_breakdown?.length ? baseOf(line.declared_pack_breakdown) : null;
+  /** More counted than the supplier declared: the server refuses it level by level. */
+  const overDeclared = (line: ReceiptItemWrite) => {
+    const sent = declaredQty(line);
+    return sent !== null && !blankQty(line.received_qty) && num(line.received_qty) > sent;
+  };
+  /**
+   * A TYPED received quantity, said again as packs of the line's OWN hierarchy
+   * (2026-10-21) — the hierarchy never changes here. Against a despatch note it is
+   * the declared packs shrunk to that quantity, exactly as the server reads a short
+   * count (`shrinkWithin` ↔ `packing.shrink_snapshot`); without one, whole packs
+   * biggest-first and the rest loose. `undefined` for a line with no packing at all.
+   */
+  const packsFor = (line: ReceiptItemWrite, qty: number): PackEntry[] | undefined => {
+    if (line.declared_pack_breakdown?.length) {
+      return shrinkWithin(line.declared_pack_breakdown, Math.min(qty, baseOf(line.declared_pack_breakdown)));
+    }
+    const h = packingOf(line);
+    return h ? greedy(h, qty) : undefined;
+  };
+  /** The hierarchy a line counts in: its own, else — a direct line nobody has packed
+   *  yet (2026-10-27) — the item's default, which is the one the server describes it
+   *  in on save anyway. Saying so on screen is what puts the packs, and the pack-by-pack
+   *  check, on a direct inward before the first save rather than after it. */
+  const packingOf = (line: ReceiptItemWrite) => {
+    const options = packable(packOptions.data?.[line.item_id]);
+    return options.find((x) => x.hierarchy_id === line.pack_hierarchy_id)
+      ?? (line.pack_hierarchy_id || line.declared_pack_breakdown?.length
+        ? undefined : options.find((x) => x.is_default) ?? options[0]);
+  };
+  /**
+   * The packs a line is checked AGAINST, pack by pack (2026-10-27): the supplier's
+   * despatch note when there is one — fixed, and what the server holds the count to —
+   * else the packs the line held when the check was first opened, so a carton marked
+   * missing stays on the list to be marked back. Null for a line with no packs.
+   */
+  const referencePacks = (line: ReceiptItemWrite): PackEntry[] | null => {
+    const ref = line.declared_pack_breakdown?.length ? line.declared_pack_breakdown
+      : line.expected_pack_breakdown?.length ? line.expected_pack_breakdown
+      : line.pack_breakdown;
+    return ref?.some((e) => e.level > 0 && num(e.qty) > 0) ? ref : null;
+  };
+  /** The name of the packing a line is in — "Box of 20" — or null for none. */
+  const packName = (line: ReceiptItemWrite): string | null =>
+    packable(packOptions.data?.[line.item_id])
+      .find((h) => h.hierarchy_id === line.pack_hierarchy_id)?.name
+    ?? hierarchyOf(line.declared_pack_breakdown ?? line.pack_breakdown) ?? null;
+
+  // The ON brand / variant / model combinations of every item on the receipt.
+
+  const comboOptions = useCombinationOptions(form.items.map((line) => line.item_id || 0));
+
   const patchLine = (index: number, patch: Partial<ReceiptItemWrite>) =>
     setForm((f) => {
       const items = f.items.map((l, i) => {
         if (i !== index) return l;
         const next = { ...l, ...patch };
+        // Lowering the quantity takes the surplus codes with it, from the tail — the
+        // last scanned are the ones still in hand — so 30 corrected to 25 does not send
+        // the storekeeper into the popup to delete five by hand. Never on a blank box:
+        // that is a number being retyped, not a count of zero.
+        if ("received_qty" in patch && !blankQty(next.received_qty)) {
+          const units = Math.floor(num(next.received_qty));
+          if ((next.serial_numbers?.length ?? 0) > units) next.serial_numbers = next.serial_numbers!.slice(0, units);
+          if ((next.imei_numbers?.length ?? 0) > units) next.imei_numbers = next.imei_numbers!.slice(0, units);
+        }
         const received = num(next.received_qty);
         // Accepted can never exceed what arrived; rejected is the remainder.
         const accepted = Math.min(num(next.accepted_qty), received);
@@ -556,6 +698,37 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
   }, [form.items]);
 
   const locked = !!doc && !["DRAFT", "GATE_ENTRY"].includes(doc.status);
+  // What the document before this one fixes: the same rule the save applies.
+  const hasSource = !!(form.po_id || form.despatch_note_id || form.dispatch_id);
+  const scopeSource = useQuery({
+    queryKey: ["receipt-scope", form.po_id, form.despatch_note_id, form.dispatch_id],
+    queryFn: () => receiptScope(form),
+    enabled: hasSource && !olderScope,
+  });
+  const carried = hasSource ? scopeSource.data ?? null : null;
+  useEffect(() => {
+    if (!carried) return;
+    setScope((current) => ({
+      ...current,
+      organizationId: carried.organization_id, organizationName: carried.organization_name,
+      orgDepartmentId: carried.org_department_id ?? "",
+      departmentName: carried.org_department_name ?? "",
+      ...(current.projectId === "" && carried.project_id
+        ? { projectId: carried.project_id, projectName: carried.project_name ?? "" } : {}),
+    }));
+    if (!form.project_id && carried.project_id) {
+      setForm((f) => ({ ...f, project_id: carried.project_id ?? null }));
+    }
+  }, [carried]); // eslint-disable-line react-hooks/exhaustive-deps
+  const scopeLocks: DocNumberLocks = locked ? { all: true }
+    : carried ? { organisation: true, department: true } : {};
+  /** The receipt as it is saved: the card first, the form's own project wins. */
+  const withScope = (): ReceiptWrite => (olderScope ? form : { ...docNumberPayload(scope), ...form });
+  /* Filing a document is the same grant as saving one: POST /attachments is gated
+   * on receipt.create, so offering "Attach a file" without it ends in a refusal
+   * banner for an action the screen itself invited. Save is already <Can>-gated;
+   * this keeps the Documents panel honest the same way. */
+  const canFile = can("receipt.create");
   /** Lines came off a consignment, so the items are fixed by what was sent. */
   const fromConsignment = form.receipt_type === "DISPATCH";
 
@@ -608,6 +781,12 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
 
   const validateQuantities = () => {
     for (const [index, line] of form.items.entries()) {
+      if (overDeclared(line)) {
+        const name = savedLine(index)?.item_name ?? line.item_name ?? "";
+        throw new Error(`Line ${index + 1}${name ? ` (${name})` : ""}: the supplier's despatch note `
+          + `sent ${fmtQty(declaredQty(line))}, and this line receives ${fmtQty(line.received_qty)}. `
+          + "Enter what actually arrived — at most what was sent.");
+      }
       if (line.po_item_id && num(line.received_qty) > num(line.ordered_qty)) {
         const name = savedLine(index)?.item_name ?? line.item_name ?? "";
         throw new Error(`Line ${index + 1}${name ? ` (${name})` : ""}: You received more than was ordered. Enter a number up to the ordered quantity.`);
@@ -625,30 +804,26 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       + "0 if none of it did.");
   };
 
-  /** Enforces that serials and IMEIs match exactly the received quantity. */
+  /** Serials and IMEIs must match the received quantity exactly — the server refuses
+   *  anything else, at the gate too. Said here by line and item, with where to press. */
   const validateSerialLines = () => {
     for (const [index, line] of form.items.entries()) {
-      if (!line.is_serial_tracked) continue;
+      if (!line.is_serial_tracked && !line.is_imei_tracked) continue;
+      const name = savedLine(index)?.item_name ?? line.item_name ?? "";
+      const at = `Line ${index + 1}${name ? ` (${name})` : ""}`;
       const required = Math.floor(num(line.received_qty));
       if (num(line.received_qty) !== required) {
-        throw new Error(`Line ${index + 1}: Enter a full number (like 5, not 5.5). Each piece has its own serial number.`);
+        throw new Error(`${at}: enter a whole number of units (like 5, not 5.5) — each unit carries its own code.`);
       }
-      const actual = line.serial_numbers?.length ?? 0;
-      if (actual !== required) {
-        throw new Error(`Line ${index + 1}: Scan or type ${required} serial numbers, one for each piece.`);
-      }
-    }
-
-    // Same rules for IMEIs
-    for (const [index, line] of form.items.entries()) {
-      if (!line.is_imei_tracked) continue;
-      const required = Math.floor(num(line.received_qty));
-      if (num(line.received_qty) !== required) {
-        throw new Error(`Line ${index + 1}: Enter a full number (like 5, not 5.5). Each piece has its own IMEI number.`);
-      }
-      const actual = line.imei_numbers?.length ?? 0;
-      if (actual !== required) {
-        throw new Error(`Line ${index + 1}: Scan or type ${required} IMEI numbers, one for each piece.`);
+      const missing = [
+        ...(line.is_serial_tracked && (line.serial_numbers?.length ?? 0) !== required ? ["serial"] : []),
+        ...(line.is_imei_tracked && (line.imei_numbers?.length ?? 0) !== required ? ["IMEI"] : []),
+      ];
+      if (missing.length) {
+        const done = unitsCoded(line);
+        throw new Error(
+          `${at}: ${done} of ${required} units have their ${missing.join(" and ")}. `
+          + "Press Scan in the Serial / IMEI column and capture one for every unit.");
       }
     }
   };
@@ -658,12 +833,12 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       validateQuantities();
       validateSerialLines();
       const saved = await (async () => {
-        if (editing) return updateReceipt(Number(id), form);
+        if (editing) return updateReceipt(Number(id), withScope());
         if (sourceGateId) {
-          await updateReceipt(sourceGateId, form);
+          await updateReceipt(sourceGateId, withScope());
           return convertReceiptToGrn(sourceGateId);
         }
-        return createReceipt(form);
+        return createReceipt(withScope());
       })();
       // Files picked before the record existed. Uploaded here rather than dropped,
       // and inside the mutation so a failure shows on the same banner as the save.
@@ -700,7 +875,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       // box cleared since the last save fails on the server's parser rather than here.
       if (!locked) validateQuantities();
       validateSerialLines();
-      if (!locked) await updateReceipt(Number(id), form);
+      if (!locked) await updateReceipt(Number(id), withScope());
       return what === "submit" ? submitReceipt(Number(id)) : completeReceipt(Number(id));
     },
     onSuccess: (result, what) => {
@@ -777,6 +952,172 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     },
   });
 
+  /** What the selected order still owes, per PO line — and what it owes nothing of. */
+  const { data: poState } = useQuery({
+    queryKey: ["wh-lookup", "po-lines", form.po_id ?? 0, doc?.id ?? 0],
+    queryFn: () => getPoLines(form.po_id as number, doc?.id),
+    enabled: Boolean(form.po_id) && !locked,
+    staleTime: 60_000,
+  });
+
+  /**
+   * What is wrong with each line, said on the line BEFORE Save — the same two rules
+   * the save enforces, so the press never gets as far as the server's refusal:
+   *
+   * - a DUPLICATE: the same item, batch, packing AND brand / variant / model as an
+   *   earlier line of this Inward (`_apply_receipt_lines`). One batch sent in two pack
+   *   hierarchies is two lines (2026-10-21), and so is one item arriving as two
+   *   combinations (2026-10-27) — an LG and an HP toner are different goods on the
+   *   shelf even when the batch number on both cartons reads the same;
+   * - an order line ALREADY RECEIVED, or taken past what it still owes
+   *   (`_assert_po_fulfilment`). A line added by hand for an item the order names is
+   *   checked against that item's PO line exactly as the server ties it.
+   */
+  const { lineProblems, duplicateOrigins } = useMemo(() => {
+    const problems = new Map<number, string>();
+    const origins = new Map<number, number>();
+    const first = new Map<string, number>();
+    form.items.forEach((l, i) => {
+      if (!l.item_id) return;
+      const key = [l.item_id, (l.batch_no ?? "").trim().toLowerCase(), l.pack_hierarchy_id ?? 0,
+                   l.brand_id || 0, l.variant_id || 0, l.model_id || 0].join("|");
+      const earlier = first.get(key);
+      if (earlier === undefined) first.set(key, i);
+      else {
+        origins.set(i, earlier);
+        const itemLabel = l.item_code ? `${l.item_code}` : "This item";
+        const batch = l.batch_no?.trim() ? `batch ${l.batch_no.trim()}` : "no batch";
+        const packing = packName(l);
+        const combo = [l.brand_name, l.variant_name, l.model_name].filter(Boolean).join(" / ");
+        const same = [batch, combo, packing].filter(Boolean).join(", ");
+        problems.set(
+          i,
+          isGrn
+            ? `Same goods as line ${earlier + 1} (${itemLabel}, ${same}). Combine the quantity `
+              + `onto line ${earlier + 1}, or give this line a different batch, brand, variant `
+              + `or model.`
+            : `Same goods as line ${earlier + 1} (${itemLabel}, ${same}). Combine the quantity `
+              + `onto line ${earlier + 1}, remove this line, or pick the brand, variant and model `
+              + `that actually arrived.`,
+        );
+      }
+    });
+
+    if (form.po_id && poState) {
+      const open = new Map(poState.lines.map((p) => [p.po_item_id, p]));
+      const settled = new Map((poState.settled_lines ?? []).map((p) => [p.po_item_id, p]));
+      const ofItem = new Map<number, number[]>();
+      [...poState.lines, ...(poState.settled_lines ?? [])]
+        .sort((a, b) => a.po_item_id - b.po_item_id)
+        .forEach((p) => ofItem.set(p.item_id, [...(ofItem.get(p.item_id) ?? []), p.po_item_id]));
+      const taken = new Map<number, number>();
+      const by = poState.received_by?.length ? ` by ${poState.received_by.join(", ")}` : "";
+      form.items.forEach((l, i) => {
+        if (!l.item_id || problems.has(i)) return;
+        let pid = l.po_item_id ?? null;
+        if (!pid && ofItem.has(l.item_id)) {
+          const candidates = ofItem.get(l.item_id)!;
+          pid = candidates.find((c) =>
+            num(open.get(c)?.pending_qty) - (taken.get(c) ?? 0) > 0) ?? candidates[0];
+        }
+        if (!pid) return;
+        const running = (taken.get(pid) ?? 0) + num(l.received_qty);
+        const line = open.get(pid);
+        if (!line) {
+          const done = settled.get(pid);
+          if (done) {
+            problems.set(i, `Already fully received against ${form.po_no || "this PO"} — all `
+              + `${fmtQty(done.ordered_qty)}${by}. Nothing is left to receive; remove this line.`);
+          }
+          return;
+        }
+        if (running > num(line.pending_qty)) {
+          problems.set(i, `Only ${fmtQty(line.pending_qty)} still to come on ${form.po_no || "this PO"} `
+            + `(${fmtQty(line.received_qty)} already received${by}), and this Inward takes `
+            + `${fmtQty(running)}. Enter what actually arrived.`);
+        }
+        taken.set(pid, running);
+      });
+    }
+    return { lineProblems: problems, duplicateOrigins: origins };
+  }, [form.items, form.po_id, form.po_no, poState, isGrn, packOptions.data]);
+
+  const problemMessage = (() => {
+    const [index, message] = lineProblems.entries().next().value ?? [];
+    if (index === undefined || !message) return null;
+    const code = form.items[index]?.item_code ?? savedLine(index)?.item_code;
+    const more = lineProblems.size > 1 ? ` (${lineProblems.size - 1} more line${lineProblems.size === 2 ? "" : "s"} to fix)` : "";
+    return `Line ${index + 1}${code ? ` · ${code}` : ""}: ${message}${more}`;
+  })();
+
+  /** Fold a duplicate line into the earlier one — its packs and its codes as well as
+   *  its quantity. Summing only the quantity left the packs describing the first line
+   *  alone, and a packed line's quantity IS its packs, so the next edit undid it. */
+  const mergeDuplicate = (fromIndex: number, toIndex: number) => {
+    const fromLine = form.items[fromIndex];
+    const toLine = form.items[toIndex];
+    if (!fromLine || !toLine) return;
+    const packs = mergePacks(toLine.pack_breakdown, fromLine.pack_breakdown);
+    const combinedReceived = packs
+      ? baseOf(packs)
+      : (num(toLine.received_qty) || 0) + (num(fromLine.received_qty) || 0);
+    const combinedAccepted = packs
+      ? combinedReceived
+      : (num(toLine.accepted_qty) || 0) + (num(fromLine.accepted_qty) || 0);
+    const codes = (a?: string[] | null, b?: string[] | null) =>
+      a?.length || b?.length ? [...(a ?? []), ...(b ?? [])] : (a ?? b ?? null);
+    setForm((current) => ({
+      ...current,
+      items: current.items
+        .map((item, idx) => {
+          if (idx === toIndex) {
+            return {
+              ...item,
+              received_qty: combinedReceived as any,
+              accepted_qty: (isGrn ? combinedAccepted : combinedReceived) as any,
+              pack_breakdown: packs ?? item.pack_breakdown,
+              serial_numbers: codes(item.serial_numbers, fromLine.serial_numbers),
+              imei_numbers: codes(item.imei_numbers, fromLine.imei_numbers),
+            };
+          }
+          return item;
+        })
+        .filter((_, idx) => idx !== fromIndex),
+    }));
+  };
+
+  /** The problem on one line, under its item — where the eye already is. */
+  const lineNote = (i: number) => {
+    if (locked || !lineProblems.has(i)) return null;
+    const earlierIdx = duplicateOrigins.get(i);
+    return (
+      <div className="mt-1.5 flex flex-col gap-1 rounded-lg border border-bad/30 bg-bad-bg/60 p-2 text-[11px] leading-snug text-bad">
+        <div className="flex items-start gap-1.5">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-bad" />
+          <span className="font-semibold">{lineProblems.get(i)}</span>
+        </div>
+        {earlierIdx !== undefined && !locked && (
+          <div className="mt-1 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => mergeDuplicate(i, earlierIdx)}
+              className="inline-flex items-center gap-1 rounded bg-bad px-2 py-0.5 text-[11px] font-medium text-white shadow-sm hover:bg-bad/90"
+            >
+              Combine quantity into Line {earlierIdx + 1}
+            </button>
+            <button
+              type="button"
+              onClick={() => set("items", form.items.filter((_, x) => x !== i))}
+              className="text-[11px] font-medium text-bad underline hover:no-underline"
+            >
+              Remove line
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const invalid = {
     warehouse: touched && !form.warehouse_id,
     lines: touched && form.items.length === 0,
@@ -786,6 +1127,14 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     setTouched(true);
     if (!form.warehouse_id) return;
     if (form.items.length === 0) return;
+    if (lineProblems.size > 0) {
+      void alerts.error(
+        !isGrn
+          ? "Two lines are the same goods — same item, batch and packing. Combine or remove one before saving."
+          : "Please resolve line errors before saving."
+      );
+      return;
+    }
     save.mutate();
   };
 
@@ -819,18 +1168,34 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
                 {name ?? (fromConsignment ? "Consignment line" : "PO line")}
               </div>
               <div className="truncate font-mono text-[11px] text-muted">{code ?? "—"}</div>
+              <CombinationTag value={saved ?? l} className="mt-1" />
+              {lineNote(i)}
             </div>
           );
         }
         return (
+          <>
           <Lookup
             name="items"
             load={itemOptions}
             value={l.item_id || ""}
+            isInvalid={lineProblems.has(i)}
+            errorMessage={lineProblems.get(i)}
+            formatOptionLabel={(option, defaultLabel) => {
+              const otherIdx = form.items.findIndex(
+                (item, idx) => idx !== i && item.item_id === option.id
+              );
+              if (otherIdx !== -1) {
+                return `${defaultLabel} (already on line ${otherIdx + 1})`;
+              }
+              return defaultLabel;
+            }}
             onChange={(v, option) => {
               const item = option as ItemOption | undefined;
               patchLine(i, {
                 item_id: v === "" ? 0 : v,
+                ...pickCombination(null),
+                combination_any: false,
                 item_code: item?.code ?? null,
                 item_name: item?.name ?? null,
                 uom_code: item?.uom_code ?? null,
@@ -843,6 +1208,22 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
             }}
             placeholder="Pick an item"
           />
+          {!!l.item_id && !!comboOptions.data?.[String(l.item_id)]?.length && (
+            <div className="mt-2">
+              <CombinationPicker
+                options={comboOptions.data?.[String(l.item_id)]}
+                value={comboFrom(l)}
+                // Off a despatch-note line the server books the supplier's stated
+                // combination whatever is sent, so the screen must not offer a change
+                // the save would quietly undo.
+                locked={locked || !!l.despatch_note_item_id}
+                ariaLabel={`Brand, variant and model for line ${i + 1}`}
+                onChange={(combo) => patchLine(i, combo)}
+              />
+            </div>
+          )}
+          {lineNote(i)}
+          </>
         );
       },
     },
@@ -860,14 +1241,65 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       numeric: true,
       width: "min-w-[10rem] w-40",
       render: (l, i) => (
-        <QtyInput
-          ariaLabel={`Received quantity, line ${i + 1}`}
-          value={l.received_qty}
-          disabled={locked}
-          max={l.po_item_id ? num(l.ordered_qty) : undefined}
-          invalid={touched && blankQty(l.received_qty)}
-          onChange={(v) => patchLine(i, { received_qty: v, accepted_qty: v })}
-        />
+        <div className="space-y-1">
+          {/* Typed even on a packed line (2026-10-21): the packs follow it, inside the
+              line's own hierarchy, and the Serial / IMEI rows are sized off it. */}
+          <QtyInput
+            ariaLabel={`Received quantity, line ${i + 1}`}
+            uom={savedLine(i)?.uom_code ?? l.uom_code}
+            value={l.received_qty}
+            disabled={locked}
+            max={declaredQty(l) ?? (l.po_item_id ? num(l.ordered_qty) : undefined)}
+            invalid={(touched && blankQty(l.received_qty)) || overDeclared(l)}
+            onChange={(v) => {
+              const packs = blankQty(v) ? undefined : packsFor(l, num(v));
+              const hid = l.pack_hierarchy_id ?? packingOf(l)?.hierarchy_id ?? null;
+              // Off no despatch note, the packs the line held before a LOWER count
+              // stay the reference for "Check packages" (the cartons that did not come
+              // are still listed); a higher count is a new reference of its own.
+              const before = l.declared_pack_breakdown?.length ? null
+                : l.expected_pack_breakdown?.length ? l.expected_pack_breakdown : l.pack_breakdown;
+              const keepRef = !!before?.length && num(v) <= baseOf(before);
+              patchLine(i, { received_qty: v, accepted_qty: v,
+                             ...(packs !== undefined
+                               ? { pack_breakdown: packs, pack_hierarchy_id: hid,
+                                   expected_pack_breakdown: keepRef ? before : null }
+                               : {}) });
+            }}
+          />
+          {overDeclared(l) && (
+            <p className="text-right text-[11px] font-medium text-bad">
+              The despatch note sent {fmtQty(declaredQty(l))} — more cannot be received on it.
+            </p>
+          )}
+          {/* The count in packs, the quantity in the item's own unit under it, and
+            * the hierarchy one press away (2026-10-11). */}
+          {isPacked(l) && (
+            <PackQty entries={l.pack_breakdown} qty={l.received_qty}
+                     uom={savedLine(i)?.uom_code ?? l.uom_code}
+                     hierarchies={packable(packOptions.data?.[Number(l.item_id)])}
+                     itemId={Number(l.item_id) || null} align="right" />
+          )}
+          {/* Pack by pack (2026-10-27): which cartons arrived and which came short —
+              the received quantity and the counted packs follow from it. */}
+          {(() => {
+            const ref = referencePacks(l);
+            if (!ref) return null;
+            const packs = expandPacks(ref);
+            const check = checkFrom(packs, l.pack_breakdown);
+            const short = splitByCheck(packs, check).lostQty > 0;
+            return (
+              <button type="button" onClick={() => setPackCheckLine(i)}
+                      title={locked ? "View which packs arrived" : "Mark packs missing or short"}
+                      className={`ml-auto flex min-h-9 w-full items-center justify-end gap-1.5 rounded-lg border px-2 text-[11px] font-semibold transition-colors ${
+                        short ? "border-warn/40 bg-warn/10 text-warn hover:bg-warn/15"
+                          : "border-line text-brand hover:border-brand hover:bg-brand-050"}`}>
+                <Boxes className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                <span className="truncate">{checkSummary(packs, check, "short")}</span>
+              </button>
+            );
+          })()}
+        </div>
       ),
     },
     {
@@ -897,6 +1329,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       render: (l, i) => (
         <QtyInput
           ariaLabel={`Accepted quantity, line ${i + 1}`}
+          uom={savedLine(i)?.uom_code ?? l.uom_code}
           value={l.accepted_qty ?? 0}
           max={num(l.received_qty)}
           disabled={locked || !isGrn}
@@ -977,22 +1410,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         />
       ),
     },
-    {
-      key: "bin",
-      header: "Bin",
-      width: "w-40",
-      hideOnNarrow: true,
-      render: (l, i) => (
-        <Lookup
-          name={`bins-${form.warehouse_id}`}
-          load={(s) => binOptions(form.warehouse_id, s)}
-          value={l.bin_id ?? ""}
-          isDisabled={locked || !isGrn || !form.warehouse_id}
-          onChange={(v) => patchLine(i, { bin_id: v === "" ? null : v })}
-          placeholder="Bin"
-        />
-      ),
-    },
+
     {
       key: "rate",
       header: "Rate",
@@ -1003,50 +1421,53 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         <QtyInput
           ariaLabel={`Rate, line ${i + 1}`}
           value={l.rate ?? 0}
-          step="0.01"
+          decimals={2}
           disabled={locked}
           onChange={(v) => patchLine(i, { rate: rate2(v) })}
         />
       ),
     },
     {
-      key: "imeis",
-      header: "IMEIs",
-      width: "w-28",
-      hideOnNarrow: true,
+      // Serials and IMEIs together, one row per unit in the popup (2026-10-21). They
+      // were two columns opening two lists, and the server pairs position i of one
+      // with position i of the other as the same handset — so two lists typed apart
+      // were one mis-ordered scan from swapping two phones' IMEIs.
+      key: "codes",
+      header: "Serial / IMEI",
+      width: "w-36",
       render: (l, i) => {
-        const captured = l.imei_numbers?.length ?? 0;
-        const required = Math.floor(num(l.received_qty));
-        if (!l.is_imei_tracked) return <span className="text-muted">—</span>;
+        if (!l.is_serial_tracked && !l.is_imei_tracked) {
+          return <span className="text-xs text-muted">Not tracked</span>;
+        }
+        const units = Math.floor(num(l.received_qty));
+        const done = unitsCoded(l);
+        const complete = units > 0 && done >= units;
+        const what = l.is_serial_tracked && l.is_imei_tracked ? "Serial + IMEI"
+          : l.is_imei_tracked ? "IMEI" : "Serial";
         return (
-          <Button variant="ghost" onClick={() => setImeiLine(i)}>
-            <ScanLine className="h-4 w-4" />
-            {captured ? `${captured}/${required}` : `0/${required}`}
-          </Button>
-        );
-      },
-    },
-    {
-      key: "serials",
-      header: "Serials",
-      width: "w-28",
-      hideOnNarrow: true,
-      render: (l, i) => {
-        if (!l.is_serial_tracked) return <span className="text-xs text-muted">—</span>;
-        const captured = l.serial_numbers?.length ?? 0;
-        const required = Math.floor(num(l.received_qty));
-        return (
-          <Button variant="ghost" onClick={() => setSerialLine(i)}>
-            <ScanLine className="h-4 w-4" />
-            {captured || required ? `${captured}/${required}` : "Add"}
-          </Button>
+          <button
+            type="button"
+            onClick={() => setCodesLine(i)}
+            title={`${what} for each unit — ${done} of ${units} captured`}
+            className={`group inline-flex min-h-11 w-full flex-col items-start justify-center rounded-xl border px-2.5 py-1 text-left transition-all active:scale-[0.98] ${
+              complete ? "border-ok/40 bg-ok-bg/60 hover:border-ok"
+                : done > 0 ? "border-warn/40 bg-warn-bg/50 hover:border-warn"
+                : "border-brand/30 bg-brand-050/60 hover:border-brand"}`}
+          >
+            <span className={`inline-flex items-center gap-1 text-xs font-bold tabular ${
+              complete ? "text-ok" : done > 0 ? "text-warn" : "text-brand"}`}>
+              {complete ? <CheckCircle2 className="h-3.5 w-3.5" /> : <ScanLine className="h-3.5 w-3.5" />}
+              {locked ? "View" : complete ? "Done" : "Scan"} {done}/{units}
+            </span>
+            <span className="text-[10px] font-medium text-muted">{what}</span>
+          </button>
         );
       },
     },
   ];
 
   const columns = allColumns.filter((c) =>
-    (isGrn || !GRN_ONLY_LINE_COLUMNS.has(c.key)) && (c.key !== "bin" || binManaged));
+    (isGrn || !GRN_ONLY_LINE_COLUMNS.has(c.key)));
 
   if (editing && isLoading) return <div className="py-16 text-center text-muted">Loading…</div>;
 
@@ -1139,8 +1560,27 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           </>
         }
       />
+      {!olderScope && (
+        <div className="mb-5">
+          <DocumentNumberCard
+            docType={isGrn ? "RECEIPT" : "GATE_ENTRY"} value={scope} exclusive
+            ready={!editing && (!hasSource || !scopeSource.isFetching)}
+            locks={scopeLocks}
+            source={carried?.source_no ? { label: carried.source_no } : null}
+            showInvalid={touched}
+            savedNumber={editing ? (isGrn ? doc?.grn_no : doc?.gate_entry_no ?? doc?.grn_no) ?? null : null}
+            onChange={(patch) => {
+              setScope((current) => ({ ...current, ...patch }));
+              // The receipt's project IS the card's project: one value, kept in step.
+              if ("projectId" in patch) {
+                setForm((f) => ({ ...f, project_id: patch.projectId === "" ? null : patch.projectId ?? null }));
+              }
+            }}
+          />
+        </div>
+      )}
 
-      <ErrorBanner error={save.error ?? gateEntry.error ?? convert.error ?? forward.error ?? consignment.error ?? route.error} />
+      <ErrorBanner error={(!locked && (touched || lineProblems.size > 0) ? problemMessage : null) ?? save.error ?? gateEntry.error ?? convert.error ?? forward.error ?? consignment.error ?? route.error} />
 
       {doc && (
         <MetaCard title="Document">
@@ -1396,6 +1836,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           }
         >
           {invalid.lines && <ErrorBanner error="Add at least one line before saving." />}
+          {!locked && problemMessage && <ErrorBanner error={problemMessage} />}
           <LinesEditor
             rows={form.items}
             columns={columns}
@@ -1408,7 +1849,15 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
               ? undefined
               : () => set("items", [...form.items, emptyLine()])}
             onRemove={locked ? undefined : (i) => set("items", form.items.filter((_, x) => x !== i))}
-            rowTone={(l) => (num(l.rejected_qty) > 0 ? "bg-bad-bg/40" : undefined)}
+            rowTone={(l, i) => (lineProblems.has(i) ? "bg-bad-bg/25 border-l-4 border-l-bad" : num(l.rejected_qty) > 0 ? "bg-bad-bg/40" : undefined)}
+            renderDetail={(l, i) => {
+              const options = packable(packOptions.data?.[l.item_id]);
+              if (!l.item_id || !options.length) return null;
+              return (
+                <ReceiptLinePacking line={l} lineNo={i + 1} hierarchies={options} locked={locked}
+                                    onChange={(patch) => patchLine(i, patch)} />
+              );
+            }}
             empty={fromConsignment
               ? "Pick the incoming consignment above — its lines fill in here."
               : isGrn
@@ -1447,11 +1896,17 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       </Section>
 
       <Section title="Documents" hint="Invoice copy, LR slip, packing list, weighbridge ticket.">
+        {!locked && !canFile && (
+          <p className="mb-3 text-xs text-muted">
+            You can view this entry. Attaching a document needs the receipt filing
+            permission — ask your admin for access.
+          </p>
+        )}
         <AttachmentsPanel
           entityType="RECEIPT"
           entityId={doc?.id}
           category="INWARD"
-          readOnly={locked}
+          readOnly={locked || !canFile}
           onStagedChange={setStagedFiles}
         />
       </Section>
@@ -1461,38 +1916,78 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           its submission raised. Only on a saved document: an unsaved one has no trail. */}
       {doc && <ReceiptLinkedDocuments receipt={doc} />}
 
-      <SerialNumbersModal
-        isOpen={serialLine !== null}
-        onClose={() => setSerialLine(null)}
-        quantity={serialLine === null ? 0 : num(form.items[serialLine]?.received_qty)}
-        initial={serialLine === null ? [] : form.items[serialLine]?.serial_numbers ?? []}
-        itemLabel={
-          serialLine === null
-            ? ""
-            : savedLine(serialLine)?.item_name
-              ?? form.items[serialLine]?.item_name
-              ?? `Line ${serialLine + 1}`
-        }
-        readOnly={locked}
-        onSave={(serials) => serialLine !== null && patchLine(serialLine, { serial_numbers: serials })}
-      />
-
-      <SerialNumbersModal
-        noun="IMEI"
-        isOpen={imeiLine !== null}
-        onClose={() => setImeiLine(null)}
-        quantity={imeiLine === null ? 0 : num(form.items[imeiLine]?.received_qty)}
-        initial={imeiLine === null ? [] : form.items[imeiLine]?.imei_numbers ?? []}
-        itemLabel={
-          imeiLine === null
-            ? ""
-            : savedLine(imeiLine)?.item_name
-              ?? form.items[imeiLine]?.item_name
-              ?? `Line ${imeiLine + 1}`
-        }
-        readOnly={locked}
-        onSave={(imeis) => imeiLine !== null && patchLine(imeiLine, { imei_numbers: imeis })}
-      />
+      {packCheckLine !== null && form.items[packCheckLine] && (() => {
+        const line = form.items[packCheckLine];
+        const ref = referencePacks(line) ?? [];
+        const packs = expandPacks(ref);
+        const index = packCheckLine;
+        const tracked = line.is_serial_tracked || line.is_imei_tracked;
+        return (
+          <PackageCheckModal
+            open
+            mode="receipt"
+            readOnly={locked}
+            packName={packs.find((p) => p.level > 0)?.entry.name ?? "pack"}
+            uom={savedLine(index)?.uom_code ?? line.uom_code}
+            itemLabel={[line.item_code ?? savedLine(index)?.item_code, line.item_name ?? savedLine(index)?.item_name,
+                        line.batch_no ? `batch ${line.batch_no}` : null,
+                        line.declared_pack_breakdown?.length ? "as the despatch note declares" : null]
+              .filter(Boolean).join(" · ")
+              + (tracked ? " — serials / IMEIs are matched to the new count separately" : "")}
+            packages={packs}
+            value={checkFrom(packs, line.pack_breakdown)}
+            onClose={() => setPackCheckLine(null)}
+            onSave={(check) => {
+              const { kept, keptQty } = splitByCheck(packs, check);
+              patchLine(index, {
+                pack_breakdown: kept, received_qty: keptQty as never, accepted_qty: keptQty as never,
+                expected_pack_breakdown: line.declared_pack_breakdown?.length ? null : ref,
+              });
+            }}
+          />
+        );
+      })()}
+      {codesLine !== null && form.items[codesLine] && (() => {
+        const opened = form.items[codesLine];
+        // Every line of the same item: one batch in two packings, or two batches, is
+        // one popup with a tab per line — codes are unique across all of them.
+        const siblings = form.items
+          .map((line, index) => ({ line, index }))
+          .filter(({ line }) => line.item_id === opened.item_id);
+        return (
+          <UnitCodesModal
+            isOpen
+            onClose={() => setCodesLine(null)}
+            readOnly={locked}
+            itemName={savedLine(codesLine)?.item_name ?? opened.item_name ?? `Line ${codesLine + 1}`}
+            itemCode={savedLine(codesLine)?.item_code ?? opened.item_code}
+            uom={savedLine(codesLine)?.uom_code ?? opened.uom_code}
+            trackSerial={!!opened.is_serial_tracked}
+            trackImei={!!opened.is_imei_tracked}
+            focusIndex={codesLine}
+            groups={siblings.map(({ line, index }) => ({
+              index,
+              batchNo: line.batch_no,
+              packLabel: packName(line),
+              qty: num(line.received_qty),
+              serials: line.serial_numbers ?? [],
+              imeis: line.imei_numbers ?? [],
+            }))}
+            onSave={(updates) => setForm((current) => ({
+              ...current,
+              items: current.items.map((line, index) => {
+                const update = updates.find((u) => u.index === index);
+                if (!update) return line;
+                return {
+                  ...line,
+                  ...(update.serial_numbers ? { serial_numbers: update.serial_numbers } : {}),
+                  ...(update.imei_numbers ? { imei_numbers: update.imei_numbers } : {}),
+                };
+              }),
+            }))}
+          />
+        );
+      })()}
 
       <ConfirmModal
         isOpen={confirming === "submit"}

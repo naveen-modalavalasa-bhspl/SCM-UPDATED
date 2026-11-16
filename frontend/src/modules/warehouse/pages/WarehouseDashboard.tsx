@@ -45,7 +45,6 @@ const TILES: Tile[] = [
   { key: "pending_grn", label: "GRN to raise", to: "transactions/grn", icon: PackageCheck, can: "receipt.view" },
   { key: "pending_inspections", label: "Awaiting QC", to: "transactions/quality-inspection", icon: ClipboardCheck, tone: "warn", can: "inspection.view" },
   { key: "pending_putaways", label: "To put away", to: "transactions/putaway", icon: ArrowLeftRight, can: "putaway.view" },
-  { key: "open_picklists", label: "Open fulfilments", to: "transactions/fulfilment", icon: ClipboardCheck, can: "picking.view" },
   { key: "pending_issues", label: "Issues pending", to: "transactions/material-issues", icon: Send, can: "issue.view" },
   { key: "in_transit_dispatches", label: "In transit", to: "transactions/dispatch", icon: Truck, can: "dispatch.view" },
 ];
@@ -55,7 +54,6 @@ const DOC_ROUTE: Record<string, string> = {
   GATE_ENTRY: "transactions/material-inward",
   INSPECTION: "transactions/quality-inspection",
   PUTAWAY: "transactions/putaway",
-  PICKING: "transactions/fulfilment",
   ISSUE: "transactions/material-issues",
   DISPATCH: "transactions/dispatch",
 };

@@ -1,3 +1,4 @@
+import { PackQty } from "@/shared/packing";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
@@ -34,6 +35,7 @@ import type {
   TransportMode, TransportRequest,
 } from "../transportTypes";
 import { TripRouteStrip } from "../components/TripStops";
+import { TransferContextStrip } from "@/modules/warehouse";
 import { legDestination } from "../components/manifestView";
 
 const BLANK = {
@@ -326,6 +328,9 @@ function DispatchOutcome({
           <p className="mt-1 text-sm font-semibold text-ink">
             {doc?.from_warehouse_name || "—"}
           </p>
+          {doc?.from_warehouse_address && (
+            <p className="mt-0.5 text-xs leading-snug text-muted">{doc.from_warehouse_address}</p>
+          )}
         </div>
         <ArrowRight className="mt-6 hidden h-4 w-4 shrink-0 text-muted sm:block" aria-hidden />
         <div className="min-w-0">
@@ -679,6 +684,14 @@ export function DispatchConfirmPage() {
     queryFn: () => consignmentApi.get(id),
     enabled: id > 0 && !isLeg,
   });
+  // STR / STO number, destination, department, project and the person it is issued
+  // to — read off the issue behind the consignment, never retyped (2026-10-29).
+  const { data: transferContext } = useQuery({
+    queryKey: ["lgs-consignment-transfer-context", consignmentId],
+    queryFn: () => consignmentApi.transferContext(id),
+    enabled: id > 0 && !isLeg,
+    retry: false,
+  });
   // Dispatching the same consignment twice raises a second transport request for one
   // physical load. Ask first, and offer the one that exists.
   const { data: links } = useQuery({
@@ -727,7 +740,7 @@ export function DispatchConfirmPage() {
     setCarrierIds([]);
     setPapers({});
     setHandoverPerson("EMPLOYEE");
-    if (next === "COURIER") void dispatchPolicyQuery.refetch();
+    if (next === "COURIER" || next === "THIRD_PARTY") void dispatchPolicyQuery.refetch();
   };
 
   const rule: ModeRule | undefined = useMemo(
@@ -738,6 +751,26 @@ export function DispatchConfirmPage() {
   // driver it travels with. The question is the same one both times — is this one of
   // ours, and what number identifies them — so it is asked once, here.
   const asksPerson = needs("handed_over_by_name") || needs("vehicle_number");
+  // An in-person hand-over is usually collected by the person the goods are issued
+  // to, so their name, employee code and phone come in from the issue (2026-10-29) —
+  // only into EMPTY boxes, and only until somebody types: the person who actually
+  // turns up on the day is the desk's to record.
+  const prefilledHandover = useRef<string | null>(null);
+  useEffect(() => {
+    if (!needs("handed_over_by_name") || !transferContext?.issued_to_name) return;
+    const key = `${mode}:${transferContext.issue_id}`;
+    if (prefilledHandover.current === key) return;
+    prefilledHandover.current = key;
+    setHandoverPerson("EMPLOYEE");
+    setForm((f) => ({
+      ...f,
+      handed_over_by_name: f.handed_over_by_name || transferContext.issued_to_name || "",
+      handed_over_employee_id: f.handed_over_employee_id || transferContext.issued_to_code || "",
+      handed_over_phone: f.handed_over_phone
+        || sanitizePhone(transferContext.issued_to_phone ?? ""),
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, rule, transferContext]);
   // `carriers` is undefined while it loads; only an empty ARRAY means the register is
   // actually empty, so the pointer to Settings never flashes on a slow connection.
   const noPartners = Array.isArray(carriers) && carriers.length === 0;
@@ -928,6 +961,9 @@ export function DispatchConfirmPage() {
   // the form able to satisfy it. Unknown holds the step and says so instead — but only
   // where the policy is what decides, which a raised leg does not need.
   const courierPolicy = dispatchPolicyQuery.data;
+  /** Whether third-party dispatches are sent to vendor portals for quote tendering
+   *  or handled directly at the desk ("Leaves now"). */
+  const thirdPartyIsVendor = courierPolicy?.send_third_party_to_vendor === true;
   /** Which of the two courier flows applies here — the same answer `manualCourier`
    *  gives, without the "is courier the mode right now" half, so the mode tiles can
    *  say what the courier tile would do before it is chosen. */
@@ -972,10 +1008,12 @@ export function DispatchConfirmPage() {
    *  The mirror of the service's `asks_provider_for_price`, and the same reasoning:
    *  courier and third-party both go out to providers for quotes and award one. Only
    *  the manual courier cannot be asked, since a name off a counter receipt has no
-   *  login to send the question to. */
+   *  login to send the question to. And when third-party vendor dispatch is off,
+   *  third-party is settled at the desk without quote requests. */
   const asksForPrice = !manualCourier && (
-    Boolean(rule?.needs_quotes)
-    || (mode === "COURIER" && !courierPolicyUnknown)
+    (mode === "COURIER" && !courierPolicyUnknown)
+    || (mode === "THIRD_PARTY" && thirdPartyIsVendor)
+    || (mode !== "COURIER" && mode !== "THIRD_PARTY" && Boolean(rule?.needs_quotes))
   );
   const tenderedMode = asksForPrice;
 
@@ -1326,6 +1364,8 @@ export function DispatchConfirmPage() {
           tell a slow request from a leg it cannot see. */}
       <ErrorBanner error={legError} />
 
+      {transferContext && <TransferContextStrip context={transferContext} />}
+
       {/* The form and the rail. Below `xl` the rail stacks under the form, which puts
           the load, the choice and the press at the end of the page, where a phone
           expects them. */}
@@ -1449,23 +1489,29 @@ export function DispatchConfirmPage() {
                   options={(modes ?? [])
                     .filter((option) => typeAllowed(option.value))
                     .map((option) => {
-                      const optionTendered = option.value === "COURIER"
+                      const isCourier = option.value === "COURIER";
+                      const isThirdParty = option.value === "THIRD_PARTY";
+                      const optionTendered = isCourier
                         ? !courierIsManual
-                        : option.needs_quotes;
+                        : isThirdParty
+                          ? thirdPartyIsVendor
+                          : option.needs_quotes;
                       return {
                         value: option.value,
                         label: modeLabel(option.value),
-                        help: option.value === "COURIER"
+                        help: isCourier
                           ? optionTendered
                             ? "Invite courier providers, compare their quotes and award the shipment."
                             : "Record the courier name at the dispatch desk."
-                          : oneLine(option.help),
+                          : isThirdParty
+                            ? optionTendered
+                              ? "Invite carriers, compare their quotes and award the shipment."
+                              : "Dispatch directly with carrier details recorded at the desk."
+                            : oneLine(option.help),
                         icon: MODE_ICON[option.value],
                         // What the press does. A tender goes out to several for
-                        // prices. Manual courier and the modes we move ourselves do not.
-                        badge: option.value === "COURIER" && courierIsManual
-                          ? "Leaves now"
-                          : optionTendered ? "Tender" : "Leaves now",
+                        // prices. Direct bookings and the modes we move ourselves do not.
+                        badge: optionTendered ? "Tender" : "Leaves now",
                       };
                     })}
                 />
@@ -1504,7 +1550,9 @@ export function DispatchConfirmPage() {
                   + "the LR or docket are recorded here. Approval is followed by "
                   + "final dispatch at the desk."
                 : rule?.needs_carrier
-                ? "The provider fills in the journey details when they acknowledge."
+                ? tenderedMode
+                  ? "The provider fills in the journey details when they acknowledge."
+                  : "Recorded at the dispatch desk for direct dispatch."
                 : `What a ${modeLabel(mode).toLowerCase()} leg records.`}
             >
               <div className="grid gap-4 lg:grid-cols-2">
@@ -1521,7 +1569,9 @@ export function DispatchConfirmPage() {
                       hint={manualCourier ? "Recorded at the dispatch desk"
                         : tenderedMode
                           ? "Everyone who should price this job"
-                          : "Asked for their rate before anything is booked"}
+                          : mode === "COURIER"
+                            ? "Asked for their rate before anything is booked"
+                            : "Carrier selected for direct dispatch"}
                     />
                     <div className="col-span-full">
                       {courierPolicyUnknown ? (
@@ -1557,11 +1607,13 @@ export function DispatchConfirmPage() {
                         </Field>
                       ) : (
                       <Field
-                        label={tenderedMode ? "Logistics partners" : "Courier"}
+                        label={tenderedMode ? "Logistics partners" : mode === "COURIER" ? "Courier" : "Carrier"}
                         required
                         hint={tenderedMode
                           ? "Prices come back side by side on Provider Selection."
-                          : "Their price comes back on Provider Selection, where it is accepted."}
+                          : mode === "COURIER"
+                            ? "Their price comes back on Provider Selection, where it is accepted."
+                            : "Selected carrier for direct dispatch."}
                       >
                         <Select
                           value={tenderedMode ? "" : (carrierIds[0] ? String(carrierIds[0]) : "")}
@@ -1585,7 +1637,9 @@ export function DispatchConfirmPage() {
                             ? "No logistics vendors registered yet"
                             : tenderedMode
                               ? "Add a provider to the tender"
-                              : "Select the provider"}
+                              : mode === "COURIER"
+                                ? "Select the provider"
+                                : "Select the carrier"}
                           ariaLabel="Provider"
                         />
 
@@ -1805,6 +1859,13 @@ export function DispatchConfirmPage() {
                       title="Who takes custody"
                       hint="A name alone identifies nobody"
                     />
+                    {transferContext?.issued_to_name && (
+                      <p className="col-span-full -mt-1 inline-flex items-center gap-1.5 rounded-lg bg-info-bg px-3 py-2 text-xs text-info">
+                        <IdCard className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                        Filled from {transferContext.issue_no}: issued to {transferContext.issued_to_name}.
+                        Change it if somebody else collects.
+                      </p>
+                    )}
                     {personChoice("Who hands it over")}
 
                     <Field label="Handed over by"
@@ -1859,6 +1920,23 @@ export function DispatchConfirmPage() {
                     value={load(subject.packages, subject.weight_kg)} />
                   <Fact icon={<CalendarDays className="h-4 w-4" />}
                     label={subject.dateLabel} value={fmtDate(subject.date)} />
+                  {/* The packs on the vehicle, per item (2026-10-22). */}
+                  {!!doc?.line_packs?.length && (
+                    <div className="space-y-2 border-t border-line/70 pt-3.5">
+                      <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">
+                        Packs
+                      </span>
+                      {doc.line_packs.map((row) => (
+                        <div key={row.issue_item_id} className="rounded-xl border border-line/70 bg-content2/30 px-3 py-2">
+                          <div className="truncate text-xs font-semibold text-ink">
+                            {row.item_name ?? row.item_code}
+                          </div>
+                          <PackQty entries={row.pack_breakdown} qty={row.quantity}
+                                   uom={row.uom_code} itemId={row.item_id} className="mt-1" />
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </>
               ) : (
                 <p className="text-sm text-muted">
@@ -1939,7 +2017,7 @@ export function DispatchConfirmPage() {
                           // and saying "for acknowledgement" pointed the desk at a
                           // portal that will never reply.
                           ? "Ready to send for approval."
-                          : "Ready for final dispatch in Shipments."}
+                          : "Ready for direct dispatch."}
                     </span>
                   </p>
                 )}

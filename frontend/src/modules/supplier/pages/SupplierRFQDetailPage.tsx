@@ -3,7 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, History } from "lucide-react";
 import {
-  Card, ConfirmModal, ErrorBanner, Field, Input, StatusPill, Textarea, useToast,
+  Card, ConfirmModal, DocumentScopeStrip, ErrorBanner, Field, Input, StatusPill, Textarea, useToast,
 } from "@/shared/components";
 import { Button } from "@/modules/procurement/components/ActionButton";
 import { fmtDate, todayIst } from "@/shared/datetime";
@@ -12,12 +12,26 @@ import { supplierApi } from "@/modules/procurement/api";
 import { QuotationChat } from "@/modules/procurement/components/QuotationChat";
 import { QuotePriceTrail } from "@/modules/procurement/components/QuotePriceTrail";
 import type { QuoteChangeRequest, QuoteOtpSent, QuoteSubmit } from "@/modules/procurement/types";
+import {
+  CombinationPicker, SUPPLIER_COMBINATIONS, askedLabel, combinationKey, combinationLabel,
+  comboFrom, comboPayload, useCombinationOptions,
+  type CombinationValue,
+} from "@/shared/combination";
+import { guardNumberKeys } from "@/shared/quantity";
+import { QuantityInput } from "@/shared/components/QuantityInput";
+import { useUomDecimals } from "@/shared/hooks/useUomDecimals";
 
 const money = (n: number) =>
   `₹${n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 interface QuoteLine {
   rfq_item_id: number;
+  item_id: number;
+  /** The brand / variant / model offered — the buyer's ask, or another (2026-10-23). */
+  combo?: CombinationValue;
+  /** What the buyer asked for on the RFQ — the warning compares against it. */
+  asked?: CombinationValue;
+  askedLabel?: string;
   item_name: string;
   item_code: string;
   uom_code: string;
@@ -28,9 +42,6 @@ interface QuoteLine {
   required_date?: string | null;
   rate: string;
   discount_percent: string;
-  /** The whole GST rate. Which half applies — CGST + SGST or IGST — is decided by the
-   *  two GSTINs and only changes how the tax is described, not how much it is. */
-  gst_rate: string;
   delivery_days: string;
   hsn_code?: string | null;
   /** The rate the item's HSN notifies, or null where the item has no HSN. */
@@ -44,12 +55,13 @@ interface QuoteLine {
  * the browser's arithmetic is never trusted into the database. A vendor may re-submit
  * until the deadline; each save bumps `revision_count`, which the buyer can see.
  *
- * The tax box is not a free choice: the rate is capped by the rate notified for the
- * item's HSN. Whether that rate is charged as CGST + SGST or as IGST is decided by the
- * two GSTINs, so the vendor types ONE figure and the server enforces the ceiling again
- * regardless of what the browser sent.
+ * GST is not a vendor choice (SCM_0062): it is the rate the item's HSN notifies,
+ * split into CGST + SGST or IGST by the two GSTINs' states — law, not negotiation.
+ * Removing the edit removed the one way a mistyped number could refuse the whole
+ * submission; what shows here is read-only, the same figure the server computes.
  */
 export function SupplierRFQDetailPage() {
+  const uomDecimals = useUomDecimals();
   const { id } = useParams();
   const nav = useNavigate();
   const toast = useToast();
@@ -57,6 +69,8 @@ export function SupplierRFQDetailPage() {
   const rfqId = Number(id);
 
   const [lines, setLines] = useState<QuoteLine[]>([]);
+  const comboOptions = useCombinationOptions(lines.map((line) => line.item_id),
+                                             SUPPLIER_COMBINATIONS);
   const [header, setHeader] = useState({
     vendor_ref_no: "", valid_till: "", expected_delivery_date: "",
     payment_terms: "", freight_amount: "", discount_amount: "", remarks: "",
@@ -66,6 +80,8 @@ export function SupplierRFQDetailPage() {
     queryKey: ["supplier-rfq", id],
     queryFn: () => supplierApi.rfq(rfqId),
   });
+  // The buyer's switch on the RFQ: no freight field unless they asked for it.
+  const freightAsked = Boolean(rfq?.freight_required);
 
   const { data: quote, isLoading } = useQuery({
     queryKey: ["supplier-quote", id],
@@ -100,6 +116,14 @@ export function SupplierRFQDetailPage() {
     });
     setLines(quote.items.map((item) => ({
       rfq_item_id: item.rfq_item_id ?? 0,
+      item_id: Number(item.item_id),
+      combo: comboFrom(item),
+      asked: item.requested_brand_id ? {
+        brand_id: item.requested_brand_id, variant_id: item.requested_variant_id || null,
+        model_id: item.requested_model_id || null, brand_name: item.requested_brand_name ?? null,
+        variant_name: item.requested_variant_name ?? null, model_name: item.requested_model_name ?? null,
+      } : undefined,
+      askedLabel: askedLabel(item),
       item_name: item.item_name ?? `Item ${item.item_id}`,
       item_code: item.item_code ?? "—",
       uom_code: item.uom_code ?? "",
@@ -108,10 +132,6 @@ export function SupplierRFQDetailPage() {
       required_date: item.required_date,
       rate: item.rate ? String(item.rate) : "",
       discount_percent: item.discount_percent ? String(item.discount_percent) : "",
-      // Opens at the notified rate. That is what is normally charged, so the vendor
-      // types nothing in the usual case and can only bring it down from there.
-      gst_rate: (item.tax_percent || item.max_gst_rate)
-        ? String(item.tax_percent || item.max_gst_rate) : "",
       delivery_days: item.delivery_days == null ? "" : String(item.delivery_days),
       hsn_code: item.hsn_code,
       max_gst: item.max_gst_rate ?? null,
@@ -122,16 +142,17 @@ export function SupplierRFQDetailPage() {
   // DESCRIBED (CGST + SGST, or IGST), never how much it is.
   const interstate = quote?.tax_region !== "INTRA";
 
-  /** What this line is taxed at. One rate, whichever route the goods travel. */
-  const taxRate = (line: QuoteLine) => Number(line.gst_rate || 0);
+  /** What this line is taxed at — the item's own HSN-notified rate, never a figure
+   *  the vendor chose. Zero where the item has no HSN. */
+  const taxRate = (line: QuoteLine) => Number(line.max_gst ?? 0);
 
-  /** The ceiling this line may quote up to, or null where the item has no HSN. */
-  const ceiling = (line: QuoteLine) => line.max_gst;
-
-  const overCeiling = lines.filter((line) => {
-    const limit = ceiling(line);
-    return limit != null && taxRate(line) > limit + 1e-9;
-  });
+  /** CGST+SGST within a state, IGST across one — the split, for display only. */
+  const gstSplitLabel = (line: QuoteLine) => {
+    const rate = taxRate(line);
+    return interstate
+      ? `IGST ${rate}%`
+      : `CGST ${rate / 2}% + SGST ${rate / 2}%`;
+  };
 
   /** The starred answers this quotation is still missing.
    *
@@ -163,9 +184,9 @@ export function SupplierRFQDetailPage() {
       tax += (net * taxRate(line)) / 100;
     }
     const sub = sumNet - Number(header.discount_amount || 0);
-    const grand = sub + tax + Number(header.freight_amount || 0);
+    const grand = sub + tax + (freightAsked ? Number(header.freight_amount || 0) : 0);
     return { sub, tax, grand };
-  }, [lines, interstate, header.freight_amount, header.discount_amount]);
+  }, [lines, interstate, header.freight_amount, header.discount_amount, freightAsked]);
 
   const save = useMutation({
     mutationFn: () => {
@@ -175,11 +196,12 @@ export function SupplierRFQDetailPage() {
         valid_till: header.valid_till || null,
         expected_delivery_date: header.expected_delivery_date || null,
         payment_terms: header.payment_terms || null,
-        freight_amount: Number(header.freight_amount || 0),
+        freight_amount: freightAsked ? Number(header.freight_amount || 0) : 0,
         discount_amount: Number(header.discount_amount || 0),
         remarks: header.remarks || null,
-        // One GST rate per line. The server caps it at the HSN's notified rate and
-        // decides which half of it applies from the two GSTINs.
+        // Always the HSN's notified rate (SCM_0062) — the server re-derives and
+        // caps it the same way regardless of what is sent, so this is read-only
+        // here too, not a value the vendor could still override.
         lines: lines.map((line) => ({
           rfq_item_id: line.rfq_item_id,
           quantity: Number(line.quantity || 0),
@@ -187,6 +209,7 @@ export function SupplierRFQDetailPage() {
           discount_percent: Number(line.discount_percent || 0),
           tax_percent: taxRate(line),
           delivery_days: line.delivery_days ? Number(line.delivery_days) : null,
+          ...comboPayload(line.combo),
         })),
       };
       return supplierApi.submitQuotation(rfqId, payload);
@@ -240,7 +263,20 @@ export function SupplierRFQDetailPage() {
   const [decideNote, setDecideNote] = useState("");
   const [decide, setDecide] = useState<"ACCEPT" | "DECLINE" | null>(null);
   const [counterMode, setCounterMode] = useState(false);
-  const [counterEdits, setCounterEdits] = useState<Record<number, { qty: string; rate: string; discount: string }>>({});
+  const [counterEdits, setCounterEdits] = useState<Record<number, { qty: string; rate: string; discount: string; note?: string }>>({});
+  /** What the RFQ asked for on a quotation line. A counter may offer more, but only
+   *  with a reason on that line (2026-11-11). The server refuses the same. */
+  const rfqAsked = (quotationItemId: number): number | null => {
+    const item = quote?.items.find((row) => row.id === quotationItemId);
+    const asked = item?.requested_quantity;
+    return asked == null ? null : Number(asked);
+  };
+  const counterOver = (quotationItemId: number, qty: string) => {
+    const asked = rfqAsked(quotationItemId);
+    return asked != null && qty.trim() !== "" && Number(qty) > asked;
+  };
+  // The brand the supplier answers with (2026-10-26) — the buyer's ask by default.
+  const [counterCombos, setCounterCombos] = useState<Record<number, CombinationValue | undefined>>({});
 
   useEffect(() => {
     if (openCr) {
@@ -303,6 +339,8 @@ export function SupplierRFQDetailPage() {
       </div>
 
       <ErrorBanner error={rfqError ?? save.error} />
+
+      {quote && <DocumentScopeStrip doc={quote} number={quote.quotation_no} className="mb-4" />}
 
       {rfq && (
         <Card className="mb-6 p-6 border-0 shadow-lg ring-1 ring-black/5 bg-gradient-to-r from-sky-50 to-indigo-50">
@@ -387,20 +425,77 @@ export function SupplierRFQDetailPage() {
                         {line.item_name ?? `Item ${line.item_id}`}
                         <span className="ml-2 text-muted">Original: Qty {line.current_quantity} @ ₹{line.current_rate} | Buyer Asked: Qty {line.proposed_quantity} @ ₹{line.proposed_rate}</span>
                       </div>
+                      {(line.proposed_combination || line.current_combination) && (
+                        <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px]">
+                          <span className="text-muted">Brand quoted: <b className="text-ink">{line.current_combination ?? "—"}</b></span>
+                          {line.proposed_combination && (
+                            <span className="rounded-md bg-brand/10 px-2 py-0.5 font-semibold text-brand">
+                              Buyer asks for {line.proposed_combination}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                      {!!line.item_id && !!comboOptions.data?.[String(line.item_id)]?.length && (() => {
+                        const current: CombinationValue | undefined = line.current_brand_id ? {
+                          brand_id: line.current_brand_id, variant_id: line.current_variant_id || null,
+                          model_id: line.current_model_id || null } : undefined;
+                        const asked: CombinationValue | undefined = line.proposed_brand_id ? {
+                          brand_id: line.proposed_brand_id, variant_id: line.proposed_variant_id || null,
+                          model_id: line.proposed_model_id || null } : undefined;
+                        const value = counterCombos[line.quotation_item_id] ?? asked ?? current;
+                        return (
+                          <div className="mt-2 max-w-md">
+                            <label className="block text-[11px] text-muted">Counter brand · variant · model</label>
+                            <CombinationPicker
+                              options={comboOptions.data?.[String(line.item_id)]}
+                              value={value}
+                              ariaLabel={`Brand to counter with on ${line.item_name ?? "this line"}`}
+                              onChange={(combo) => setCounterCombos({ ...counterCombos, [line.quotation_item_id]: combo })}
+                            />
+                            {asked && value?.brand_id && combinationKey(value) !== combinationKey(asked) && (
+                              <div className="mt-1 rounded-md border border-warn/40 bg-warn-bg px-2 py-1 text-[11px] text-warn">
+                                ⚠ Not the {line.proposed_combination} the buyer asked for — they will see the change.
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
                       <div className="mt-2 grid grid-cols-1 sm:grid-cols-3 gap-2">
                         <div>
                           <label className="block text-[11px] text-muted">Counter Quantity</label>
-                          <input
-                            type="number" min="0" step="0.001"
-                            value={edit.qty}
-                            onChange={(e) => setCounterEdits({ ...counterEdits, [line.quotation_item_id]: { ...edit, qty: e.target.value } })}
-                            className="h-9 w-full rounded-md border border-line bg-white px-2 text-xs text-ink outline-none focus:border-brand"
-                          />
+                            <QuantityInput
+                              decimals={uomDecimals(line.uom_code)} min={0}
+                              value={edit.qty}
+                              data-uom={line.uom_code ?? ""}
+                              onChange={(raw) => setCounterEdits({ ...counterEdits, [line.quotation_item_id]: { ...edit, qty: raw } })}
+                              className={`h-9 w-full rounded-md border bg-white px-2 text-xs text-ink outline-none ${
+                                counterOver(line.quotation_item_id, edit.qty)
+                                  ? "border-danger focus:border-danger" : "border-line focus:border-brand"}`}
+                            />
+                          {rfqAsked(line.quotation_item_id) != null && (
+                            <p className={`mt-1 text-[10px] ${counterOver(line.quotation_item_id, edit.qty) ? "font-semibold text-warn" : "text-muted"}`}>
+                              {counterOver(line.quotation_item_id, edit.qty)
+                                ? `More than the ${rfqAsked(line.quotation_item_id)} the RFQ asked for — say why below`
+                                : `The RFQ asked for ${rfqAsked(line.quotation_item_id)} · more needs a reason`}
+                            </p>
+                          )}
+                          {counterOver(line.quotation_item_id, edit.qty) && (
+                            <input
+                              type="text"
+                              value={edit.note ?? line.note ?? ""}
+                              onChange={(e) => setCounterEdits({ ...counterEdits, [line.quotation_item_id]: { ...edit, note: e.target.value } })}
+                              placeholder="Reason for the higher quantity (required)"
+                              aria-label="Reason for the higher quantity"
+                              className={`mt-1 h-9 w-full rounded-md border bg-white px-2 text-xs text-ink outline-none ${
+                                (edit.note ?? line.note ?? "").trim()
+                                  ? "border-line focus:border-brand" : "border-danger focus:border-danger"}`}
+                            />
+                          )}
                         </div>
                         <div>
                           <label className="block text-[11px] text-muted">Counter Rate (₹)</label>
                           <input
-                            type="number" min="0" step="0.01"
+                            type="number" onKeyDown={guardNumberKeys} min="0" step="0.01"
                             value={edit.rate}
                             onChange={(e) => setCounterEdits({ ...counterEdits, [line.quotation_item_id]: { ...edit, rate: e.target.value } })}
                             className="h-9 w-full rounded-md border border-line bg-white px-2 text-xs text-ink outline-none focus:border-brand"
@@ -409,7 +504,7 @@ export function SupplierRFQDetailPage() {
                         <div>
                           <label className="block text-[11px] text-muted">Counter Discount %</label>
                           <input
-                            type="number" min="0" max="100" step="0.01"
+                            type="number" onKeyDown={guardNumberKeys} min="0" max="100" step="0.01"
                             value={edit.discount}
                             onChange={(e) => setCounterEdits({ ...counterEdits, [line.quotation_item_id]: { ...edit, discount: e.target.value } })}
                             className="h-9 w-full rounded-md border border-line bg-white px-2 text-xs text-ink outline-none focus:border-brand"
@@ -442,15 +537,27 @@ export function SupplierRFQDetailPage() {
                 </div>
                 <Button
                   className="bg-brand text-white hover:bg-brand/90"
-                  disabled={answerCr.isPending || otpCode.trim().length < 5}
+                  disabled={answerCr.isPending || otpCode.trim().length < 5
+                    || openCr.lines.some((l) => counterOver(l.quotation_item_id,
+                      counterEdits[l.quotation_item_id]?.qty ?? String(l.proposed_quantity))
+                      && !(counterEdits[l.quotation_item_id]?.note ?? l.note ?? "").trim())}
                   onClick={() => {
                     const counterLinesPayload = openCr.lines.map((l) => {
                       const ed = counterEdits[l.quotation_item_id];
+                      // The brand answered with: picked, else the buyer's ask, else kept.
+                      const combo = counterCombos[l.quotation_item_id]
+                        ?? (l.proposed_brand_id ? { brand_id: l.proposed_brand_id,
+                          variant_id: l.proposed_variant_id || null, model_id: l.proposed_model_id || null }
+                          : undefined);
                       return {
                         quotation_item_id: l.quotation_item_id,
                         proposed_quantity: Number(ed?.qty ?? l.proposed_quantity),
                         proposed_rate: Number(ed?.rate ?? l.proposed_rate),
                         proposed_discount_percent: Number(ed?.discount ?? l.proposed_discount_percent),
+                        // The reason for a quantity above the RFQ's: the supplier's own,
+                        // else the buyer's on that line (2026-11-11).
+                        note: (ed?.note ?? l.note ?? "").trim() || undefined,
+                        ...comboPayload(combo),
                       };
                     });
                     answerCr.mutate({
@@ -499,6 +606,36 @@ export function SupplierRFQDetailPage() {
                       </span>
                       {line.note && <span className="text-muted">Note: {line.note}</span>}
                     </div>
+                    {/* The brand (2026-10-26): what the RFQ asked for, what is quoted,
+                        and — when this request names one — the brand asked for now. */}
+                    {(() => {
+                      const quoted = quote?.items.find((i) => i.id === line.quotation_item_id);
+                      const rfqAsked = askedLabel(quoted);
+                      const current = line.current_combination ?? (combinationLabel(quoted) || null);
+                      if (!rfqAsked && !current && !line.proposed_combination) return null;
+                      const changing = !!line.proposed_combination && line.proposed_combination !== current;
+                      return (
+                        <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+                          {rfqAsked && (
+                            <span className="text-muted">
+                              RFQ asked: <b className="text-ink">{rfqAsked}</b>
+                            </span>
+                          )}
+                          <span className="text-muted">
+                            Brand: {changing
+                              ? <><span className="line-through">{current ?? "—"}</span>{" "}
+                                  <b className="text-brand">{line.proposed_combination}</b>
+                                  <span className="ml-1 rounded bg-brand/10 px-1.5 py-0.5 text-[10px] font-semibold text-brand">buyer asks</span></>
+                              : <b className={quoted?.brand_changed ? "text-warn" : "text-ink"}>{current ?? "—"}</b>}
+                          </span>
+                          {!changing && quoted?.brand_changed && (
+                            <span className="rounded bg-warn-bg px-1.5 py-0.5 text-[10px] font-semibold text-warn">
+                              differs from the RFQ
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
                 );
               })}
@@ -625,8 +762,6 @@ export function SupplierRFQDetailPage() {
           lines.map((line, index) => {
             const gross = Number(line.quantity || 0) * Number(line.rate || 0);
             const net = gross - (gross * Number(line.discount_percent || 0)) / 100;
-            const limit = ceiling(line);
-            const over = limit != null && taxRate(line) > limit + 1e-9;
             const short = Number(line.quantity || 0) < line.requested;
             const taxed = net + (net * taxRate(line)) / 100;
 
@@ -654,6 +789,35 @@ export function SupplierRFQDetailPage() {
                     {line.hsn_code ? ` · HSN ${line.hsn_code}` : ""}
                   </div>
                 </div>
+                {!!comboOptions.data?.[String(line.item_id)]?.length && (
+                  <div className="mb-3 max-w-md">
+                    <Field label="Brand · variant · model">
+                      <CombinationPicker
+                        options={comboOptions.data?.[String(line.item_id)]}
+                        value={line.combo}
+                        locked={!open}
+                        ariaLabel={`Brand, variant and model for ${line.item_name}`}
+                        onChange={(combo) => set(index, { combo })}
+                      />
+                    </Field>
+                    {line.askedLabel && (
+                      <p className="mt-1 text-[11px] text-muted">Buyer asked for <b className="text-ink">{line.askedLabel}</b></p>
+                    )}
+                    {/* Another brand than the buyer asked for (2026-10-26): allowed, and
+                        said out loud — the buyer sees the change on every screen. */}
+                    {line.asked?.brand_id && line.combo?.brand_id
+                      && combinationKey(line.combo) !== combinationKey(line.asked) && (
+                      <div className="mt-2 flex items-start gap-2 rounded-lg border border-warn/40 bg-warn-bg px-3 py-2 text-xs text-warn">
+                        <span aria-hidden>⚠</span>
+                        <span>
+                          <b>You are quoting {combinationLabel(line.combo)}</b>, not the {line.askedLabel} the
+                          buyer asked for. The buyer will see this as a brand change, and may ask you to quote
+                          the requested brand instead.
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-6">
                   {/* Short is an ordinary answer — say what you can actually supply. More
                     * than was asked for is refused by the server: a quotation answers a
@@ -665,6 +829,7 @@ export function SupplierRFQDetailPage() {
                     <Input
                       type="number" min="0" step="0.001" max={line.requested}
                       value={line.quantity} disabled={!open}
+                      data-uom={line.uom_code ?? ""}
                       onChange={(e) => set(index, { quantity: e.target.value })}
                     />
                   </Field>
@@ -682,18 +847,14 @@ export function SupplierRFQDetailPage() {
                     />
                   </Field>
 
-                  {/* One rate. Which half of it applies is the two GSTINs' business, not
-                    * the vendor's, so there is a single box rather than one per half. */}
-                  <Field
-                    label="GST %"
-                    hint={line.max_gst != null ? `Up to ${line.max_gst}%` : undefined}
-                  >
-                    <Input
-                      type="number" min="0" step="0.01"
-                      max={line.max_gst ?? undefined}
-                      value={line.gst_rate} disabled={!open}
-                      onChange={(e) => set(index, { gst_rate: e.target.value })}
-                    />
+                  {/* SCM_0062: GST is the HSN's notified rate, not a vendor choice — shown
+                    * as the split the two GSTINs decide, read-only. A mistyped number
+                    * here used to be the one way a submission could come back refused
+                    * over a figure the vendor never actually needed to touch. */}
+                  <Field label="GST">
+                    <div className="flex h-11 items-center rounded-lg border border-line bg-content2/50 px-3 text-sm font-medium text-body">
+                      {gstSplitLabel(line)}
+                    </div>
                   </Field>
 
                   <div className="flex items-end pb-2">
@@ -706,13 +867,6 @@ export function SupplierRFQDetailPage() {
                     </div>
                   </div>
                 </div>
-                {over && (
-                  <p className="mt-2 text-xs text-danger">
-                    Above the {limit}% notified for
-                    {line.hsn_code ? ` HSN ${line.hsn_code}` : " this item"}. Quote at or
-                    below it — the submission will be refused otherwise.
-                  </p>
-                )}
               </div>
             );
           })
@@ -740,13 +894,16 @@ export function SupplierRFQDetailPage() {
             />
           </Field>
 
-          <Field label="Freight">
-            <Input
-              type="number" min="0" step="0.01" value={header.freight_amount} disabled={!open}
-              onChange={(e) => setHeader({ ...header, freight_amount: e.target.value })}
-            />
-          </Field>
-          <Field label="Overall discount">
+          {/* Only when the buyer asked for freight on this RFQ. */}
+          {freightAsked && (
+            <Field label="Freight" hint="The buyer asked for freight on this RFQ">
+              <Input
+                type="number" min="0" step="0.01" value={header.freight_amount} disabled={!open}
+                onChange={(e) => setHeader({ ...header, freight_amount: e.target.value })}
+              />
+            </Field>
+          )}
+          <Field label="Overall discount (amount)" hint="A flat amount off the total, not a percentage">
             <Input
               type="number" min="0" step="0.01" value={header.discount_amount} disabled={!open}
               onChange={(e) => setHeader({ ...header, discount_amount: e.target.value })}
@@ -776,13 +933,6 @@ export function SupplierRFQDetailPage() {
             <dd className="mt-1 font-semibold text-ink">{money(totals.grand)}</dd>
           </div>
         </dl>
-
-        {open && overCeiling.length > 0 && (
-          <p className="rounded-lg bg-danger/10 px-3 py-2 text-xs text-danger">
-            {overCeiling.length} line{overCeiling.length === 1 ? "" : "s"} quote more tax
-            than the HSN allows. Bring them down to submit.
-          </p>
-        )}
 
         {open && gaps.length > 0 && (
           <p className="rounded-lg bg-danger/10 px-3 py-2 text-xs text-danger">
@@ -854,7 +1004,7 @@ export function SupplierRFQDetailPage() {
         {open && !openCr && (
           <button
             className="w-full sm:w-auto rounded-xl bg-gradient-to-r from-brand to-brand/90 px-8 py-3.5 text-base font-bold text-white shadow-xl transition-all hover:scale-105 hover:shadow-2xl hover:from-brand/90 hover:to-brand focus:outline-none focus:ring-4 focus:ring-brand/30 disabled:opacity-40 disabled:pointer-events-none disabled:transform-none"
-            disabled={save.isPending || !lines.length || overCeiling.length > 0
+            disabled={save.isPending || !lines.length
               || gaps.length > 0 || otpCode.trim().length < 5}
             onClick={() => save.mutate()}
           >

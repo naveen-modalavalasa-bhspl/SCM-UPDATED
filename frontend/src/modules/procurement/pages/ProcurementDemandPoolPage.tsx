@@ -18,6 +18,19 @@ const STAGE_TONE: Record<string, { bg: string; text: string; border: string }> =
   success: { bg: "#d1fae5", text: "#065f46", border: "#a7f3d0" },
 };
 
+/** Each document a pool row names, what it is called and where it opens. */
+const DOC_KIND: Record<string, { label: string; path: (id: number) => string }> = {
+  MR: { label: "MR", path: (id) => `/inventory/material-requests/${id}` },
+  REQUISITION: { label: "Requisition", path: (id) => `/procurement/requisitions/${id}` },
+  CONSOLIDATION: { label: "Requisition", path: (id) => `/procurement/requisitions/${id}` },
+  RFQ: { label: "Requisition", path: (id) => `/procurement/requisitions/${id}` },
+  PO: { label: "PO", path: (id) => `/pos/${id}` },
+};
+
+/** The part of a document number a person reads: BHS/104/2026-27/WHI0023 → WHI0023.
+ *  The full number is in the chip's tooltip and in the export. */
+const docShort = (no?: string | null) => (no ? no.split("/").pop() || no : null);
+
 function stageStyle(tone: string) {
   return STAGE_TONE[tone] ?? STAGE_TONE.neutral;
 }
@@ -99,16 +112,21 @@ function SourceRow({
       </td>
       <td className="py-2.5 px-3">
         <div className="flex gap-1.5 flex-wrap">
-          {source.docs.slice(0, 3).map((doc, i) => (
-            <button
-              key={i}
-              type="button"
-              onClick={() => nav(meta?.deep_link ?? "#")}
-              className="bg-blue-50 hover:bg-blue-100 border border-blue-200 text-blue-700 rounded px-2 py-0.5 text-[11px] font-medium transition-colors"
-            >
-              {doc.kind} #{doc.id}
-            </button>
-          ))}
+          {source.docs.map((doc, i) => {
+            const known = DOC_KIND[doc.kind];
+            return (
+              <button
+                key={`${doc.kind}-${doc.id}-${i}`}
+                type="button"
+                title={`${known?.label ?? doc.kind} ${doc.no ?? ""} · ${doc.status.replace(/_/g, " ").toLowerCase()} · ${doc.qty}`}
+                onClick={() => nav(known ? known.path(doc.id) : meta?.deep_link ?? "#")}
+                className="group inline-flex items-center gap-1 rounded-md border border-blue-200 bg-blue-50 px-2 py-0.5 text-[11px] text-blue-800 transition-colors hover:border-blue-300 hover:bg-blue-100"
+              >
+                <span className="font-semibold uppercase tracking-wide text-blue-600/80">{known?.label ?? doc.kind}</span>
+                <span className="font-mono font-semibold">{docShort(doc.no) ?? `#${doc.id}`}</span>
+              </button>
+            );
+          })}
         </div>
       </td>
     </tr>
@@ -522,7 +540,7 @@ export default function ProcurementDemandPoolPage() {
       const rows: (string | number | boolean | null | undefined)[][] = [];
       for (const g of groupsToExport) {
         for (const s of g.sources) {
-          const docsStr = s.docs.map((d) => `${d.kind} #${d.id}`).join("; ");
+          const docsStr = s.docs.map((d) => `${DOC_KIND[d.kind]?.label ?? d.kind} ${d.no ?? `#${d.id}`}`).join("; ");
           rows.push([
             s.indent_no,
             g.item_code,

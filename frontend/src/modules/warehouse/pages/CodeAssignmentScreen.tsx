@@ -2,9 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ArrowRight, Boxes, Check, MapPin, ScanLine, Trash2, X } from "lucide-react";
 import { Button, ErrorBanner } from "@/shared/components";
-import { listSerials } from "../api";
+import { listSerials, serialScopeCounts } from "../api";
 import { TrackingBadge } from "../components/TrackingBadge";
-import type { SerialNumber, TrackingType, TrackingTypeMeta, UnitMode } from "../types";
+import type { CodeScopeLevel, SerialNumber, TrackingType, TrackingTypeMeta, UnitMode } from "../types";
 
 /**
  * Naming the physical units on one pick of a material issue — a SCREEN, not a dialog.
@@ -175,15 +175,31 @@ export function CodeAssignmentScreen({
   }, [entry, open]);
 
   const ready = !!(itemId && warehouseId);
+  /** Where the picker is looking: this exact bay, the batch anywhere here, or the
+   *  whole point. Bay empty is not missing stock — the switch says how far the
+   *  list has widened, and rows outside the bay carry their own bay name. */
+  const [scopeLevel, setScopeLevel] = useState<CodeScopeLevel>("exact");
+  useEffect(() => { if (open) setScopeLevel("exact"); }, [open, itemId, batchId, binId]);
+  const { data: scopeCounts } = useQuery({
+    queryKey: ["wh-issue-code-scopes", itemId ?? 0, warehouseId ?? 0, batchId ?? 0, binId ?? 0, issueId ?? 0, issueLineId ?? 0],
+    queryFn: () => serialScopeCounts({
+      item_id: itemId!, warehouse_id: warehouseId!, batch_id: batchId ?? null,
+      bin_id: binId ?? null, issue_id: issueId ?? null, issue_line_id: issueLineId ?? null,
+    }),
+    enabled: open && ready,
+    staleTime: 30_000,
+  });
   /** One page of either pool. The destination is read with no claim filter: a unit
    *  already standing there is shown whatever holds it — it is not being offered. */
   const args = (which: number, needle: string, where: "shelf" | "destination" = "shelf") => {
     const atDest = where === "destination" && !!destination;
     const batch = atDest ? destination!.batchId : batchId;
+    const widen = atDest ? "exact" : scopeLevel;
     return {
       item_id: itemId!,
-      batch_id: batch || undefined,
-      bin_id: (atDest ? destination!.binId : binId) || undefined,
+      batch_id: widen === "point" ? undefined : batch || undefined,
+      bin_id: widen === "exact" ? ((atDest ? destination!.binId : binId) || undefined) : undefined,
+      scope: widen === "exact" ? undefined : widen,
       unbatched: (unbatched && !batch) || undefined,
       claim_free: (!atDest && claimFree) || undefined,
       warehouse_id: warehouseId!,
@@ -198,7 +214,7 @@ export function CodeAssignmentScreen({
   const key = (which: number, needle: string, where: "shelf" | "destination" = "shelf") => [
     "wh-issue-codes", where, itemId ?? 0, warehouseId ?? 0, batchId ?? 0, binId ?? 0,
     destination?.binId ?? 0, destination?.batchId ?? 0, unbatched, claimFree,
-    issueLineId ?? 0, which, needle,
+    issueLineId ?? 0, which, needle, scopeLevel,
   ];
 
   const codes = useQuery({
@@ -226,7 +242,7 @@ export function CodeAssignmentScreen({
    * arrives; a fresh search resets it, because that genuinely is a different pool.
    */
   const lastTotal = useRef(0);
-  useEffect(() => { lastTotal.current = 0; }, [search, itemId, batchId, binId, listView]);
+  useEffect(() => { lastTotal.current = 0; }, [search, itemId, batchId, binId, listView, scopeLevel]);
   if (codes.data?.total != null) lastTotal.current = codes.data.total;
   const total = codes.data?.total ?? lastTotal.current;
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -402,6 +418,45 @@ export function CodeAssignmentScreen({
           </div>
         )}
       </header>
+
+      {/* Where to look. Bay empty is a location problem, not a stock problem —
+        * the same batch one bay over, or the same item anywhere at this point,
+        * still names a code. Brain-first labels: what each circle MEANS. */}
+      {listView === "shelf" && scopeCounts?.has_units && (
+        <div className="shrink-0 border-b border-line bg-content2/40 px-4 py-2 sm:px-6">
+          <div className="flex flex-wrap items-center gap-2" role="tablist" aria-label="Where to look for codes">
+            {([
+              ["exact", "This bay", scopeCounts.exact],
+              ["batch", "This batch, any bay", scopeCounts.batch],
+              ["point", "Whole point, any batch", scopeCounts.point],
+            ] as const).map(([level, label, count]) => (
+              <button
+                key={level}
+                role="tab"
+                aria-selected={scopeLevel === level}
+                onClick={() => { setScopeLevel(level); setPage(1); }}
+                className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold transition-all ${
+                  scopeLevel === level
+                    ? "bg-brand text-white shadow-sm"
+                    : "bg-content1 text-body ring-1 ring-line hover:ring-brand/40"
+                }`}
+              >
+                {label}
+                <span className={`rounded-full px-1.5 py-0.5 font-mono text-[11px] tabular ${
+                  scopeLevel === level ? "bg-white/20" : "bg-content2 text-muted"
+                }`}>
+                  {count == null ? "…" : count >= 201 ? "200+" : count}
+                </span>
+              </button>
+            ))}
+            {scopeLevel !== "exact" && (
+              <span className="text-[11px] text-warn">
+                Showing beyond this bay — the save still checks the bay on the pick.
+              </span>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* The scan box and the two views. Sticky, because it is the thing the
         * storekeeper comes back to after every walk to the shelf. */}

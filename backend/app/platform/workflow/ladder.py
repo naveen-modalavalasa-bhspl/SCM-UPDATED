@@ -120,7 +120,7 @@ DOC_TYPE_LABEL: dict[str, str] = {
     # The outward leg: transport is arranged and the consignment leaves the warehouse.
     # This is where Logistics signs.
     DocType.DISPATCH.value: "Dispatch",
-    DocType.QC_OUTWARD.value: "Outward QC (before a consignment may be raised)",
+    DocType.QC_OUTWARD.value: "Outward QC",
     DocType.PURCHASE_RETURN.value: "Purchase Return (sending material back to a vendor)",
     DocType.REQUISITION.value: "Purchase Requisition",
     DocType.CONSOLIDATION.value: "Consolidated Purchase Sheet",
@@ -234,6 +234,39 @@ def ladder_code(project_id: int | None, doc_type: str) -> str:
 def is_ladder(stages: list[Stage]) -> bool:
     """A workflow is a ladder when its stages name ranks rather than positions."""
     return any(s.position_role_id is not None for s in stages)
+
+
+async def is_hierarchy_root(db: AsyncSession, position_id: int | None) -> bool:
+    """True when the post has nobody above it in the reporting tree."""
+    if position_id is None:
+        return False
+    position = await db.get(HcmPosition, position_id)
+    return position is not None and not position.parent_position_id
+
+
+async def raiser_is_final(db: AsyncSession, stages: list[Stage],
+                          requester_position_id: int | None) -> bool:
+    """Is the raiser at the END of this approval — so there is no one left to ask?
+
+    Two ways to be at the end, and either is enough:
+      * the raiser holds a rung of the ladder and no enabled rung comes after it; or
+      * the raiser sits at the root of the reporting tree (nobody above to climb to).
+
+    Only consulted when the chain came out EMPTY. It is what separates "the raiser is
+    the top, so the document is theirs to approve" from "something is misconfigured",
+    which still goes to the independent-approver fallback.
+    """
+    if requester_position_id is None:
+        return False
+    position = await db.get(HcmPosition, requester_position_id)
+    if position is None:
+        return False
+    enabled = [s for s in stages if s.is_enabled]
+    held = [s.sequence for s in enabled if s.position_id == position.id or (
+        position.role_id is not None and s.position_role_id == position.role_id)]
+    if held and not any(s.sequence > min(held) for s in enabled):
+        return True
+    return not position.parent_position_id
 
 
 def is_custom_ladder(wf: Workflow) -> bool:
@@ -503,13 +536,19 @@ async def reachable_positions(db: AsyncSession,
 
 async def unreachable_rung_warnings(db: AsyncSession, project_id: int | None,
                                     rungs: list) -> list[str]:
-    """One line per switched-on rung no reporting line can reach. A warning, not a bar.
+    """One line per switched-on rung that will actually fail to find an approver.
 
     Saving must still succeed: an administrator setting a ladder up before HCM data
-    lands has to be able to save it. But a rung nobody climbs through is silently
-    skipped at submit, and a ladder made entirely of those strands the document on the
-    ADMIN_SAFETY_NET fallback — which is how fifteen documents in two days ended up
-    routed to System Admin.
+    lands has to be able to save it. A rung no reporting line climbs through is NOT
+    by itself a problem — `_add_offline_rungs` resolves exactly that case company-wide
+    at submit time, which is how a central desk (SCM Head, Inventory Manager, ...) is
+    meant to be reached from a field project with nobody of that rank in its own tree.
+    This used to warn "cannot approve anything" about every one of those, which is
+    wrong for the common case and left an admin unable to tell a genuinely broken rung
+    from one that works by the company-wide path instead of the climb. It now runs the
+    SAME check `_add_offline_rungs` runs (`offline_rung_resolution`) and only warns
+    where that check also fails — nobody holds the rank, too many positions to pick
+    one unambiguously, or the position exists but nobody is assigned to it today.
     """
     live = [rung for rung in rungs
             if getattr(rung, "is_enabled", False) or getattr(rung, "conditions", None)]
@@ -525,13 +564,30 @@ async def unreachable_rung_warnings(db: AsyncSession, project_id: int | None,
             candidates = candidates & set(narrowed)
         if candidates:
             continue
-        warnings.append(
-            f"{rung.name}: no reporting line climbs through it — "
-            + ("none of the positions picked for this rung has"
-               if narrowed is not None else "no position at this rank has")
-            + " anyone reporting up through it, so this rung will be skipped at "
-              "submit and cannot approve anything."
-        )
+        # Not on anyone's reporting line in this scope — but that is exactly the
+        # shape `_add_offline_rungs` exists to rescue. Check it before alarming.
+        status, posts, _holders = await offline_rung_resolution(
+            db, rung.position_role_id, narrowed)
+        if status == "ok":
+            continue
+        if status == "ambiguous":
+            warnings.append(
+                f"{rung.name}: not in anyone's reporting line here, and held by "
+                f"{len(posts)} positions company-wide — too many to resolve "
+                "automatically, so this rung will be skipped. Scope it to named "
+                "positions on Approvals Config."
+            )
+        elif status == "no_holder":
+            warnings.append(
+                f"{rung.name}: not in anyone's reporting line here, and nobody is "
+                f"currently assigned to the {len(posts)} position(s) at this rank — "
+                "this rung will be skipped until someone is."
+            )
+        else:  # no_position
+            warnings.append(
+                f"{rung.name}: no active position holds this rank at all — "
+                "this rung will be skipped and cannot approve anything."
+            )
     return warnings
 
 
@@ -1049,7 +1105,8 @@ async def resolve_chain(db: AsyncSession, stages: list[Stage],
                         requester_position_id: int | None,
                         requester_id: int | None,
                         context: dict | None = None,
-                        policy: str = POLICY_INDEPENDENT) -> list[dict]:
+                        policy: str = POLICY_INDEPENDENT,
+                        allow_offline: bool = True) -> list[dict]:
     """Walk up from the raiser and keep the ancestors whose rank is switched on.
 
     Returns the frozen chain: one entry per approval stage, in order. Empty means the
@@ -1108,17 +1165,60 @@ async def resolve_chain(db: AsyncSession, stages: list[Stage],
     # position — it sits outside every branch's reporting line by design, and no
     # amount of climbing from a field post will ever reach it.
     missing = [role_id for role_id in enabled if role_id not in matched]
-    if missing:
+    if missing and allow_offline:
         chain = await _add_offline_rungs(
-            db, chain, missing, enabled, stages, exclude_id)
+            db, chain, missing, enabled, stages, exclude_id,
+            requester_position_id=requester_position_id)
     return dedupe_chain(chain)
+
+
+async def offline_rung_resolution(
+    db: AsyncSession, role_id: int, scope: set[int] | None,
+    exclude_id: int | None = None,
+) -> tuple[str, list, list]:
+    """What rank `role_id` resolves to when no reporting line climbs through it.
+
+    The one test both `_add_offline_rungs` (at submit time) and
+    `unreachable_rung_warnings` (at save time) must agree on — they used to each
+    guess independently, which is how the save-time check came to warn "cannot
+    approve anything" about ranks that resolve fine at submit time: it only knew
+    how to climb, never about this company-wide rescue.
+
+    Returns `(status, posts, approvers)`:
+    - `"ok"`: unambiguous — `posts` and `approvers` (HcmEmployee) are the real answer.
+    - `"no_position"`: no active position holds this rank at all.
+    - `"ambiguous"`: too many positions to resolve company-wide (`posts` only).
+    - `"no_holder"`: the position(s) exist but nobody is currently assigned
+      (`posts` only).
+    """
+    stmt = select(HcmPosition).where(HcmPosition.role_id == role_id,
+                                     HcmPosition.is_active.is_(True))
+    if scope:
+        stmt = stmt.where(HcmPosition.id.in_(scope))
+    posts = list((await db.execute(stmt)).scalars().all())
+    if not posts:
+        return "no_position", [], []
+    if scope is None and len(posts) > MAX_OFFLINE_RANK_POSITIONS:
+        return "ambiguous", posts, []
+    approvers: list = []
+    seen: set[int] = set()
+    for post in posts:
+        for holder in await _position_holders(db, post.id, exclude_id):
+            if holder.id in seen:
+                continue
+            seen.add(holder.id)
+            approvers.append(holder)
+    if not approvers:
+        return "no_holder", posts, []
+    return "ok", posts, approvers
 
 
 async def _add_offline_rungs(db: AsyncSession, chain: list[dict],
                              missing: list[int],
                              enabled: dict[int, set[int] | None],
                              stages: list[Stage],
-                             exclude_id: int | None) -> list[dict]:
+                             exclude_id: int | None,
+                             requester_position_id: int | None = None) -> list[dict]:
     """Resolve the configured ranks the climb never met, off the whole org.
 
     A central function is not anybody's ancestor. The climb answers "who above ME holds
@@ -1137,20 +1237,37 @@ async def _add_offline_rungs(db: AsyncSession, chain: list[dict],
     """
     order = {stage.position_role_id: stage.sequence for stage in stages
              if stage.position_role_id is not None}
+
+    requester_pos = await db.get(HcmPosition, requester_position_id) if requester_position_id else None
+    raiser_stage_seq = min(
+        (s.sequence for s in stages if s.position_role_id == requester_pos.role_id),
+        default=None,
+    ) if requester_pos and requester_pos.role_id else None
+
+    min_matched_seq = min(
+        (order[link["role_id"]] for link in chain if link.get("role_id") in order),
+        default=None,
+    )
+
     added: list[dict] = []
     for role_id in missing:
+        role_seq = order.get(role_id)
+        if raiser_stage_seq is not None and role_seq is not None and role_seq <= raiser_stage_seq:
+            logger.info("Skipping offline rung %s: at or below raiser's stage in ladder", role_id)
+            continue
+        if min_matched_seq is not None and role_seq is not None and role_seq < min_matched_seq:
+            logger.info("Skipping offline rung %s: sequence is below climbed rungs", role_id)
+            continue
+
         scope = enabled.get(role_id)
-        stmt = select(HcmPosition).where(HcmPosition.role_id == role_id,
-                                         HcmPosition.is_active.is_(True))
-        if scope:
-            stmt = stmt.where(HcmPosition.id.in_(scope))
-        posts = list((await db.execute(stmt)).scalars().all())
-        if not posts:
+        status, posts, holders = await offline_rung_resolution(
+            db, role_id, scope, exclude_id)
+        if status == "no_position":
             logger.error(
                 "Ladder rung for rank %s resolves to no active position; the rung is "
                 "not in the chain and nobody will be asked to sign it.", role_id)
             continue
-        if scope is None and len(posts) > MAX_OFFLINE_RANK_POSITIONS:
+        if status == "ambiguous":
             logger.error(
                 "Ladder rung for rank %s is not in the raiser's reporting line and is "
                 "held by %d positions, too many to resolve company-wide. The rung is "
@@ -1158,20 +1275,13 @@ async def _add_offline_rungs(db: AsyncSession, chain: list[dict],
                 "or configure a rank the raiser reports through.",
                 role_id, len(posts))
             continue
-        approver_ids: list[int] = []
-        approver_names: list[str] = []
-        position_ids: list[int] = []
-        for post in posts:
-            position_ids.append(post.id)
-            for holder in await _position_holders(db, post.id, exclude_id):
-                if holder.id in approver_ids:
-                    continue
-                approver_ids.append(holder.id)
-                approver_names.append(holder.full_name)
-        if not approver_ids:
+        if status == "no_holder":
             logger.error(
                 "Ladder rung for rank %s resolves to %d position(s) that nobody "
                 "fills; the rung is not in the chain.", role_id, len(posts))
+            continue
+        if requester_pos and any(p.parent_position_id == requester_pos.id for p in posts):
+            logger.info("Skipping offline rung %s: position is subordinate to raiser", role_id)
             continue
         first = posts[0]
         added.append({
@@ -1179,14 +1289,14 @@ async def _add_offline_rungs(db: AsyncSession, chain: list[dict],
             "position_name": first.name,
             "role_id": role_id,
             "role_name": first.role_name or first.job_name or first.name,
-            "approver_ids": approver_ids,
-            "approver_names": approver_names,
-            "allowed_position_ids": position_ids,
+            "approver_ids": [h.id for h in holders],
+            "approver_names": [h.full_name for h in holders],
+            "allowed_position_ids": [p.id for p in posts],
         })
         logger.warning(
             "Ladder rung for rank %s (%s) is not in the raiser's reporting line; "
             "resolved company-wide to %d approver(s) across %d position(s).",
-            role_id, first.role_name or first.name, len(approver_ids), len(posts))
+            role_id, first.role_name or first.name, len(holders), len(posts))
     if not added:
         return chain
     merged = chain + added

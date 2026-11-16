@@ -213,6 +213,22 @@ export function QuotePriceTrail({
                             <Diff label="Buyer Requested Rate" before={curRate} after={propRate} />
                             <Diff label="Buyer Requested Amount" before={curAmt} after={propAmt} />
                           </div>
+                          {/* The brand the buyer asked for in this request (2026-10-26). */}
+                          {(() => {
+                            const proposed = line.proposed_combination
+                              ?? [line.proposed_brand_name, line.proposed_variant_name, line.proposed_model_name]
+                                .filter(Boolean).join(" · ");
+                            if (!proposed) return null;
+                            return (
+                              <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px]">
+                                <span className="text-muted">Buyer Requested Brand</span>
+                                {line.current_combination && line.current_combination !== proposed && (
+                                  <span className="text-muted line-through">{line.current_combination}</span>
+                                )}
+                                <span className="rounded bg-brand/10 px-1.5 py-0.5 font-semibold text-brand">{proposed}</span>
+                              </div>
+                            );
+                          })()}
                         </div>
                       );
                     })}

@@ -21,19 +21,21 @@ from sqlalchemy.orm import relationship
 from app.core.database import Base
 from app.platform.workflow import doc_registry
 from app.shared.enums import DocType
-from app.shared.enums import DespatchNoteStatus
+from app.shared.enums import DespatchNoteStatus, PackChangeStatus
 from app.shared.models.base import created_at_col, pk, soft_fk, updated_at_col
+from app.shared.models.combination import CombinationMixin
+from app.shared.models.master import OrgScopeColumns
 
 
-class PurchaseOrder(Base):
+class PurchaseOrder(OrgScopeColumns, Base):
     __tablename__ = "pro_purchase_orders"
     id = pk()
-    po_no = Column(String(30), unique=True, nullable=False)
+    po_no = Column(String(50), unique=True, nullable=False)
     po_date = Column(Date, nullable=True)
     expected_date = Column(Date, nullable=True)
 
     indent_id = Column(ForeignKey("ind_indents.id"), index=True, nullable=True)  # backward pointer
-    indent_no = Column(String(30), nullable=True)   # snapshot
+    indent_no = Column(String(50), nullable=True)   # snapshot
 
     # The buying chain this PO came off, when it was raised from an award rather than
     # straight off an indent. Soft FKs, all nullable: a PO raised from an indent has
@@ -41,11 +43,17 @@ class PurchaseOrder(Base):
     # the PO is written with — without it the winning offer had to be retyped and the
     # trail indent -> MR -> requisition -> RFQ -> quotation -> PO broke at the last hop.
     requisition_id = soft_fk()
-    requisition_no = Column(String(30), nullable=True)    # snapshot
+    requisition_no = Column(String(50), nullable=True)    # snapshot
     rfq_id = soft_fk()
-    rfq_no = Column(String(30), nullable=True)            # snapshot
+    rfq_no = Column(String(50), nullable=True)            # snapshot
     quotation_id = soft_fk()
     quotation_no = Column(String(50), nullable=True)      # snapshot
+
+    # The order this one was copied from (2026-10-19). A reference for the reader and
+    # nothing more: a copy is a new hand-raised order, so no quantity, approval or
+    # payment is ever rolled back along it.
+    copied_from_po_id = soft_fk()
+    copied_from_po_no = Column(String(30), nullable=True)  # snapshot
 
     vendor_id = Column(ForeignKey("mst_vendors.id"), index=True, nullable=False)
     vendor_name = Column(String(200), nullable=True)   # snapshot
@@ -58,6 +66,10 @@ class PurchaseOrder(Base):
     facility_name = Column(String(200), nullable=True)
     project_id = soft_fk()
     project_name = Column(String(200), nullable=True)     # snapshot
+    # A hand-raised order is booked to a project OR a department, exactly one
+    # (2026-11-04, `_apply_po_header`). Soft FK to hcm_departments + snapshot.
+    department_id = soft_fk()
+    department_name = Column(String(200), nullable=True)  # snapshot
 
     # What the order says besides its lines. Free text on purpose: a term is what was
     # agreed with THIS vendor for THIS order, and every attempt to code them into a
@@ -163,7 +175,7 @@ class PORevision(Base):
 Index("ix_pro_po_date", PurchaseOrder.po_date.desc())
 
 
-class POItem(Base):
+class POItem(CombinationMixin, Base):
     __tablename__ = "pro_po_items"
     id = pk()
     po_id = Column(ForeignKey("pro_purchase_orders.id", ondelete="CASCADE"), index=True, nullable=False)
@@ -183,6 +195,12 @@ class POItem(Base):
     # behind it and nobody promised anything.
     delivery_days = Column(Integer, nullable=True)
     received_quantity = Column(Numeric(14, 3), nullable=False, default=0)
+    # HOW the quantity is to be packed (2026-10-08): one of the item's pack
+    # hierarchies, and a breakdown inside it ("2 Carton"). `quantity` stays the truth,
+    # in the item's base unit; the breakdown always adds up to it — see
+    # `app/shared/packing.py`. NULL on lines written before packing existed.
+    pack_hierarchy_id = Column(BigInteger, index=True, nullable=True)
+    pack_breakdown = Column(JSON, nullable=True)
 
     po = relationship("PurchaseOrder", back_populates="items")
 
@@ -191,7 +209,7 @@ class POItem(Base):
 #  Requisition — what a buyer wants to buy
 # --------------------------------------------------------------------------- #
 
-class Requisition(Base):
+class Requisition(OrgScopeColumns, Base):
     """`pro_requisitions`. Procurement's own demand note.
 
     Not `inv_material_requests`: that one is raised BY the system when an approved
@@ -200,7 +218,7 @@ class Requisition(Base):
     """
     __tablename__ = "pro_requisitions"
     id = pk()
-    req_no = Column(String(30), unique=True, nullable=False)
+    req_no = Column(String(50), unique=True, nullable=False)
     req_date = Column(Date, nullable=True)
 
     warehouse_id = soft_fk()
@@ -250,7 +268,7 @@ class Requisition(Base):
 Index("ix_pro_req_status_created", Requisition.status, Requisition.created_at.desc())
 
 
-class RequisitionItem(Base):
+class RequisitionItem(CombinationMixin, Base):
     __tablename__ = "pro_requisition_items"
     id = pk()
     requisition_id = Column(ForeignKey("pro_requisitions.id", ondelete="CASCADE"),
@@ -260,7 +278,7 @@ class RequisitionItem(Base):
     # Backward pointers, both optional: a requisition may be raised cold, or it may
     # come off an indent that stock could not fill.
     indent_id = soft_fk()
-    indent_no = Column(String(30), nullable=True)         # snapshot
+    indent_no = Column(String(50), nullable=True)         # snapshot
     indent_item_id = soft_fk()
 
     item_id = Column(ForeignKey("mst_items.id"), index=True, nullable=False)
@@ -268,6 +286,11 @@ class RequisitionItem(Base):
     item_name = Column(String(300), nullable=True)        # snapshot
     uom_code = Column(String(20), nullable=True)
     quantity = Column(Numeric(16, 3), nullable=False)
+    # The CEILING for this line (2026-11-03): the material request quantity behind it
+    # when the requisition was drawn from MRs, else what the buyer typed when the
+    # requisition was SUBMITTED. NULL on a hand-made draft, which its author may still
+    # change freely. A later edit may lower the quantity or leave it, never raise it.
+    requested_quantity = Column(Numeric(16, 3), nullable=True)
     # How much of `quantity` has reached a PO. Lets a requisition be bought in parts.
     ordered_qty = Column(Numeric(16, 3), nullable=False, default=0)
     estimated_rate = Column(Numeric(16, 2), nullable=False, default=0)
@@ -275,6 +298,34 @@ class RequisitionItem(Base):
     required_date = Column(Date, nullable=True)
 
     requisition = relationship("Requisition", back_populates="items")
+
+
+class RequisitionQtyChange(Base):
+    """One quantity change on a requisition line once it had a ceiling (2026-11-03):
+    a draft drawn from material requests being cut, or any line edited after submit.
+    Append-only. Keyed by item (and brand / variant / model) rather than by line id,
+    because a requisition edit rewrites its lines."""
+
+    __tablename__ = "pro_requisition_qty_changes"
+
+    id = pk()
+    requisition_id = Column(BigInteger, ForeignKey("pro_requisitions.id", ondelete="CASCADE"),
+                            index=True, nullable=False)
+    item_id = Column(BigInteger, nullable=False)
+    item_code = Column(String(100), nullable=True)
+    item_name = Column(String(300), nullable=True)
+    uom_code = Column(String(30), nullable=True)
+    combination = Column(String(300), nullable=True)
+    from_qty = Column(Numeric(16, 3), nullable=False)
+    to_qty = Column(Numeric(16, 3), nullable=False)
+    ceiling_qty = Column(Numeric(16, 3), nullable=True)
+    # DRAFT_EDIT (cut before submit, against its MR ceiling)
+    stage = Column(String(20), nullable=False)
+    comments = Column(String(500), nullable=True)
+    changed_by_id = Column(BigInteger, nullable=True)
+    changed_by_name = Column(String(200), nullable=True)
+    changed_by_position = Column(String(200), nullable=True)
+    changed_at = created_at_col()
 
 
 class RequisitionSource(Base):
@@ -298,7 +349,7 @@ class RequisitionSource(Base):
     # across (rule 10).
     mr_id = soft_fk()
     mr_no = Column(String(30), nullable=True)             # snapshot
-    indent_no = Column(String(30), nullable=True)         # snapshot, for the trail
+    indent_no = Column(String(50), nullable=True)         # snapshot, for the trail
     item_count = Column(Integer, nullable=False, default=0)
     created_at = created_at_col()
 
@@ -310,17 +361,17 @@ Index("ix_pro_req_source_mr", RequisitionSource.mr_id)
 #  RFQ — what went out to vendors
 # --------------------------------------------------------------------------- #
 
-class RFQ(Base):
+class RFQ(OrgScopeColumns, Base):
     __tablename__ = "pro_rfqs"
     id = pk()
-    rfq_no = Column(String(30), unique=True, nullable=False)
+    rfq_no = Column(String(50), unique=True, nullable=False)
     rfq_type = Column(String(20), nullable=True)
     rfq_date = Column(Date, nullable=True)
     # The submission deadline. A vendor may read after it and may not quote.
     due_date = Column(Date, nullable=True)
 
     requisition_id = Column(ForeignKey("pro_requisitions.id"), index=True, nullable=True)
-    requisition_no = Column(String(30), nullable=True)    # snapshot
+    requisition_no = Column(String(50), nullable=True)    # snapshot
 
     warehouse_id = soft_fk()
     warehouse_name = Column(String(200), nullable=True)   # snapshot
@@ -346,12 +397,15 @@ class RFQ(Base):
     # The consolidated sheet this RFQ is buying against, when it came off one.
     # Backward pointer, like every other link in this chain.
     consolidation_id = soft_fk()
-    consolidation_no = Column(String(30), nullable=True)  # snapshot
+    consolidation_no = Column(String(50), nullable=True)  # snapshot
 
     awarded_vendor_id = Column(ForeignKey("mst_vendors.id"), index=True, nullable=True)
     awarded_vendor_name = Column(String(200), nullable=True)   # snapshot
     terms = Column(Text, nullable=True)
     current_approver_name = Column(String(200), nullable=True)
+    # Does the buyer ask the suppliers to quote freight? Off, the portal hides the
+    # field and a quote's freight is saved as 0 (2026-10-27).
+    freight_required = Column(Boolean, nullable=False, default=False, server_default="0")
 
     # ── Freeze Prices (2026-09-26) ───────────────────────────────────────── #
     # The lock a buyer closes BEFORE comparing and awarding, and the gate every
@@ -382,7 +436,7 @@ class RFQ(Base):
                            cascade="all, delete-orphan", lazy="selectin")
 
 
-class RFQItem(Base):
+class RFQItem(CombinationMixin, Base):
     __tablename__ = "pro_rfq_items"
     id = pk()
     rfq_id = Column(ForeignKey("pro_rfqs.id", ondelete="CASCADE"),
@@ -436,15 +490,18 @@ class RFQVendor(Base):
 #  Quotation — what a vendor answered
 # --------------------------------------------------------------------------- #
 
-class Quotation(Base):
+class Quotation(OrgScopeColumns, Base):
     __tablename__ = "pro_quotations"
     id = pk()
     quotation_no = Column(String(50), unique=True, nullable=False)
+    # Copied from the document before, so this one reads and lists on its own.
+    project_id = soft_fk()
+    project_name = Column(String(200), nullable=True)     # snapshot
     quotation_type = Column(String(20), nullable=True)
 
     rfq_id = Column(ForeignKey("pro_rfqs.id", ondelete="CASCADE"),
                     index=True, nullable=False)
-    rfq_no = Column(String(30), nullable=True)            # snapshot
+    rfq_no = Column(String(50), nullable=True)            # snapshot
     vendor_id = Column(ForeignKey("mst_vendors.id"), index=True, nullable=False)
     vendor_name = Column(String(200), nullable=True)      # snapshot
     vendor_ref_no = Column(String(50), nullable=True)
@@ -495,7 +552,7 @@ class Quotation(Base):
                          cascade="all, delete-orphan", lazy="selectin")
 
 
-class QuoteChangeRequest(Base):
+class QuoteChangeRequest(OrgScopeColumns, Base):
     """`pro_quote_change_requests` — the buyer's ask on a supplier's quotation.
 
     An amendment for a quotation, cut from the same cloth as `PORevision` and
@@ -516,7 +573,10 @@ class QuoteChangeRequest(Base):
     # the tender the request is negotiating against, and listing a vendor's open
     # requests must not chase two joins.
     rfq_id = Column(ForeignKey("pro_rfqs.id"), index=True, nullable=False)
-    cr_no = Column(String(30), unique=True, nullable=False)   # CR-2026-27/0001
+    cr_no = Column(String(50), unique=True, nullable=False)   # CR-2026-27/0001
+    # Copied from the document before, so this one reads and lists on its own.
+    project_id = soft_fk()
+    project_name = Column(String(200), nullable=True)     # snapshot
     # DRAFT is never persisted — a proposed request goes straight to the supplier.
     # AWAITING_SUPPLIER -> ACCEPTED | DECLINED, or WITHDRAWN by the buyer, or
     # SUPERSEDED when a different request on the same quote was accepted first.
@@ -573,7 +633,7 @@ Index("ix_pro_quotation_comments_q_created", QuotationComment.quotation_id,
       QuotationComment.created_at)
 
 
-class QuotationItem(Base):
+class QuotationItem(CombinationMixin, Base):
     __tablename__ = "pro_quotation_items"
     id = pk()
     quotation_id = Column(ForeignKey("pro_quotations.id", ondelete="CASCADE"),
@@ -603,7 +663,7 @@ class QuotationItem(Base):
 #  Despatch note — what the vendor says they put on the vehicle
 # --------------------------------------------------------------------------- #
 
-class DespatchNote(Base):
+class DespatchNote(OrgScopeColumns, Base):
     """`pro_despatch_notes`. The vendor's own statement of a delivery, filed before it
     arrives.
 
@@ -621,12 +681,15 @@ class DespatchNote(Base):
     """
     __tablename__ = "pro_despatch_notes"
     id = pk()
-    dn_no = Column(String(30), unique=True, nullable=False)
+    dn_no = Column(String(50), unique=True, nullable=False)
+    # Copied from the document before, so this one reads and lists on its own.
+    project_id = soft_fk()
+    project_name = Column(String(200), nullable=True)     # snapshot
     dn_date = Column(Date, nullable=True)
 
     # Backward pointer, like every other link in this chain.
     po_id = Column(ForeignKey("pro_purchase_orders.id"), index=True, nullable=False)
-    po_no = Column(String(30), nullable=True)              # snapshot
+    po_no = Column(String(50), nullable=True)              # snapshot
     vendor_id = Column(ForeignKey("mst_vendors.id"), index=True, nullable=False)
     vendor_name = Column(String(200), nullable=True)       # snapshot
 
@@ -655,7 +718,7 @@ class DespatchNote(Base):
 Index("ix_pro_dn_po_status", DespatchNote.po_id, DespatchNote.status)
 
 
-class DespatchNoteItem(Base):
+class DespatchNoteItem(CombinationMixin, Base):
     """`pro_despatch_note_items`. Batch, manufacture and expiry per line.
 
     These three are the reason this document earns its place. They cannot be derived
@@ -680,6 +743,23 @@ class DespatchNoteItem(Base):
     mfg_date = Column(Date, nullable=True)
     expiry_date = Column(Date, nullable=True)
     remarks = Column(String(500), nullable=True)
+
+    # How the supplier PACKED what they sent (2026-10-08) — "1 Carton + 10 Box +
+    # 20 Strip". `despatched_qty` is that breakdown's total in base units. The gate
+    # receives against exactly this, read-only.
+    pack_hierarchy_id = Column(BigInteger, index=True, nullable=True)
+    pack_breakdown = Column(JSON, nullable=True)
+    # A different hierarchy from the order's is allowed but goes to the buyer
+    # (PackChangeStatus). The order's hierarchy at the time is snapshotted so the
+    # buyer reads "you ordered X, they sent Y" even after accepting it.
+    pack_change_status = Column(String(20), nullable=False,
+                                default=PackChangeStatus.NONE.value)
+    ordered_pack_hierarchy_id = Column(BigInteger, nullable=True)
+    ordered_pack_hierarchy_name = Column(String(100), nullable=True)
+    pack_change_reason = Column(String(500), nullable=True)
+    pack_change_note = Column(String(500), nullable=True)
+    pack_change_by_name = Column(String(200), nullable=True)
+    pack_change_at = Column(DateTime, nullable=True)
 
     note = relationship("DespatchNote", back_populates="items")
 
@@ -755,7 +835,7 @@ class VendorUser(Base):
 #  always answer "who asked for this" without the aggregation being reversible only
 #  by re-running it.
 
-class PurchaseConsolidation(Base):
+class PurchaseConsolidation(OrgScopeColumns, Base):
     """`pro_consolidations` — many requisitions, one buying sheet.
 
     `PurchaseConsolidation`, not `Consolidation`: `modules/indents` already maps a
@@ -767,7 +847,7 @@ class PurchaseConsolidation(Base):
     """
     __tablename__ = "pro_consolidations"
     id = pk()
-    cons_no = Column(String(30), unique=True, nullable=False)
+    cons_no = Column(String(50), unique=True, nullable=False)
     cons_date = Column(Date, nullable=True)
     title = Column(String(300), nullable=True)
     # What the sheet covers, in the buyer's words: "August 2026 — Southern region".
@@ -805,7 +885,7 @@ Index("ix_pro_cons_status_created", PurchaseConsolidation.status,
       PurchaseConsolidation.created_at.desc())
 
 
-class PurchaseConsolidationItem(Base):
+class PurchaseConsolidationItem(CombinationMixin, Base):
     """`pro_consolidation_items` — one line per ITEM, whatever it was asked on."""
     __tablename__ = "pro_consolidation_items"
     id = pk()
@@ -851,7 +931,7 @@ class PurchaseConsolidationSource(Base):
                               index=True, nullable=False)
     requisition_id = Column(ForeignKey("pro_requisitions.id"), index=True,
                             nullable=False)
-    requisition_no = Column(String(30), nullable=True)    # snapshot
+    requisition_no = Column(String(50), nullable=True)    # snapshot
     project_name = Column(String(200), nullable=True)     # snapshot
     item_count = Column(Integer, nullable=False, default=0)
     estimated_value = Column(Numeric(16, 2), nullable=False, default=0)

@@ -91,7 +91,7 @@ export function StockEditRecordsModal({
   const labelOf = (row: Row) =>
     target === "UNIT"
       ? `${row.item_code ?? ""} · ${(row as StockEditUnitRow).serial_number ?? `unit ${row.id}`}`
-      : `${row.item_code ?? ""} · batch ${row.batch_no ?? row.id}`;
+      : `${row.item_code ?? ""} · ${row.batch_no === "Unbatched" ? "Unbatched" : `batch ${row.batch_no ?? row.id}`}`;
   const setValue = (row: Row, field: string, value: string) => {
     const key = draftKey(target, row.id);
     setDrafts((prev) => {

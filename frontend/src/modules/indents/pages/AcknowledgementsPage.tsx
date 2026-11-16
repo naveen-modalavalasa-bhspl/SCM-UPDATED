@@ -10,6 +10,7 @@ import { IndentModuleHeader } from "../components/IndentModuleHeader";
 import { IndentSummaryStatusBadge } from "../components/IndentSummaryStatusBadge";
 import { INDENT_LIST_TYPES, INDENT_STATUS } from "../constants";
 import { indentApi } from "../api";
+import { ackDetailPath, isTransferRow } from "../ackPaths";
 import type { Acknowledgement } from "../types";
 import {
   displayStatus, summarise, trackingHandle,
@@ -71,7 +72,9 @@ export default function AcknowledgementsPage({ indentTypes = INDENT_LIST_TYPES, 
   const rows = acknowledgements.data ?? [];
   // One destination, whichever of the three ways in was used — the row, the desktop
   // button or the phone card.
-  const open = (row: Acknowledgement) => nav(`/indents/acknowledgements/${row.indent_id}`);
+  // An STR is received on Stock Transfer, never here (2026-10-29).
+  const open = (row: Acknowledgement) => nav(ackDetailPath(
+    row.indent_id, isTransferRow(row) || (indentTypes.length === 1 && indentTypes[0] === "STR")));
   // What the pill would leave on screen. The endpoint returns the whole list rather
   // than a page, so counting the loaded rows is the true number; with the filter
   // already on, the server has narrowed it and every row here is one of them.
@@ -130,7 +133,34 @@ export default function AcknowledgementsPage({ indentTypes = INDENT_LIST_TYPES, 
     {
       key: "status",
       header: "Status",
-      render: (row) => <IndentSummaryStatusBadge status={displayStatus(row)} />,
+      render: (row) => {
+        const consignments = getConsignments(row);
+        const hasMultiple = consignments.length > 1;
+        const distinctStatuses = [...new Set(consignments.map((c) => c.statusLabel))];
+
+        return (
+          <div className="flex flex-col items-start gap-1">
+            <IndentSummaryStatusBadge status={displayStatus(row)} />
+            {hasMultiple && distinctStatuses.length > 1 && (
+              <div className="flex flex-wrap gap-1 mt-0.5">
+                {consignments.map((c) => (
+                  <span
+                    key={c.no}
+                    className={`rounded px-1.5 py-0.5 text-[9px] font-semibold ${
+                      c.status === "received"
+                        ? "bg-ok-bg text-ok border border-ok/20"
+                        : "bg-brand-050 text-brand border border-brand/20"
+                    }`}
+                    title={c.no}
+                  >
+                    {c.no.slice(-7)}: {c.statusLabel}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      },
     },
     {
       key: "action",
@@ -273,30 +303,107 @@ export default function AcknowledgementsPage({ indentTypes = INDENT_LIST_TYPES, 
   );
 }
 
+export interface ConsignmentItem {
+  no: string;
+  dispatchId?: number | null;
+  status: "received" | "in_transit" | "ready";
+  statusLabel: string;
+}
+
+export function getConsignments(row: Acknowledgement): ConsignmentItem[] {
+  const map = new Map<string, { dispatchId?: number | null }>();
+
+  for (const line of row.lines) {
+    for (const pkg of line.package_quantities ?? []) {
+      if (pkg.dispatch_no) {
+        if (!map.has(pkg.dispatch_no)) {
+          map.set(pkg.dispatch_no, { dispatchId: pkg.dispatch_id });
+        } else if (pkg.dispatch_id && !map.get(pkg.dispatch_no)?.dispatchId) {
+          map.set(pkg.dispatch_no, { dispatchId: pkg.dispatch_id });
+        }
+      }
+    }
+  }
+
+  for (const s of row.shipments) {
+    if (s.consignment_no && !map.has(s.consignment_no)) {
+      map.set(s.consignment_no, { dispatchId: s.dispatch_id });
+    }
+  }
+
+  const result: ConsignmentItem[] = [];
+
+  for (const [no, { dispatchId }] of map.entries()) {
+    const shipment = row.shipments.find(
+      (s) => (dispatchId && s.dispatch_id === dispatchId) || s.consignment_no === no
+    );
+
+    let status: "received" | "in_transit" | "ready" = "in_transit";
+    let statusLabel = "In Transit";
+
+    if (shipment) {
+      const sStatus = (shipment.status || "").toUpperCase();
+      if (sStatus === "CLOSED" || sStatus === "ACKNOWLEDGED" || sStatus === "DELIVERED") {
+        status = "received";
+        statusLabel = sStatus === "DELIVERED" ? "Delivered" : "Received";
+      } else if (sStatus === "READY" || sStatus === "DRAFT" || sStatus === "PENDING_APPROVAL") {
+        status = "ready";
+        statusLabel = "Ready";
+      } else {
+        status = "in_transit";
+        statusLabel = "In Transit";
+      }
+    } else {
+      const relatedLines = row.lines.filter((l) =>
+        (l.package_quantities ?? []).some((p) => p.dispatch_no === no)
+      );
+      if (
+        relatedLines.length > 0 &&
+        relatedLines.every((l) => Number(l.received_quantity ?? 0) >= Number(l.dispatched_quantity ?? 0))
+      ) {
+        status = "received";
+        statusLabel = "Received";
+      } else {
+        status = "in_transit";
+        statusLabel = "In Transit";
+      }
+    }
+
+    result.push({ no, dispatchId, status, statusLabel });
+  }
+
+  return result;
+}
+
 /**
- * The consignment note number(s) the goods travelled under — the number printed on the
- * paper the driver hands over, so the requester can match the row to the load at the
- * gate. Read off the package split already on each line; an indent served in rounds
- * can arrive under more than one, and all of them are in the tooltip.
+ * The consignment note number(s) the goods travelled under and their individual status.
  */
 function ConsignmentNos({ row }: { row: Acknowledgement }) {
-  const nos = [...new Set(
-    row.lines.flatMap((line) => (line.package_quantities ?? [])
-      .map((part) => part.dispatch_no)
-      .filter((no): no is string => Boolean(no))),
-  )];
-  if (nos.length === 0) {
+  const consignments = getConsignments(row);
+  if (consignments.length === 0) {
     return <span className="text-[11px] text-muted">Not sent yet</span>;
   }
   return (
-    <div className="inline-flex min-w-0 items-center gap-1.5" title={nos.join("\n")}>
-      <Truck className="h-3.5 w-3.5 shrink-0 text-muted" aria-hidden />
-      <span className="truncate font-mono text-xs font-semibold text-ink">{nos[0]}</span>
-      {nos.length > 1 && (
-        <span className="shrink-0 rounded-full bg-content2 px-1.5 py-0.5 text-[10px] font-semibold text-muted">
-          +{nos.length - 1}
-        </span>
-      )}
+    <div className="flex flex-col gap-1.5 min-w-0">
+      {consignments.map((c) => (
+        <div key={c.no} className="inline-flex items-center gap-1.5 text-xs">
+          <Truck className="h-3.5 w-3.5 shrink-0 text-muted" aria-hidden />
+          <span className="font-mono font-semibold text-ink truncate max-w-[190px]" title={c.no}>
+            {c.no}
+          </span>
+          <span
+            className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+              c.status === "received"
+                ? "bg-ok-bg text-ok border border-ok/20"
+                : c.status === "in_transit"
+                ? "bg-brand-050 text-brand border border-brand/20"
+                : "bg-content2 text-muted border border-line"
+            }`}
+          >
+            {c.statusLabel}
+          </span>
+        </div>
+      ))}
     </div>
   );
 }

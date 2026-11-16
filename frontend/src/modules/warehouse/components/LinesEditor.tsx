@@ -1,6 +1,9 @@
-import { useState, useEffect, type ReactNode } from "react";
+import { Fragment, useState, useEffect, type ReactNode } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { Button } from "@/shared/components";
+import { QuantityInput } from "@/shared/components/QuantityInput";
+import { useUomDecimals } from "@/shared/hooks/useUomDecimals";
+import { quantityProblem } from "@/shared/quantity";
 
 /**
  * The editable line grid behind every warehouse document form.
@@ -40,9 +43,12 @@ interface Props<T> {
   footer?: ReactNode;
   empty?: string;
   /** Shown when the caller wants a line marked, e.g. a rejected quantity in red. */
-  rowTone?: (row: T) => string | undefined;
+  rowTone?: (row: T, index: number) => string | undefined;
   /** Minimum table width for dense documents whose cells need room to breathe. */
   minTableWidth?: string;
+  /** A full-width panel under a line — its packing, say. `null` for none. Drawn as
+   *  a second table row on desktop and at the foot of the card on a phone. */
+  renderDetail?: (row: T, index: number) => ReactNode | null;
 }
 
 export function LinesEditor<T>({
@@ -56,6 +62,7 @@ export function LinesEditor<T>({
   empty = "No lines yet.",
   rowTone,
   minTableWidth = "min-w-[720px]",
+  renderDetail,
 }: Props<T>) {
   const head = (
     <>
@@ -93,8 +100,11 @@ export function LinesEditor<T>({
                 </td>
               </tr>
             ) : (
-              rows.map((row, i) => (
-                <tr key={keyOf(row, i)} className={`border-t border-line/70 ${rowTone?.(row) ?? ""}`}>
+              rows.map((row, i) => {
+                const detail = renderDetail?.(row, i) ?? null;
+                return (
+                <Fragment key={keyOf(row, i)}>
+                <tr className={`border-t border-line/70 transition-colors ${rowTone?.(row, i) ?? ""}`}>
                   {columns.map((c) => (
                     <td
                       key={c.key}
@@ -118,7 +128,16 @@ export function LinesEditor<T>({
                     </td>
                   )}
                 </tr>
-              ))
+                {detail && (
+                  <tr className={rowTone?.(row, i) ?? ""}>
+                    <td colSpan={columns.length + (onRemove ? 1 : 0)} className="px-3 pb-3 pt-0">
+                      {detail}
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
+                );
+              })
             )}
           </tbody>
         </table>
@@ -135,7 +154,7 @@ export function LinesEditor<T>({
           rows.map((row, i) => (
             <div
               key={keyOf(row, i)}
-              className={`rounded-2xl border border-line/70 bg-content1 p-4 ${rowTone?.(row) ?? ""}`}
+              className={`rounded-2xl border border-line/70 bg-content1 p-4 transition-colors ${rowTone?.(row, i) ?? ""}`}
             >
               <div className="mb-3 flex items-center justify-between">
                 <span className="text-[11px] font-semibold uppercase tracking-wider text-muted">
@@ -161,6 +180,7 @@ export function LinesEditor<T>({
                     <div className="text-sm">{c.render(row, i)}</div>
                   </div>
                 ))}
+                {renderDetail?.(row, i)}
               </div>
             </div>
           ))
@@ -179,27 +199,45 @@ export function LinesEditor<T>({
   );
 }
 
-/** A compact numeric cell editor, sized for the grid. */
+/** A compact quantity cell editor, sized for the grid.
+ *
+ *  It follows the unit of the line it sits on. Pass `uom` (the line's `uom_code`) and
+ *  the box reads that unit's "Allows decimal" setting: a whole-unit unit refuses "."
+ *  and every digit after it at the keyboard, a divisible one takes up to three places,
+ *  and a value outside `min`..`max` is flagged. `decimals`, when given, wins over `uom`
+ *  (the issue-split screens already know it). With neither, the old behaviour stays:
+ *  shown to two places, typed to the three the column holds.
+ */
 export function QtyInput({
   value,
   onChange,
   max,
+  min = 0,
   disabled,
   invalid,
   ariaLabel,
-  step = "0.01",
+  decimals,
+  uom,
 }: {
   value: number | string;
   onChange: (value: any) => void;
   max?: number;
+  min?: number;
   disabled?: boolean;
   invalid?: boolean;
   ariaLabel: string;
-  /** Warehouse quantities and money are entered at two decimal places. */
-  step?: string;
+  /** Places the line's unit allows: 0 = whole units. Overrides `uom`. */
+  decimals?: number | null;
+  /** The line's unit code; its decimals are looked up from the UOM type. */
+  uom?: string | null;
 }) {
+  const uomDecimals = useUomDecimals();
+  const resolved: number | null = decimals ?? (uom ? uomDecimals(uom) : null);
+  const typePlaces = resolved ?? 3;        // what the keyboard lets through
+  const places = resolved ?? 2;            // what the cell shows
+  const fmt = (n: number) => n.toFixed(places);
   const [local, setLocal] = useState<string>(
-    value === 0 ? "0.00" : value === "" || value == null ? "" : Number(value).toFixed(2)
+    value === 0 ? fmt(0) : value === "" || value == null ? "" : fmt(Number(value))
   );
 
   useEffect(() => {
@@ -209,37 +247,42 @@ export function QtyInput({
       const currentNum = Number(local);
       const newNum = Number(value);
       if (currentNum !== newNum && !(Number.isNaN(currentNum) && Number.isNaN(newNum))) {
-        setLocal(Number(value).toFixed(2));
+        setLocal(fmt(Number(value)));
       }
     }
-  }, [value, local]);
+  }, [value, local, places]);
+
+  // The net under the keyboard filter: the unit's places, the minimum and the maximum.
+  const problem = quantityProblem(local, { decimals: typePlaces, min, max, unit: uom, required: false });
 
   return (
-    <input
-      type="number"
-      inputMode="decimal"
-      min={0}
+    <QuantityInput
+      decimals={typePlaces}
+      min={min}
       max={max}
-      step={step}
+      data-decimals={places === 0 ? 0 : undefined}
+      data-uom={uom === undefined ? undefined : uom ?? ""}
       value={local}
       disabled={disabled}
       aria-label={ariaLabel}
-      onChange={(e) => {
-        setLocal(e.target.value);
-        onChange(e.target.value === "" ? "" : e.target.value);
+      aria-invalid={Boolean(invalid || problem)}
+      title={problem ?? undefined}
+      onChange={(raw) => {
+        setLocal(raw);
+        onChange(raw);
       }}
       onBlur={(e) => {
         if (e.target.value !== "") {
           const num = Number(e.target.value);
           if (!Number.isNaN(num)) {
-            const formatted = num.toFixed(2);
+            const formatted = fmt(num);
             setLocal(formatted);
             onChange(formatted);
           }
         }
       }}
       className={`min-h-11 w-full rounded-md border bg-content1 px-2 text-right text-sm text-ink outline-none focus:border-brand disabled:bg-content2 disabled:text-muted ${
-        invalid ? "border-bad" : "border-line"
+        invalid || problem ? "border-bad" : "border-line"
       }`}
     />
   );

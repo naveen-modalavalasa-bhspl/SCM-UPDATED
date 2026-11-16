@@ -9,6 +9,7 @@ import { listPutaways, deletePutaway, DRAFT_DELETE_PERMISSION } from "../api";
 import { fmtQty, humanise, normaliseStatus } from "../format";
 import { fmtCount, volume, weight } from "../components/CapacityMeter";
 import type { Putaway as PutawayTask } from "../types";
+import { CombinationTag } from "@/shared/combination";
 
 /**
  * The putaway queue — received stock that is on the floor but not yet in a bin.
@@ -54,6 +55,7 @@ export default function Putaway() {
             {r.item_name ?? "—"}
             {r.batch_no ? ` · ${r.batch_no}` : ""}
           </div>
+          <CombinationTag value={r} className="mt-1" />
         </div>
       ),
     },
@@ -191,6 +193,7 @@ export default function Putaway() {
             </div>
           </div>
           <div className="truncate text-sm text-body">{r.item_name ?? r.item_code ?? "—"}</div>
+          <CombinationTag value={r} />
           <div className="text-[11px] text-muted">
             {fmtQty(r.qty)} {r.uom_code ?? ""} → {r.actual_bin_code ?? "not placed yet"}
           </div>

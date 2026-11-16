@@ -1,7 +1,9 @@
 from datetime import date, datetime, timezone
 
+from app.shared.org_scope_schemas import OrgScopeIn, OrgScopeOut
 from pydantic import (
     BaseModel, ConfigDict, Field, computed_field, field_serializer, field_validator,
+    model_validator,
 )
 
 from app.modules.indents.enums import IndentType
@@ -10,6 +12,7 @@ from app.shared.time import iso as ist_iso, not_in_past, to_ist, today
 from app.shared.limits import (  # request-size guards, see the module
     Annotated, BatchIds, DocumentLines, MAX_DOCUMENT_LINES,
 )
+from app.shared.masters.combinations import CombinationIn, CombinationOut
 
 
 _AGE_FROZEN = {IndentStatus.CLOSED.value, IndentStatus.REJECTED.value}
@@ -20,13 +23,15 @@ def _utc_iso(value: datetime | None) -> str | None:
     return ist_iso(value)
 
 
-class IndentItemIn(BaseModel):
+class IndentItemIn(CombinationIn):
+    """A line: the item, and which brand / variant / model of it — or "Any"
+    (2026-10-23). The same item in two combinations is two lines."""
     item_id: int
     quantity: float = Field(gt=0)
     remarks: str | None = None
 
 
-class IndentCreate(BaseModel):
+class IndentCreate(OrgScopeIn):
     required_date: date | None = None
 
     _no_past_required_date = field_validator("required_date")(
@@ -36,16 +41,20 @@ class IndentCreate(BaseModel):
     # lands on exactly the value the database would have given it anyway.
     indent_type: IndentType = IndentType.REGULAR
     vehicle_id: int | None = None
+    #: A Stock Transfer Request's source point (2026-11-04) — required on an STR,
+    #: ignored on an indent.
+    source_warehouse_id: int | None = None
     remarks: str | None = None
     items: Annotated[list[IndentItemIn], DocumentLines]
 
 
-class IndentUpdate(BaseModel):
+class IndentUpdate(OrgScopeIn):
     required_date: date | None = None
     priority: str | None = None
     indent_type: IndentType | None = None
     vehicle_id: int | None = None
     office_id: int | None = None
+    source_warehouse_id: int | None = None
     remarks: str | None = None
     items: Annotated[list[IndentItemIn], DocumentLines] | None = None
 
@@ -67,14 +76,41 @@ class ActionIn(BaseModel):
     comments: str = ""
 
 
+class ReturnForCorrectionIn(BaseModel):
+    """`target_sequence`: 0 sends the indent back to the requester, a positive number to
+    whoever signed that step. Left out, it goes to the nearest earlier step."""
+    comments: str = ""
+    target_sequence: int | None = Field(default=None, ge=0)
+
+
+class ReturnTargetOut(BaseModel):
+    sequence: int
+    stage_name: str | None = None
+    owner_name: str | None = None
+    owner_position_id: int | None = None
+    is_requester: bool = False
+    is_default: bool = False
+
+
 class CorrectionOwnerOut(BaseModel):
     employee_id: int
     employee_name: str | None = None
     position_id: int | None = None
 
 
-class IndentItemOut(BaseModel):
+class BrandChangeOut(BaseModel):
+    """An allocation that gave another brand than the indent line asked for."""
+    asked_for: str | None = None
+    given: str | None = None
+    quantity: float = 0
+    reason: str | None = None
+    allocation_no: str | None = None
+
+
+class IndentItemOut(CombinationOut):
     model_config = ConfigDict(from_attributes=True)
+    #: Brand changes made at the Fulfilment Desk (2026-10-24), read on the detail.
+    brand_changes: list[BrandChangeOut] = Field(default_factory=list)
     id: int
     item_id: int
     item_code: str | None = None
@@ -87,7 +123,46 @@ class IndentItemOut(BaseModel):
     remarks: str | None = None
 
 
-class IndentOut(BaseModel):
+class StrPointOut(BaseModel):
+    """One end of a Stock Transfer Request's route."""
+    warehouse_id: int | None = None
+    warehouse_code: str | None = None
+    warehouse_name: str | None = None
+    warehouse_type: str | None = None
+    tier_label: str | None = None
+    held_by: list[str] = Field(default_factory=list)
+
+
+class StrSourceChangeOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    from_warehouse_id: int | None = None
+    from_warehouse_name: str | None = None
+    to_warehouse_id: int
+    to_warehouse_name: str | None = None
+    stage_name: str | None = None
+    reason: str | None = None
+    changed_by_name: str | None = None
+    position_name: str | None = None
+    created_at: datetime
+
+    @field_serializer("created_at", when_used="json")
+    def serialize_datetime(self, value: datetime):
+        return _utc_iso(value)
+
+
+class StrSourceOption(BaseModel):
+    """A point an STR may name as its source: held at the raiser's own rank."""
+    warehouse_id: int
+    warehouse_code: str | None = None
+    warehouse_name: str | None = None
+    warehouse_type: str | None = None
+    tier: int | None = None
+    tier_label: str | None = None
+    held_by: list[str] = Field(default_factory=list)
+
+
+class IndentOut(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     indent_no: str
@@ -96,6 +171,16 @@ class IndentOut(BaseModel):
     required_date: date | None = None
     vehicle_id: int | None = None
     vehicle_number: str | None = None
+    source_warehouse_id: int | None = None
+    source_warehouse_name: str | None = None
+    source_warehouse_code: str | None = None
+    #: An STR's route, decorated on single-document reads (2026-11-04).
+    str_source: StrPointOut | None = None
+    str_destination: StrPointOut | None = None
+    str_source_changes: list[StrSourceChangeOut] = Field(default_factory=list)
+    #: False when the delivery point is not the bottom rung of the chain (a warehouse
+    #: or an MDP): no vehicle and no service area code belong on it. None = unknown.
+    needs_vehicle_and_sac: bool | None = None
     requested_by_id: int | None = None
     requested_by_name: str | None = None
     position_id: int | None = None
@@ -125,6 +210,10 @@ class IndentOut(BaseModel):
     can_return_for_correction: bool = False
     can_edit_correction: bool = False
     can_resubmit_correction: bool = False
+    can_send_correction_back: bool = False
+    #: The returns an acknowledgement just raised for goods it did not accept (2026-11-06).
+    #: Only set on the response to that acknowledgement; empty everywhere else.
+    receipt_returns: list[dict] = Field(default_factory=list)
     correction_owner: CorrectionOwnerOut | None = None
     returned_from_stage: str | None = None
     resubmit_target_stage: str | None = None
@@ -146,6 +235,8 @@ class IndentListRow(BaseModel):
     department_name: str | None = None
     region_id: int | None = None
     region_name: str | None = None
+    source_warehouse_id: int | None = None
+    source_warehouse_name: str | None = None
     status: str
     priority: str
     total_items: int
@@ -252,11 +343,91 @@ class FulfilmentStep(BaseModel):
     caption: str | None = None
 
 
+#: Why a delivered quantity was not accepted (2026-11-06), with the words the screen
+#: shows. The VALUES are the Returns module's own reasons, one for one, because each
+#: rejection is raised there as a return of that reason; `returns/tests` asserts every one
+#: is a real `ReturnReason`, so the two cannot drift apart. Indents may not import returns
+#: (rule 5), hence a copy that is checked rather than a shared import.
+ACK_REJECTION_LABELS: dict[str, str] = {
+    "DAMAGED": "Damaged",
+    "EXPIRED": "Expired",
+    "NEAR_EXPIRY": "Near expiry",
+    "LEAKED_SPILLED": "Leakage",
+    "PACKAGING_DAMAGED": "Broken package",
+    "OTHER": "Other",
+}
+
+#: The reasons that mean the goods were harmed in transit, so the carrier is claimed
+#: against as well. Expired / near-expiry / other are the supplier's or the shelf's
+#: problem, not the carrier's.
+ACK_DAMAGE_REASONS = frozenset({"DAMAGED", "PACKAGING_DAMAGED", "LEAKED_SPILLED"})
+
+
+class ReceiptRejectionIn(BaseModel):
+    """Part of a line that reached the requester and is NOT being accepted.
+
+    The REASON is optional (2026-11-07): the person at the delivery only says how much
+    is going back; why is asked on the Returns page, where the return is raised."""
+    reason: str | None = None
+    quantity: float = Field(gt=0, allow_inf_nan=False)
+    comment: str | None = Field(default=None, max_length=500)
+    #: WHICH units are turned away, for goods that carry codes (serial, IMEI, asset).
+    #: Empty for bulk goods; otherwise exactly one code per unit.
+    serial_numbers: list[str] = Field(default_factory=list, max_length=500)
+
+    @field_validator("serial_numbers")
+    @classmethod
+    def _clean_codes(cls, value: list[str]) -> list[str]:
+        codes = [str(c).strip() for c in value if str(c).strip()]
+        if len(set(codes)) != len(codes):
+            raise ValueError("A serial number is named twice")
+        return codes
+
+    @field_validator("reason")
+    @classmethod
+    def _known_reason(cls, value: str | None) -> str | None:
+        reason = (value or "").strip().upper()
+        if not reason:
+            return None
+        if reason not in ACK_REJECTION_LABELS:
+            raise ValueError(
+                "Pick a reason: " + ", ".join(ACK_REJECTION_LABELS.values()))
+        return reason
+
+    @field_validator("comment")
+    @classmethod
+    def _trim(cls, value: str | None) -> str | None:
+        return (value or "").strip() or None
+
+    @model_validator(mode="after")
+    def _other_says_what(self):
+        # "Other" on its own tells whoever handles the return nothing.
+        if self.reason == "OTHER" and not self.comment:
+            raise ValueError("Say what the problem is when the reason is Other")
+        if self.serial_numbers and (
+                self.quantity != int(self.quantity) or len(self.serial_numbers) != int(self.quantity)):
+            raise ValueError("Name one serial number for each unit turned away")
+        return self
+
+
 class AcknowledgeLineIn(BaseModel):
     indent_item_id: int
-    # What arrived in THIS delivery, not the running total. The service adds it to what
-    # was already acknowledged, so the caller never has to know the previous figure.
-    received_quantity: float = Field(gt=0)
+    # What arrived in THIS delivery AND WAS ACCEPTED, not the running total. The service
+    # adds it to what was already acknowledged, so the caller never has to know the
+    # previous figure. Zero is allowed when the whole line is being rejected.
+    received_quantity: float = Field(ge=0)
+    #: What reached the requester and is NOT being accepted, by reason (2026-11-06).
+    #: Accepted + rejected + still missing is what was sent.
+    rejections: list[ReceiptRejectionIn] = Field(default_factory=list, max_length=12)
+    #: A line issued in PACKAGES (2026-10-26): how much arrived in each package that
+    #: came SHORT or MISSING (0), by code. Packages not named arrived whole.
+    package_receipts: dict[str, float] | None = None
+
+    @model_validator(mode="after")
+    def _something_is_confirmed(self):
+        if self.received_quantity + sum(r.quantity for r in self.rejections) <= 0:
+            raise ValueError("Enter what you received, or what you are not accepting")
+        return self
 
 
 class AcknowledgeIn(BaseModel):
@@ -299,18 +470,34 @@ class AcknowledgementPackageQuantityRow(BaseModel):
     is_temp_controlled: bool = False
     packed_by_name: str | None = None
     packed_at: datetime | None = None
+    #: The packs THIS package holds of the line, as the packer left them (2026-10-22).
+    pack_breakdown: list[dict] | None = None
+    pack_text: str | None = None
+    #: The packages this carton holds of a line issued in packages, {code, quantity}.
+    box_codes: list[dict] = Field(default_factory=list)
 
 
-class AcknowledgementLineRow(BaseModel):
+class AcknowledgementLineRow(CombinationOut):
     """One indent line on the "what is owed to me" screen."""
     indent_item_id: int
+    item_id: int | None = None
     item_code: str | None = None
     item_name: str | None = None
     uom_code: str | None = None
     approved_quantity: float
     issued_quantity: float
+    #: What was actually ISSUED against the line, per brand / variant / model
+    #: (2026-10-26): a substituted brand, or stock with no brand recorded.
+    issued_combinations: list[dict] = Field(default_factory=list)
+    #: Issued in BOXES (2026-10-26): {code, pack_name, quantity} per box. The site
+    #: checks these boxes; no code per piece is asked for.
+    box_codes: list[dict] = Field(default_factory=list)
     dispatched_quantity: float
     received_quantity: float
+    #: Reached the requester and was not accepted (2026-11-06). Counted as arrived, so it
+    #: is not offered for acknowledgement again, but it is not received: the line is
+    #: still owed.
+    rejected_quantity: float = 0
     is_serial_tracked: bool = False
     #: WHICH kind of identifier the labels below are — SERIAL, IMEI, ASSET,
     #: CONSUMABLE or NONE (`warehouse.enums.TRACKING_META`). Served rather than
@@ -330,6 +517,10 @@ class AcknowledgementLineRow(BaseModel):
     #: Physical package split for this line. The acknowledgement itself is still per
     #: indent line, but the receipt desk has to open the packages warehouse labelled.
     package_quantities: list[AcknowledgementPackageQuantityRow] = Field(default_factory=list)
+    #: The packs the line was sent in — "1 Box + 5 loose" — read off its issue lines
+    #: (2026-10-22). Codes stay per unit; this only describes them.
+    pack_breakdown: list[dict] | None = None
+    pack_text: str | None = None
     # Plain-English answer to "why hasn't my stuff come yet", derived at read time from
     # the issue and dispatch state — never stored, so it cannot go stale.
     pending_with: str | None = None
@@ -344,6 +535,7 @@ class ShipmentTrackRow(BaseModel):
     today". Read-only — the leg itself belongs to Logistics.
     """
     dispatch_id: int | None = None
+    consignment_no: str | None = None
     tr_id: int
     tr_no: str
     mode: str
@@ -364,12 +556,20 @@ class ShipmentTrackRow(BaseModel):
 class AcknowledgementRow(BaseModel):
     indent_id: int
     indent_no: str
+    #: STR rows are received on Inventory > Stock Transfer, not Indents (2026-10-29).
+    indent_type: str | None = None
+    #: An STR's route, off the orders serving it: STO numbers, source(s), destination.
+    sto_nos: list[str] = []
+    from_warehouse_names: list[str] = []
+    to_warehouse_name: str | None = None
     indent_date: date | None = None
     required_date: date | None = None
     status: str
     priority: str | None = None
     project_name: str | None = None
     can_acknowledge: bool = False
+    #: Returns raised by the acknowledgement that produced this row (2026-11-06).
+    receipt_returns: list[dict] = Field(default_factory=list)
     lines: list[AcknowledgementLineRow] = []
     shipments: list[ShipmentTrackRow] = []
 
@@ -442,6 +642,11 @@ class IndentJourneyOut(BaseModel):
     phases: list[IndentJourneyStage]
     history: list[IndentJourneyHistoryEvent]
     missing_sources: list[str] = Field(default_factory=list)
+    qc_status: str | None = None
+    qc_inspection_no: str | None = None
+    qc_complete: bool = False
+    consignment_no: str | None = None
+    consignment_status: str | None = None
 
     @field_serializer("created_at", when_used="json")
     def serialize_datetime(self, value: datetime):

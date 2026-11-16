@@ -45,6 +45,8 @@ export interface AppSettings {
   logistics: {
     /** Let the dispatch desk record a courier name without a logistics-vendor login. */
     manual_courier_dispatch: boolean;
+    /** Send third-party logistics to vendor portals for quote tendering. When off, handled directly at desk. */
+    send_third_party_to_vendor: boolean;
   };
   security: {
     /** How long a vendor's one-time code stays good for, in seconds. Enforced by the

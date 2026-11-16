@@ -577,7 +577,7 @@ async def test_reject_requires_reason_before_workflow_action(monkeypatch, commen
             approver,
         )
 
-    active_task.assert_awaited_once_with(db, 77, 20)
+    active_task.assert_awaited_once_with(db, 77, 20, user=approver)
     service.engine.act.assert_not_awaited()
 
 

@@ -255,6 +255,8 @@ async def list_rows(db: AsyncSession, key: str, page: int, size: int,
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     result = await db.execute(stmt.offset((page - 1) * size).limit(size))
     items = [{k: _clean(v) for k, v in row.items()} for row in result.mappings()]
+    if spec.decorate is not None and items:
+        await spec.decorate(db, items)
     return {
         "items": items, "total": total, "page": page, "size": size,
         "columns": [_col_out(c) for c in spec.columns], "applied": applied,
@@ -361,7 +363,10 @@ async def _export_rows(db: AsyncSession, spec: LedgerSpec, query: Mapping[str, s
     visibility scope at all while the screen it came from had one."""
     stmt, applied = await _filtered(db, spec, query, user)
     result = await db.execute(stmt.limit(MAX_EXPORT_ROWS))
-    return list(result.mappings()), applied
+    rows = [dict(row) for row in result.mappings()]
+    if spec.decorate is not None and rows:
+        await spec.decorate(db, rows)
+    return rows, applied
 
 
 def export_columns(spec: LedgerSpec, query: Mapping[str, str]) -> list[Col]:

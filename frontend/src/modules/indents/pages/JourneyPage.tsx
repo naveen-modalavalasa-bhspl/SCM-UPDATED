@@ -2,20 +2,20 @@ import { useEffect, useMemo } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  AlertTriangle, ArrowLeft, Ban, Check, Circle, Clock, Loader2, Minus, RefreshCw, Undo2, X,
+  AlertTriangle, ArrowLeft, Ban, Check, Circle, Clock, Loader2, Minus, RefreshCw, Repeat2, Undo2, X,
 } from "lucide-react";
 import { CardBody, Skeleton } from "@heroui/react";
 import { Button, Card } from "@/shared/components";
 import { IndentStatusBadge } from "../components/IndentStatusBadge";
 import {
-  INDENT_QUERY_GC_TIME, INDENT_QUERY_STALE_TIME, indentApi, indentKeys,
+  INDENT_QUERY_GC_TIME, indentApi, indentKeys,
   isIndentUnavailableError, useIndentAccountCacheIsolation, useIndentAccountScope,
 } from "../api";
 import { INDENT_STATUS, STR_BASE, STR_HOME } from "../constants";
 import { formatIndentDate, formatIndentDateTime, parseIndentTimestamp } from "../dateTime";
 import {
   buildJourneyTracks, isOccurredJourneyStage, isResubmissionStage, isUpcomingJourneyStage,
-  journeySteps, sortOccurredStages, stageStatus,
+  journeySteps, journeyTrackKey, sortOccurredStages, stageStatus,
 } from "../journeyModel";
 import type { JourneyTrack, JourneyTrackState } from "../journeyModel";
 import type { IndentJourneyHistoryEvent, IndentJourneyStage } from "../types";
@@ -35,7 +35,14 @@ function formatDuration(seconds?: number | null) {
   return rest ? `${hours} hr ${rest} min` : `${hours} hr`;
 }
 
-function stageTone(stage: IndentJourneyStage) {
+function isWaitingAllocationStage(stage: IndentJourneyStage, isAllocationPending: boolean) {
+  return isAllocationPending && (
+    stage.title?.toLowerCase() === "ready for allocation" || stageStatus(stage) === "AWAITING_ALLOCATION"
+  );
+}
+
+function stageTone(stage: IndentJourneyStage, isAllocationPending = false) {
+  if (isWaitingAllocationStage(stage, isAllocationPending)) return "border-info/50 bg-info-bg text-info";
   const status = stageStatus(stage);
   if (status === "REJECTED") return "border-bad bg-bad-bg text-bad";
   if (status === "RETURNED" || status === INDENT_STATUS.RETURNED_FOR_CORRECTION) return "border-warn bg-warn-bg text-warn";
@@ -50,20 +57,52 @@ function stageTone(stage: IndentJourneyStage) {
   return "border-line bg-white text-muted";
 }
 
-function statusLabel(stage: IndentJourneyStage) {
+function pendingStageLabel(stage: IndentJourneyStage): string {
+  const stageType = String(stage.stage_type ?? "").trim().toLowerCase();
+  if (stageType === "draft") return "Draft";
+  if (stageType === "submission") return "Awaiting submission";
+
+  const track = journeyTrackKey(stageType);
+  if (track === "approvals") return "Awaiting approval";
+  if (track === "allocation") return "Awaiting allocation";
+  if (track === "warehouse") return "Pending warehouse";
+  if (track === "delivery") return "In transit";
+  if (track === "acknowledgement") return "Awaiting acknowledgement";
+
+  const title = String(stage.title ?? "").trim().toLowerCase();
+  if (title.includes("draft")) return "Draft";
+  if (title.includes("submit")) return "Awaiting submission";
+  if (title.includes("approv")) return "Awaiting approval";
+  if (title.includes("allocat")) return "Awaiting allocation";
+  if (title.includes("warehouse") || title.includes("issue") || title.includes("pick")) return "Pending warehouse";
+  if (title.includes("transit") || title.includes("dispatch") || title.includes("deliver")) return "In transit";
+  if (title.includes("ack") || title.includes("receipt")) return "Awaiting acknowledgement";
+
+  return "Pending";
+}
+
+function statusLabel(stage: IndentJourneyStage, isAllocationPending = false) {
   if (stage.is_current) return "Current";
   const status = stageStatus(stage);
   if (
     (stage.stage_type === "draft" && status === "APPROVED")
     || (stage.stage_type === "submission" && status === "SUBMITTED")
   ) return "Completed";
+  if (isWaitingAllocationStage(stage, isAllocationPending)) {
+    return "Waiting for allocation";
+  }
+  if (status === "PENDING") {
+    return pendingStageLabel(stage);
+  }
   const labels: Record<string, string> = {
+    DRAFT: "Draft",
+    PENDING_APPROVAL: "Awaiting approval",
     SUBMITTED: "Submitted",
     APPROVED: "Approved",
     COMPLETED: "Completed",
+    AWAITING_ALLOCATION: "Waiting for allocation",
     ACKNOWLEDGED: "Acknowledged",
     REJECTED: "Rejected",
-    PENDING: "Pending",
     NOT_REQUIRED: "Not required",
     RETURNED: "Returned for correction",
     RETURNED_FOR_CORRECTION: "Returned for correction",
@@ -96,15 +135,19 @@ function correctedReturnStageKeys(stages: IndentJourneyStage[]) {
   return corrected;
 }
 
-function StageIcon({ stage }: { stage: IndentJourneyStage }) {
+function StageIcon({ stage, isAllocationPending = false }: { stage: IndentJourneyStage; isAllocationPending?: boolean }) {
+  if (isWaitingAllocationStage(stage, isAllocationPending)) {
+    const cls = `grid h-9 w-9 shrink-0 place-items-center rounded-full border ${stageTone(stage, isAllocationPending)}`;
+    return <span className={cls}><Clock className="h-4 w-4" /></span>;
+  }
   const status = stageStatus(stage);
-  const cls = `grid h-9 w-9 shrink-0 place-items-center rounded-full border ${stageTone(stage)}`;
+  const cls = `grid h-9 w-9 shrink-0 place-items-center rounded-full border ${stageTone(stage, isAllocationPending)}`;
   if (status === "REJECTED") return <span className={cls}><X className="h-4 w-4" /></span>;
   if (status === "RETURNED" || status === INDENT_STATUS.RETURNED_FOR_CORRECTION) return <span className={cls}><Undo2 className="h-4 w-4" /></span>;
   if (status === "CANCELLED") return <span className={cls}><Ban className="h-4 w-4" /></span>;
   if (status === "NOT_REQUIRED") return <span className={cls}><Minus className="h-4 w-4" /></span>;
   if (["APPROVED", "SUBMITTED", "COMPLETED", "ACKNOWLEDGED"].includes(status)) return <span className={cls}><Check className="h-4 w-4" /></span>;
-  if (stage.is_current) return <span className={cls}><Clock className="h-4 w-4" /></span>;
+  if (status === "PENDING_APPROVAL" || stage.is_current) return <span className={cls}><Clock className="h-4 w-4" /></span>;
   return <span className={cls}><Circle className="h-4 w-4" /></span>;
 }
 
@@ -123,8 +166,8 @@ function trackAccent(state: JourneyTrackState) {
 }
 
 function JourneyStageRow({
-  stage, isLast, correctionResubmitted = false,
-}: { stage: IndentJourneyStage; isLast: boolean; correctionResubmitted?: boolean }) {
+  stage, isLast, correctionResubmitted = false, isAllocationPending = false,
+}: { stage: IndentJourneyStage; isLast: boolean; correctionResubmitted?: boolean; isAllocationPending?: boolean }) {
   const when = formatIndentDateTime(stage.timestamp);
   const duration = formatDuration(stage.duration_seconds);
   const status = stageStatus(stage);
@@ -132,15 +175,16 @@ function JourneyStageRow({
   const rejected = status === "REJECTED";
   const returned = status === "RETURNED" || status === INDENT_STATUS.RETURNED_FOR_CORRECTION;
   const awaited = !stage.timestamp && !current;
+  const waitingAllocation = isWaitingAllocationStage(stage, isAllocationPending);
   return (
     <li className="relative flex gap-3 sm:gap-4">
       <div className="flex flex-col items-center">
-        <StageIcon stage={stage} />
+        <StageIcon stage={stage} isAllocationPending={isAllocationPending} />
         {!isLast && <span className="mt-2 h-full min-h-10 w-px bg-line" />}
       </div>
       <article
         className={`mb-4 min-w-0 flex-1 rounded-lg border p-4 shadow-sm transition-colors duration-150 motion-reduce:transition-none ${
-          current
+          current || waitingAllocation
             ? "border-brand/40 bg-brand/5"
             : rejected
               ? "border-bad/40 bg-bad-bg"
@@ -162,9 +206,11 @@ function JourneyStageRow({
             )}
           </div>
           <span className={`w-fit shrink-0 rounded-full border px-2.5 py-1 text-xs font-semibold ${
-            current ? "border-brand/30 bg-brand/10 text-brand" : "border-line bg-content2 text-muted"
+            current || waitingAllocation
+              ? "border-info/30 bg-info-bg text-info"
+              : "border-line bg-content2 text-muted"
           }`}>
-            {statusLabel(stage)}
+            {statusLabel(stage, isAllocationPending)}
           </span>
         </div>
         <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
@@ -242,11 +288,18 @@ export function IndentJourneyPage() {
     queryKey: indentKeys.journey(accountScope, indentId),
     queryFn: ({ signal }) => indentApi.journey(indentId, signal),
     enabled: Number.isFinite(indentId),
-    staleTime: INDENT_QUERY_STALE_TIME,
+    staleTime: 10_000,
     gcTime: INDENT_QUERY_GC_TIME,
     placeholderData: (previousData) => previousData,
     refetchOnMount: "always",
     refetchOnWindowFocus: "always",
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      if (status && !["CLOSED", "REJECTED"].includes(status)) {
+        return 10_000;
+      }
+      return false;
+    },
   });
   const steps = useMemo(() => journeySteps(data), [data]);
   const correctedReturns = useMemo(
@@ -309,23 +362,53 @@ export function IndentJourneyPage() {
   const journeyCompleted = data.phases.length > 0 && data.phases.every((phase) => (
     COMPLETED_PHASE_STATUSES.has(stageStatus(phase))
   ));
-  // A consignment still inside the gate has no `gate_out_at` to read. That is the
-  // normal state of an indent the warehouse has not released yet, not a record the
-  // evidence walk failed on, so listing it fired the banner on almost every open
-  // request. Every other missing source still shows.
-  const visibleMissingSources = data.missing_sources?.filter(
-    (source) => source !== "out_dispatches.gate_out_at",
-  ) ?? [];
+  // In-progress requests naturally do not have downstream records yet:
+  // - An indent waiting for allocation has no approved allocation yet.
+  // - A consignment still inside the gate has no `gate_out_at` to read yet.
+  // These are normal operational states, not missing or unreadable records.
+  const hasAllocationOccurred = (data.history ?? []).some((e) => {
+    const type = String(e.event_type ?? "").trim().toUpperCase();
+    return (
+      type === "STOCK_ALLOCATED"
+      || type === "ALLOCATION_CREATED"
+      || type === "ALLOCATION_COMPLETED"
+      || type.startsWith("ALLOCATION_")
+    );
+  });
+  const isAllocationPending =
+    !hasAllocationOccurred && (
+      data.status === "AWAITING_ALLOCATION"
+      || data.status === "APPROVED"
+      || !data.phases.some(
+        (phase) => phase.title.toLowerCase().includes("allocation") && COMPLETED_PHASE_STATUSES.has(stageStatus(phase)),
+      )
+    );
+  const visibleMissingSources = data.missing_sources?.filter((source) => {
+    if (source === "out_dispatches.gate_out_at") return false;
+    if (isAllocationPending && source.includes("inv_allocations")) return false;
+    return true;
+  }) ?? [];
 
   return (
     <div className="min-w-0 space-y-5">
-      <button
-        type="button"
-        onClick={() => nav(`${base}/${indentId}`)}
-        className="inline-flex min-h-11 items-center gap-1.5 text-sm font-semibold text-muted hover:text-body"
-      >
-        <ArrowLeft className="h-4 w-4" /> Back to indent details
-      </button>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <button
+          type="button"
+          onClick={() => nav(`${base}/${indentId}`)}
+          className="inline-flex min-h-11 items-center gap-1.5 text-sm font-semibold text-muted hover:text-body"
+        >
+          <ArrowLeft className="h-4 w-4" /> Back to indent details
+        </button>
+        <Button
+          variant="secondary"
+          onClick={() => refetch()}
+          disabled={isFetching}
+          className="gap-1.5 text-xs font-semibold"
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${isFetching ? "animate-spin motion-reduce:animate-none" : ""}`} />
+          {isFetching ? "Refreshing..." : "Refresh"}
+        </Button>
+      </div>
 
       <header className="flex flex-col gap-4 rounded-xl border border-line bg-content1 p-5 shadow-sm lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
@@ -359,7 +442,9 @@ export function IndentJourneyPage() {
             </div>
           </dl>
         </div>
-        <IndentStatusBadge status={data.status} journey={data} />
+        <div className="flex flex-col items-start gap-1.5 lg:items-end">
+          <IndentStatusBadge status={data.status} journey={data} />
+        </div>
       </header>
 
       {error && <p className="rounded-lg border border-bad/30 bg-bad-bg px-4 py-3 text-sm text-bad">{error.message}</p>}
@@ -387,6 +472,7 @@ export function IndentJourneyPage() {
                         <JourneyStageRow
                           key={stageKey(stage)}
                           stage={stage}
+                          isAllocationPending={isAllocationPending}
                           correctionResubmitted={correctedReturns.has(stageKey(stage))}
                           isLast={
                             index === track.occurred.length - 1
@@ -411,6 +497,7 @@ export function IndentJourneyPage() {
                     <JourneyStageRow
                       key={stageKey(stage)}
                       stage={stage}
+                      isAllocationPending={isAllocationPending}
                       isLast={index === steps.upcoming.length - 1}
                     />
                   ))}
@@ -432,9 +519,22 @@ export function IndentJourneyPage() {
                     <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted">{date}</h3>
                     <div className="space-y-3">
                       {events.map((event) => (
-                        <article key={event.id} className="rounded-lg border border-line bg-content2 p-3">
+                        <article
+                          key={event.id}
+                          className={event.event_type === "BRAND_CHANGED"
+                            ? "rounded-lg border border-warning/40 bg-warning/5 p-3"
+                            : "rounded-lg border border-line bg-content2 p-3"}
+                        >
                           <p className="text-xs font-semibold text-muted">{formatIndentDateTime(event.timestamp)}</p>
-                          <p className="mt-1 break-words text-sm font-semibold text-body">{event.title}</p>
+                          {/* A brand given in place of the one asked for is the one
+                              allocation fact a requester must not miss. */}
+                          {event.event_type === "BRAND_CHANGED" ? (
+                            <p className="mt-1 inline-flex items-center gap-1.5 text-sm font-semibold text-warning">
+                              <Repeat2 size={14} aria-hidden /> {event.title}
+                            </p>
+                          ) : (
+                            <p className="mt-1 break-words text-sm font-semibold text-body">{event.title}</p>
+                          )}
                           {event.description && <p className="mt-1 break-words text-sm text-muted">{event.description}</p>}
                           {event.actor_name && <p className="mt-1 break-words text-sm text-body">{event.actor_name}</p>}
                           {event.position_name && <p className="break-words text-xs text-muted">{event.position_name}</p>}

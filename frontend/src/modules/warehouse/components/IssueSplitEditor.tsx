@@ -1,4 +1,7 @@
 import { useState } from "react";
+import { baseOf, packable, type PackHierarchy } from "@/shared/packing";
+import { IssuePickPacking } from "./IssuePickPacking";
+import { ItemStockCard } from "./ItemStockCard";
 import {
   AlertTriangle, Barcode, Check, MessageSquare, PackageX, Plus, ScanLine, Trash2, Undo2,
 } from "lucide-react";
@@ -9,13 +12,16 @@ import { LocationTrail } from "./LocationTrail";
 import { BatchPicker, LocationPicker, expiryLabel } from "./SourcePicker";
 import { fmtQty, num } from "../format";
 import {
-  allowedExpiries, batchChoices, locationChoices, redistribute, replaceGroup, round,
-  sourceKey, trimUnits,
+  allowedExpiries, batchChoices, batchesForPick, locationChoices, redistribute, replaceGroup,
+  round, sourceKey, trimUnits,
 } from "../issueSplits";
 import type { BatchChoice, IssueGroup, IssueSplit } from "../issueSplits";
+import { sourcesFor } from "../issueSplits";
+import { heldMix } from "../packPick";
 import type {
   IssueItemWrite, IssueStockSource, TrackingType, TrackingTypeMeta, UnitSupply,
 } from "../types";
+import { CombinationPicker, CombinationTag, inStockOptions, type CombinationValue } from "@/shared/combination";
 
 /**
  * The Lines grid of a material issue: **one row per item, however many batches and
@@ -134,11 +140,17 @@ interface Props {
   locked: boolean;
   /** Even the units are settled — posted, cancelled, or somebody else's to name. */
   unitsLocked: boolean;
+  /** Asset/consumable codes only — swappable by the issuer or an approver. Falls back
+   *  to `locked && unitsLocked` when not given. */
+  codesLocked?: boolean;
   /** Identifiers are not picked yet at all — drafts and documents in approval. The
    *  units are chosen at the shelf by whoever issues it, once it is approved. */
   unitsHidden?: boolean;
   /** Opens the identifier picker for one pick, by its flat index. */
   onPickUnits: (index: number) => void;
+  /** A pick has just been given its batch AND location (or batch, where the point
+   *  keeps none) — the form fills asset / consumable codes for it there and then. */
+  onSourcePicked?: (index: number, line: IssueItemWrite) => void;
   meta: (code?: TrackingType | null) => TrackingTypeMeta | null;
   /** Flat indices that carry a problem, so the row can show it where it happened. */
   problemAt: Map<number, { level: "error" | "warn"; message: string }>;
@@ -158,15 +170,37 @@ interface Props {
   onRemoveGroup?: (group: IssueGroup) => void;
   /** Per-pick rate editor — unchanged from the flat grid, kept on the pick. */
   renderRate?: (split: IssueSplit) => React.ReactNode;
+  /** Each item's pack hierarchies, so a pick can be issued in packs (2026-10-08). */
+  packOptionsByItem?: Record<number, PackHierarchy[]>;
 }
 
 export function IssueSplitEditor({
   groups, lines, onChange, sourcesByItem, warehouseId, indentId, binManaged,
-  locked, unitsLocked, unitsHidden = false, onPickUnits, meta, problemAt, unitSupply,
-  sourcesReady, onAddItem, renderItemPicker, onRemoveGroup, renderRate,
+  locked, unitsLocked, codesLocked, unitsHidden = false, onPickUnits, onSourcePicked, meta, problemAt, unitSupply,
+  sourcesReady, onAddItem, renderItemPicker, onRemoveGroup, renderRate, packOptionsByItem,
 }: Props) {
-  const patch = (index: number, change: Partial<IssueItemWrite>) =>
-    onChange(lines.map((line, i) => (i === index ? { ...line, ...change } : line)));
+  const patch = (index: number, change: Partial<IssueItemWrite>,
+                 event?: { batchPicked?: boolean; locationPicked?: boolean }) => {
+    const next = lines.map((line, i) => (i === index ? { ...line, ...change } : line));
+    onChange(next);
+    const line = next[index];
+    // Batch and location both named (or the batch, where nothing is binned): the
+    // source is decided, so the codes for it can be filled straight away.
+    const picked = event?.locationPicked ? !!line.bin_id
+      : event?.batchPicked ? !!line.batch_id && !binManaged : false;
+    if (picked && onSourcePicked) onSourcePicked(index, line);
+  };
+
+  /** A direct issue picks which brand / variant / model it gives, off what the point
+   *  holds (2026-10-23). The picks then stand on another shelf, so their batch,
+   *  location and codes are cleared to be picked again. */
+  const setCombination = (group: IssueGroup, combo: CombinationValue) => {
+    const at = new Set(group.splits.map((s) => s.index));
+    onChange(lines.map((line, i) => (at.has(i) ? {
+      ...line, ...combo, batch_id: null, batch_no: null, bin_id: null, bin_code: null,
+      serial_numbers: null,
+    } : line)));
+  };
 
   /**
    * Take a pick off an item, and give what it was requesting back to the item.
@@ -193,18 +227,17 @@ export function IssueSplitEditor({
   const addPick = (group: IssueGroup) => {
     const template = group.splits[group.splits.length - 1]?.line;
     if (!template) return;
-    const next = group.spare[0];
-    const take = next
-      ? round(Math.min(group.remaining, num(next.drawable_qty)))
-      : 0;
+    // Blank, never pre-picked (2026-10-12): which batch and which bay are the
+    // storekeeper's choice, offered earliest-expiry first in the dropdowns.
+    const take = round(Math.max(group.remaining, 0));
     const fresh: IssueItemWrite = {
       ...template,
       id: undefined,
-      batch_id: next?.batch_id ?? null,
-      batch_no: next?.batch_no ?? null,
-      bin_id: binManaged ? next?.bin_id ?? null : null,
-      bin_code: next?.bin_code ?? null,
-      bin_path: next?.bin_path ?? null,
+      batch_id: null,
+      batch_no: null,
+      bin_id: null,
+      bin_code: null,
+      bin_path: null,
       requested_qty: take,
       issued_qty: take,
       serial_numbers: [],
@@ -303,12 +336,15 @@ export function IssueSplitEditor({
           key={group.key}
           group={group}
           lines={lines}
-          sources={sourcesByItem[group.itemId] ?? []}
+          sources={sourcesFor(sourcesByItem, group.itemId, group.combo)}
+          allSources={sourcesByItem[group.itemId] ?? []}
+          onSetCombination={(combo) => setCombination(group, combo)}
           binManaged={binManaged}
           warehouseId={warehouseId}
           indentId={indentId}
           locked={locked}
           unitsLocked={unitsLocked}
+          codesLocked={codesLocked}
           unitsHidden={unitsHidden}
           unitMeta={meta(group.trackingType)}
           problemAt={problemAt}
@@ -323,7 +359,8 @@ export function IssueSplitEditor({
           onRemoveGroup={onRemoveGroup}
           renderItemPicker={renderItemPicker}
           renderRate={renderRate}
-          hasSources={(sourcesByItem[group.itemId] ?? []).length > 0}
+          packOptions={packable(packOptionsByItem?.[group.itemId])}
+          hasSources={sourcesFor(sourcesByItem, group.itemId, group.combo).length > 0}
         />
       ))}
 
@@ -358,12 +395,14 @@ interface ItemProps {
   indentId?: number | null;
   locked: boolean;
   unitsLocked: boolean;
+  codesLocked?: boolean;
   unitsHidden: boolean;
   unitMeta: TrackingTypeMeta | null;
   problemAt: Map<number, { level: "error" | "warn"; message: string }>;
   unitSupply?: Record<string, UnitSupply>;
   sourcesReady?: boolean;
-  onPatch: (index: number, change: Partial<IssueItemWrite>) => void;
+  onPatch: (index: number, change: Partial<IssueItemWrite>,
+            event?: { batchPicked?: boolean; locationPicked?: boolean }) => void;
   onAddPick: () => void;
   onRemovePick: (index: number) => void;
   onRestore: () => void;
@@ -372,14 +411,25 @@ interface ItemProps {
   onRemoveGroup?: (group: IssueGroup) => void;
   renderItemPicker: (split: IssueSplit) => React.ReactNode;
   renderRate?: (split: IssueSplit) => React.ReactNode;
+  packOptions: PackHierarchy[];
   hasSources: boolean;
+  /** Every source of the item, whatever its combination — the in-stock dropdown. */
+  allSources: IssueStockSource[];
+  onSetCombination: (combo: CombinationValue) => void;
 }
 
 function ItemRow(props: ItemProps) {
   const {
     group, sources, locked, unitMeta, sourcesReady, onAddPick, onRestore, onSetAsk,
-    onRemoveGroup, renderItemPicker, hasSources,
+    onRemoveGroup, renderItemPicker, hasSources, allSources, onSetCombination,
   } = props;
+  // The brand / variant / model: an indent's is carried and fixed (it is what was
+  // reserved); a direct issue picks one off what this point holds.
+  const firstLine = group.splits[0]?.line;
+  const comboChoices = group.direct && group.itemId
+    ? inStockOptions(group.itemId,
+                     allSources.map((row) => ({ ...row, qty: num(row.drawable_qty) })))
+    : [];
 
   // The shelf has answered and it holds none of this item — at this point, in any
   // batch, in any bay. Said once, in a sentence, instead of leaving the batch picker
@@ -398,7 +448,15 @@ function ItemRow(props: ItemProps) {
    * every batch is open; the oldest-first ordering then carries the advice by itself.
    */
   const allowed = allowedExpiries(group.allocated);
-  const batches = batchChoices(sources, allowed, group.codedSwap);
+  // Strict FEFO (2026-10-12): only the batches the ask needs, earliest expiry first.
+  // The batch already on a line stays listed so a saved pick never renders empty; if
+  // the plan no longer names it, the row says so (`splitProblems`).
+  // A direct issue answers no indent, so no plan limits it: every batch is offered,
+  // oldest first, and the hint below carries the FEFO advice (CLAUDE.md: a manual
+  // issue is not held to the same-day rule).
+  const batches = batchChoices(sources, allowed, group.codedSwap).filter(
+    (choice) => group.direct || group.required.has(choice.batchId ?? 0)
+      || group.splits.some((s) => (s.line.batch_id ?? 0) === (choice.batchId ?? 0) && choice.batchId));
   // The oldest batch that still has stock, when this item is not taking from it.
   // Advice on a manual line, never a refusal: the storekeeper can see which pallet is
   // reachable and the screen cannot.
@@ -413,13 +471,17 @@ function ItemRow(props: ItemProps) {
   const tracked = group.pickable && group.trackingType !== "NONE";
   const short = round(group.requested - group.issued);
   const over = short < 0;
-  const codesDone = !tracked || group.codes === Math.trunc(group.issued);
+  const codesDone = !tracked || group.codes === group.need;
   const settled = !over && short === 0 && codesDone && group.issued > 0;
   // Positive: still to scan. Negative: more named than the picks now take — lowering
   // a quantity after scanning leaves too MANY, and "-2 to assign" is not a sentence.
-  const unassigned = Math.trunc(group.issued) - group.codes;
+  const unassigned = group.need - group.codes;
   const askEditable = !locked && !!group.itemId && !group.splits[0]?.line.indent_item_id;
   const spareQty = group.spare.reduce((sum, row) => sum + num(row.drawable_qty), 0);
+  // The next place worth walking to: earliest expiry, but never an expired lot.
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const nextSpare = group.spare.find(
+    (row) => !(row.expiry_date && row.expiry_date < todayIso)) ?? null;
   // The whole reason this screen has to say anything about reservations at all: a
   // pick moved off the location inventory allocated is a hold that MOVES when this
   // document is saved. Announced before the press, never after.
@@ -428,7 +490,11 @@ function ItemRow(props: ItemProps) {
   return (
     <div
       className={`overflow-hidden rounded-xl border bg-content1 transition-colors ${
-        over ? "border-bad/50" : settled ? "border-line/70" : "border-warn/40"
+        over
+          ? "border-bad/50"
+          : settled || !group.itemId
+          ? "border-line/70"
+          : "border-warn/40"
       }`}
     >
       <div className="grid gap-4 px-3 py-3 lg:grid-cols-[minmax(15rem,19rem)_minmax(0,1fr)]">
@@ -445,20 +511,38 @@ function ItemRow(props: ItemProps) {
               <div className="mt-0.5 break-words text-xs leading-5 text-muted">
                 {group.itemName ?? "—"}
               </div>
+              {comboChoices.length > 0 && !locked ? (
+                <div className="mt-2">
+                  <CombinationPicker
+                    options={comboChoices}
+                    value={firstLine}
+                    ariaLabel={`Brand, variant and model for ${group.itemCode ?? "this item"}`}
+                    onChange={onSetCombination}
+                  />
+                </div>
+              ) : (
+                <CombinationTag value={firstLine} className="mt-1.5" />
+              )}
             </>
           ) : (
             <div className="max-w-md">{renderItemPicker(group.splits[0])}</div>
           )}
 
           <dl className="mt-2.5 flex flex-wrap items-end gap-x-5 gap-y-2">
-            <div>
-              <dt className={HEAD}>Requested</dt>
+            {!group.direct && <div>
+              {/* SCM_0068: "Requested" implies a request behind the line, which is
+                  true for an indent line and false for one raised with no indent —
+                  the storekeeper is deciding the quantity, nobody asked for it. A
+                  wholly direct item hides it (2026-10-21); a hand-added line on an
+                  indent issue still shows it, under this name. */}
+              <dt className={HEAD}>{askEditable ? "Quantity to issue" : "Requested"}</dt>
               <dd className="tabular text-sm font-semibold text-ink">
                 {askEditable ? (
                   <span className="block w-24">
                     <QtyInput
-                      ariaLabel={`Requested quantity for ${group.itemCode ?? "this item"}`}
+                      ariaLabel={`Quantity to issue for ${group.itemCode ?? "this item"}`}
                       value={group.requested}
+                      decimals={group.qtyDecimals}
                       onChange={(value) => onSetAsk(num(value))}
                     />
                   </span>
@@ -466,14 +550,16 @@ function ItemRow(props: ItemProps) {
                   fmtQty(group.requested)
                 )}
               </dd>
-            </div>
+            </div>}
             <div>
               <dt className={HEAD}>Issuing</dt>
               <dd className={`tabular text-sm font-semibold ${
                 over ? "text-bad" : settled ? "text-ok" : "text-ink"
               }`}>
                 {fmtQty(group.issued)}
-                <span className="font-normal text-muted"> / {fmtQty(group.requested)}</span>
+                {!group.direct && (
+                  <span className="font-normal text-muted"> / {fmtQty(group.requested)}</span>
+                )}
               </dd>
             </div>
             {tracked && (
@@ -492,78 +578,63 @@ function ItemRow(props: ItemProps) {
           {/* One sentence, and it is the one that decides whether this item is
             * finished. Never a status word on its own — "Partial" tells nobody what
             * to do next. */}
-          <div className="mt-2 text-xs font-semibold">
-            {over ? (
-              <span className="inline-flex items-center gap-1 text-bad">
-                <AlertTriangle className="h-3.5 w-3.5" /> Over by {fmtQty(-short)}
-              </span>
-            ) : settled ? (
-              <span className="inline-flex items-center gap-1 text-ok">
-                <Check className="h-3.5 w-3.5" />
-                Fully allocated
-                {group.splits.length > 1 && (
-                  <span className="font-normal text-muted">
-                    ({group.splits.length} locations)
-                  </span>
-                )}
-              </span>
-            ) : short > 0 ? (
-              <span className="text-warn">{fmtQty(short)} still to place</span>
-            ) : (
-              <span className={unassigned > 0 ? "text-warn" : "text-bad"}>
-                {Math.abs(unassigned)} {unitMeta?.unit ?? "identifier"}
-                {Math.abs(unassigned) === 1 ? "" : "s"}{" "}
-                {unassigned > 0 ? "to assign" : "too many"}
-              </span>
-            )}
-          </div>
-
-          {/* What the WAREHOUSE holds of this item, which is the question the picks
-            * below are answers to. It is not a sum of what is on screen: a location
-            * another document has reserved outright is not offered as a source at
-            * all, so the stock would silently disappear from any figure the grid
-            * added up for itself. Served — see `IssueStockSource`.
-            *
-            * Two numbers, because they are two facts. What is standing here, and how
-            * much of it this document is allowed to take. */}
-          {group.warehouseTotal !== null && (
-            <div className="mt-2.5 rounded-lg border border-line/60 bg-content2/40 px-2.5 py-1.5">
-              <div className={HEAD}>In this warehouse</div>
-              <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2">
-                <span className="tabular text-sm font-semibold text-ink">
-                  {fmtQty(group.warehouseTotal)}
+          {!group.itemId ? (
+            <div className="mt-2 text-xs text-muted">
+              Select an item to issue
+            </div>
+          ) : group.requested <= 0 && group.issued <= 0 ? (
+            <div className="mt-2 text-xs text-muted">
+              {group.direct
+                ? "Pick a batch and location, then enter the quantity to issue"
+                : "Enter requested quantity to issue"}
+            </div>
+          ) : (
+            <div className="mt-2 text-xs font-semibold">
+              {over ? (
+                <span className="inline-flex items-center gap-1 text-bad">
+                  <AlertTriangle className="h-3.5 w-3.5" /> Over by {fmtQty(-short)}
                 </span>
-                <span className="text-[11px] text-muted">on the shelf</span>
-              </div>
-              {group.warehouseDrawable !== null && (
-                <div className={`mt-0.5 text-[10px] leading-tight ${
-                  group.warehouseDrawable <= 0 ? "text-warn" : "text-muted"
-                }`}>
-                  <span className="tabular font-semibold">
-                    {fmtQty(group.warehouseDrawable)}
-                  </span>{" "}
-                  this issue can take
-                  {group.warehouseDrawable < group.warehouseTotal
-                    && " — the rest is held by other documents"}
-                </div>
-              )}
-              {/* And what the shelf reads once this document has gone out. The
-                * quantity on screen is a promise about stock that is still there;
-                * the number that decides whether to reorder is this one. */}
-              {group.issued > 0 && (
-                <div className="mt-0.5 text-[10px] leading-tight text-muted">
-                  <span className={`tabular font-semibold ${
-                    round(group.warehouseTotal - group.issued) <= 0 ? "text-warn" : "text-ink"
-                  }`}>
-                    {fmtQty(round(group.warehouseTotal - group.issued))}
-                  </span>{" "}
-                  left here after this issue
-                </div>
-              )}
+              ) : settled ? (
+                <span className="inline-flex items-center gap-1 text-ok">
+                  <Check className="h-3.5 w-3.5" />
+                  {group.direct ? "Ready to issue" : "Fully allocated"}
+                  {group.splits.length > 1 && (
+                    <span className="font-normal text-muted">
+                      ({group.splits.length} locations)
+                    </span>
+                  )}
+                </span>
+              ) : short > 0 ? (
+                <span className="text-warn">{fmtQty(short)} still to place</span>
+              ) : unassigned !== 0 ? (
+                <span className={unassigned > 0 ? "text-warn" : "text-bad"}>
+                  {Math.abs(unassigned)} {unitMeta?.unit ?? "identifier"}
+                  {Math.abs(unassigned) === 1 ? "" : "s"}{" "}
+                  {unassigned > 0 ? "to assign" : "too many"}
+                </span>
+              ) : null}
             </div>
           )}
 
-          {onRemoveGroup && !locked && group.itemId > 0 && (
+          {/* The shelf for this item, split the way the decision needs it: free to
+            * anybody, held for this document, reserved by other documents — then what
+            * this issue can take and what is left once it goes (2026-11-03). Replaces
+            * the separate "Stock on the shelf" panel that sat above the grid. */}
+          {group.warehouseTotal !== null && (
+            <ItemStockCard
+              total={group.warehouseTotal}
+              free={group.warehouseFree ?? 0}
+              mine={group.heldForThis ?? 0}
+              others={group.heldByOthers ?? 0}
+              drawable={group.warehouseDrawable}
+              issued={group.issued}
+              asked={group.requested}
+              direct={group.direct}
+              rows={group.stockRows}
+            />
+          )}
+
+          {onRemoveGroup && !locked && (group.itemId > 0 || !group.splits[0]?.line.indent_item_id) && (
             <button
               type="button"
               onClick={() => onRemoveGroup(group)}
@@ -592,6 +663,12 @@ function ItemRow(props: ItemProps) {
               </div>
             </div>
           )}
+          {/* The FEFO plan: only the batches this ask needs, earliest expiry first, and
+            * how much from each. An earlier step must be used up before a later one —
+            * the same plan the save checks. Nothing is picked for the storekeeper. */}
+          {group.plan.length > 0 && !locked && (
+            <FefoPlanStrip group={group} />
+          )}
           <div className="space-y-1.5">
             {group.splits.map((split, position) => (
               <PickRow
@@ -617,12 +694,12 @@ function ItemRow(props: ItemProps) {
                 <span className="text-[11px] text-muted">
                   {fmtQty(spareQty)} more available in {group.spare.length} other
                   {" "}location{group.spare.length === 1 ? "" : "s"}
-                  {group.spare[0] && (
-                    <> — next is{" "}
+                  {nextSpare && (
+                    <> — earliest good is{" "}
                       <span className="font-mono text-ink">
-                        {group.spare[0].bin_code ?? "unbinned"}
+                        {nextSpare.bin_code ?? "unbinned"}
                       </span>
-                      {group.spare[0].batch_no ? ` · ${group.spare[0].batch_no}` : ""}
+                      {nextSpare.batch_no ? ` · ${nextSpare.batch_no}` : ""}
                     </>
                   )}
                 </span>
@@ -715,14 +792,75 @@ interface PickProps extends ItemProps {
   problem?: { level: "error" | "warn"; message: string };
 }
 
+/** The batches an item's ask needs, in the order stock must leave. */
+function FefoPlanStrip({ group }: { group: IssueGroup }) {
+  const taken = new Map<number, number>();
+  for (const split of group.splits) {
+    if (split.line.batch_id) {
+      taken.set(split.line.batch_id, round((taken.get(split.line.batch_id) ?? 0) + split.issued));
+    }
+  }
+  const total = round(group.plan.reduce((sum, step) => sum + step.take, 0));
+  const short = round(Math.max(group.requested, group.issued) - total);
+  return (
+    <div className="mb-2 rounded-xl border border-brand/20 bg-brand/[0.035] px-3 py-2">
+      <div className="mb-1.5 flex items-center justify-between gap-2">
+        <span className="text-[10px] font-bold uppercase tracking-wider text-brand">
+          FEFO plan · take in this order
+        </span>
+        {short > 0 && (
+          <span className="text-[10px] font-semibold text-warn">
+            {fmtQty(short)} short — no other unexpired stock here
+          </span>
+        )}
+      </div>
+      <ol className="flex flex-wrap items-stretch gap-1.5">
+        {group.plan.map((step, i) => {
+          const got = round(step.batches.reduce((sum, b) => sum + (taken.get(b.batchId ?? 0) ?? 0), 0));
+          const done = got >= step.take && step.take > 0;
+          return (
+            <li key={`${step.expiry}-${i}`}
+                className={`flex min-w-[9.5rem] items-center gap-2 rounded-lg border px-2.5 py-1.5 transition ${
+                  done ? "border-ok/40 bg-ok/[0.07]" : "border-line bg-content1"}`}>
+              <span className={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${
+                done ? "bg-ok text-white" : "bg-brand/10 text-brand"}`}>
+                {done ? <Check className="h-3 w-3" /> : i + 1}
+              </span>
+              <span className="min-w-0">
+                <span className="block truncate font-mono text-xs font-semibold text-ink">
+                  {step.batches.map((b) => b.batchNo ?? "unbatched").join(" / ")}
+                </span>
+                <span className="block text-[10px] leading-tight text-muted">
+                  {step.expiry ? `exp ${expiryLabel(step.expiry)}` : "no expiry"} · take{" "}
+                  <b className="tabular text-ink">{fmtQty(step.take)}</b>
+                  {got > 0 && !done && <> · {fmtQty(got)} picked</>}
+                </span>
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+}
+
 function PickRow(props: PickProps) {
   const {
     group, split, position, sources, batches, fefoHint, binManaged, locked,
-    unitsLocked, unitsHidden, unitMeta, unitSupply, onPatch, onPickUnits, onRemove, problem,
-    renderRate,
+    unitsLocked, codesLocked, unitsHidden, unitMeta, unitSupply, onPatch, onPickUnits, onRemove, problem,
+    renderRate, packOptions,
   } = props;
 
   const line = split.line;
+  // One batch at a time (2026-11-10): this pick is offered the earliest batch the other
+  // picks have not used up — the next one only once that is all taken. A direct issue
+  // keeps every batch, oldest first, with the FEFO hint as advice.
+  const allowedForPick = group.direct ? null : batchesForPick(group, split.index);
+  const pickBatches = allowedForPick
+    ? batches.filter((choice) => allowedForPick.has(choice.batchId ?? 0))
+    : batches;
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const isBatchExpired = !!(split.batchExpiry && split.batchExpiry < todayIso);
   // Only the locations holding THIS batch of this item. Changing the bay within a
   // batch is one physical batch sitting in two places, which FEFO cannot tell apart
   // and which is the storekeeper's call — so this list is deliberately wide open
@@ -736,7 +874,25 @@ function PickRow(props: PickProps) {
     .filter((other) => sourceKey(other.line.batch_id, null)
       === sourceKey(line.batch_id, null))
     .reduce((sum, other) => sum + other.issued, 0));
-  const need = Math.trunc(split.issued);
+  const need = split.need;
+  // A pick issued in PACKAGES (2026-10-26): the package size off the boxes it holds,
+  // and how many it holds — or, before a save, how many the quantity comes to.
+  const boxes = line.issue_in_boxes ? line.box_codes ?? [] : [];
+  // Counted in packages only while every package is the same one. Boxes AND the strips
+  // out of a box (two Issue levels) are not one unit: counting 45 strips as "45 boxes"
+  // and multiplying an edit by the box size is how the count went wrong, so a mixed
+  // pick is edited in base units and its mix is said under it.
+  const uniformPacks = boxes.length > 0 && boxes.every((b) =>
+    num(b.size) === num(boxes[0].size) && (b.pack_name ?? "") === (boxes[0].pack_name ?? ""));
+  const packSize = uniformPacks ? Math.max(...boxes.map((b) => num(b.size))) : 0;
+  const boxesMix = boxes.length ? heldMix(boxes) : "";
+  const packsHeld = boxes.length && Math.abs(boxes.reduce((s, b) => s + num(b.take), 0)
+    - num(line.issued_qty)) < 1e-6
+    ? boxes.length : packSize ? Math.ceil(num(line.issued_qty) / packSize) : 0;
+  const packWord = (n: number) => {
+    const name = (boxes[0]?.pack_name ?? "package").toLowerCase();
+    return `${n} ${n === 1 ? name : /(x|s|ch|sh)$/.test(name) ? `${name}es` : `${name}s`}`;
+  };
   const tracked = group.pickable && group.trackingType !== "NONE";
   // Asset and consumable codes are the system's own labels: the server assigns them,
   // oldest first from THIS pick's batch and location, on every save — so they are on
@@ -744,9 +900,9 @@ function PickRow(props: PickProps) {
   // an IMEI is read off the goods at the shelf, and stays "picked after approval".
   const autoCodes = group.trackingType === "ASSET" || group.trackingType === "CONSUMABLE";
   const hidden = unitsHidden && !autoCodes;
-  // Editable on a draft and, once approved, by whoever issues it; only viewable in
+  // Editable on a draft and, once approved, by whoever issues it or approved it; only viewable in
   // between. Serial/IMEI picks keep the document-wide rule.
-  const pickLocked = autoCodes ? locked && unitsLocked : unitsLocked;
+  const pickLocked = autoCodes ? codesLocked ?? (locked && unitsLocked) : unitsLocked;
   // Everybody else's reservation on this balance row. Worth naming: an unexplained
   // gap between what is on the shelf and what the pick may take reads as a bug.
   const othersHold = split.reserved !== null && split.ownReserved !== null
@@ -805,12 +961,15 @@ function PickRow(props: PickProps) {
         <div className="min-w-0">
           <CellLabel>Batch</CellLabel>
           <BatchPicker
-            choices={batches}
+            choices={pickBatches}
+            unbatched={!line.batch_id && !!line.bin_id
+              && sources.some((row) => !row.batch_id && row.bin_id === line.bin_id)}
             value={line.batch_id}
             isDisabled={locked || !line.item_id}
             isBatchTracked={group.isBatchTracked}
             fallbackNo={split.batchNo ?? line.batch_no}
             fefoHint={fefoHint}
+            isExpired={isBatchExpired}
             onChange={(choice) =>
               onPatch(split.index, {
                 batch_id: choice?.batchId ?? null,
@@ -823,9 +982,10 @@ function PickRow(props: PickProps) {
                 bin_code: null,
                 bin_path: null,
                 serial_numbers: [],
-              })
+              }, { batchPicked: true })
             }
           />
+
           {/* This batch across the WHOLE warehouse — the middle of the three widths.
             * The pick takes from one bay of it; knowing whether the batch has forty
             * more elsewhere or nothing at all is what decides whether the shortfall
@@ -860,6 +1020,7 @@ function PickRow(props: PickProps) {
                 needsBatch={group.isBatchTracked && !line.batch_id}
                 fallbackCode={split.binCode ?? line.bin_code}
                 fallbackPath={split.binPath ?? line.bin_path}
+                isExpired={isBatchExpired}
                 onChange={(choice) =>
                   onPatch(split.index, {
                     bin_id: choice?.binId ?? null,
@@ -868,7 +1029,7 @@ function PickRow(props: PickProps) {
                     // Named at the bay being left. A unit that is not in the bin the
                     // pick now claims is refused at save either way.
                     serial_numbers: [],
-                  })
+                  }, { locationPicked: true })
                 }
               />
               {/* Floor › lane › rack › shelf › bin. The dropdown label carries it too,
@@ -951,6 +1112,35 @@ function PickRow(props: PickProps) {
           * storekeeper correcting a quantity used to be sent back into the picker to
           * unpick four codes by hand before he could save. */}
         <div>
+          {packSize > 0 ? (
+            <>
+              {/* Issued in PACKAGES (2026-10-26): the count is in packages, the base
+                * under it. The last package may be a part one — the ask is honoured
+                * exactly, never rounded up to a whole package. */}
+              <CellLabel>Issue qty ({packWord(2).split(" ")[1]})</CellLabel>
+              <QtyInput
+                ariaLabel={`Packages to issue from pick ${position + 1}`}
+                value={packsHeld}
+                disabled={locked}
+                invalid={overDrawn}
+                onChange={(value) => {
+                  const want = Math.max(0, Math.floor(num(value)));
+                  const ask = num(line.requested_qty);
+                  const base = ask > 0 ? Math.min(want * packSize, ask) : want * packSize;
+                  onPatch(split.index, {
+                    issued_qty: base,
+                    serial_numbers: [],
+                    ...(line.pack_breakdown?.length && baseOf(line.pack_breakdown) !== base
+                      ? { pack_breakdown: null } : {}),
+                  });
+                }}
+              />
+              <div className="mt-0.5 text-[11px] text-muted">
+                {fmtQty(num(line.issued_qty))} base
+              </div>
+            </>
+          ) : (
+            <>
           <CellLabel>Issue qty</CellLabel>
           <QtyInput
             ariaLabel={`Issue quantity from pick ${position + 1}`}
@@ -958,11 +1148,18 @@ function PickRow(props: PickProps) {
             max={split.drawable ?? undefined}
             disabled={locked}
             invalid={overDrawn}
+            decimals={group.qtyDecimals}
             onChange={(value) => onPatch(split.index, {
               issued_qty: value,
               serial_numbers: trimUnits(line, num(value)),
+              // The packs follow the quantity: dropped here, worked out again in the
+              // same hierarchy by `IssuePickPacking` (2026-10-22).
+              ...(line.pack_breakdown?.length && baseOf(line.pack_breakdown) !== num(value)
+                ? { pack_breakdown: null } : {}),
             })}
           />
+            </>
+          )}
         </div>
 
         {/* --- identifiers ---
@@ -972,7 +1169,7 @@ function PickRow(props: PickProps) {
           * storekeeper has actually named. A quantity is not an identity — stock put
           * away before the item was coded has the first and not the second. */}
         <div className="min-w-0">
-          <CellLabel>{unitMeta?.label ?? "Identifiers"}</CellLabel>
+          <CellLabel>{line.issue_in_boxes ? "Package codes" : unitMeta?.label ?? "Identifiers"}</CellLabel>
           {!tracked ? (
             <span className="inline-block text-[11px] text-muted lg:pt-2.5">Not tracked</span>
           ) : hidden ? (
@@ -1006,8 +1203,32 @@ function PickRow(props: PickProps) {
                 * scanned is the storekeeper's own progress. Stock put away before the
                 * item was coded has quantity and no identity, so a pick can be sound
                 * on the first and impossible on the second. */}
+              {/* Issued in a container (2026-10-26): the line names its boxes. */}
+              {line.issue_in_boxes && !needsSource && (line.serial_numbers?.length ?? 0) > 0 && (
+                <div className="mt-1 flex max-w-[15rem] flex-wrap gap-1">
+                  {(line.serial_numbers ?? []).slice(0, 2).map((code) => (
+                    <span key={code} title={code}
+                          className="mono max-w-[13rem] truncate rounded-md bg-brand/[0.07] px-1.5 py-0.5 text-[10px] font-semibold text-brand">
+                      {code}
+                    </span>
+                  ))}
+                  {(line.serial_numbers?.length ?? 0) > 2 && (
+                    <span className="rounded-md bg-content2 px-1.5 py-0.5 text-[10px] font-semibold text-muted">
+                      +{(line.serial_numbers?.length ?? 0) - 2}
+                    </span>
+                  )}
+                </div>
+              )}
+              {line.container_note && (
+                <div className="mt-1 max-w-[15rem] rounded-md bg-warn-bg px-2 py-1 text-[10px] font-medium leading-snug text-warn">
+                  {line.container_note}
+                </div>
+              )}
               <div className="mt-0.5 text-[10px] leading-tight text-muted">
-                {needsSource ? (
+                {line.issue_in_boxes && !needsSource ? (
+                  boxesMix ? `${boxesMix} for this pick`
+                    : need > 0 ? `${need} ${need === 1 ? "package" : "packages"} for this pick` : null
+                ) : needsSource ? (
                   "Name the source first"
                 ) : unitsHere === null || unitsHere === undefined ? (
                   "…"
@@ -1091,6 +1312,16 @@ function PickRow(props: PickProps) {
             </div>
           )}
         </div>
+      )}
+
+      {packOptions.length > 0 && !!line.item_id && (
+        <IssuePickPacking
+          line={line}
+          hierarchies={packOptions}
+          locked={locked}
+          uom={packOptions[0]?.base_uom}
+          onChange={(change) => onPatch(split.index, change)}
+        />
       )}
 
       {problem && (

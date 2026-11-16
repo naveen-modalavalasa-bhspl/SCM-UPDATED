@@ -12,6 +12,7 @@ import { isChainPoint, orderPoints } from "../warehouseTiers";
 import type {
   AllocationDecision, BatchDemandItem, BatchDemandLine,
 } from "../types";
+import { QuantityInput } from "@/shared/components/QuantityInput";
 
 /**
  * The fulfilment queue turned on its side: one row per ITEM, not per indent.
@@ -499,6 +500,7 @@ function ItemRow({ item, plan, onChange }: {
                     type="number"
                     min={0}
                     max={freeOn(split.wh, i)}
+                    data-decimals={item.uom_decimals ?? undefined}
                     value={split.qty}
                     onChange={(e) => setSplit(i, { qty: clampSplit(i, split.wh, e.target.value) })}
                     aria-label={`Quantity from source ${i + 1} for ${item.item_name ?? "item"}`}
@@ -618,20 +620,21 @@ function ItemRow({ item, plan, onChange }: {
                       <td className="px-2 py-2 text-right">{fmt(line.pending_qty)}</td>
                       <td className="px-2 py-2 text-right">
                         <div className="flex items-center justify-end gap-2">
-                          <input
-                            type="number"
+                          <QuantityInput
+                            decimals={item.uom_decimals ?? 3}
                             min={0}
                             max={line.pending_qty}
+                            data-decimals={item.uom_decimals ?? undefined}
                             value={plan.edited[line.indent_item_id] ?? fmt(gets)}
                             // Clamped to what this line asked for and to what is
                             // actually being taken off the shelves, so a hand-set
                             // share can never promise stock the sources do not cover.
-                            onChange={(e) => onChange({
+                            onChange={(raw) => onChange({
                               ...plan,
                               edited: {
                                 ...plan.edited,
-                                [line.indent_item_id]: String(round3(Math.max(0, Math.min(
-                                  Number(e.target.value) || 0,
+                                [line.indent_item_id]: /\.$|^$/.test(raw) ? raw : String(round3(Math.max(0, Math.min(
+                                  Number(raw) || 0,
                                   line.pending_qty,
                                   round3(giving - otherFixed(line.indent_item_id)),
                                 )))),

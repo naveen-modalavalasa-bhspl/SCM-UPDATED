@@ -77,7 +77,7 @@ describe("quantityError", () => {
 
   it("explains blank and non-numeric input", () => {
     expect(quantityError(line({ max_quantity: 15 }), ""))
-      .toBe("Enter a quantity from 0 to 15 EA. Enter 0 to approve none of this item.");
+      .toBe("Enter a quantity from 0 to 15 EA. Enter 0 to reject this item.");
     expect(quantityError(line(), undefined)).toMatch(/Enter a quantity from 0 to 5 EA/);
     expect(quantityError(line(), "abc")).toMatch(/Enter a valid number/);
     expect(quantityError(line(), "1e3")).toMatch(/Enter a valid number/);
@@ -94,5 +94,15 @@ describe("formatQuantity", () => {
     expect(formatQuantity(5)).toBe("5");
     expect(formatQuantity(4.5)).toBe("4.5");
     expect(formatQuantity(-2)).toBe("-2");
+  });
+});
+
+describe("quantityError respects the unit", () => {
+  it("whole-unit lines refuse any fraction", () => {
+    expect(quantityError(line({ max_quantity: 15, uom_decimals: 0 }), "2.5")).toMatch(/whole/);
+    expect(quantityError(line({ max_quantity: 15, uom_decimals: 0 }), "2")).toBeNull();
+  });
+  it("uses the places of the unit instead of the stored three", () => {
+    expect(quantityError(line({ uom_decimals: 1 }), "1.25")).toMatch(/up to 1 decimal place/);
   });
 });

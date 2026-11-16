@@ -138,6 +138,8 @@ export function MaterialRequestFormPage() {
                   type="number"
                   min={0}
                   value={line.quantity}
+                  data-uom={catalog.find((c) => c.id === line.item_id)?.uom_code
+                    ?? catalog.find((c) => c.id === line.item_id)?.uom ?? ""}
                   aria-label={`Quantity on line ${i + 1}`}
                   placeholder="Qty"
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) =>

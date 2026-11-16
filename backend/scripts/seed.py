@@ -70,7 +70,7 @@ ROLE_PERMS = {
     RoleCode.STORE.value: [P.GRN_VIEW, P.GRN_CREATE, P.GRN_QC, P.STOCK_VIEW,
                            P.STOCK_VIEW_ALL,
                            P.STOCK_ADJUST, P.STOCK_RESERVE, P.STOCK_TRANSFER,
-                           P.ISSUE_VIEW, P.ISSUE_CREATE, P.ISSUE_ISSUE,
+                           P.ISSUE_VIEW, P.ISSUE_CREATE, P.ISSUE_SUBMIT, P.ISSUE_ISSUE,
                            P.MASTER_LOCATION_MANAGE,
                            P.RECEIPT_VIEW, P.RECEIPT_CREATE, P.RECEIPT_POST,
                            P.INSPECTION_VIEW, P.INSPECTION_EXECUTE,
@@ -119,8 +119,14 @@ PAGE_TREE = [
     # the page and its rbac_pages row (ind_ack) are gone — do not re-add a row here.
     ("ind_reports", "/indents/reports", "Activity Ledger", "bar-chart",
      P.page_view_code("ind_reports"), 15, "grp_indents"),
-    ("ind_notifications", "/indents/notifications", "Notifications", "bell",
-     P.page_view_code("ind_notifications"), 16, "grp_indents"),
+    # SCM_0056 (2026-10-19) — replaced by the top-level Alerts & Notifications page
+    # (`notifications` in page_registry.PAGES), which reads every notification the
+    # bell does rather than this derived, indent-only subset. Left commented rather
+    # than deleted: seed_pages sets is_active = True for everything in PAGE_TREE, so
+    # a row left here would put this screen back on the rail at the next seed.
+    # `page_registry.RETIRED_PAGES` parks it on an existing database.
+    # ("ind_notifications", "/indents/notifications", "Notifications", "bell",
+    #  P.page_view_code("ind_notifications"), 16, "grp_indents"),
     # What a BOM puts on the form, and which items a role or region may ask for at
     # all. LAST in the group — the rail opens a module on its first child and a master
     # is never what somebody came to Indents to do.
@@ -184,8 +190,9 @@ PAGE_TREE = [
     # two entries.
     ("wh_stock_movements", "/warehouse/stock-movements", "Stock Movements", "move",
      P.STOCK_VIEW, 47, "grp_warehouse"),
-    ("wh_picklist", "/warehouse/picklist", "Picklists", "list-checks",
-     P.PICKING_VIEW, 48, "grp_warehouse"),
+    # Picklists retired from the UI 2026-11-04 (page_registry.RETIRED_PAGES).
+    # ("wh_picklist", "/warehouse/picklist", "Picklists", "list-checks",
+    #  P.PICKING_VIEW, 48, "grp_warehouse"),
     ("wh_issues", "/warehouse/material-issues", "Material Issues", "send",
      P.ISSUE_VIEW, 49, "grp_warehouse"),
     ("wh_material_returns", "/warehouse/material-returns", "Material Returns",

@@ -981,7 +981,15 @@ async def apply_rows(defn, db: AsyncSession, ready, unchanged: int, user,
                 # Same call the CRUD route makes: a master whose apply checks the
                 # caller must get the caller here too, or a spreadsheet would be
                 # the way around a check the form enforces.
-                await run_apply(line, row, data)
+                from app.shared.masters.crud import UseExistingRow
+                try:
+                    await run_apply(line, row, data)
+                except UseExistingRow as existing:
+                    # Another brand of an item already in the master: the brand was
+                    # added to that item; there is no new row to write (2026-10-23).
+                    saved_by_key[_norm(getattr(existing.row, "code", "") or "")] = existing.row
+                    updated += 1
+                    continue
             else:
                 for key, value in data.model_dump().items():
                     setattr(row, key, value)

@@ -19,8 +19,9 @@ from app.modules.indents.enums import (
 )
 from app.modules.indents.schemas import (
     AcknowledgeIn, AcknowledgmentRow, ActionIn, ActivityRow, IndentCreate, IndentListRow,
+    ReturnForCorrectionIn, ReturnTargetOut,
     IndentJourneyOut, IndentNotificationRow, IndentOut, IndentStatsOut, IndentUpdate,
-    MonthlyCopyIn, MonthlySubmitIn,
+    MonthlyCopyIn, MonthlySubmitIn, StrSourceOption,
 )
 # Allocation is a decision about an indent, so its endpoints live here. The
 # mechanics are in modules/inventory/allocations.py -- indents may import inventory,
@@ -92,6 +93,7 @@ async def list_stock_transfer_requests(params: PageParams = Depends(),
                                        # to serve — the Fulfilment Queue's own filters.
                                        has_remainder: bool = False,
                                        to_serve: bool = False,
+                                       source_warehouse_id: int | None = None,
                                        db: AsyncSession = Depends(get_db),
                                        user=Depends(require_permission_or(
                                            perms.STOCK_TRANSFER_VIEW,
@@ -101,7 +103,18 @@ async def list_stock_transfer_requests(params: PageParams = Depends(),
         db, params, search=search, date_from=created_date_from,
         date_to=created_date_to, statuses=status, has_remainder=has_remainder,
         to_serve=to_serve, indent_types=[IndentType.STR], user=user,
+        source_warehouse_id=source_warehouse_id,
     )
+
+
+@indent_router.get("/stock-transfer-requests/sources")
+async def stock_transfer_request_sources(db: AsyncSession = Depends(get_db),
+                                         user=Depends(require_permission_or(
+                                             perms.STOCK_TRANSFER_VIEW,
+                                             perms.STOCK_TRANSFER_SERVE,
+                                             service.anywhere_in_reach))):
+    """The source points named on the STRs this login can read — the Source filter."""
+    return await service.str_sources_in_use(db, user)
 
 
 @indent_router.get("/approved-pending-po", response_model=Page[IndentListRow])
@@ -236,6 +249,13 @@ async def region_options(db: AsyncSession = Depends(get_db),
     return await service.list_region_options(db, user)
 
 
+@indent_router.get("/options/str-sources", response_model=list[StrSourceOption])
+async def str_source_options(db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(perms.STOCK_TRANSFER_REQUEST))):
+    """Where an STR may ask stock to come from: the points held at the raiser's rank."""
+    return await service.str_source_options(db, user)
+
+
 @indent_router.get("/options/vehicles")
 async def vehicle_options(search: str | None = None,
                           db: AsyncSession = Depends(get_db),
@@ -318,13 +338,35 @@ async def submit(indent_id: int, db: AsyncSession = Depends(get_db),
     return await service.submit_indent(db, indent_id, user)
 
 
+@indent_router.get("/{indent_id}/return-targets", response_model=list[ReturnTargetOut])
+async def return_targets(indent_id: int, db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission_or(
+        perms.INDENT_APPROVE,
+        (perms.INDENT_VIEW, perms.STOCK_TRANSFER_STR_APPROVE, perms.STOCK_TRANSFER_REQUEST),
+        service.anywhere_in_reach))):
+    """The earlier steps this person may send the indent back to: an approver returning
+    it, or the correction owner passing it further back. The service decides which, and
+    answers with nothing for anybody who may do neither."""
+    return await service.get_indent_return_targets(db, indent_id, user)
+
+
 @indent_router.post("/{indent_id}/return-for-correction", response_model=IndentOut)
-async def return_for_correction(indent_id: int, body: ActionIn,
+async def return_for_correction(indent_id: int, body: ReturnForCorrectionIn,
                                 db: AsyncSession = Depends(get_db),
                                 user=Depends(require_permission_or(
         perms.INDENT_APPROVE, perms.STOCK_TRANSFER_STR_APPROVE, service.str_in_reach))):
     return await service.return_indent_for_correction(
-        db, indent_id, body.comments, user,
+        db, indent_id, body.comments, user, target_sequence=body.target_sequence,
+    )
+
+
+@indent_router.post("/{indent_id}/send-correction-back", response_model=IndentOut)
+async def send_correction_back(indent_id: int, body: ReturnForCorrectionIn,
+                               db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission_or(
+        perms.INDENT_VIEW, perms.STOCK_TRANSFER_REQUEST, service.str_in_reach))):
+    return await service.send_indent_correction_back(
+        db, indent_id, body.comments, user, target_sequence=body.target_sequence,
     )
 
 
@@ -342,9 +384,12 @@ async def acknowledge(indent_id: int, body: AcknowledgeIn,
         perms.INDENT_ACKNOWLEDGE, perms.STOCK_TRANSFER_RECEIVE, service.str_in_reach))):
     lines = {line.indent_item_id: Decimal(str(line.received_quantity))
              for line in body.lines}
-    return await service.acknowledge_receipt(db, indent_id, lines, user,
-                                             condition=body.condition,
-                                             remarks=body.remarks)
+    return await service.acknowledge_receipt(
+        db, indent_id, lines, user, condition=body.condition, remarks=body.remarks,
+        package_receipts={line.indent_item_id: line.package_receipts or {}
+                          for line in body.lines},
+        rejections={line.indent_item_id: [r.model_dump() for r in line.rejections]
+                    for line in body.lines if line.rejections})
 
 
 @indent_router.get("/{indent_id}/receipt-attachments", response_model=list[AttachmentRead])

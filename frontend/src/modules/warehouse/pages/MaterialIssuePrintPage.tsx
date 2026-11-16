@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { PrintTemplate } from "@/shared/components";
 import { getIssue, warehouseOptions } from "../api";
 import { fmtDate, fmtQty } from "../format";
+import { combinationLabel } from "@/shared/combination";
 
 /**
  * The material issue note — the paper that leaves the store with the goods.
@@ -43,6 +44,23 @@ export function MaterialIssuePrintPage() {
   const warehouseName = warehouse?.label || warehouse?.name || `WH-${issue.warehouse_id}`;
   const outward = issue.direction === "OUT";
 
+  // What this issue was raised against, named for what it is. It used to print one
+  // "Indent" box, so an issue executing a stock transfer order read "Indent —" with the
+  // STO number nowhere on the paper. An STO raised from an STR names both.
+  const strNo = issue.sto_str_no ?? (issue.indent_type === "STR" ? issue.indent_no : null);
+  const against: { label: string; value: string; mono: true }[] = [];
+  if (strNo) against.push({ label: "STR", value: strNo, mono: true });
+  if (issue.sto_no) against.push({ label: "STO", value: issue.sto_no, mono: true });
+  if (!against.length) {
+    against.push({
+      label: "Indent",
+      value: issue.indent_no || (outward ? "— (direct issue)" : "—"),
+      mono: true,
+    });
+  }
+  const destination = issue.sto_to_warehouse_name
+    || issue.destination_warehouse_name || issue.destination_office_name || "—";
+
   return (
     <PrintTemplate
       title={outward ? "Material Issue" : "Material Return"}
@@ -53,9 +71,13 @@ export function MaterialIssuePrintPage() {
       metadata={[
         { label: "Warehouse", value: issue.warehouse_id ? warehouseName : "—" },
         { label: "Issued to", value: issue.issued_to_name || "—" },
-        { label: issue.indent_type === "STR" ? "STR" : "Indent", value: issue.indent_no || "—", mono: true },
-        { label: "Department", value: issue.department_id ? `DEPT-${issue.department_id}` : "—", mono: true },
-        { label: "Destination", value: issue.destination_office_name || "—", fullWidth: true },
+        ...against,
+        // Only when the issue names a department — an empty "Department —" box on
+        // a stock transfer's paper reads as a field somebody forgot to fill.
+        ...(issue.department_name || issue.department_id
+          ? [{ label: "Department", value: issue.department_name || `DEPT-${issue.department_id}` }]
+          : []),
+        { label: "Destination", value: destination, fullWidth: true },
       ]}
       columns={[
         { header: "Item", width: "30%" },
@@ -69,6 +91,7 @@ export function MaterialIssuePrintPage() {
         <span className="font-semibold" style={{ color: "#141a2a" }}>{line.item_name ?? "—"}</span>,
         <>
           <div className="font-mono text-[9px]">{line.item_code ?? "—"}</div>
+          {combinationLabel(line) && <div className="text-[9px]">{combinationLabel(line)}</div>}
           {line.batch_no && (
             <div className="mt-0.5 text-[9px]" style={{ color: "#697187" }}>Batch: {line.batch_no}</div>
           )}

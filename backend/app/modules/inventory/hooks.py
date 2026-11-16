@@ -31,6 +31,9 @@ async def fire_mr_approved(db, mr, user) -> None:
     committed by the time this runs, so the only thing an exception here can achieve is
     turning a successful approval into a 500 for the person who pressed it.
     """
+    # Read before any hook runs: after a rollback the row is expired, and touching it
+    # lazy-loads outside the async context — the very 500 this guard exists to stop.
+    mr_no = getattr(mr, "mr_no", None)
     for hook in ON_MR_APPROVED:
         try:
             await hook(db, mr, user)
@@ -38,7 +41,7 @@ async def fire_mr_approved(db, mr, user) -> None:
             await db.rollback()
             logger.exception(
                 "post-approval hook %s failed for material request %s",
-                getattr(hook, "__name__", hook), getattr(mr, "mr_no", None))
+                getattr(hook, "__name__", hook), mr_no)
 
 
 #: Called once a Stock Transfer Order reaches APPROVED, after the approval is
@@ -50,6 +53,7 @@ ON_STO_APPROVED: list[Callable[..., Awaitable[None]]] = []
 async def fire_sto_approved(db, sto, user) -> None:
     """Same contract as `fire_mr_approved`: a failing consequence never fails the
     signature that caused it."""
+    sto_no = getattr(sto, "sto_no", None)   # see fire_mr_approved
     for hook in ON_STO_APPROVED:
         try:
             await hook(db, sto, user)
@@ -57,7 +61,7 @@ async def fire_sto_approved(db, sto, user) -> None:
             await db.rollback()
             logger.exception(
                 "post-approval hook %s failed for stock transfer %s",
-                getattr(hook, "__name__", hook), getattr(sto, "sto_no", None))
+                getattr(hook, "__name__", hook), sto_no)
 
 
 #: Called for every stock movement INTO a warehouse that means goods arrived there —
@@ -70,6 +74,25 @@ async def fire_sto_approved(db, sto, user) -> None:
 #: Registered by `integrations.adapters.aims` (the AIMS outbox) — inventory may not
 #: import integrations (rule 5), so the direction is inverted like the hooks above.
 ON_STOCK_IN: list[Callable[..., Awaitable[None]]] = []
+
+#: Called for every stock movement OUT of a warehouse during a stock-audit posting —
+#: a DAMAGE, EXPIRY or SHORTAGE write-off. Runs INSIDE the posting transaction, so the
+#: units a hook retires are committed with the stock difference or not at all.
+#: Signature: `(db, adjustment, adj_item, user)`, where `adjustment` is the approved
+#: `inv_adjustments` row and `adj_item` one line of it. Registered by the warehouse
+#: module, which owns `whs_serial_numbers` and must write the codes OFF the moment
+#: their stock leaves; without it a damaged unit stayed `available` and the issue
+#: picker offered a code that no longer exists on the shelf.
+ON_ADJUSTMENT_OUT: list[Callable[..., Awaitable[None]]] = []
+
+#: Called for every write-off line WHEN THE AUDIT IS RAISED (2026-10-31), before a
+#: number is minted. Signature: `(db, warehouse_id, line, qty)`, where `line` is the
+#: request's line (item, batch, bin, `serial_numbers`) and `qty` the shortfall the
+#: server derived. Registered by the warehouse module, which owns the units and packs:
+#: a serial / IMEI lot must name exactly `qty` units, a coded lot must name packs and
+#: unit codes adding up to exactly `qty`. A hook that raises refuses the audit —
+#: checking only at approval would let a wrong pick sit in somebody's queue for days.
+ON_ADJUSTMENT_VALIDATE: list[Callable[..., Awaitable[None]]] = []
 
 #: The ledger `ref_type`s that mean "goods arrived at this warehouse".
 STOCK_IN_REF_TYPES = frozenset({"GRN", "RECEIPT", "DISPATCH", "TRANSFER", "STO"})
@@ -92,3 +115,22 @@ async def fire_stock_in(db, movement, user) -> None:
                 "stock-in hook %s failed for ledger ref %s %s",
                 getattr(hook, "__name__", hook), getattr(movement, "ref_type", None),
                 getattr(movement, "ref_no", None))
+
+
+async def fire_adjustment_validate(db, warehouse_id: int, line, qty) -> None:
+    """Run every write-off validator; the first refusal refuses the whole audit."""
+    for hook in ON_ADJUSTMENT_VALIDATE:
+        await hook(db, warehouse_id, line, qty)
+
+
+async def fire_adjustment_out(db, adjustment, adj_item, user) -> None:
+    """Run every write-off hook INSIDE the posting transaction.
+
+    Unlike the post-approval hooks above, one that fails DOES fail the posting: the
+    codes' availability is half of what the audit just recorded, and committing the
+    stock without the codes would leave the system counting units a damaged shelf
+    no longer carries. Post the ledger row and leave them live, or retire them and
+    post — never one without the other.
+    """
+    for hook in ON_ADJUSTMENT_OUT:
+        await hook(db, adjustment, adj_item, user)

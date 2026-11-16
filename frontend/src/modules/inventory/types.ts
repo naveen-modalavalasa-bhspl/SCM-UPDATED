@@ -1,3 +1,4 @@
+import type { CombinationValue } from "@/shared/combination";
 export interface InventoryOverview {
   module: string;
   status: string;
@@ -27,6 +28,8 @@ export interface StockAdjustmentLine {
   system_qty?: number | null;
   physical_qty?: number | null;
   unit_cost?: number | null;
+  batch_id?: number | null;
+  bin_id?: number | null;
   remarks?: string | null;
 }
 
@@ -76,7 +79,16 @@ export interface VendorOption {
 }
 
 export interface StockBalanceItem {
+  /** The combination (2026-10-23); absent / 0 when none was named. */
+  brand_id?: number;
+  variant_id?: number;
+  model_id?: number;
+  brand_name?: string | null;
+  variant_name?: string | null;
+  model_name?: string | null;
   id: number;
+  /** Part of reserved_qty that is an indent's QUANTITY hold — not tied to this lot. */
+  indent_held_qty?: number;
   item_id: number;
   item_code: string;
   item_name: string;
@@ -143,6 +155,37 @@ export interface StockBalanceFilter {
   size?: number;
 }
 
+/** One batch inside an item-at-point card. */
+export interface StockGroupBatch {
+  batch_id: number;
+  batch_no?: string | null;
+  expiry_date?: string | null;
+  total_qty: number;
+  available_qty: number;
+  reserved_qty: number;
+  indent_held_qty?: number;
+  bins: number;
+  bin_codes: string[];
+}
+
+/** GET /api/stock/grouped — one card per item per point, batches tucked inside. */
+export interface StockGroupRow {
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  category_name?: string | null;
+  uom_code?: string | null;
+  uom_name?: string | null;
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  total_qty: number;
+  available_qty: number;
+  reserved_qty: number;
+  indent_held_qty?: number;
+  lots: number;
+  batches: StockGroupBatch[];
+}
+
 /** GET /api/stock/summary — the tiles, counted over every matching row. */
 export interface StockSummary {
   stock_lines: number;
@@ -185,6 +228,10 @@ export interface SerialSummaryRow {
 
 /** One physical unit: GET /api/warehouse/serials (list) and .../serials/lookup (one). */
 export interface UnitRow {
+  /** The package (box / strip) the unit sits in, if any (2026-10-26). */
+  package_code?: string | null;
+  package_name?: string | null;
+  package_holds?: number | null;
   id: number;
   item_id: number;
   item_code: string | null;
@@ -245,6 +292,8 @@ export interface StockLedgerItem {
   in_qty: number;
   out_qty: number;
   balance_qty: number;
+  /** How the movement was packed (2026-10-08), as written at the time. */
+  pack_text?: string | null;
   /** Null, not 0, when the movement was never costed — "not costed" is not "free". */
   unit_rate: number | null;
   total_value: number | null;
@@ -365,6 +414,13 @@ export interface Page<T> {
 
 /** Exactly what GET /api/stock returns -- the live stk_balance columns. */
 export interface StockRow {
+  /** The combination (2026-10-23); absent / 0 when none was named. */
+  brand_id?: number;
+  variant_id?: number;
+  model_id?: number;
+  brand_name?: string | null;
+  variant_name?: string | null;
+  model_name?: string | null;
   id: number;
   warehouse_id: number;
   warehouse_name?: string | null;
@@ -385,6 +441,8 @@ export interface StockRow {
   consumable_code?: string | null;
   available_qty: number;
   reserved_qty: number;
+  /** Part of reserved_qty that is an indent quantity hold (see StockBalanceItem). */
+  indent_held_qty?: number;
   transit_qty?: number;
   issued_pending_qty?: number;
   outgoing_qty?: number;
@@ -435,6 +493,8 @@ export interface MovementRow {
   direction: "IN" | "OUT";
   quantity: number;
   balance_after: number;
+  /** How the movement was packed, snapshotted on the row (2026-10-08). */
+  pack_text?: string | null;
   /** stk_ledger.rate / .value — null on rows written before they were mapped. */
   rate?: number | null;
   value?: number | null;
@@ -464,7 +524,7 @@ export interface UnitCodeRow {
   status: string | null;
 }
 
-export interface MaterialRequestItem {
+export interface MaterialRequestItem extends CombinationValue {
   id: number;
   line_no: number;
   item_id: number;
@@ -472,6 +532,8 @@ export interface MaterialRequestItem {
   item_name?: string | null;
   uom_code?: string | null;
   quantity: number;
+  /** What the line asked for when raised — the ceiling: it may be lowered, never raised. */
+  requested_quantity?: number | null;
   ordered_quantity: number;
   indent_item_id?: number | null;
   remarks?: string | null;
@@ -493,6 +555,20 @@ export interface MaterialRequestListRow {
    *  request is waiting on. One person often holds two rungs of the same ladder, so
    *  being named the approver is not the same as being able to sign right now. */
   can_act?: boolean;
+  /** Set while RETURNED_FOR_CORRECTION: who it went back to, who sent it and why. */
+  correction?: {
+    owner_name?: string | null;
+    returned_by_name?: string | null;
+    returned_from_stage?: string | null;
+    returned_at?: string | null;
+    reason?: string | null;
+  } | null;
+  /** True only for the person it was sent back to. */
+  can_resubmit_correction?: boolean;
+  /** Only the raiser may edit it once sent back to them. */
+  can_edit_correction?: boolean;
+  /** An approver holding it may pass it one rung further down. */
+  can_pass_correction_down?: boolean;
   has_requisition?: boolean;
   created_at: string;
 }
@@ -544,10 +620,13 @@ export interface AllocationWarehouseOption {
    *  chain, everything else is the warehouse itself. */
   warehouse_type: string | null;
   available_qty: number;
+  /** Free stock here per brand / variant / model — the in-stock dropdown. */
+  combinations?: (CombinationValue & { available_qty: number })[];
 }
 
-/** A line on the allocation screen: what was asked for, what is actually there. */
-export interface AllocationProposalLine {
+/** A line on the allocation screen: what was asked for, what is actually there.
+ *  Its combination is the indent's — named, or Any. */
+export interface AllocationProposalLine extends CombinationValue {
   on_order_qty?: number;
   indent_item_id: number;
   item_id: number;
@@ -579,6 +658,9 @@ export interface AllocationProposal {
   blocked_reason: string | null;
   /** Everything already promising this indent something. */
   allocations: { id: number; allocation_no: string; status: string }[];
+  /** An STR's source point (2026-11-04) — every line opens on it when it is offered. */
+  str_source_warehouse_id?: number | null;
+  str_source_warehouse_name?: string | null;
   lines: AllocationProposalLine[];
 }
 
@@ -626,6 +708,9 @@ export interface AllocationDecision {
   quantity: number;
   warehouse_id: number | null;
   project_id?: number;
+  brand_id?: number | null;
+  variant_id?: number | null;
+  model_id?: number | null;
 }
 
 /** Outcome of allocating a whole cycle at once. `failed` names the indents that moved
@@ -711,7 +796,7 @@ export interface AllocationListRow {
 
 /** What one allocation line could actually be given right now: the shelf at its point,
  *  less what other un-approved allocations have already promised out of it. */
-export interface AllocationLineAvailability {
+export interface AllocationLineAvailability extends CombinationValue {
   id: number;
   item_id: number;
   item_code: string | null;
@@ -728,7 +813,12 @@ export interface AllocationLineAvailability {
   max_allowed: number;
 }
 
-export interface AllocationItem {
+export interface AllocationItem extends CombinationValue {
+  /** The brand the indent asked for, when another was given (2026-10-24). */
+  substituted_from?: string | null;
+  substitution_reason?: string | null;
+  /** Given out of stock with no brand recorded (2026-10-24). */
+  no_brand?: boolean;
   id: number;
   indent_item_id: number;
   item_id: number;
@@ -779,6 +869,7 @@ export interface StockLot {
   days_to_expiry?: number | null;
   available_qty: number;
   reserved_qty: number;
+  indent_held_qty?: number;
   total_qty: number;
   project_name?: string | null;
   serial_number?: string | null;
@@ -799,6 +890,10 @@ export interface StockDetail {
   total_reserved: number;
   total_on_hand: number;
   lots: StockLot[];
+  /** Indents' quantity holds on this item at this point — no batch, no location. */
+  set_aside_total?: number;
+  set_aside?: { indent_id: number; indent_no?: string | null; quantity: number;
+                since?: string | null; by_name?: string | null }[];
 }
 
 export interface ReplenishmentRule {
@@ -945,6 +1040,14 @@ export interface STOItemOut {
 }
 
 export interface STOListRow {
+  /** Whose paper it is on (2026-11-09); null on an STO older than organisations. */
+  organization_id?: number | null;
+  organization_name?: string | null;
+  org_department_id?: number | null;
+  org_department_name?: string | null;
+  project_id?: number | null;
+  project_name?: string | null;
+  fiscal_year?: string | null;
   id: number;
   sto_no: string;
   from_warehouse_id: number;
@@ -1108,6 +1211,12 @@ export interface MyStockingPoints {
   primary_warehouse_id?: number | null;
   warehouse_ids: number[];
   tags: PositionLocationTag[];
+  /** What this person's own point IS — MAIN / MDP / LIP (`describe_point`). */
+  point_type?: string | null;
+  point_name?: string | null;
+  point_label?: string;
+  /** Only the bottom rung of the chain runs a vehicle and carries an SAC (served). */
+  needs_vehicle_and_sac?: boolean;
 }
 
 /** A position the tagging screen can offer, found by person, code or post name. */
@@ -1223,6 +1332,9 @@ export interface FulfilmentBatch {
   total_qty: number;
   totals_by_uom?: UomTotal[];
   oldest_raised_at?: string | null;
+  /** The most recent indent's created_at in this cycle — together with
+   *  `oldest_raised_at` this is a RANGE, not one date (SCM_0082). */
+  newest_raised_at?: string | null;
 }
 
 export interface BatchDemand {
@@ -1317,3 +1429,129 @@ export interface StockEditPage<T> {
   page: number;
   size: number;
 }
+
+/** A queued (or printed) label for one box code — `/api/warehouse/box-labels`
+ *  (2026-10-26). Every box code made for an item issued in a container lands here. */
+export interface BoxLabelFacets {
+  items: { item_id: number; item_code: string | null; item_name: string | null; count: number }[];
+  /** batch_id 0 = stock with no batch. */
+  batches: { batch_id: number; batch_no: string | null; expiry_date: string | null; count: number }[];
+  /** bin_id 0 = no storage location. */
+  locations: { bin_id: number; bin_code: string | null; bin_name: string | null; count: number }[];
+}
+
+export interface BoxLabelRow {
+  id: number;
+  hu_code: string;
+  item_code?: string | null;
+  item_name?: string | null;
+  warehouse_name?: string | null;
+  bin_code?: string | null;
+  batch_no?: string | null;
+  pack_name?: string | null;
+  content_qty: number | string;
+  pack_size: number | string;
+  uom_code?: string | null;
+  reason: "PUTAWAY" | "CONVERTED" | "RECODED" | "PART_BOX";
+  source_no?: string | null;
+  status: "QUEUED" | "PRINTED";
+  printed_at?: string | null;
+  printed_by_name?: string | null;
+  created_at?: string | null;
+  /** Where it sits in the carton → box tree, and what its sticker prints (2026-10-27). */
+  parent_code?: string | null;
+  depth?: number;
+  root_id?: number | null;
+  level?: number | null;
+  packs_inside?: string | null;
+  expiry_date?: string | null;
+  brand_name?: string | null;
+  variant_name?: string | null;
+  model_name?: string | null;
+  /** Signed: the QR opens live, read-only details at /c/<token> on any phone. */
+  qr_token?: string | null;
+}
+
+
+// ─── Stock audit write-offs (2026-10-31) ────────────────────────────────────
+// An audit only takes stock off. Each (batch, location) lot is written off in one of
+// three modes, decided by the server per lot (`warehouse/audit_writeoff.py`):
+//   UNITS     exactly N serials / IMEIs, picked by hand
+//   CODES     whole packs + unit codes adding up to exactly N
+//   QUANTITY  the count alone (the lot carries no codes)
+
+export type AuditMode = "UNITS" | "CODES" | "QUANTITY";
+export type AuditTracking = "SERIAL" | "IMEI" | "ASSET" | "CONSUMABLE" | "NONE";
+
+/** An item this point holds — the only items an audit can count. */
+export interface AuditItemOption {
+  item_id: number;
+  item_code: string | null;
+  item_name: string | null;
+  uom_code: string | null;
+  system_qty: number;
+  reserved_qty: number;
+  tracking: AuditTracking;
+}
+
+/** One (batch, location) of an item here, earliest expiry first. */
+export interface AuditLot {
+  batch_id: number;
+  bin_id: number;
+  batch_no: string | null;
+  expiry_date: string | null;
+  bin_code: string | null;
+  bin_name: string | null;
+  system_qty: number;
+  reserved_qty: number;
+  mode: AuditMode;
+  tracking: AuditTracking;
+  /** The brand / variant / model this balance is (0 = none recorded). Two brands on
+   *  one shelf are two lots, counted and written off apart. */
+  brand_id: number;
+  variant_id: number;
+  model_id: number;
+  brand_name: string | null;
+  variant_name: string | null;
+  model_name: string | null;
+  /** More than one brand stands at this batch and location; their codes are one pool. */
+  mixed: boolean;
+}
+
+export interface AuditPack {
+  id: number;
+  code: string;
+  name: string | null;
+  level: number;
+  holds: number;
+  size: number;
+  /** The pack it sits in, when that pack is in this lot too. */
+  parent_id: number | null;
+  /** Why it cannot be written off whole — a document holds it or something inside. */
+  held_by: string | null;
+  selectable: boolean;
+}
+
+export interface AuditUnit {
+  id: number;
+  code: string;
+  /** Its other printed identifier (an IMEI beside a serial, say). */
+  alt: string | null;
+  pack_id: number | null;
+  held_by: string | null;
+  selectable: boolean;
+}
+
+/** Everything one lot's write-off can name. */
+export interface AuditSources {
+  mode: AuditMode;
+  tracking: AuditTracking;
+  system_qty: number;
+  packs: AuditPack[];
+  units: AuditUnit[];
+  /** More units than the picker is served; scan or type the rest. */
+  truncated: boolean;
+  /** More than one brand stands here; units and packs carry no brand of their own. */
+  mixed: boolean;
+}
+

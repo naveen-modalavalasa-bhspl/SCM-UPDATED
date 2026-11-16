@@ -2,8 +2,11 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Popover, PopoverContent, PopoverTrigger } from "@heroui/react";
-import { Bell, CheckCheck } from "lucide-react";
-import { api } from "@/shared/api/client";
+import { ArrowRight, Bell, BellOff, CheckCheck } from "lucide-react";
+import {
+  notificationKeys, notificationsApi, type NotificationRow,
+} from "@/shared/api/notifications";
+import { NotificationItem } from "@/shared/components/NotificationItem";
 
 /**
  * Unread alerts for the signed-in person, from `sys_notifications`.
@@ -12,30 +15,15 @@ import { api } from "@/shared/api/client";
  * minimum, warehouse raises one when a document needs someone — with nowhere in the
  * app to read it. Rows accumulated and nobody ever saw them.
  *
- * Reads `/api/notifications`, which is scoped to the caller and needs only a login.
- * The warehouse module's copy of these routes is gated on `stock.view`, so the shell
- * cannot use it: a requester would get a 403 on their own alerts.
+ * Reads `shared/api/notifications`, which hits `/api/notifications` — scoped to the
+ * caller and needs only a login. The warehouse module's copy of these routes is gated
+ * on `stock.view`, so the shell cannot use it: a requester would get a 403 on their
+ * own alerts. SCM_0056: the full Alerts & Notifications page (`modules/notifications`)
+ * reads the exact same module, so a notification shown here is never invisible there.
  */
 
-interface NotificationRow {
-  id: number;
-  title: string;
-  body?: string | null;
-  deep_link?: string | null;
-  is_read: boolean;
-  created_at: string;
-}
-
-const KEY = ["notifications"];
-const COUNT_KEY = ["notifications", "unread-count"];
-
-const ago = (iso: string) => {
-  const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60_000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
-  if (mins < 1440) return `${Math.floor(mins / 60)}h ago`;
-  return `${Math.floor(mins / 1440)}d ago`;
-};
+const KEY = notificationKeys.list({ size: 20 });
+const COUNT_KEY = notificationKeys.unreadCount;
 
 export function NotificationBell() {
   const nav = useNavigate();
@@ -46,8 +34,7 @@ export function NotificationBell() {
   // count is fine for a stock alert. Swap for a subscription if that changes.
   const { data: unread } = useQuery({
     queryKey: COUNT_KEY,
-    queryFn: () => api.get<{ count: number }>("/api/notifications/unread-count")
-      .then((r) => r.data.count),
+    queryFn: notificationsApi.unreadCount,
     refetchInterval: 60_000,
     refetchOnWindowFocus: true,
   });
@@ -55,30 +42,31 @@ export function NotificationBell() {
   // Only fetched once the panel is opened — the badge alone needs just the count.
   const { data: rows = [], isLoading } = useQuery({
     queryKey: KEY,
-    queryFn: () => api.get<{ items: NotificationRow[] }>("/api/notifications", {
-      params: { size: 20 },
-    }).then((r) => r.data.items ?? []),
+    queryFn: () => notificationsApi.list({ size: 20 }).then((r) => r.items ?? []),
     enabled: open,
   });
 
   const refresh = () => {
-    qc.invalidateQueries({ queryKey: KEY });
-    qc.invalidateQueries({ queryKey: COUNT_KEY });
+    // Every list this module feeds — the bell's own 20 and the full page's — so
+    // reading one here can never leave the other showing a stale unread flag.
+    qc.invalidateQueries({ queryKey: ["notifications"] });
   };
 
   const markRead = useMutation({
-    mutationFn: (id: number) => api.post(`/api/notifications/${id}/read`),
+    mutationFn: notificationsApi.markRead,
     onSuccess: refresh,
   });
   const markAll = useMutation({
-    mutationFn: () => api.post("/api/notifications/read-all"),
+    mutationFn: notificationsApi.markAllRead,
     onSuccess: refresh,
   });
 
+  // SCM_0075: the row is a link to its own document (or to the inbox focused on
+  // itself), so a click always lands somewhere. This only marks it read and closes
+  // the panel; the link does the navigating.
   const openRow = (row: NotificationRow) => {
     if (!row.is_read) markRead.mutate(row.id);
     setOpen(false);
-    if (row.deep_link) nav(row.deep_link);
   };
 
   const count = unread ?? 0;
@@ -98,44 +86,65 @@ export function NotificationBell() {
           )}
         </button>
       </PopoverTrigger>
-      <PopoverContent className="w-[min(24rem,calc(100vw-2rem))] p-0">
-        <div className="flex w-full items-center justify-between border-b border-line px-4 py-3">
-          <span className="font-semibold text-ink">Notifications</span>
+      <PopoverContent className="w-[min(26rem,calc(100vw-2rem))] overflow-hidden p-0">
+        <div className="flex w-full items-center justify-between gap-2 border-b border-line bg-gradient-to-r from-brand/[0.06] to-content1 px-4 py-3">
+          <div className="flex items-center gap-2">
+            <span className="font-semibold text-ink">Notifications</span>
+            {count > 0 && (
+              <span className="rounded-full bg-brand px-2 py-0.5 text-[11px] font-bold text-white">{count} new</span>
+            )}
+          </div>
           {count > 0 && (
             <button
               onClick={() => markAll.mutate()}
               disabled={markAll.isPending}
-              className="flex items-center gap-1 text-xs font-medium text-brand hover:underline"
+              className="flex min-h-8 items-center gap-1 rounded-lg px-2 text-xs font-semibold text-brand hover:bg-brand/10 disabled:opacity-50"
             >
               <CheckCheck className="h-3.5 w-3.5" /> Mark all read
             </button>
           )}
         </div>
 
-        <div className="max-h-96 w-full overflow-y-auto">
-          {isLoading && <p className="px-4 py-6 text-sm text-muted">Loading…</p>}
+        <div className="max-h-[26rem] w-full overflow-y-auto">
+          {isLoading && (
+            <div className="space-y-2 p-4">
+              {[0, 1, 2].map((k) => (
+                <div key={k} className="flex gap-3">
+                  <div className="h-9 w-9 animate-pulse rounded-xl bg-content2" />
+                  <div className="flex-1 space-y-1.5">
+                    <div className="h-3 w-3/4 animate-pulse rounded bg-content2" />
+                    <div className="h-3 w-1/2 animate-pulse rounded bg-content2" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
           {!isLoading && rows.length === 0 && (
-            <p className="px-4 py-8 text-center text-sm text-muted">Nothing to catch up on.</p>
+            <div className="flex flex-col items-center gap-2 px-6 py-10 text-center">
+              <span className="grid h-12 w-12 place-items-center rounded-2xl bg-content2 text-muted"><BellOff className="h-5 w-5" /></span>
+              <p className="text-sm font-semibold text-ink">You're all caught up</p>
+              <p className="text-xs text-muted">Approvals, orders and deliveries will show up here as they move.</p>
+            </div>
           )}
           {rows.map((row) => (
-            <button
+            <NotificationItem
               key={row.id}
-              onClick={() => openRow(row)}
-              className={`flex w-full flex-col items-start gap-0.5 border-b border-line/60 px-4 py-3 text-left last:border-0 hover:bg-content2 ${
-                row.is_read ? "" : "bg-brand/5"
-              }`}
-            >
-              <div className="flex w-full items-start gap-2">
-                {!row.is_read && <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-brand" />}
-                <span className={`flex-1 text-sm ${row.is_read ? "text-body" : "font-semibold text-ink"}`}>
-                  {row.title}
-                </span>
-              </div>
-              {row.body && <span className="text-xs text-muted">{row.body}</span>}
-              <span className="text-[11px] text-muted">{ago(row.created_at)}</span>
-            </button>
+              row={row}
+              variant="compact"
+              onOpen={openRow}
+              onMarkRead={(r) => markRead.mutate(r.id)}
+            />
           ))}
         </div>
+
+        {/* SCM_0056: the full inbox, same data as above — this panel only ever
+            offered the newest 20 with no way to search or page through the rest. */}
+        <button
+          onClick={() => { setOpen(false); nav("/notifications"); }}
+          className="flex w-full items-center justify-center gap-1.5 border-t border-line bg-content2/40 px-4 py-3 text-sm font-semibold text-brand hover:bg-content2"
+        >
+          View all notifications <ArrowRight className="h-4 w-4" />
+        </button>
       </PopoverContent>
     </Popover>
   );

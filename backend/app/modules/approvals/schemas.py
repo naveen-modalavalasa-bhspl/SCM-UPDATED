@@ -2,7 +2,9 @@
 from datetime import date, datetime
 
 from fastapi import Query
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from pydantic import (
+    BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator,
+)
 from app.shared.limits import (  # request-size guards, see the module
     Annotated, DocumentLines, MAX_BATCH_IDS, MAX_DOCUMENT_LINES,
 )
@@ -84,6 +86,7 @@ class IndentRejectionIn(BaseModel):
 
 class IndentReturnIn(BaseModel):
     comments: str = Field(min_length=1, max_length=2000)
+    target_sequence: int | None = Field(default=None, ge=0)
 
     @field_validator("comments")
     @classmethod
@@ -172,6 +175,12 @@ class ApprovalIndentLineOut(BaseModel):
     # The ceiling for this approver: the request at the first level, and whatever the
     # level below approved after that. Approvers may only reduce.
     max_quantity: float
+    # The field's own bounds and step, read from the unit (UOM type "Allows decimal")
+    # so the screen and the server judge the same number the same way. `uom_decimals`
+    # is 0 for a unit counted in whole numbers; `min_quantity` is 0 because an approver
+    # may always cut a line to nothing.
+    uom_decimals: int = 3
+    min_quantity: float = 0
     remarks: str | None = None
     # Dropped by an approver below, not cut to zero. The screen shows "Excluded"
     # instead of a quantity and offers no second Exclude button for it.
@@ -188,12 +197,14 @@ class ApprovalIndentOut(BaseModel):
     position_name: str | None = None
     department_name: str | None = None
     office_name: str | None = None
+    indent_type: str | None = None
     current_stage_name: str | None = None
     current_approver_name: str | None = None
     can_return_for_correction: bool = False
     required_date: date | None = None
     created_at: datetime
     items: list[ApprovalIndentLineOut]
+    excluded_items: list[ApprovalIndentLineOut] = []
 
     @field_serializer("created_at", when_used="json")
     def serialize_datetime(self, value: datetime):
@@ -469,3 +480,12 @@ class IssueFromStockIn(BaseModel):
     # approved quantities are untouched — only the remainder travels — so the next
     # approver sees exactly what is still owed and nothing is re-decided.
     forward_remainder: bool = False
+
+
+class StrAllocateIn(BaseModel):
+    """Approve an STR at this rung and allocate it from a point in the approver's
+    scope (2026-11-04). `source_warehouse_id` empty = the STR's own source; another
+    point moves the source there, and then `reason` is required."""
+    source_warehouse_id: int | None = Field(default=None, gt=0)
+    reason: str = Field(default="", max_length=500)
+    items: list[ApprovalQuantityIn] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)

@@ -12,7 +12,7 @@ import {
   getPicking, indentOptions, itemOptions, pickLine, releasePicking, warehouseOptions,
 } from "../api";
 import { fmtQty, humanise, num, percent, today } from "../format";
-import type { Picking, PickingItem, PickingWrite } from "../types";
+import type { ItemOption, Picking, PickingItem, PickingWrite } from "../types";
 import { usePointLabel } from "../usePointLabel";
 import { TONE_MINT } from "@/shared/components/tones";
 
@@ -53,6 +53,8 @@ export default function PicklistForm() {
     items: [],
   });
   const [picked, setPicked] = useState<Record<number, number>>({});
+  // The unit of each item picked on the draft, so its quantity box follows that unit.
+  const [itemUom, setItemUom] = useState<Record<number, string | null>>({});
   const [confirming, setConfirming] = useState(false);
 
   const { data: doc, isLoading } = useQuery({
@@ -132,9 +134,10 @@ export default function PicklistForm() {
             name="items"
             load={itemOptions}
             value={l.item_id || ""}
-            onChange={(v) =>
-              set("items", form.items.map((r, x) => (x === i ? { ...r, item_id: v === "" ? 0 : v } : r)))
-            }
+            onChange={(v, option) => {
+              setItemUom((c) => ({ ...c, [Number(v) || 0]: (option as ItemOption | undefined)?.uom_code ?? null }));
+              set("items", form.items.map((r, x) => (x === i ? { ...r, item_id: v === "" ? 0 : v } : r)));
+            }}
             placeholder="Pick an item"
           />
         ),
@@ -164,6 +167,7 @@ export default function PicklistForm() {
         render: (l, i) => (
           <QtyInput
             ariaLabel={`Required quantity, line ${i + 1}`}
+            uom={itemUom[l.item_id]}
             value={l.required_qty}
             onChange={(v) =>
               set("items", form.items.map((r, x) => (x === i ? { ...r, required_qty: v } : r)))

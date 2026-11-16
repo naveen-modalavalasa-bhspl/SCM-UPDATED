@@ -53,8 +53,8 @@ function EmptyChart() {
 }
 
 export function ApprovalReportsPage() {
-  const pending = useQuery({ queryKey: ["approvals", "report-pending"], queryFn: approvalsApi.pendingAll });
-  const decisions = useQuery({ queryKey: ["approvals", "report-decisions"], queryFn: approvalsApi.decisionsAll });
+  const pending = useQuery({ queryKey: ["approvals", "report-pending"], queryFn: () => approvalsApi.pendingAll() });
+  const decisions = useQuery({ queryKey: ["approvals", "report-decisions"], queryFn: () => approvalsApi.decisionsAll() });
 
   const [range, setRange] = useState<RaisedRange>("30d");
   const [dateFrom, setDateFrom] = useState("");

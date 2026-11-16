@@ -12,13 +12,15 @@ describe("IndentsNav", () => {
     );
     expect(screen.getByRole("navigation", { name: "Indent" })).toBeInTheDocument();
     for (const label of [
-      "Dashboard", "All requests", "Acknowledgements",
-      "Activity ledger", "Alert & Notification",
+      "Dashboard", "All requests", "Acknowledgements", "Activity ledger",
     ]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
     }
     // Board is parked — off the tab bar, route and page kept.
     expect(screen.queryByRole("link", { name: "Board" })).not.toBeInTheDocument();
+    // SCM_0056: moved to the top-level Alerts & Notifications page — this strip
+    // never carried it.
+    expect(screen.queryByRole("link", { name: "Alert & Notification" })).not.toBeInTheDocument();
   });
 
   it("keeps the existing route paths behind the renamed labels", () => {
@@ -29,6 +31,5 @@ describe("IndentsNav", () => {
     );
 
     expect(screen.getByRole("link", { name: "All requests" })).toHaveAttribute("href", "/indents");
-    expect(screen.getByRole("link", { name: "Alert & Notification" })).toHaveAttribute("href", "/indents/notifications");
   });
 });

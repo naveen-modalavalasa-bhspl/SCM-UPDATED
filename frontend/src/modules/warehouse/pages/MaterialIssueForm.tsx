@@ -1,9 +1,17 @@
-import { Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Button, Can, ConfirmModal, DocumentNumberCard, ErrorBanner, Field, Input, PageHeader, StatusPill,
+} from "@/shared/components";
+import {
+  docNumberPayload, docNumberValueFrom, emptyDocNumberValue, type DocNumberLocks,
+  type DocNumberValue,
+} from "@/shared/documentNumber";
+import { ladderFor, usageLevels, usePackOptions } from "@/shared/packing";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Accordion, AccordionItem } from "@heroui/react";
-import { ArrowLeft, Info, MapPin, FileText, ChevronRight, ChevronDown } from "lucide-react";
+import { ArrowLeft, Info, Lock, MapPin, FileText, ChevronRight, ChevronDown, Tag } from "lucide-react";
+import { SplitFamilyCard } from "../components/SplitFamilyCard";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { Lookup } from "../components/Lookup";
 import { ItemPicker } from "../components/ItemPicker";
@@ -17,15 +25,17 @@ import type { IssueGroup, IssueSplit } from "../issueSplits";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { Timeline, approvalsToTimeline, type TimelineEntry } from "../components/Timeline";
 import { CodeAssignmentScreen } from "./CodeAssignmentScreen";
+import { SearchPicker, type PickerRow } from "../components/SearchPicker";
 import {
-  acknowledgeIssue, approveIssue, cancelIssue, createIssue, departmentOptions,
-  employeeOptions, getEmployeeDestination, getIndentIssueSource, getIssue, getPickingIssueSource, indentOptions,
+  acknowledgeIssue, approveIssue, auditUnlocatedStock, cancelIssue, createIssue, departmentOptions,
+  employeeOptions, stoIssueOptions, getEmployeeDestination, repairUnlocatedStock, searchIssueDestinations, searchIssueEmployees, getIndentIssueSource, getIssue, getPickingIssueSource, indentOptions,
   issueApprovalHistory,  postIssue, projectOptions,
   occupancyPreview,
   itemHandlingUnits,
-  returnableIssueOptions, rejectIssue, setIssueSerials, splitIssue, submitIssue, updateIssue,
+  postSplitIssue, previewIssueSplit, returnableIssueOptions, rejectIssue, setIssueSerials, splitIssue,
+  submitIssue, updateIssue,
   warehouseOptions,
-  issueStockSources,
+  issueStockSources, listSerials,
   issueUnitSupply,
 } from "../api";
 import type { IssueSplitResult } from "../api";
@@ -36,9 +46,15 @@ import type {
   HandlingUnit,
   Issue, IssueItemWrite, IssueStockSource, IssueWrite, ItemOption, OccupancyMove,
   TrackingType, UnitMode, UnitSupply,
+  IssueDestinationOption, IssueEmployeeOption, StoIssueOption,
 } from "../types";
 import { usePointLabel } from "../usePointLabel";
 import { TONE_APPROVE, TONE_BLUE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
+import { codesNeeded, comboKeyOf, sourcesFor } from "../issueSplits";
+import { PackagePickerModal } from "../components/PackagePickerModal";
+import { DocLabelsDialog } from "../components/DocLabelsDialog";
+import { IssueTypeTiles, type IssueMode } from "../components/IssueTypeTiles";
+import { LockedDestination, StoContextCard } from "../components/StoContextCard";
 
 /**
  * Raise, approve and post a material issue.
@@ -60,10 +76,13 @@ import { TONE_APPROVE, TONE_BLUE, TONE_REJECT, TONE_SUBMIT } from "@/shared/comp
  *  outright so a storekeeper can still say so on a document, but it follows the
  *  indent box whenever that is touched: the two disagreeing is not a state anybody
  *  means to be in. */
-const TYPES = [
-  { value: "INDENT_BASED", label: "Indent based" },
-  { value: "DIRECT", label: "Direct" },
-];
+/** Which of the four tiles a SAVED issue is — read off the document, never chosen
+ *  again. An STR issue that produced an STO is still an STR issue: the request is
+ *  what it serves; the order is shown beside it. */
+const modeOf = (doc: { sto_no?: string | null; sto_kind?: string | null;
+                       indent_id?: number | null; indent_type?: string | null }): IssueMode =>
+  doc.indent_id ? (doc.indent_type === "STR" ? "STR" : "INDENT")
+    : doc.sto_no ? "STO" : "DIRECT";
 
 const emptyLine = (): IssueItemWrite => ({
   item_id: 0,
@@ -132,7 +151,7 @@ function BreakdownGroup({
           ) : (
             (() => {
               const split = picks[0];
-              const source = (sourcesByItem[group.itemId] ?? []).find(
+              const source = sourcesFor(sourcesByItem, group.itemId, group.combo).find(
                 (row) => sourceKey(row.batch_id, row.bin_id)
                   === sourceKey(split.line.batch_id, split.line.bin_id),
               );
@@ -179,7 +198,7 @@ function BreakdownGroup({
         const binCode = location
           ? location.location_code
           : savedLine(split.index)?.bin_code ?? `Bin ${split.line.bin_id}`;
-        const source = (sourcesByItem[group.itemId] ?? []).find(
+        const source = sourcesFor(sourcesByItem, group.itemId, group.combo).find(
           (row) => sourceKey(row.batch_id, row.bin_id)
             === sourceKey(split.line.batch_id, split.line.bin_id),
         );
@@ -262,20 +281,48 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     items: [],
   });
   const [touched, setTouched] = useState(false);
+  // What this issue serves — the four tiles (2026-10-29). Seeded from the document
+  // once it loads; on a new one, the storekeeper's choice.
+  const [mode, setMode] = useState<IssueMode>(
+    searchParams.get("mode") === "STO" ? "STO" : "DIRECT");
+  const [pickedSto, setPickedSto] = useState<StoIssueOption | null>(null);
+  const stoRows = useRef(new Map<number, StoIssueOption>());
   const [confirming, setConfirming] = useState<
-    "submit" | "approve" | "reject" | "post" | "split" | "ack" | "cancel" | null
+    "submit" | "approve" | "reject" | "post" | "split" | "postSplit" | "ack" | "cancel" | null
   >(null);
   const [reason, setReason] = useState("");
+  // Labels print once the stock is posted (2026-10-28): the whole issue or chosen items.
+  const [labelsOpen, setLabelsOpen] = useState(false);
+  const [justPosted, setJustPosted] = useState(false);
   const [serialLine, setSerialLine] = useState<number | null>(null);
   const [destination, setDestination] = useState("");
   // The destination office's service area code. Held beside the destination name and
   // filled from the same answer, because it belongs to the office the goods are going
   // to — never to whoever happens to be raising the issue.
   const [destinationSac, setDestinationSac] = useState<string | null>(null);
+  // Whether the point the goods go INTO runs a vehicle and carries an SAC — an LIP
+  // only (served). False hides both rows on an indent / STR / STO issue; null keeps them.
+  const [needsVehicleSac, setNeedsVehicleSac] = useState<boolean | null>(null);
+  // Organisation, project / department and year (2026-11-09). Against an indent, STR or
+  // STO they are COPIED from it and locked (`linkedScope` names it); a direct issue
+  // selects them, opening on the card's defaults. `olderScope`: the issue or its source
+  // predates organisations, so no card — it numbers exactly as before.
+  const [scope, setScope] = useState<DocNumberValue>(emptyDocNumberValue);
+  const [linkedScope, setLinkedScope] = useState<string | null>(null);
+  const [olderScope, setOlderScope] = useState(false);
   // The employee dropdown loads one page of names, so the indent raiser this form
   // defaults to is usually not in it. Hold the name that came with the id, or the
   // field shows its placeholder over a person who IS selected.
   const [issuedToName, setIssuedToName] = useState<string | null>(null);
+  // A direct issue's chosen destination point and issued-to person, held whole so each
+  // picker can fill and narrow the others (see `choosePoint` / `chooseEmployee`).
+  const [destPoint, setDestPoint] = useState<IssueDestinationOption | null>(null);
+  const [issuedTo, setIssuedTo] = useState<IssueEmployeeOption | null>(null);
+  // The employee list follows the destination's office unless the store asks for all.
+  const [everyone, setEveryone] = useState(false);
+  // The office an STR's indent is bound for, from its issue source — a NEW issue has
+  // no saved document to read it off yet.
+  const [indentOffice, setIndentOffice] = useState<number | null>(null);
   const [departmentName, setDepartmentName] = useState<string | null>(null);
   const [projectName, setProjectName] = useState<string | null>(null);
   // Some of the reserved stock was received for another project, or for none.
@@ -303,9 +350,29 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
 
   useEffect(() => {
     if (!doc) return;
+    setMode(modeOf(doc));
+    setScope(docNumberValueFrom(doc));
+    setOlderScope(!doc.organization_id);
+    setLinkedScope(doc.indent_id ? (doc.indent_no ?? "the request")
+      : doc.sto_no ? doc.sto_no : null);
     setDestination(doc.destination_office_name ?? "");
     setDestinationSac(doc.destination_office_sac ?? null);
+    setNeedsVehicleSac(doc.destination_needs_vehicle_and_sac ?? null);
     setIssuedToName(doc.issued_to_name ?? null);
+    setIssuedTo(doc.issued_to_id
+      ? { id: doc.issued_to_id, name: doc.issued_to_name ?? String(doc.issued_to_id) }
+      : null);
+    setDestPoint(doc.destination_warehouse_id
+      ? {
+          warehouse_id: doc.destination_warehouse_id,
+          name: doc.destination_warehouse_name ?? doc.destination_office_name ?? "",
+          warehouse_type: doc.destination_warehouse_type ?? null,
+          office_id: doc.destination_office_id ?? null,
+          office_name: doc.destination_office_name ?? null,
+          sac: doc.destination_office_sac ?? null,
+          vehicle_number: null,
+        }
+      : null);
     setDepartmentName(doc.department_name ?? null);
     setProjectName(doc.project_name ?? null);
     if (doc.warehouse_id) {
@@ -325,6 +392,12 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
       vehicle_id: doc.vehicle_id ?? null,
       vehicle_number: doc.vehicle_number ?? null,
       issued_to_id: doc.issued_to_id ?? null,
+      // An STO's issue goes where the order was approved to. One drafted before the
+      // order's destination was carried onto it reads it from the order here; the
+      // server freezes it on save either way.
+      destination_warehouse_id: doc.destination_warehouse_id
+        ?? (doc.sto_to_warehouse_id && doc.sto_to_warehouse_id !== doc.warehouse_id
+          ? doc.sto_to_warehouse_id : null),
       direction: doc.direction,
       original_issue_id: doc.original_issue_id ?? null,
       remarks: doc.remarks ?? "",
@@ -334,6 +407,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         item_id: l.item_id,
         item_code: l.item_code,
         item_name: l.item_name,
+        qty_decimals: l.qty_decimals,
         is_serial_tracked: l.is_serial_tracked,
         is_imei_tracked: l.is_imei_tracked,
         unit_mode: l.unit_mode,
@@ -355,10 +429,18 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         issued_qty: num(l.issued_qty),
         rate: l.rate,
         remarks: l.remarks,
+        pack_hierarchy_id: l.pack_hierarchy_id ?? null,
+        pack_breakdown: l.pack_breakdown ?? null,
+        break_bulk: !!l.break_bulk,
         // Stated in the currency the item is validated on — the serial for a
         // serialized item, the IMEI for a handset, the asset/consumable code
         // otherwise. The backend resolves any of the three back to the same unit.
         serial_numbers: parseCodes(l.unit_keys ?? l.serial_numbers) ?? [],
+        codes_needed: l.codes_needed ?? null,
+        codes_needed_at: num(l.issued_qty),
+        issue_in_boxes: !!l.issue_in_boxes,
+        container_note: l.container_note ?? null,
+        box_codes: l.box_codes ?? null,
       })),
     });
   }, [doc]);
@@ -414,6 +496,51 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
 
   const setLines = (items: IssueItemWrite[]) => setForm((f) => ({ ...f, items }));
 
+  /**
+   * A pick has just been given its batch and location: fill its asset / consumable
+   * codes there and then, oldest first, up to the quantity it issues (2026-10-12).
+   *
+   * Those codes are the system's own labels — nobody reads them off a maker's box — so
+   * the storekeeper should see them the moment the source is decided, not after a
+   * save. The server still checks every one on save (`_reserve_issue_serials`) and tops
+   * up anything missing (`_autofill_codes`); this only makes the choice visible early.
+   * They stay swappable in the code screen. Serial / IMEI picks are read off the goods
+   * and are never pre-filled.
+   */
+  const fillCodesFor = async (index: number, line: IssueItemWrite) => {
+    const type = line.tracking_type;
+    if (type !== "ASSET" && type !== "CONSUMABLE") return;
+    const need = Math.trunc(num(line.issued_qty));
+    if (!need || !line.item_id || !form.warehouse_id) return;
+    try {
+      const page = await listSerials({
+        item_id: line.item_id,
+        warehouse_id: form.warehouse_id,
+        batch_id: line.batch_id || undefined,
+        bin_id: line.bin_id || undefined,
+        unbatched: !line.batch_id || undefined,
+        issue_id: editing ? Number(id) : undefined,
+        issue_line_id: line.id || undefined,
+        claim_free: !line.id || undefined,
+        status: "available",
+        page: 1,
+        size: Math.min(need, 500),
+      });
+      const codes = (page.items ?? [])
+        .map((row) => row.asset_code ?? row.consumable_code ?? row.serial_number)
+        .filter((code): code is string => !!code)
+        .slice(0, need);
+      setForm((f) => ({
+        ...f,
+        items: f.items.map((l, i) => (
+          i === index && l.batch_id === line.batch_id && l.bin_id === line.bin_id
+            ? { ...l, serial_numbers: codes } : l)),
+      }));
+    } catch {
+      // Not fatal: the save fills them (`_autofill_codes`) and says so if it cannot.
+    }
+  };
+
   /* ----------------------------------------------- where the stock actually is --
    *
    * A line names ONE batch and ONE bin; the shelf regularly holds the quantity in
@@ -428,14 +555,24 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     () => Array.from(new Set(form.items.map((l) => l.item_id).filter(Boolean))),
     [form.items],
   );
-  const { data: sources = [], isSuccess: sourcesReady } = useQuery({
-    queryKey: ["wh-issue-sources", form.warehouse_id, form.indent_id ?? 0, form.project_id ?? 0, itemIds],
-    queryFn: () => issueStockSources(form.warehouse_id, itemIds, form.indent_id, form.project_id),
+  const {
+    data: sources = [], isSuccess: sourcesReady,
+  } = useQuery({
+    queryKey: ["wh-issue-sources", form.warehouse_id, form.indent_id ?? 0,
+      form.project_id ?? 0, (editing ? Number(id) : (doc?.id ?? 0)), itemIds],
+    queryFn: () => issueStockSources(form.warehouse_id, itemIds, form.indent_id,
+      form.project_id, editing ? Number(id) : (doc?.id ?? null)),
     // Only while the picks are still open. Once the stock is posted the balances
     // have already moved, and drawing "available" against a document that has gone
     // out would report every split as over-issued.
     enabled: !!form.warehouse_id && itemIds.length > 0 && !doc?.is_stock_posted,
-    staleTime: 30_000,
+    // LIVE: other storekeepers are drawing on the same shelf. Re-read every 15 s and
+    // whenever the window comes back into focus, keeping the last answer on screen
+    // while the next one loads so nothing flickers.
+    refetchInterval: 15_000,
+    refetchOnWindowFocus: true,
+    staleTime: 5_000,
+    placeholderData: (previous) => previous,
   });
   const sourcesByItem = useMemo(() => {
     const map: Record<number, IssueStockSource[]> = {};
@@ -563,7 +700,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     if (serialLine === null || !activeSerialLine) return undefined;
     const group = groups.find((g) => g.splits.some((s) => s.index === serialLine));
     const split = group?.splits.find((s) => s.index === serialLine);
-    const source = (sourcesByItem[activeSerialLine.item_id] ?? []).find(
+    const source = sourcesFor(sourcesByItem, activeSerialLine.item_id, comboKeyOf(activeSerialLine)).find(
       (row) => sourceKey(row.batch_id, row.bin_id)
         === sourceKey(activeSerialLine.batch_id, activeSerialLine.bin_id),
     );
@@ -677,20 +814,50 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   // quantities, but which physical units go out is decided at the shelf, and
   // "Issue from stock" refuses an incomplete set. Saved straight away through the
   // serials endpoint, because the document itself is no longer editable.
-  // Only once APPROVED, and only for the person it is with (or their reporting line):
+  // Only once APPROVED, and only for the person it is with (or their reporting line, or an approver):
   // picking units on a draft or during approval is what got lost on the way through.
   const awaitingIssue = doc?.status === "APPROVED" && !doc?.is_stock_posted;
   const unitsHidden = direction === "OUT"
     && (!doc || doc.status === "DRAFT" || doc.status === "PENDING_APPROVAL");
-  const serialsLocked = unitsHidden || (locked && !(awaitingIssue && doc?.can_issue_from_stock));
+  // A SPLIT parent (2026-11-11): its raiser or approver picks a line's serials here,
+  // and they are listed and saved against the floor-piece line that carries it now.
+  const pieceOf = (i: number | null) => {
+    const saved = i === null ? undefined : savedLine(i);
+    return saved?.piece_issue_id && saved.piece_line_id
+      ? { issueId: saved.piece_issue_id, lineId: saved.piece_line_id, posted: !!saved.piece_is_posted }
+      : null;
+  };
+  const activePiece = pieceOf(serialLine);
+  const splitParentOpen = doc?.status === "SPLIT" && !!doc?.can_issue_split;
+  const splitPick = doc?.status === "SPLIT" && !!doc?.can_issue_split && !!activePiece && !activePiece.posted;
+  const serialsLocked = unitsHidden
+    || (locked && !((awaitingIssue && doc?.can_issue_from_stock) || splitPick));
+  // Asset/consumable codes are auto-assigned and swappable: on a draft, and once
+  // approved by the issuer OR anyone who approved it (`can_swap_codes`).
+  const codesLocked = locked
+    && (unitsHidden || !((awaitingIssue && doc?.can_swap_codes) || splitPick));
+  // Pack hierarchies of every item on the issue, in one call (2026-10-08).
+  const packOptions = usePackOptions(form.items.map((line) => line.item_id));
+  /** Is this line's item issued in a container (2026-10-27)? A serial or IMEI line of
+   *  such an item picks its packages first, then its numbers inside them. */
+  const hasIssueContainer = (line?: { item_id?: number | null; brand_id?: number | null } | null) => {
+    if (!line?.item_id) return false;
+    const ladder = ladderFor(packOptions.data?.[Number(line.item_id)], line.brand_id ?? null);
+    return !!ladder && (usageLevels(ladder, "ISSUE") ?? []).some((lv) => lv > 0);
+  };
+  /** Serial / IMEI lines: packages first; "one by one" falls back to the code screen. */
+  const [unitsOneByOne, setUnitsOneByOne] = useState(false);
+  useEffect(() => { if (serialLine === null) setUnitsOneByOne(false); }, [serialLine]);
   const payload = (): IssueWrite => ({
+    // The card first: the form's own project, kept in step with it, wins below.
+    ...(direction === "OUT" && !olderScope ? docNumberPayload(scope) : {}),
     ...form,
     // `normalizeSplits` first: the splits of one ask share its requested quantity
     // between them, and the server refuses a line requesting nothing or issuing more
     // than it asked for. Done once here rather than on every keystroke, so the number
     // in the Issue qty box stays the storekeeper's until he saves. See issueSplits.ts.
     items: normalizeSplits(form.items).map(
-      ({ item_code, item_name, is_serial_tracked, is_imei_tracked, unit_mode, unit_keys,
+      ({ item_code, item_name, qty_decimals, is_serial_tracked, is_imei_tracked, unit_mode, unit_keys,
          tracking_type, has_units, units_available, bin_code, bin_path, batch_no,
          ...line }) => line,
     ),
@@ -711,22 +878,25 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
       bin: l.bin_code,
       need: Math.trunc(num(l.issued_qty)),
       have: l.units_available ?? null,
-      serial: !!l.is_serial_tracked,
+      strict: !!l.has_units,
     }))
-    .filter((r) => r.serial && r.need > 0 && r.have !== null && r.have < r.need);
+    .filter((r) => r.strict && r.need > 0 && r.have !== null && r.have < r.need);
 
   const save = useMutation({
     mutationFn: () => (editing ? updateIssue(Number(id), payload()) : createIssue(payload())),
     onSuccess: (saved: Issue) => {
       qc.invalidateQueries({ queryKey: [`wh-issues-${direction}`] });
       qc.invalidateQueries({ queryKey: ["wh-issue", String(saved.id)] });
+      // Saving moves holds (a direct issue's own, a relocated allocation's), so the
+      // shelf this screen is showing has just changed.
+      qc.invalidateQueries({ queryKey: ["wh-issue-sources"] });
       if (!editing) nav(`${listPath}/${saved.id}`, { replace: true });
     },
   });
 
   const saveSerials = useMutation({
-    mutationFn: (line: { id: number; serial_numbers: string[] }) =>
-      setIssueSerials(Number(id), [line]),
+    mutationFn: ({ issueId, ...line }: { id: number; serial_numbers: string[]; issueId?: number }) =>
+      setIssueSerials(issueId ?? Number(id), [line]),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["wh-issue", id] });
     },
@@ -737,6 +907,15 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     onSuccess: (source) => {
       setDestination(source.destination_office_name ?? "");
       setDestinationSac(source.destination_office_sac ?? null);
+      setNeedsVehicleSac(source.destination_needs_vehicle_and_sac ?? null);
+      // Copied from the indent / STR and fixed; an older one numbers as before.
+      setOlderScope(!source.organization_id);
+      setLinkedScope(source.indent_no ?? "the request");
+      setScope({
+        ...docNumberValueFrom({ ...source, fiscal_year: null }),
+        projectId: source.project_id ?? "", projectName: source.project_name ?? "",
+      });
+      setIndentOffice(source.destination_office_id ?? null);
       setMixedProjects(!!source.mixed_projects);
       if (source.issued_to_id) setIssuedToName(source.issued_to_name ?? null);
       if (source.department_id) setDepartmentName((source as any).department_name ?? null);
@@ -755,6 +934,200 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     },
   });
 
+  /** A destination point chosen: it fills Destination, SAC and Vehicle, and narrows
+   *  the people offered to its office. A person already chosen from ANOTHER office no
+   *  longer fits, so they are cleared rather than silently kept. */
+  const choosePoint = (point: IssueDestinationOption | null) => {
+    setEveryone(false);
+    if (!point) {
+      setDestPoint(null);
+      setForm((f) => ({ ...f, destination_warehouse_id: null }));
+      // Back to the derived answer: the person's office, else nothing.
+      if (form.issued_to_id) pullEmployee.mutate(form.issued_to_id);
+      else { setDestination(""); setDestinationSac(null); }
+      return;
+    }
+    setDestPoint(point);
+    setDestination(point.office_name || point.name);
+    setDestinationSac(point.sac ?? null);
+    const keepPerson = !issuedTo?.office_id || !point.office_id
+      || issuedTo.office_id === point.office_id;
+    if (!keepPerson) { setIssuedTo(null); setIssuedToName(null); }
+    setForm((f) => ({
+      ...f,
+      destination_warehouse_id: point.warehouse_id,
+      // An MDP or a warehouse is served by no MMU, so it carries no vehicle.
+      vehicle_number: point.vehicle_number ?? null,
+      issued_to_id: keepPerson ? f.issued_to_id : null,
+    }));
+  };
+
+  /** A person chosen: their office fills the rest (`pullEmployee`), and when no point
+   *  was chosen yet, the one stocking point on their office becomes the destination. */
+  const chooseEmployee = (person: IssueEmployeeOption | null) => {
+    setIssuedTo(person);
+    setIssuedToName(person?.name ?? null);
+    set("issued_to_id", person?.id ?? null);
+    if (!person) {
+      if (!destPoint && !form.indent_id) { setDestination(""); setDestinationSac(null); }
+      return;
+    }
+    pullEmployee.mutate(person.id);
+    if (!destPoint && person.office_id) {
+      searchIssueDestinations("", { fromWarehouseId: form.warehouse_id, officeId: person.office_id })
+        .then((found) => {
+          if (found.items.length !== 1) return;
+          const point = found.items[0];
+          setDestPoint(point);
+          setForm((f) => ({
+            ...f,
+            destination_warehouse_id: point.warehouse_id,
+            vehicle_number: f.vehicle_number || point.vehicle_number || null,
+          }));
+        })
+        .catch(() => undefined);
+    }
+  };
+
+  const pointKind = (type?: string | null) =>
+    type === "LIP" ? "LIP" : type === "MDP" ? "MDP" : "Warehouse";
+  const pointRow = (p: IssueDestinationOption): PickerRow => ({
+    id: p.warehouse_id,
+    title: p.name,
+    subtitle: [
+      p.office_name && p.office_name !== p.name ? p.office_name : null,
+      p.sac ? `SAC ${p.sac}` : null,
+      p.vehicle_number ? `Vehicle ${p.vehicle_number}` : null,
+    ].filter(Boolean).join(" · ") || null,
+    badges: [{ text: pointKind(p.warehouse_type), tone: p.warehouse_type === "LIP" ? "ok" : "brand" }],
+  });
+  const sacRow = (p: IssueDestinationOption): PickerRow => ({
+    id: p.warehouse_id,
+    title: p.sac ?? "—",
+    subtitle: p.name,
+    badges: [{ text: pointKind(p.warehouse_type), tone: p.warehouse_type === "LIP" ? "ok" : "brand" }],
+  });
+  const personRow = (e: IssueEmployeeOption): PickerRow => ({
+    id: e.id,
+    title: e.name,
+    subtitle: [e.position_name, e.office_name, e.department_name].filter(Boolean).join(" · ") || null,
+    // Employee code, then every post held — the post is what the store recognises.
+    badges: [
+      ...(e.code ? [{ text: e.code, tone: "muted" as const }] : []),
+      ...(e.position_codes ?? []).map((code) => ({ text: code, tone: "brand" as const })),
+    ],
+  });
+  // Whose people the Issued-to list shows: the chosen point's office, unless widened.
+  const personOffice = !everyone ? destPoint?.office_id ?? null : null;
+  // A point with no service area code (an MDP, a main warehouse) says "None" there.
+  const pointHasNoSac = !!destPoint && !destPoint.sac;
+  const direct = !form.indent_id && direction === "OUT";
+  // A warehouse or an MDP takes no vehicle and no SAC (served per destination). Only
+  // an indent / STR / STO issue hides them: a direct issue names its own destination
+  // and already says "None" for a point without them.
+  const hideVehicleSac = needsVehicleSac === false;
+  const scopeLocks: DocNumberLocks = locked ? { all: true }
+    : linkedScope ? { organisation: true, project: true, department: true } : {};
+  // The issue executes a Stock Transfer Order whose destination is a real point: the
+  // destination is the ORDER's, shown locked (2026-10-29). Like the server
+  // (`_assert_direct_issue_parties(for_sto=)`), the order is its request, so neither
+  // a destination pick nor an issued-to person is demanded of it.
+  const stoIssue = !!doc?.sto_no && !!doc.sto_to_warehouse_id
+    && doc.sto_to_warehouse_id !== doc.warehouse_id;
+  // A direct issue must say where the goods go and who takes them (2026-10-21): with
+  // no indent behind it, these two are the only record of it. The server refuses the
+  // same (`_build_issue`); this says it on the field before the press.
+  const missingDestination = direct && !stoIssue && !form.destination_warehouse_id;
+  // A stock transfer — an STO's issue, or one serving an STR — is issued TO somebody
+  // at the destination, exactly as a direct issue is (2026-11-02): the people offered
+  // are the destination office's ("Show everyone" widens it), and naming one is
+  // required. The server refuses the submit without it (`submit_issue`).
+  const strIssue = mode === "STR" || doc?.indent_type === "STR";
+  const transferIssue = direction === "OUT" && (stoIssue || strIssue);
+  const transferOffice = destPoint?.office_id ?? doc?.destination_office_id ?? indentOffice ?? null;
+  const transferPeopleOffice = !everyone ? transferOffice : null;
+  const missingIssuedTo = !form.issued_to_id
+    && ((direct && !stoIssue) || transferIssue);
+
+  /** On a transfer the destination is fixed by the order / request, so naming the
+   *  person never re-points it — unlike a direct issue, where the person's office
+   *  answers where the goods go. */
+  const chooseTransferPerson = (person: IssueEmployeeOption | null) => {
+    setIssuedTo(person);
+    setIssuedToName(person?.name ?? null);
+    set("issued_to_id", person?.id ?? null);
+  };
+
+  const transferDestinationName = doc?.sto_to_warehouse_name ?? doc?.destination_warehouse_name
+    ?? destPoint?.name ?? destination ?? null;
+
+  const transferPicker = (
+    <SearchPicker<IssueEmployeeOption>
+      label="Issued to"
+      required
+      error={touched && missingIssuedTo
+        ? "Pick who carries or receives this transfer — a stock transfer names a person." : null}
+      hint={transferPeopleOffice
+        ? "People at the destination — who carries or receives the goods."
+        : "Search every employee by name, code, office or department."}
+      placeholder="Search name, employee or position code"
+      value={issuedTo ? personRow(issuedTo) : (form.issued_to_id
+        ? { id: form.issued_to_id, title: issuedToName ?? String(form.issued_to_id) }
+        : null)}
+      onChange={chooseTransferPerson}
+      queryKey={["issue-employees", transferPeopleOffice]}
+      load={(q) => searchIssueEmployees(q, transferPeopleOffice)}
+      toRow={personRow}
+      emptyText={transferPeopleOffice ? "Nobody is recorded at the destination's office." : "No active employees."}
+      filterNote={transferOffice ? (everyone ? (
+        <span>
+          Showing everyone.{" "}
+          <button type="button" className="font-semibold text-brand hover:underline"
+                  onClick={() => setEveryone(false)}>
+            Only people at the destination
+          </button>
+        </span>
+      ) : (
+        <span>
+          Showing people at <b className="text-ink">{transferDestinationName ?? "the destination"}</b>.{" "}
+          <button type="button" className="font-semibold text-brand hover:underline"
+                  onClick={() => setEveryone(true)}>
+            Show everyone
+          </button>
+        </span>
+      )) : undefined}
+      disabled={locked}
+    />
+  );
+
+  // A new issue seeded with an indent from elsewhere (a fulfilment pick, a deep link)
+  // is an indent issue, whichever tile was showing.
+  useEffect(() => {
+    if (!editing && form.indent_id && (mode === "DIRECT" || mode === "STO")) setMode("INDENT");
+  }, [editing, form.indent_id, mode]);
+
+  /** Switching tile on a NEW issue starts the header over: an indent, a person and a
+   *  destination chosen for one kind of issue mean nothing for another. */
+  const chooseMode = (next: IssueMode) => {
+    if (next === mode) return;
+    setMode(next);
+    setScope(emptyDocNumberValue());
+    setLinkedScope(null);
+    setOlderScope(false);
+    setPickedSto(null);
+    setDestPoint(null);
+    setDestination("");
+    setDestinationSac(null);
+    setIssuedTo(null);
+    setIssuedToName(null);
+    setForm((f) => ({
+      ...f,
+      issue_type: next === "INDENT" || next === "STR" ? "INDENT_BASED" : "DIRECT",
+      indent_id: null, destination_warehouse_id: null, issued_to_id: null,
+      items: f.indent_id ? [] : f.items,
+    }));
+  };
+
   const pullEmployee = useMutation({
     mutationFn: (employeeId: number) => getEmployeeDestination(employeeId),
     onSuccess: (source) => {
@@ -762,10 +1135,13 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
       // precedence `_issue_destination` applies on a saved issue — so picking the
       // person fills Destination / SAC from their office. The vehicle follows only
       // when the office name carries one; an indent-set number is kept otherwise.
-      setDestination(source.destination_office_name ?? "");
-      setDestinationSac(source.destination_office_sac ?? null);
+      // A destination point the store CHOSE wins here exactly as it does on save.
+      if (!destPoint) {
+        setDestination(source.destination_office_name ?? "");
+        setDestinationSac(source.destination_office_sac ?? null);
+      }
       if (source.issued_to_name) setIssuedToName(source.issued_to_name);
-      if (source.vehicle_number) {
+      if (source.vehicle_number && !destPoint) {
         setForm((current) => ({ ...current, vehicle_number: source.vehicle_number ?? current.vehicle_number }));
       }
       // Department / Project from the person's HCM record — only into a BLANK field:
@@ -814,6 +1190,22 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   });
 
   const [splitResult, setSplitResult] = useState<IssueSplitResult | null>(null);
+  // The floor plan, read the moment the confirm opens: which floor gets what, from the
+  // lots this issue already picked. Nothing is written until Confirm.
+  const splitPreview = useQuery({
+    queryKey: ["wh-issue-split-preview", id],
+    queryFn: () => previewIssueSplit(Number(id)),
+    enabled: confirming === "split" && editing,
+    staleTime: 0,
+  });
+  const postSplit = useMutation({
+    mutationFn: () => postSplitIssue(Number(id)),
+    onSuccess: () => {
+      setConfirming(null);
+      qc.invalidateQueries({ queryKey: ["wh-issue", id] });
+      qc.invalidateQueries({ queryKey: [`wh-issues-${direction}`] });
+    },
+  });
   const split = useMutation({
     mutationFn: () => splitIssue(Number(id)),
     onSuccess: (result) => {
@@ -824,9 +1216,21 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   });
 
   const act = useMutation({
-    mutationFn: (what: "submit" | "approve" | "reject" | "post" | "ack" | "cancel") => {
+    mutationFn: async (what: "submit" | "approve" | "reject" | "post" | "ack" | "cancel") => {
       const numId = Number(id);
-      if (what === "submit") return submitIssue(numId);
+      if (what === "submit") {
+        // Submit carries no line data of its own (`POST .../submit` takes only the
+        // id) — it approves whatever is already in the database. The grid is still
+        // editable right up to this press, so an edit made after the last Save was
+        // being silently discarded: the chain advanced on the STALE saved copy, and
+        // if that stale copy happened to be valid the document went straight to
+        // approved while the edit on screen vanished on the refetch — with no error
+        // at all, or a status-guard error on a second press that had nothing to do
+        // with what was actually wrong. Saving here first means submit always acts
+        // on what the user is looking at.
+        if (editing && doc?.status === "DRAFT") await save.mutateAsync();
+        return submitIssue(numId);
+      }
       if (what === "approve") return approveIssue(numId, reason);
       if (what === "reject") return rejectIssue(numId, reason);
       if (what === "post") return postIssue(numId);
@@ -837,9 +1241,13 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
       const number = doc?.issue_no ?? "The issue";
       // Only the outcomes that change what the storekeeper does next are announced;
       // submit and approve are already obvious from the status pill moving.
-      if (what === "post") void alerts.success("issue.posted", { number });
+      if (what === "post") {
+        void alerts.success("issue.posted", { number });
+        setJustPosted(true);
+      }
       else if (what === "ack") void alerts.success("issue.acknowledged", { number });
       qc.invalidateQueries({ queryKey: ["wh-issue", id] });
+      qc.invalidateQueries({ queryKey: ["wh-issue-sources"] });
       qc.invalidateQueries({ queryKey: ["wh-issue-approvals", id] });
       qc.invalidateQueries({ queryKey: [`wh-issues-${direction}`] });
       // A posted issue is exactly what the consignment screen offers as its source,
@@ -853,6 +1261,17 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
       setReason("");
     },
   });
+
+  // SCM_0063: `act` is shared across every action this form confirms (submit,
+  // approve, reject, post, ack, cancel). Without this, an error left over from a
+  // PREVIOUS press stayed on `act.error` and the ConfirmModal for the NEXT press
+  // showed it immediately — reading as "this press failed" on a request that was
+  // never actually sent, even while the earlier press's real effect (e.g. an
+  // approval that went through) was already reflected in the document.
+  useEffect(() => {
+    if (confirming) act.reset();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [confirming]);
 
   // Raised, then every rung the engine recorded, then where it is waiting now, then
   // what happened to the stock. The approvals come from wf_actions rather than the
@@ -912,6 +1331,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
           item_id: v === "" ? 0 : v,
           item_code: item?.code ?? null,
           item_name: item?.name ?? null,
+          qty_decimals: item?.qty_decimals ?? null,
           is_serial_tracked: !!item?.is_serial_tracked,
           is_imei_tracked: !!item?.is_imei_tracked,
           is_batch_tracked: !!item?.is_batch_tracked,
@@ -971,6 +1391,52 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
    *  of the grid as well as on the item it belongs to. */
   const relocating = groups.filter((g) => g.allocated.length > 0 && g.releasing.length > 0);
 
+  /* Picks drafted before this point kept locations: bin 0 in a bin-managed
+   * warehouse. They match no source row, so they read as "nothing here" while the
+   * stock waits one bay away in UNLOCATED. Brain-first name: "Waiting to be
+   * placed" — the goods are here, the address is old. */
+  const waitingPlacement = isBinManaged
+    ? form.items
+        .map((line, index) => ({ line, index }))
+        .filter(({ line }) => line.item_id && !line.bin_id)
+        .filter(({ line }) => sourcesFor(sourcesByItem, line.item_id, comboKeyOf(line)).some(
+          (row) => (row.bin_code || "").toUpperCase().includes("UNLOCATED"),
+        ))
+    : [];
+  const { data: unlocatedAudit } = useQuery({
+    queryKey: ["wh-unlocated-audit", form.warehouse_id],
+    queryFn: () => auditUnlocatedStock(form.warehouse_id),
+    enabled: !!form.warehouse_id && isBinManaged && waitingPlacement.length > 0,
+    staleTime: 30_000,
+  });
+  const repairUnlocated = useMutation({
+    mutationFn: () => repairUnlocatedStock(form.warehouse_id, true),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["wh-issue-sources"] });
+      qc.invalidateQueries({ queryKey: ["wh-issue-unit-supply"] });
+      qc.invalidateQueries({ queryKey: ["wh-unlocated-audit"] });
+    },
+  });
+  const pointStaleAt = (index: number) => {
+    const line = form.items[index];
+    if (!line?.item_id) return false;
+    const rows = sourcesFor(sourcesByItem, line.item_id, comboKeyOf(line));
+    const target = rows.find((row) => (row.bin_code || "").toUpperCase().includes("UNLOCATED"));
+    if (!target || line.bin_id) return false;
+    patchLine(index, { bin_id: target.bin_id ?? null, bin_code: target.bin_code ?? null });
+    void fillCodesFor(index, { ...line, bin_id: target.bin_id ?? null });
+    return true;
+  };
+  /* Bay empty but batch/point has codes: "same batch, other bay" / "whole point".
+   * Read off the widened unit-supply probes so the grid says WHERE the codes are,
+   * not just that this bay has none. */
+  const widerCodes = groups.filter((g) => g.splits.some((s) => {
+    const supply = unitSupply[unitSupplyKey(
+      s.line.item_id, s.line.batch_id, isBinManaged ? s.line.bin_id : null)];
+    return (supply?.available ?? 0) <= 0
+      && ((supply?.batch_available ?? 0) > 0 || (supply?.point_available ?? 0) > 0);
+  }));
+
 
   if (editing && isLoading) return <div className="py-16 text-center text-muted">Loading…</div>;
 
@@ -996,7 +1462,8 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                   variant="subtle"
                   onClick={() => {
                     setTouched(true);
-                    if (form.warehouse_id && form.items.length && blocking.length === 0) {
+                    if (form.warehouse_id && form.items.length && blocking.length === 0
+                        && !missingDestination && !missingIssuedTo) {
                       save.mutate();
                     }
                   }}
@@ -1008,7 +1475,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
               </Can>
             )}
             {editing && doc?.status === "DRAFT" && (
-              <Can do="issue.create">
+              <Can do="issue.submit">
                 <Button
                   className={TONE_SUBMIT}
                   onClick={() => setConfirming("submit")}
@@ -1035,11 +1502,17 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                   onClick={() => setConfirming("post")}
                   disabled={problems.length > 0 || !doc?.can_issue_from_stock}
                   title={!doc?.can_issue_from_stock
-                    ? `With ${doc?.currently_with ?? "another person"} — only they, or someone they report to, can issue it`
+                    ? `With ${doc?.currently_with ?? "another person"} — only they, someone they report to, or an approver of this issue can issue it`
                     : problems.length > 0 ? problems[0].message : undefined}
                 >
                   Issue from stock
                 </Button>
+              </Can>
+            )}
+            {/* A split parent: its raiser or approver issues every floor piece at once. */}
+            {editing && doc?.status === "SPLIT" && doc?.can_issue_split && (
+              <Can do="issue.issue">
+                <Button onClick={() => setConfirming("postSplit")}>Issue from stock</Button>
               </Can>
             )}
             {/* The manager's other option on the same approved issue: hand it to the
@@ -1062,9 +1535,14 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                 <Button variant="danger" onClick={() => setConfirming("cancel")}>Cancel</Button>
               </Can>
             )}
+            {editing && doc?.is_stock_posted && direction === "OUT" && (
+              <Button variant="subtle" onClick={() => setLabelsOpen(true)}>
+                <Tag className="h-4 w-4" /> Print labels
+              </Button>
+            )}
             {editing && doc && (
-              <Button 
-                variant="subtle" 
+              <Button
+                variant="subtle"
                 onClick={() => window.open(`/warehouse/material-issues/${doc.id}/print`, "_blank")}
               >
                 <FileText className="mr-2 h-4 w-4" />
@@ -1077,6 +1555,23 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
 
       <ErrorBanner error={save.error ?? saveSerials.error ?? pullIndent.error ?? pullEmployee.error ?? pickingSource.error} />
 
+      {/* The moment the goods leave is the moment their labels are wanted — part packs
+          cut at posting have only just got their codes. */}
+      {justPosted && doc?.is_stock_posted && direction === "OUT" && (
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-ok/30 bg-ok-bg px-4 py-3">
+          <span className="flex items-center gap-2 text-sm text-ink">
+            <Tag className="h-4 w-4 text-ok" aria-hidden />
+            {doc.issue_no} is issued. Its labels are ready — every package that left, and any part packs cut just now.
+          </span>
+          <span className="flex gap-2">
+            <Button variant="ghost" onClick={() => setJustPosted(false)}>Later</Button>
+            <Button onClick={() => { setJustPosted(false); setLabelsOpen(true); }}>Print now</Button>
+          </span>
+        </div>
+      )}
+      {labelsOpen && <DocLabelsDialog open={labelsOpen} onClose={() => setLabelsOpen(false)}
+                       doc={doc ? { type: "ISSUE", id: doc.id } : null} />}
+
       {/* What the split actually handed out. Shown here rather than as a toast: the
           shortfall is the half that matters and it must not scroll away — a quantity
           no floor was holding is a shortage on the indent, and the manager is the
@@ -1085,71 +1580,29 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
           still waiting on, since its own status is rolled up from theirs. Hidden while
           the just-split result is up — that card already lists the same children. */}
       {!splitResult && doc && (doc.child_issues?.length ?? 0) > 0 && (
-        <div className="mb-4 rounded-xl border border-line bg-surface px-4 py-3 text-sm">
-          <div className="font-semibold">
-            {doc.status === "SPLIT"
-              ? "Split across floors — closes when every floor issue below is posted"
-              : doc.status === "CLOSED"
-                ? "Split across floors — every floor issue has been posted"
-                : "Split across floors — every floor issue was cancelled, so this one is back in your hands"}
-          </div>
-          <ul className="mt-2 space-y-1">
-            {doc.child_issues!.map((child) => (
-              <li key={child.id} className="flex flex-wrap items-center gap-2">
-                <button type="button" className="font-mono underline"
-                        onClick={() => nav(`${listPath}/${child.id}`)}>
-                  {child.issue_no}
-                </button>
-                <span className="text-muted">{child.floor_location_name ?? "—"}</span>
-                <span>· {fmtQty(Number(child.total_qty))}</span>
-                <StatusPill status={child.status} />
-              </li>
-            ))}
-          </ul>
-        </div>
+        <SplitFamilyCard
+          parentNo={doc.parent_issue_no ?? doc.issue_no}
+          parentStatus={doc.parent_issue_id ? null : doc.status}
+          members={doc.child_issues!}
+          currentId={doc.id}
+          onOpen={(childId) => nav(`${listPath}/${childId}`)}
+        />
       )}
 
       {splitResult && (
-        <div className="mb-4 rounded-xl border border-line bg-surface px-4 py-3 text-sm">
-          <div className="flex items-center justify-between gap-3">
-            <span className="font-semibold">
-              {splitResult.parent_issue_no} split into {splitResult.children.length}{" "}
-              issue{splitResult.children.length === 1 ? "" : "s"}
-            </span>
-            <Button variant="ghost" onClick={() => setSplitResult(null)}>Dismiss</Button>
-          </div>
-          <ul className="mt-2 space-y-1">
-            {splitResult.children.map((child) => (
-              <li key={child.id} className="flex flex-wrap items-baseline gap-2">
-                <button type="button" className="font-mono underline"
-                        onClick={() => nav(`${listPath}/${child.id}`)}>
-                  {child.issue_no}
-                </button>
-                <span className="text-muted">{child.floor_location_name ?? "—"}</span>
-                <span>
-                  → {child.in_charge_names.length
-                    ? <span className="font-medium">{child.in_charge_names.join(", ")}</span>
-                    : <span className="text-warn">no floor in-charge assigned</span>}
-                </span>
-                <span>· {child.total_items} line{child.total_items === 1 ? "" : "s"}</span>
-                <span>· {fmtQty(Number(child.total_qty))}</span>
-              </li>
-            ))}
-          </ul>
-          {splitResult.unfulfilled.length > 0 && (
-            <div className="mt-3 rounded-lg bg-bad-bg px-3 py-2 text-bad">
-              <div className="font-semibold">No floor is holding these — still outstanding</div>
-              <ul className="mt-1 space-y-0.5">
-                {splitResult.unfulfilled.map((row) => (
-                  <li key={row.item_id}>
-                    {row.item_name ?? row.item_code ?? `#${row.item_id}`} ·{" "}
-                    {fmtQty(Number(row.qty))}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </div>
+        <SplitFamilyCard
+          parentNo={splitResult.parent_issue_no}
+          parentStatus="SPLIT"
+          members={splitResult.children.map((child) => ({
+            id: child.id, issue_no: child.issue_no, status: "DRAFT" as const,
+            floor_location_name: child.floor_location_name, is_stock_posted: false,
+            total_qty: Number(child.total_qty), total_items: child.total_items,
+            in_charge_names: child.in_charge_names,
+          }))}
+          unfulfilled={splitResult.unfulfilled}
+          onOpen={(childId) => nav(`${listPath}/${childId}`)}
+          onDismiss={() => setSplitResult(null)}
+        />
       )}
       {mixedProjects && (
         <div className="mb-4 flex items-start gap-2 rounded-xl border border-info/30 bg-info-bg px-4 py-3 text-sm text-info">
@@ -1162,19 +1615,44 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
       )}
       {touched && !form.warehouse_id && <ErrorBanner error="Pick the issuing warehouse." />}
       {touched && form.items.length === 0 && <ErrorBanner error="Add at least one line." />}
+      {touched && (missingDestination || missingIssuedTo) && (
+        <ErrorBanner error={`${transferIssue ? "A stock transfer" : "A direct issue"} needs ${[
+          missingDestination && "a destination", missingIssuedTo && "the person it is issued to",
+        ].filter(Boolean).join(" and ")} — pick ${missingDestination && missingIssuedTo ? "them" : "it"} under Issue details.`} />
+      )}
+
+      {doc?.sto_no && (
+        <StoContextCard
+          stoNo={doc.sto_no}
+          status={doc.sto_status}
+          kind={doc.sto_kind}
+          strNo={doc.sto_str_no ?? doc.indent_no}
+          fromName={doc.sto_from_warehouse_name ?? doc.warehouse_name}
+          toName={doc.sto_to_warehouse_name ?? doc.destination_warehouse_name}
+        />
+      )}
 
       {doc && (
         <MetaCard title="Document">
           <MetaRow label="Number" value={<span className="font-mono">{doc.issue_no}</span>} />
           <MetaRow label="Status" value={<StatusPill status={doc.status} />} />
-          <MetaRow
-            label="Currently with"
-            value={doc.currently_with
-              ? `${doc.currently_with}${awaitingIssue ? " — to issue from stock" : ""}`
-              : "—"}
-          />
+          {/* Only while the issue is still waiting on somebody's decision. Once it is
+            * approved or issued the row said nothing useful ("—", or the approver who
+            * had already signed). */}
+          {(doc.status === "DRAFT" || doc.status === "PENDING_APPROVAL") && (
+            <MetaRow
+              label="Currently with"
+              value={doc.currently_with
+                ? `${doc.currently_with}${awaitingIssue ? " — to issue from stock" : ""}`
+                : "—"}
+            />
+          )}
           <MetaRow label="Stock" value={doc.is_stock_posted ? `Posted ${fmtDateTime(doc.posted_at)}` : "Not posted"} />
-          <MetaRow label={doc.indent_type === "STR" ? "Against STR" : "Against indent"} value={<span className="font-mono">{doc.indent_no ?? "—"}</span>} />
+          {doc.sto_no && !doc.indent_id ? (
+            <MetaRow label="Against STO" value={<span className="font-mono">{doc.sto_no}</span>} />
+          ) : (
+            <MetaRow label={doc.indent_type === "STR" ? "Against STR" : "Against indent"} value={<span className="font-mono">{doc.indent_no ?? "—"}</span>} />
+          )}
           {doc.pick_no && (
             <MetaRow label="Fulfilment" value={<span className="font-mono">{doc.pick_no}</span>} />
           )}
@@ -1187,7 +1665,10 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
             <MetaRow label="Submitted by"
                      value={doc.submitted_by_name || doc.created_by_name || "—"} />
           )}
-          <MetaRow label="Acknowledged by" value={doc.acknowledged_by_name || "—"} />
+          {/* Only once the receiver has actually acknowledged it. */}
+          {doc.acknowledged_by_name && (
+            <MetaRow label="Acknowledged by" value={doc.acknowledged_by_name} />
+          )}
           {doc.parent_issue_id && (
             <MetaRow
               label="Split of"
@@ -1218,31 +1699,114 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         </MetaCard>
       )}
 
+      {direction === "OUT" && !olderScope && (linkedScope || !form.indent_id) && (
+        <div className="mb-5">
+          <DocumentNumberCard
+            docType="WH_ISSUE" value={scope} exclusive
+            ready={!editing && !linkedScope}
+            locks={scopeLocks}
+            source={linkedScope ? { label: linkedScope } : null}
+            savedNumber={editing ? doc?.issue_no ?? null : null}
+            onChange={(patch) => {
+              setScope((current) => ({ ...current, ...patch }));
+              // A direct issue's project IS the form's project: keep the two in step.
+              if (!linkedScope && "projectId" in patch) {
+                set("project_id", patch.projectId === "" ? null : patch.projectId ?? null);
+                setProjectName(null);
+              }
+            }}
+          />
+        </div>
+      )}
+
       <Section title={`${direction === "OUT" ? "Issue" : "Return"} details`}>
+        {direction === "OUT" && (
+          <div className="mb-4">
+            <span className="mb-1.5 block text-sm font-medium text-body">Issue type</span>
+            <IssueTypeTiles value={mode} onChange={chooseMode} disabled={editing || locked} />
+          </div>
+        )}
+        {mode === "STO" && !editing && pickedSto && (
+          <div className="mb-4">
+            <StoContextCard
+              stoNo={pickedSto.sto_no}
+              status="APPROVED"
+              kind={pickedSto.kind}
+              strNo={pickedSto.str_no}
+              fromName={pickedSto.from_warehouse_name}
+              toName={pickedSto.to_warehouse_name}
+              issueNo={pickedSto.issue_no}
+            />
+            {pickedSto.issue_id ? (
+              <div className="-mt-2 flex flex-wrap items-center gap-3 rounded-xl border border-line bg-content2/60 px-4 py-3 text-sm">
+                <Info className="h-4 w-4 shrink-0 text-info" aria-hidden />
+                <span className="min-w-0 flex-1 text-body">
+                  This order already has its issue — <b className="font-mono">{pickedSto.issue_no}</b> was
+                  drafted when the STO was approved, with its {pickedSto.item_count} line
+                  {pickedSto.item_count === 1 ? "" : "s"} and the destination locked. Pick batches and
+                  bays there; a second issue would send the same goods twice.
+                </span>
+                <Button className={TONE_BLUE} onClick={() => nav(`${listPath}/${pickedSto.issue_id}`)}>
+                  Open {pickedSto.issue_no} <ChevronRight className="h-4 w-4" />
+                </Button>
+              </div>
+            ) : (
+              <div className="-mt-2 rounded-xl border border-warn/40 bg-warn-bg px-4 py-3 text-sm text-warn">
+                No issue was drafted for this order when it was approved. Ask an administrator to
+                re-run the STO's approval hook — raising one by hand here would carry no link to the order.
+              </div>
+            )}
+          </div>
+        )}
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <Field label="Date">
             <Input type="date" value={form.issue_date} disabled={locked}
                    onChange={(e) => set("issue_date", e.target.value)} />
-          </Field>
-          <Field label="Type">
-            <Select value={form.issue_type} onChange={(v) => set("issue_type", v)}
-                    options={doc?.indent_type === "STR"
-                      ? TYPES.map((t) => (t.value === "INDENT_BASED" ? { ...t, label: "Stock transfer (STR)" } : t))
-                      : TYPES}
-                    isDisabled={locked} ariaLabel="Issue type" />
           </Field>
           <Field label="From warehouse">
             <Lookup name="warehouses" load={warehouseOptions} value={form.warehouse_id || ""}
                     isDisabled={locked || !!form.picking_id || direction === "IN"}
                     onChange={(v, option) => {
                       setForm({ ...form, warehouse_id: Number(v) || 0, items: [] });
+                      if (destPoint && destPoint.warehouse_id === Number(v)) choosePoint(null);
                       setIsBinManaged((option as any)?.is_bin_managed ?? true);
                     }}
                     placeholder="Warehouse" />
           </Field>
-          <Field label="Against indent / STR" hint="Loads the approved stock reservation.">
-            <Lookup name={`indents-${form.warehouse_id}`}
-                    load={(search) => indentOptions(search, form.warehouse_id || undefined)}
+          {mode === "STO" ? (
+            editing ? (
+              <Field label="STO number">
+                <div className="flex min-h-11 items-center gap-2 rounded-md border border-brand/30 bg-brand/5 px-3">
+                  <Lock className="h-4 w-4 shrink-0 text-brand" aria-hidden />
+                  <span className="truncate font-mono text-sm font-bold text-ink">{doc?.sto_no ?? "—"}</span>
+                </div>
+              </Field>
+            ) : (
+              <Field label="STO number" hint="Approved orders leaving this point.">
+                <Lookup name={`stos-${form.warehouse_id}`}
+                        load={async (search) => {
+                          const rows = await stoIssueOptions(search, form.warehouse_id || undefined);
+                          stoRows.current = new Map(rows.map((r) => [r.id, r]));
+                          return rows.map((r) => ({
+                            id: r.id,
+                            name: `${r.sto_no} → ${r.to_warehouse_name ?? "—"}`
+                              + (r.kind === "STR" ? " · STR" : ""),
+                          }));
+                        }}
+                        value={pickedSto?.id ?? ""}
+                        isDisabled={!form.warehouse_id}
+                        onChange={(v) => setPickedSto(v === "" ? null : stoRows.current.get(Number(v)) ?? null)}
+                        placeholder={form.warehouse_id ? "Search STO number" : "Pick warehouse first"} />
+              </Field>
+            )
+          ) : (mode === "INDENT" || mode === "STR" || !!form.indent_id) && (
+          <Field label={mode === "STR" ? "Against STR" : "Against indent"}
+                 hint="Loads the approved stock reservation.">
+            <Lookup name={`indents-${mode}-${form.warehouse_id}`}
+                    // One list on the server, told apart by the "STR · " it puts on an
+                    // STR's name: each tile offers only its own kind.
+                    load={async (search) => (await indentOptions(search, form.warehouse_id || undefined))
+                      .filter((o) => (mode === "STR") === String(o.name ?? "").startsWith("STR · "))}
                     // The loader lists indents still open to be issued, so once this
                     // issue exists its own indent has left that list. Without the
                     // fallback the field on a saved document reads "Indent" in grey
@@ -1256,11 +1820,15 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                 setForm((f) => ({
                   ...f, indent_id: indentId,
                   issue_type: indentId ? "INDENT_BASED" : "DIRECT",
+                  destination_warehouse_id: indentId ? null : f.destination_warehouse_id,
                 }));
+                if (indentId) setDestPoint(null);
                 if (!indentId) { setDestination(""); setDestinationSac(null); }
                 if (indentId && form.warehouse_id) pullIndent.mutate(indentId);
-              }} placeholder={form.warehouse_id ? "Indent / STR" : "Pick warehouse first"} />
+              }} placeholder={form.warehouse_id ? (mode === "STR" ? "STR number" : "Indent number")
+                                               : "Pick warehouse first"} />
           </Field>
+          )}
           <Field label="Department">
             <Lookup name="departments" load={departmentOptions} value={form.department_id ?? ""}
                     isDisabled={locked}
@@ -1283,6 +1851,117 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                       setProjectName(option?.name ?? null);
                     }} placeholder="Project" />
           </Field>
+          {direct && stoIssue ? (
+            <>
+              <div className="sm:col-span-2">
+                <LockedDestination name={doc?.sto_to_warehouse_name ?? doc?.destination_warehouse_name}
+                                   stoNo={doc!.sto_no!} />
+              </div>
+              {hideVehicleSac ? null : (<>
+              <Field label="Service area code (SAC)" hint="Of the destination point.">
+                <Input value={destinationSac ?? doc?.destination_office_sac ?? "None"} disabled />
+              </Field>
+              <Field label="Vehicle" hint="Type one if a vehicle is taking it.">
+                <Input value={form.vehicle_number ?? ""} disabled={locked}
+                       onChange={(e) => set("vehicle_number", e.target.value)} placeholder="Vehicle number" />
+              </Field>
+              </>)}
+              <div className="sm:col-span-2">{transferPicker}</div>
+            </>
+          ) : direct ? (
+            <>
+              <div className="sm:col-span-2">
+                <SearchPicker<IssueDestinationOption>
+                  label="Destination"
+                  required
+                  error={touched && missingDestination
+                    ? "Pick where the goods are going — a direct issue needs a destination." : null}
+                  hint="Any warehouse, MDP or LIP but your own. Search a name, a SAC or a vehicle number."
+                  placeholder={destination || "Search warehouse, MDP or LIP"}
+                  value={destPoint ? pointRow(destPoint) : null}
+                  onChange={choosePoint}
+                  queryKey={["issue-destinations", form.warehouse_id]}
+                  load={(q) => searchIssueDestinations(q, { fromWarehouseId: form.warehouse_id })}
+                  toRow={pointRow}
+                  emptyText="No other warehouse, MDP or LIP is active."
+                  disabled={locked}
+                />
+              </div>
+              {pointHasNoSac ? (
+                <div>
+                  <span className="mb-1.5 block text-sm font-medium text-body">Service area code (SAC)</span>
+                  <div className="flex min-h-11 items-center rounded-md border border-dashed border-line bg-content2/40 px-3 text-sm text-muted">
+                    None
+                  </div>
+                  <span className="mt-1 block text-xs text-muted">
+                    {pointKind(destPoint?.warehouse_type)}s carry no service area code.
+                  </span>
+                </div>
+              ) : (
+                <SearchPicker<IssueDestinationOption>
+                  label="Service area code (SAC)"
+                  hint="Picking a SAC picks its LIP as the destination."
+                  placeholder={destinationSac || "Search SAC"}
+                  value={destPoint?.sac ? sacRow(destPoint) : null}
+                  onChange={choosePoint}
+                  queryKey={["issue-sacs", form.warehouse_id]}
+                  load={(q) => searchIssueDestinations(q, { fromWarehouseId: form.warehouse_id, withSac: true })}
+                  toRow={sacRow}
+                  emptyText="No point with a service area code."
+                  disabled={locked}
+                />
+              )}
+              <Field label="Vehicle" hint={destPoint && !destPoint.vehicle_number && !form.vehicle_number
+                ? `None for ${pointKind(destPoint.warehouse_type) === "Warehouse" ? "a warehouse" : `an ${pointKind(destPoint.warehouse_type)}`} — type one if a vehicle is taking it.`
+                : "Filled from the destination; type over it if another vehicle goes."}>
+                <Input value={form.vehicle_number ?? ""} disabled={locked}
+                       onChange={(e) => set("vehicle_number", e.target.value)}
+                       placeholder={destPoint && !destPoint.vehicle_number ? "None" : "Vehicle number"} />
+              </Field>
+              <div className="sm:col-span-2">
+                <SearchPicker<IssueEmployeeOption>
+                  label="Issued to"
+                  required
+                  error={touched && missingIssuedTo
+                    ? "Pick who is taking the goods — a direct issue needs a person." : null}
+                  hint={destPoint?.office_id && !everyone
+                    ? "People at the destination. Choosing one fills Department and Project."
+                    : "Search every employee by name, code, office or department."}
+                  placeholder="Search name, employee or position code"
+                  value={issuedTo ? personRow(issuedTo) : (form.issued_to_id
+                    ? { id: form.issued_to_id, title: issuedToName ?? String(form.issued_to_id) }
+                    : null)}
+                  onChange={chooseEmployee}
+                  queryKey={["issue-employees", personOffice]}
+                  load={(q) => searchIssueEmployees(q, personOffice)}
+                  toRow={personRow}
+                  emptyText={personOffice ? "Nobody is recorded at this office." : "No active employees."}
+                  filterNote={personOffice ? (
+                    <span>
+                      Showing people at <b className="text-ink">{destPoint?.office_name || destPoint?.name}</b>.{" "}
+                      <button type="button" className="font-semibold text-brand hover:underline"
+                              onClick={() => setEveryone(true)}>
+                        Show everyone
+                      </button>
+                    </span>
+                  ) : destPoint?.office_id ? (
+                    <span>
+                      Showing everyone.{" "}
+                      <button type="button" className="font-semibold text-brand hover:underline"
+                              onClick={() => setEveryone(false)}>
+                        Only people at the destination
+                      </button>
+                    </span>
+                  ) : undefined}
+                  disabled={locked}
+                />
+              </div>
+            </>
+          ) : (
+            <>
+          {transferIssue ? (
+            <div className="sm:col-span-2">{transferPicker}</div>
+          ) : (
           <Field label="Issued to">
             <Lookup name="employees" load={employeeOptions} value={form.issued_to_id ?? ""} isDisabled={locked}
                     // The list is the first page of employees, so a person outside it
@@ -1299,22 +1978,29 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                       else if (!form.indent_id) { setDestination(""); setDestinationSac(null); }
                     }} placeholder="Person" />
           </Field>
+          )}
+          {!hideVehicleSac && (
           <Field label="Vehicle">
             <Input value={form.vehicle_number ?? ""} disabled={locked}
                    onChange={(e) => set("vehicle_number", e.target.value)} placeholder="Vehicle number" />
           </Field>
+          )}
           <Field label="Destination" hint="Office of the issued-to employee — from the indent when one is picked, else from the person.">
             <Input value={destination || "—"} disabled />
           </Field>
           {/* Read-only like Destination above it, and filled from the same answer: the
               SAC belongs to the office receiving the goods, so it follows the indent
               when one is picked and the issued-to person otherwise. */}
+          {!hideVehicleSac && (
           <Field label="Service area code (SAC)" hint="Of the destination office — from the indent when one is picked, else from the person.">
             <Input
               value={destinationSac ?? (destination ? "No service area code for this office" : "—")}
               disabled
             />
           </Field>
+          )}
+            </>
+          )}
         </div>
       </Section>
 
@@ -1325,7 +2011,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         {unitShort.length > 0 && (
           <div className="mb-3 rounded-lg border border-warn/40 bg-warn-bg px-3 py-2 text-sm text-ink">
             <b>These picks cannot be posted as they stand.</b> Approval freezes the
-            batch, and issuing from stock needs one serial per unit — change the batch,
+            batch, and issuing from stock needs one identified unit per issued unit — change the batch,
             split the quantity onto another location, or reduce it now.
             <ul className="mt-1 list-disc pl-5">
               {unitShort.map((row) => (
@@ -1341,6 +2027,33 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
           </div>
         )}
 
+
+
+        {/* A direct issue has no allocation behind it, so it holds its own stock. */}
+        {direction === "OUT" && !form.indent_id && !doc?.is_stock_posted
+          && form.items.length > 0 && (
+          <div className="mb-3 flex items-start gap-2.5 rounded-xl border border-ok/30 bg-ok-bg px-3 py-2.5 text-sm text-ink">
+            <Lock className="mt-0.5 h-4 w-4 shrink-0 text-ok" />
+            <div className="min-w-0 flex-1">
+              {editing && sources.some((row) => num(row.issue_hold_qty ?? 0) > 0) ? (
+                <>
+                  <b>
+                    {fmtQty(sources.reduce((sum, row) => sum + num(row.issue_hold_qty ?? 0), 0))}{" "}
+                    reserved for this issue.
+                  </b>{" "}
+                  Nobody else can take it until this issue is issued from stock or
+                  cancelled — cancelling gives it straight back to the shelf.
+                </>
+              ) : (
+                <>
+                  <b>Saving reserves these quantities for this issue.</b> A direct issue has
+                  no allocation behind it, so it holds its own stock from the moment it is
+                  saved until it is issued or cancelled.
+                </>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Stated, never acted on. Which bay the goods actually come out of is the
           * storekeeper's decision, and "Add batch / storage location" on the item is
@@ -1381,6 +2094,60 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
           </div>
         )}
 
+        {/* Waiting to be placed: picks drafted before this point kept locations.
+          * One press points them at the UNLOCATED bay their stock now stands in —
+          * no retyping, no lost reservation. */}
+        {!locked && waitingPlacement.length > 0 && (
+          <div className="mb-3 overflow-hidden rounded-2xl border border-warn/40 bg-gradient-to-r from-warn/10 via-warn/[0.06] to-transparent px-4 py-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-warn/15 text-warn">
+                <MapPin className="h-4 w-4" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-bold text-ink">
+                  {waitingPlacement.length} pick{waitingPlacement.length === 1 ? "" : "s"} waiting to be placed
+                </p>
+                <p className="text-xs text-body">
+                  Made before this point kept locations. The stock is in{" "}
+                  <b className="font-mono">UNLOCATED</b>
+                  {unlocatedAudit && (unlocatedAudit.stranded_units ?? 0) > 0
+                    ? ` along with ${unlocatedAudit.stranded_units} unpacked codes`
+                    : ""}
+                  {" "}— point them there in one press.
+                </p>
+              </div>
+              <Button
+                variant="soft"
+                disabled={repairUnlocated.isPending}
+                onClick={() => {
+                  waitingPlacement.forEach(({ index }) => pointStaleAt(index));
+                  repairUnlocated.mutate();
+                }}
+              >
+                {repairUnlocated.isPending ? "Placing…" : "Place in UNLOCATED"}
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {/* Codes beyond this bay: the quantity is here, the identity is next door.
+          * The picker switch ("This batch, any bay" / "Whole point") already lists
+          * them — this only says the fact before the picker is opened. */}
+        {!locked && waitingPlacement.length === 0 && widerCodes.length > 0 && (
+          <div className="mb-3 flex flex-wrap items-start gap-2.5 rounded-xl border border-info/30 bg-info-bg px-3 py-2.5 text-sm text-info">
+            <Info className="mt-0.5 h-4 w-4 shrink-0" />
+            <div className="min-w-0 flex-1">
+              <b>
+                {widerCodes.length === 1
+                  ? `${widerCodes[0].itemCode ?? "One item"} has its codes beyond this bay.`
+                  : `${widerCodes.length} items have their codes beyond this bay.`}
+              </b>{" "}
+              Open the code picker and widen to “This batch, any bay” or “Whole
+              point” — the bay on the pick is empty of codes, the point is not.
+            </div>
+          </div>
+        )}
+
         <IssueSplitEditor
           groups={groups}
           lines={form.items}
@@ -1390,9 +2157,13 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
           indentId={form.indent_id}
           binManaged={isBinManaged}
           locked={locked}
-          unitsLocked={serialsLocked}
+          // A split parent opens each line's picker; a piece already issued shows it
+          // read-only there (`serialsLocked` / `codesLocked`, per open line).
+          unitsLocked={serialsLocked && !splitParentOpen}
+          codesLocked={codesLocked && !splitParentOpen}
           unitsHidden={unitsHidden}
           onPickUnits={setSerialLine}
+          onSourcePicked={(index, line) => { void fillCodesFor(index, line); }}
           meta={trackingMeta}
           problemAt={problemAt}
           unitSupply={unitSupply}
@@ -1400,6 +2171,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
           renderItemPicker={renderItemPicker}
           onAddItem={locked ? undefined : addItem}
           onRemoveGroup={locked ? undefined : removeGroup}
+          packOptionsByItem={packOptions.data}
         />
 
         <div className="mt-3 flex flex-wrap justify-end gap-x-6 gap-y-1 rounded-2xl border border-line/70 bg-content2/50 px-3 py-2 text-sm">
@@ -1407,9 +2179,15 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
             {groups.length} item{groups.length === 1 ? "" : "s"}
             {totals.lines > groups.length && ` · ${totals.lines} picks`}
           </span>
-          <span className="text-ink">Requested <b className="tabular">{fmtQty(totals.requested)}</b></span>
+          {/* A direct issue asks for nothing, so it has no "requested" and nothing
+            * to be short of (2026-10-21). */}
+          {form.indent_id && (
+            <span className="text-ink">Requested <b className="tabular">{fmtQty(totals.requested)}</b></span>
+          )}
           <span className="text-ink">Issued <b className="tabular">{fmtQty(totals.issued)}</b></span>
-          {short > 0 && <span className="text-warn">Short <b className="tabular">{fmtQty(short)}</b></span>}
+          {form.indent_id && short > 0 && (
+            <span className="text-warn">Short <b className="tabular">{fmtQty(short)}</b></span>
+          )}
           {/* What leaving the shelves gives back. Only shown once it is knowable —
             * a zero here would claim the issue frees nothing, when the truth is
             * usually that the items have not been measured. */}
@@ -1508,23 +2286,75 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
       {/* Naming the units is a SCREEN, not a dialog — see CodeAssignmentScreen. It
         * owns its own paged query, so the whole pool is reachable however large the
         * bay is, and the selection it hands back spans every page it was made on. */}
+      {/* An item issued in a container names BOXES (2026-10-26). */}
+      {/* An item issued in a container is picked PACKAGE FIRST (2026-10-27): the
+        * cartons, how many boxes out of each, codes chosen and swappable. Serial and
+        * IMEI lines of such an item use the same flow and end on their numbers. */}
+      {(() => {
+        const line = serialLine === null ? null : form.items[serialLine];
+        const unitsMode = !!line && !line.issue_in_boxes
+          && (activeTracking === "SERIAL" || activeTracking === "IMEI")
+          && hasIssueContainer(line) && !unitsOneByOne;
+        const label = (() => {
+          if (serialLine === null) return "";
+          const saved = savedLine(serialLine);
+          const name = saved?.item_name ?? line?.item_name ?? `Line ${serialLine + 1}`;
+          const code = saved?.item_code ?? line?.item_code ?? null;
+          return code ? `${code} — ${name}` : name;
+        })();
+        return (
+          <PackagePickerModal
+            open={serialLine !== null && (!!line?.issue_in_boxes || unitsMode)}
+            mode={line?.issue_in_boxes ? "boxes" : "units"}
+            unitNoun={activeTracking === "IMEI" ? "IMEI" : "serial"}
+            onClose={() => setSerialLine(null)}
+            onPickIndividually={() => setUnitsOneByOne(true)}
+            itemLabel={label}
+            warehouseId={form.warehouse_id}
+            itemId={activeSerialLine?.item_id}
+            batchId={sourceId(activeSerialLine?.batch_id)}
+            binId={isBinManaged ? sourceId(activeSerialLine?.bin_id) : undefined}
+            issueId={activePiece?.issueId ?? (editing ? Number(id) : undefined)}
+            quantity={serialLine === null ? 0 : num(line?.issued_qty)}
+            initial={serialLine === null ? [] : line?.serial_numbers ?? []}
+            uom={serialLine === null ? null : savedLine(serialLine)?.uom_code ?? null}
+            readOnly={line?.issue_in_boxes ? codesLocked : serialsLocked}
+            onSave={(codes) => {
+              if (serialLine === null) return;
+              patchLine(serialLine, { serial_numbers: codes });
+              const lineId = activePiece?.lineId ?? savedLine(serialLine)?.id;
+              if (locked && lineId) {
+                saveSerials.mutate({ id: lineId, serial_numbers: codes, issueId: activePiece?.issueId });
+              }
+            }}
+          />
+        );
+      })()}
+
       <CodeAssignmentScreen
-        open={serialLine !== null}
+        open={serialLine !== null && !form.items[serialLine]?.issue_in_boxes
+          && !((activeTracking === "SERIAL" || activeTracking === "IMEI")
+               && hasIssueContainer(form.items[serialLine]) && !unitsOneByOne)}
         onClose={() => setSerialLine(null)}
-        quantity={serialLine === null ? 0 : num(form.items[serialLine]?.issued_qty)}
+        // One per unit — or one per box for an item issued in a container (2026-10-24).
+        quantity={serialLine === null ? 0 : codesNeeded(form.items[serialLine] ?? {})}
         initial={serialLine === null ? [] : form.items[serialLine]?.serial_numbers ?? []}
         trackingType={activeTracking}
         trackingMeta={trackingMeta(activeTracking)}
         noun={unitNoun(activeUnitMode)}
         unitMode={activeUnitMode}
         scope={activeScope}
-        readOnly={serialsLocked}
+        // Asset and consumable codes are auto-assigned but swappable (`codesLocked`).
+        // Serial/IMEI keep the document-wide rule.
+        readOnly={activeTracking === "ASSET" || activeTracking === "CONSUMABLE"
+          ? codesLocked
+          : serialsLocked}
         itemId={activeSerialLine?.item_id}
         warehouseId={form.warehouse_id}
         batchId={sourceId(activeSerialLine?.batch_id)}
         binId={isBinManaged ? sourceId(activeSerialLine?.bin_id) : undefined}
-        issueId={editing ? Number(id) : undefined}
-        issueLineId={activeSerialLine?.id}
+        issueId={activePiece?.issueId ?? (editing ? Number(id) : undefined)}
+        issueLineId={activePiece?.lineId ?? activeSerialLine?.id}
         itemLabel={(() => {
           if (serialLine === null) return "";
           const name = savedLine(serialLine)?.item_name ?? form.items[serialLine]?.item_name ?? `Line ${serialLine + 1}`;
@@ -1536,8 +2366,10 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
           patchLine(serialLine, { serial_numbers: serials });
           // On a draft the serials ride along with the next save. On an approved
           // issue there is no save left to ride, so they go to the server now.
-          const lineId = savedLine(serialLine)?.id;
-          if (locked && lineId) saveSerials.mutate({ id: lineId, serial_numbers: serials });
+          const lineId = activePiece?.lineId ?? savedLine(serialLine)?.id;
+          if (locked && lineId) {
+            saveSerials.mutate({ id: lineId, serial_numbers: serials, issueId: activePiece?.issueId });
+          }
         }}
       />
 
@@ -1607,15 +2439,72 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
       <ConfirmModal
         isOpen={confirming === "split"}
         title="Split this issue across the floors?"
-        message={"One issue is created per floor that is holding stock for these items, "
-          + "each for the quantity that floor actually has. The floor in-charges see "
-          + "their own and nobody else's. Anything no floor is holding stays unfulfilled "
-          + "and is listed for you. Nothing leaves the warehouse yet."}
+        message={"One issue per floor, each for exactly the lots this issue picked there, "
+          + `numbered off this one — ${doc?.issue_no ?? "this issue"}-001, -002 and so on. `
+          + "Nothing leaves the warehouse yet."}
         confirmLabel="Split across floors"
         busy={split.isPending}
-        error={split.error}
+        confirmDisabled={!splitPreview.data?.can_split}
+        error={split.error ?? splitPreview.error}
         onConfirm={() => { split.mutate(); setConfirming(null); }}
         onClose={() => setConfirming(null)}
+      >
+        {splitPreview.isLoading ? (
+          <p className="text-sm text-muted">Working out which floor gets what…</p>
+        ) : splitPreview.data && (
+          <div className="space-y-2">
+            {splitPreview.data.floors.map((floor) => (
+              <div key={floor.floor_location_id} className="rounded-xl border border-line bg-content2/40 p-3">
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="font-semibold text-ink">{floor.floor_location_name}</span>
+                  <span className="font-mono text-sm font-semibold text-ink">{fmtQty(Number(floor.total_qty))}</span>
+                </div>
+                {floor.in_charge_names.length > 0 && (
+                  <p className="text-xs text-muted">To {floor.in_charge_names.join(", ")}</p>
+                )}
+                <ul className="mt-1.5 space-y-0.5 text-xs text-body">
+                  {floor.lines.map((line, i) => (
+                    <li key={i} className="flex justify-between gap-2">
+                      <span className="min-w-0 truncate">
+                        {line.item_code} · {line.batch_no ?? "No batch"}{line.bin_code ? ` · ${line.bin_code}` : ""}
+                      </span>
+                      <span className="shrink-0 font-mono">{fmtQty(Number(line.qty))} {line.uom_code ?? ""}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+            {splitPreview.data.shortfall.length > 0 && (
+              <div className="rounded-xl bg-warn-bg p-3 text-xs text-warn">
+                <p className="font-semibold">Stays on this issue, not handed to any floor:</p>
+                <ul className="mt-1 space-y-0.5">
+                  {splitPreview.data.shortfall.map((row, i) => (
+                    <li key={i}>{row.item_code} — {fmtQty(Number(row.qty))}{row.reason ? ` (${row.reason})` : ""}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {!splitPreview.data.can_split && (
+              <p className="text-sm font-medium text-bad">
+                None of these picks sits on a floor, so there is nothing to hand down. Issue it from stock yourself.
+              </p>
+            )}
+          </div>
+        )}
+      </ConfirmModal>
+
+      <ConfirmModal
+        isOpen={confirming === "postSplit"}
+        title="Issue every floor piece now?"
+        message={`Every floor piece of ${doc?.issue_no ?? "this issue"} not yet issued leaves the `
+          + "warehouse now, each from its own lots. All or nothing: if any piece is not ready "
+          + "(serial numbers not picked, stock no longer there), nothing is issued and that "
+          + "piece is named — open it, fix it, and press again."}
+        confirmLabel="Issue from stock"
+        busy={postSplit.isPending}
+        error={postSplit.error}
+        onConfirm={() => postSplit.mutate()}
+        onClose={() => { setConfirming(null); postSplit.reset(); }}
       />
 
       <ConfirmModal

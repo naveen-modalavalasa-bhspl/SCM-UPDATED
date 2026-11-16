@@ -1,11 +1,12 @@
 import { useNavigate } from "react-router-dom";
-import { Chip } from "@heroui/react";
 import { FileText } from "lucide-react";
 import { StatusPill, type Column } from "@/shared/components";
 import { DocumentList } from "../components/DocumentList";
 import { listInspections, listOutboundInspections, deleteInspection, deleteOutboundInspection, DRAFT_DELETE_PERMISSION } from "../api";
-import { fmtDate, percent } from "../format";
+import { fmtDate } from "../format";
 import type { Inspection } from "../types";
+import { qcQty, qcRate, summaryFromRow } from "../qcSummary";
+import { QcRowResult } from "../components/QcVerdict";
 
 /**
  * Quality inspections.
@@ -64,17 +65,9 @@ export default function QualityInspection({
     {
       key: "result",
       header: "Result",
-      render: (r) => {
-        const rate = percent(r.passed_items, r.total_items);
-        return (
-          <div className="flex items-center gap-2">
-            <Chip size="sm" variant="flat" color={r.failed_items > 0 ? "danger" : "success"}>
-              {r.passed_items}/{r.total_items} passed
-            </Chip>
-            <span className={`text-xs tabular ${rate < 100 ? "text-bad" : "text-ok"}`}>{rate}%</span>
-          </div>
-        );
-      },
+      // SCM_0164 / 0165: by QUANTITY. "0/1 passed" was the whole story a partly
+      // rejected item got here — no rejection, no partial, a 0 % that meant 80 %.
+      render: (r) => <QcRowResult summary={summaryFromRow(r)} />,
     },
     { key: "inspector", header: "Inspector", hideOnNarrow: true, render: (r) => r.inspector_name ?? "—" },
     { key: "status", header: "Status", render: (r) => <StatusPill status={r.status} /> },
@@ -130,18 +123,18 @@ export default function QualityInspection({
         { label: "Completed", statuses: ["COMPLETED"] },
       ]}
       kpis={(rows) => {
-        const passed = rows.reduce((s, r) => s + r.passed_items, 0);
-        const failed = rows.reduce((s, r) => s + r.failed_items, 0);
+        // By QUANTITY (SCM_0165): accepted ÷ inspected over the rows on screen. Lines
+        // made a sheet that kept 99 of 100 units look like a 50 % pass.
+        const summaries = rows.map(summaryFromRow);
+        const inspected = summaries.reduce((s, x) => s + x.inspected, 0);
+        const accepted = summaries.reduce((s, x) => s + x.accepted, 0);
+        const rejected = summaries.reduce((s, x) => s + x.rejected, 0);
         return [
-          { label: "Failed lines", value: failed, tone: "bad" },
+          { label: "Rejected qty", value: qcQty(rejected), tone: "bad" },
           {
             ratio: true,
-            // Over lines that have actually been judged, not over every line raised.
-            // Against `total_items` an inspection with nothing failed and half its
-            // lines still un-inspected read as a 50% pass rate, so the tile said
-            // "82% pass" directly above "0 failed lines" and neither was wrong.
             label: "Pass rate",
-            value: passed + failed ? `${percent(passed, passed + failed)}%` : "—",
+            value: qcRate(inspected > 0 ? Math.round((accepted / inspected) * 1000) / 10 : null),
           },
         ];
       }}
@@ -164,10 +157,7 @@ export default function QualityInspection({
             </div>
           </div>
           <div className="truncate text-sm text-body">{r.grn_no ?? (r as any).issue_no ?? "—"} {r.vendor_name ? `· ${r.vendor_name}` : ""}</div>
-          <div className="text-[11px] text-muted">
-            {r.passed_items}/{r.total_items} passed
-            {r.failed_items > 0 && <span className="font-semibold text-bad"> · {r.failed_items} failed</span>}
-          </div>
+          <QcRowResult summary={summaryFromRow(r)} />
         </div>
       )}
     />

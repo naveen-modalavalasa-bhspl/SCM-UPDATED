@@ -27,6 +27,11 @@ from app.shared.uom import MAX_DECIMALS, decimals_by_code
 
 logger = logging.getLogger(__name__)
 
+
+def _d(v) -> Decimal:
+    return Decimal(str(v or 0))
+
+
 from .schemas import (
     ApprovalIndentLineOut, ApprovalIndentOut, ApprovalQuantityIn,
     ConsolidatedItemAllocationOut, ConsolidatedItemOut,
@@ -116,7 +121,7 @@ async def pending_for_user(db: AsyncSession, user) -> list[dict]:
     return rows
 
 
-async def pending_summary(db: AsyncSession, user) -> dict:
+async def pending_summary(db: AsyncSession, user, scope: str = "mine") -> dict:
     """The tiles and the doc-type chips above the approval inbox, counted in SQL.
 
     The screen used to answer these by fetching its whole queue a second time (page 1
@@ -125,21 +130,38 @@ async def pending_summary(db: AsyncSession, user) -> dict:
     a queue passes 500 rows.
     """
     now = ist_now()
-    conditions = [
-        Pending.approver_id == user.id,
-        Instance.status == InstanceStatus.IN_PROGRESS.value,
-    ]
-    # Same hat rule the list below applies, or the tiles would keep counting work the
-    # list no longer shows (see engine.instances_for_other_hats).
-    other_hat = await engine.other_hat_condition(db, user)
-    if other_hat is not None:
-        conditions.append(other_hat)
+    if scope == "company":
+        from app.platform.workflow.engine import is_workflow_admin
+        if not await is_workflow_admin(db, user):
+            raise PermissionError_("Admin permission required to view company-wide approval queue")
+        conditions = [
+            Instance.status == InstanceStatus.IN_PROGRESS.value,
+        ]
+    else:
+        conditions = [
+            Pending.approver_id == user.id,
+            Instance.status == InstanceStatus.IN_PROGRESS.value,
+        ]
+        # Same hat rule the list below applies, or the tiles would keep counting work the
+        # list no longer shows (see engine.instances_for_other_hats).
+        other_hat = await engine.other_hat_condition(db, user)
+        if other_hat is not None:
+            conditions.append(other_hat)
     base = (
         select(Pending.doc_type, Pending.doc_id, Pending.due_at, Pending.created_at)
         .join(Instance, Instance.id == Pending.instance_id)
         .where(*conditions)
     )
     rows = (await db.execute(base)).all()
+    if scope == "company":
+        seen_docs: set[tuple[str, int]] = set()
+        deduped_rows = []
+        for r in rows:
+            doc_key = (r.doc_type, r.doc_id)
+            if doc_key not in seen_docs:
+                seen_docs.add(doc_key)
+                deduped_rows.append(r)
+        rows = deduped_rows
 
     # Monthly indents are approved as consolidated batches on another screen, so they
     # are not in this queue — the same exclusion pending_page applies to the list.
@@ -174,21 +196,29 @@ async def pending_page(
     db: AsyncSession, user, page: int, size: int, *, search: str = "",
     doc_type: str = "", overdue_only: bool = False,
     raised_from: datetime | None = None, raised_to: datetime | None = None,
-    sort: str = "oldest",
+    sort: str = "oldest", scope: str = "mine",
 ) -> dict:
     # Same rule the engine applies in pending_for_user: a task whose workflow has
     # finished is not work, whatever the row says. Without it a cancelled document
     # kept a live-looking task in the queue and in every count above it.
-    conditions = [
-        Pending.approver_id == user.id,
-        Instance.status == InstanceStatus.IN_PROGRESS.value,
-    ]
-    # A task belongs to the POST the ladder resolved to, not merely to the person
-    # holding it. Someone wearing two District Manager hats must not be shown the other
-    # district's work — they cannot sign it, and acting on it half-succeeded.
-    other_hat = await engine.other_hat_condition(db, user)
-    if other_hat is not None:
-        conditions.append(other_hat)
+    if scope == "company":
+        from app.platform.workflow.engine import is_workflow_admin
+        if not await is_workflow_admin(db, user):
+            raise PermissionError_("Admin permission required to view company-wide approval queue")
+        conditions = [
+            Instance.status == InstanceStatus.IN_PROGRESS.value,
+        ]
+    else:
+        conditions = [
+            Pending.approver_id == user.id,
+            Instance.status == InstanceStatus.IN_PROGRESS.value,
+        ]
+        # A task belongs to the POST the ladder resolved to, not merely to the person
+        # holding it. Someone wearing two District Manager hats must not be shown the other
+        # district's work — they cannot sign it, and acting on it half-succeeded.
+        other_hat = await engine.other_hat_condition(db, user)
+        if other_hat is not None:
+            conditions.append(other_hat)
     now = ist_now()
     term = search.strip()
     if term:
@@ -222,51 +252,116 @@ async def pending_page(
         Pending.doc_type != DocType.INDENT.value,
         Indent.indent_type != IndentType.MONTHLY.value,
     ))
-    joined = (
-        select(Pending, Instance, Indent.indent_type)
-        .join(Instance, Instance.id == Pending.instance_id)
-        .outerjoin(Indent, indent_join)
-    )
-    total = int(await db.scalar(
-        select(func.count(Pending.id))
-        .select_from(Pending).join(Instance, Instance.id == Pending.instance_id)
-        .outerjoin(Indent, indent_join)
-        .where(*conditions)
-    ) or 0)
     order = {
         "newest": Pending.created_at.desc(),
         "due": Pending.due_at.asc(),
         "value": Pending.amount.desc(),
     }.get(sort, Pending.created_at.asc())
-    rows = (await db.execute(
-        joined.where(*conditions)
-        .order_by(order, Pending.id.desc())
-        .offset((page - 1) * size)
-        .limit(size)
-    )).all()
+
+    if scope == "company":
+        # Group by instance_id so multiple approvers sharing a stage only show the document once
+        subq = (
+            select(func.min(Pending.id).label("min_pending_id"))
+            .select_from(Pending)
+            .join(Instance, Instance.id == Pending.instance_id)
+            .outerjoin(Indent, indent_join)
+            .where(*conditions)
+            .group_by(Pending.instance_id)
+        ).subquery()
+
+        total = int(await db.scalar(
+            select(func.count(subq.c.min_pending_id))
+        ) or 0)
+
+        joined = (
+            select(Pending, Instance, Indent.indent_type)
+            .join(subq, Pending.id == subq.c.min_pending_id)
+            .join(Instance, Instance.id == Pending.instance_id)
+            .outerjoin(Indent, indent_join)
+        )
+        rows = (await db.execute(
+            joined.order_by(order, Pending.id.desc())
+            .offset((page - 1) * size)
+            .limit(size)
+        )).all()
+    else:
+        total = int(await db.scalar(
+            select(func.count(Pending.id))
+            .select_from(Pending).join(Instance, Instance.id == Pending.instance_id)
+            .outerjoin(Indent, indent_join)
+            .where(*conditions)
+        ) or 0)
+        joined = (
+            select(Pending, Instance, Indent.indent_type)
+            .join(Instance, Instance.id == Pending.instance_id)
+            .outerjoin(Indent, indent_join)
+        )
+        rows = (await db.execute(
+            joined.where(*conditions)
+            .order_by(order, Pending.id.desc())
+            .offset((page - 1) * size)
+            .limit(size)
+        )).all()
+
     numbers = await _document_numbers(db, _missing_numbers(
         (pending.doc_type, pending.doc_id, pending.doc_no) for pending, _, _ in rows
     ))
-    items = [{
-        "instance_id": pending.instance_id,
-        "doc_type": pending.doc_type,
-        "indent_type": indent_type,
-        "display_doc_type": _display_doc_type(pending.doc_type, indent_type),
-        "doc_id": pending.doc_id,
-        "stage_sequence": pending.stage_sequence,
-        "doc_no": pending.doc_no or numbers.get((pending.doc_type, pending.doc_id)),
-        "summary": pending.doc_summary,
-        "requested_by_name": pending.requested_by_name,
-        "amount": float(pending.amount) if pending.amount is not None else None,
-        "waiting_since": pending.created_at.isoformat() if pending.created_at else None,
-        "due_at": pending.due_at.isoformat() if pending.due_at else None,
-        # Decided here, against the same clock the `overdue_only` filter uses. These
-        # timestamps go out naive, so a browser reading them as local time answered a
-        # different question: "Past due 0" above a filter that returned a row.
-        "overdue": bool(pending.due_at and pending.due_at < now),
-        "current_stage_name": instance.current_stage_name,
-        "approver_name": user.full_name,
-    } for pending, instance, indent_type in rows]
+
+    instance_ids = [pending.instance_id for pending, _, _ in rows]
+    approver_names_by_instance: dict[int, list[str]] = {}
+    if instance_ids and scope == "company":
+        emp_rows = (await db.execute(
+            select(Pending.instance_id, HcmEmployee.full_name)
+            .join(HcmEmployee, HcmEmployee.id == Pending.approver_id)
+            .where(Pending.instance_id.in_(instance_ids))
+        )).all()
+        for inst_id, emp_name in emp_rows:
+            if emp_name:
+                approver_names_by_instance.setdefault(inst_id, []).append(emp_name)
+
+    overridden_instance_ids: set[int] = set()
+    if instance_ids:
+        overridden_rows = (await db.execute(
+            select(Action.instance_id)
+            .where(
+                Action.instance_id.in_(instance_ids),
+                or_(
+                    Action.comments.ilike("%[Admin Override%"),
+                    Action.actor_name.ilike("%(Admin Override)%"),
+                ),
+            )
+        )).scalars().all()
+        overridden_instance_ids = set(overridden_rows)
+
+    items = []
+    for pending, instance, indent_type in rows:
+        if scope == "company":
+            names = approver_names_by_instance.get(pending.instance_id, [])
+            approver_disp = ", ".join(names) if names else user.full_name
+        else:
+            approver_disp = user.full_name
+
+        items.append({
+            "instance_id": pending.instance_id,
+            "doc_type": pending.doc_type,
+            "indent_type": indent_type,
+            "display_doc_type": _display_doc_type(pending.doc_type, indent_type),
+            "doc_id": pending.doc_id,
+            "stage_sequence": pending.stage_sequence,
+            "doc_no": pending.doc_no or numbers.get((pending.doc_type, pending.doc_id)),
+            "summary": pending.doc_summary,
+            "requested_by_name": pending.requested_by_name,
+            "amount": float(pending.amount) if pending.amount is not None else None,
+            "waiting_since": pending.created_at.isoformat() if pending.created_at else None,
+            "due_at": pending.due_at.isoformat() if pending.due_at else None,
+            # Decided here, against the same clock the `overdue_only` filter uses. These
+            # timestamps go out naive, so a browser reading them as local time answered a
+            # different question: "Past due 0" above a filter that returned a row.
+            "overdue": bool(pending.due_at and pending.due_at < now),
+            "current_stage_name": instance.current_stage_name,
+            "approver_name": approver_disp,
+            "is_overridden": pending.instance_id in overridden_instance_ids,
+        })
     return {"items": items, "total": total, "page": page, "size": size}
 
 
@@ -1799,7 +1894,9 @@ async def _load_indent_task(
         Pending.stage_sequence == instance.current_sequence,
         Pending.approver_id == user.id,
     ))
-    if not assigned:
+    from app.platform.workflow.engine import is_workflow_admin
+    is_admin = await is_workflow_admin(db, user)
+    if not assigned and not is_admin:
         raise PermissionError_("This indent is not assigned to you at the current stage")
     if indent.requested_by_id == user.id:
         raise ValidationError("Requester cannot approve or reject their own indent")
@@ -1846,26 +1943,42 @@ def _approval_ceiling(line, has_previous_approval: bool) -> Decimal:
     return min(_quantize(Decimal(str(line.approved_quantity or 0))), requested)
 
 
+async def _indent_uom_decimals(db: AsyncSession, indent: Indent) -> dict[str, int]:
+    """{uom_code: decimals} for the units on one indent (UOM type "Allows decimal")."""
+    return await decimals_by_code(db, {line.uom_code for line in indent.items})
+
+
 def _approval_out(
     indent: Indent, instance: Instance, has_previous_approval: bool,
     *, can_return_for_correction: bool = False,
+    decimals_by_uom: dict[str, int] | None = None,
 ) -> ApprovalIndentOut:
-    items = [
-        ApprovalIndentLineOut(
+    items: list[ApprovalIndentLineOut] = []
+    excluded_items: list[ApprovalIndentLineOut] = []
+    for line in sorted(indent.items, key=lambda item: (item.line_no, item.id)):
+        ceiling = _approval_ceiling(line, has_previous_approval)
+        line_out = ApprovalIndentLineOut(
             id=line.id,
             item_id=line.item_id,
             item_code=line.item_code,
             item_name=line.item_name,
             uom_code=line.uom_code,
             requested_quantity=float(line.quantity),
-            approved_quantity=float(_approval_ceiling(line, has_previous_approval)),
-            max_quantity=float(_approval_ceiling(line, has_previous_approval)),
+            approved_quantity=float(ceiling),
+            max_quantity=float(ceiling),
+            uom_decimals=(decimals_by_uom or {}).get(line.uom_code, MAX_DECIMALS),
+            min_quantity=0,
             remarks=line.remarks,
             is_excluded=bool(line.is_excluded),
             excluded_by_name=line.excluded_by_name,
         )
-        for line in sorted(indent.items, key=lambda item: (item.line_no, item.id))
-    ]
+        # If an earlier approver turned this item to zero or marked it excluded,
+        # it is dropped from the approval and not forwarded to subsequent approvers.
+        if has_previous_approval and (line.is_excluded or ceiling <= 0):
+            excluded_items.append(line_out)
+        else:
+            items.append(line_out)
+
     return ApprovalIndentOut(
         id=indent.id,
         indent_no=indent.indent_no,
@@ -1875,12 +1988,14 @@ def _approval_out(
         position_name=indent.position_name,
         department_name=indent.department_name,
         office_name=indent.office_name,
+        indent_type=indent.indent_type,
         current_stage_name=instance.current_stage_name,
         current_approver_name=indent.current_approver_name,
         can_return_for_correction=can_return_for_correction,
         required_date=indent.required_date,
         created_at=indent.created_at,
         items=items,
+        excluded_items=excluded_items,
     )
 
 
@@ -1891,6 +2006,7 @@ async def get_indent_for_approval(
     can_return = await indent_service.can_return_indent_for_correction(db, indent, user)
     return _approval_out(
         indent, instance, has_previous, can_return_for_correction=can_return,
+        decimals_by_uom=await _indent_uom_decimals(db, indent),
     )
 
 
@@ -2320,14 +2436,25 @@ async def consolidation_workspace(
 def _validated_quantities(
     indent: Indent, submitted: list[ApprovalQuantityIn],
     has_previous_approval: bool = False,
+    decimals_by_uom: dict[str, int] | None = None,
 ) -> dict[int, Decimal]:
     by_id: dict[int, Decimal] = {}
+    raw_by_id: dict[int, Decimal] = {}
+    excluded_set: set[int] = {
+        item.line_id for item in submitted if getattr(item, "excluded", False)
+    }
     for item in submitted:
         if item.line_id in by_id:
             raise ValidationError(f"Quantity for line {item.line_id} was submitted twice")
         by_id[item.line_id] = _quantize(Decimal(str(item.approved_quantity)))
+        raw_by_id[item.line_id] = Decimal(str(item.approved_quantity))
 
-    expected = {line.id for line in indent.items}
+    # Only lines that are still active (not excluded/turned to zero at an earlier rung)
+    # are expected to be submitted.
+    expected = {
+        line.id for line in indent.items
+        if not (has_previous_approval and (getattr(line, "is_excluded", False) or _approval_ceiling(line, has_previous_approval) <= 0))
+    }
     received = set(by_id)
     if received != expected:
         missing = sorted(expected - received)
@@ -2340,11 +2467,25 @@ def _validated_quantities(
         raise ValidationError("Submit one quantity for every indent line (" + "; ".join(details) + ")")
 
     for line in indent.items:
+        if line.id not in by_id:
+            continue
         approved = by_id[line.id]
         ceiling = _approval_ceiling(line, has_previous_approval)
         label = line.item_name or line.item_code or line.id
         if approved < 0:
             raise ValidationError(f"Approved quantity for {label} cannot be negative")
+        # The unit's own step. The screen already refuses the keystroke; this is the
+        # net for a client that skipped it, and it refuses rather than rounds, so what
+        # the approver typed is exactly what is stored.
+        places = (decimals_by_uom or {}).get(line.uom_code, MAX_DECIMALS)
+        raw = raw_by_id[line.id]
+        if raw != raw.quantize(Decimal(1).scaleb(-places), rounding=ROUND_DOWN):
+            if places == 0:
+                raise ValidationError(
+                    f"Approved quantity for {label} must be a whole number: "
+                    f"{line.uom_code or 'this unit'} does not allow decimals.")
+            raise ValidationError(
+                f"Approved quantity for {label} allows up to {places} decimal places.")
         if approved > ceiling:
             source = (
                 "the quantity approved at the previous level"
@@ -2393,7 +2534,11 @@ async def approve_indent(
     the same three-query load twice per indent, 900 times over. Loaded here when it is
     not supplied, so the single-indent route is unchanged."""
     indent, instance, has_previous = task or await _load_indent_task(db, indent_id, user)
-    approved_by_line = _validated_quantities(indent, quantities, has_previous)
+    approved_by_line = _validated_quantities(
+        indent, quantities, has_previous, await _indent_uom_decimals(db, indent))
+    # Before anything is written: what an STR may not sign, and why (2026-11-05).
+    from .fulfilment import assert_str_approvable
+    await assert_str_approvable(db, indent, instance, approved_by_line, user)
 
     # Which lines this approver DROPPED, as opposed to cut to nothing. Only lines the
     # screen actually sent can be excluded; a line it never mentioned keeps whatever it
@@ -2403,16 +2548,16 @@ async def approve_indent(
     before: dict[str, float] = {}
     after: dict[str, float] = {}
     for line in indent.items:
+        if line.id not in approved_by_line:
+            # Line was already excluded / zeroed below; stays excluded
+            continue
         before[f"line_{line.id}_approved_qty"] = float(
             _approval_ceiling(line, has_previous)
         )
         line.approved_quantity = approved_by_line[line.id]
         after[f"line_{line.id}_approved_qty"] = float(line.approved_quantity)
-        # Set once and never unset here: exclusion is a decision already taken further
-        # down the ladder, and a rung above must not silently put back a line somebody
-        # below deliberately dropped. Re-including is its own act, on the screen that
-        # owns it.
-        if line.id in excluded_lines and not line.is_excluded:
+        # Setting quantity to 0 or dropping a line permanently marks it excluded/rejected.
+        if (line.id in excluded_lines or line.approved_quantity == 0) and not line.is_excluded:
             line.is_excluded = True
             line.excluded_by_id = getattr(user, "id", None)
             line.excluded_by_name = getattr(user, "full_name", None)
@@ -2431,13 +2576,21 @@ async def approve_indent(
         summary=f"Updated quantities at {instance.current_stage_name or 'approval stage'}",
     )
 
-    # Nothing left owed on any line: everything has been allocated already, so the
-    # rungs above have nothing to decide. Ending the ladder here is what stops a
-    # fully-served indent travelling to the DM for goods that are already committed.
-    updated = await indent_service.act_on_indent(
-        db, indent_id, ApprovalAction.APPROVED, comments, user,
-        final=await _nothing_owed(db, indent),
-    )
+    positive_count = sum(1 for line in indent.items if _d(line.approved_quantity) > 0 and not getattr(line, "is_excluded", False))
+    if positive_count == 0:
+        # All items were set to 0 (or the only item was set to 0): stop here with REJECTED status.
+        updated = await indent_service.act_on_indent(
+            db, indent_id, ApprovalAction.REJECTED,
+            comments or "All requested items rejected (quantities set to 0)",
+            user,
+        )
+    else:
+        # Positive quantities remain: advance to next stage or complete approval.
+        # Zero-quantity lines are excluded and will not enter inventory fulfilment.
+        updated = await indent_service.act_on_indent(
+            db, indent_id, ApprovalAction.APPROVED, comments, user,
+            final=await _nothing_owed(db, indent),
+        )
 
     # The action may advance to another stage or complete the workflow. Return the
     # latest document with the quantities just persisted.
@@ -2447,7 +2600,8 @@ async def approve_indent(
     ).order_by(Instance.id.desc()))).scalars().first()
     if next_instance is None:
         next_instance = instance
-    return _approval_out(updated, next_instance, True)
+    return _approval_out(updated, next_instance, True,
+                         decimals_by_uom=await _indent_uom_decimals(db, updated))
 
 
 async def approve_consolidation(
@@ -2534,11 +2688,13 @@ async def reject_indent(
     updated = await indent_service.act_on_indent(
         db, indent_id, ApprovalAction.REJECTED, comments, user,
     )
-    return _approval_out(updated, instance, has_previous)
+    return _approval_out(updated, instance, has_previous,
+                         decimals_by_uom=await _indent_uom_decimals(db, updated))
 
 
 async def return_indent(
     db: AsyncSession, indent_id: int, comments: str, user,
+    target_sequence: int | None = None,
 ) -> ApprovalIndentOut:
     """Return for correction: same engine-backed flow as `/api/indents/{id}/
     return-for-correction` (`indent_service.return_indent_for_correction`), which
@@ -2550,8 +2706,10 @@ async def return_indent(
     behavior regardless of which endpoint a caller uses.
     """
     indent, instance, has_previous = await _load_indent_task(db, indent_id, user)
-    updated = await indent_service.return_indent_for_correction(db, indent_id, comments, user)
-    return _approval_out(updated, instance, has_previous)
+    updated = await indent_service.return_indent_for_correction(
+        db, indent_id, comments, user, target_sequence=target_sequence)
+    return _approval_out(updated, instance, has_previous,
+                         decimals_by_uom=await _indent_uom_decimals(db, updated))
 
 
 # ---------------- Monthly allocation cycles in the approval inbox ----------------

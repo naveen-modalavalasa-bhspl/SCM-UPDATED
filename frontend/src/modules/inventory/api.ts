@@ -1,3 +1,4 @@
+import type { QuantityChangeRow } from "@/shared/components";
 import { api } from "@/shared/api/client";
 import type {
   PositionLocationTag, PositionLocationWrite, FloorOption, FloorAccess, MovementClassification,
@@ -20,6 +21,8 @@ import type {
   MRClaims,
   MovementRow,
   Page,
+  BoxLabelFacets,
+  BoxLabelRow,
   ReplenishmentRule,
   StockBalanceFilter,
   StockBalanceItem,
@@ -80,6 +83,7 @@ const toBalance = (r: StockRow): StockBalanceItem => ({
   uom_name: r.uom_name ?? undefined,
   physical_qty: num(r.total_qty),
   reserved_qty: num(r.reserved_qty),
+  indent_held_qty: num(r.indent_held_qty),
   transit_qty: num(r.transit_qty),
   issued_pending_qty: num(r.issued_pending_qty),
   outgoing_qty: num(r.outgoing_qty),
@@ -120,6 +124,7 @@ const toLedger = (r: MovementRow): StockLedgerItem => ({
   in_qty: r.direction === "IN" ? num(r.quantity) : 0,
   out_qty: r.direction === "OUT" ? num(r.quantity) : 0,
   balance_qty: num(r.balance_after),
+  pack_text: r.pack_text ?? null,
   // Kept null when the ledger row has no rate rather than coerced to 0: a zero here
   // reads as "this stock is worthless", which is a different claim from "nobody
   // costed it". Rows written before stk_ledger.rate/.value were mapped are null.
@@ -353,6 +358,29 @@ export const getStockBalances = (params?: StockBalanceFilter) =>
     })
     .then((r) => ({ items: unwrap(r.data).map(toBalance), total: r.data.total }));
 
+/** Grouped reading list: one card per item per point, batches tucked inside. */
+export const getStockGroups = (params?: StockBalanceFilter) =>
+  api
+    .get<Page<import("./types").StockGroupRow>>("/api/stock/grouped", {
+      params: clean({
+        item_id: params?.item_id,
+        warehouse_id: params?.warehouse_id,
+        category_id: params?.category_id,
+        search: params?.search?.trim(),
+        batch_no: params?.batch_no?.trim(),
+        stock_view: params?.stock_view || undefined,
+        below_reorder: params?.below_reorder || undefined,
+        expiring_in_days: params?.expiring_in_days,
+        expiry_status: params?.expiry_status,
+        expiry_from: params?.expiry_from,
+        expiry_to: params?.expiry_to,
+        expired_in_last_days: params?.expired_in_last_days,
+        page: params?.page ?? 1,
+        size: params?.size ?? 20,
+      }),
+    })
+    .then((r) => r.data);
+
 export const getStockLedger = (params?: StockLedgerFilter) =>
   api
     .get<Page<MovementRow>>("/api/stock/movements", {
@@ -449,8 +477,41 @@ export const rejectMaterialRequest = (id: number, comments = "") =>
     .post<MaterialRequest>(`/api/material-requests/${id}/reject`, { comments })
     .then((r) => r.data);
 
+/** Back ONE rung (previous approver, or the raiser at the first rung). Reason required. */
+export const sendBackMaterialRequest = (id: number, comments: string) =>
+  api
+    .post<MaterialRequest>(`/api/material-requests/${id}/send-back`, { comments })
+    .then((r) => r.data);
+
+export const resubmitMaterialRequestCorrection = (id: number, comments = "") =>
+  api
+    .post<MaterialRequest>(`/api/material-requests/${id}/resubmit-correction`, { comments })
+    .then((r) => r.data);
+
+/** An approver it was sent back to passes it one rung further down. Reason required. */
+export const sendMaterialRequestFurtherBack = (id: number, comments: string) =>
+  api
+    .post<MaterialRequest>(`/api/material-requests/${id}/send-back-further`, { comments })
+    .then((r) => r.data);
+
+/** The raiser's full edit of a sent-back MR — the create form's fields. */
+export const correctMaterialRequest = (id: number, data: {
+  items: { id?: number | null; item_id: number; quantity: number }[];
+  priority?: string | null;
+  required_by?: string | null;
+  remarks?: string | null;
+}) =>
+  api
+    .put<MaterialRequest>(`/api/material-requests/${id}/correction`, data)
+    .then((r) => r.data);
+
 /** Change what the request asks for before it is signed. Lines are keyed by MR LINE
  *  id, never item id — one MR can carry the same item twice. */
+/** Every quantity change since the request was raised, oldest first. */
+export const materialRequestQuantityChanges = (id: number) =>
+  api.get<{ items: QuantityChangeRow[] }>(`/api/material-requests/${id}/quantity-changes`)
+    .then((r) => r.data.items);
+
 export const reviseMaterialRequest = (
   id: number,
   lines: { id: number; quantity: number }[],
@@ -619,6 +680,24 @@ export const getOverviewKPIs = () =>
 export const createStockAdjustment = (data: any) =>
   api.post("/api/stock/adjust", data).then((r) => r.data);
 
+/** Stock audit write-offs (2026-10-31): what the audit form counts and picks from. */
+export const getAuditItems = (warehouseId: number, search?: string) =>
+  api.get<import("./types").AuditItemOption[]>("/api/warehouse/stock-audit/items", {
+    params: { warehouse_id: warehouseId, search: search || undefined },
+  }).then((r) => r.data);
+
+export const getAuditLots = (warehouseId: number, itemId: number) =>
+  api.get<import("./types").AuditLot[]>("/api/warehouse/stock-audit/lots", {
+    params: { warehouse_id: warehouseId, item_id: itemId },
+  }).then((r) => r.data);
+
+export const getAuditSources = (warehouseId: number, itemId: number, batchId: number,
+                                binId: number, combo?: { brand_id: number; variant_id: number; model_id: number }) =>
+  api.get<import("./types").AuditSources>("/api/warehouse/stock-audit/sources", {
+    params: { warehouse_id: warehouseId, item_id: itemId, batch_id: batchId, bin_id: binId,
+              ...(combo ?? {}) },
+  }).then((r) => r.data);
+
 export const listStockAdjustments = (params?: {
   warehouse_id?: number; status?: string; search?: string; reason?: string;
   date_from?: string; date_to?: string; page?: number; size?: number;
@@ -675,6 +754,34 @@ export const getNearExpiryAlerts = (days = 90) =>
 export const createSTO = (data: any) =>
   api.post("/api/stock/sto", data).then((r) => r.data);
 
+/** Where a direct STO from this point may go — same level, same parent, in scope.
+ *  The exact set the save accepts (`create_sto`). */
+export interface StoDestination {
+  id: number;
+  code?: string | null;
+  name: string;
+  warehouse_type?: string | null;
+  tier_label: string;
+  parent_id?: number | null;
+  parent_name?: string | null;
+  /** False when the reporting tree names no parent for it (offered, flagged). */
+  parent_known: boolean;
+}
+
+export interface StoDestinations {
+  from_warehouse_id: number;
+  from_warehouse_name: string;
+  tier_label: string;
+  parent_id?: number | null;
+  parent_name?: string | null;
+  items: StoDestination[];
+}
+
+export const getStoDestinations = (fromWarehouseId: number) =>
+  api.get<StoDestinations>("/api/stock/sto/destinations", {
+    params: { from_warehouse_id: fromWarehouseId },
+  }).then((r) => r.data);
+
 export const listSTOs = (params?: {
   status?: string; page?: number; size?: number; kind?: string; search?: string;
   str_id?: number; origin?: string; from_warehouse_id?: number; to_warehouse_id?: number;
@@ -685,9 +792,15 @@ export const rejectSTO = (id: number, comments: string) =>
   api.post(`/api/stock/sto/${id}/reject`, { comments }).then((r) => r.data);
 
 /** Stock Transfer Requests — indents of type STR, listed on Inventory > Stock Transfer. */
+/** The source points named on the STRs this login can read — the Source filter. */
+export const strSourcesInUse = () =>
+  api.get<{ value: number; label: string }[]>("/api/indents/stock-transfer-requests/sources")
+    .then((r) => r.data);
+
 export const listSTRs = (params?: {
   page?: number; size?: number; search?: string; status?: string;
   created_date_from?: string; created_date_to?: string;
+  source_warehouse_id?: number;
 }) =>
   // The transfer screen's own list, under `stock.transfer.view` — not /api/indents,
   // which would demand all of Indents to see a transfer request.
@@ -834,3 +947,29 @@ export const approveStockEdit = (id: number, remarks?: string) =>
   api.post<StockEdit>(`/api/warehouse/stock-edits/${id}/approve`, { remarks }).then((r) => r.data);
 export const rejectStockEdit = (id: number, remarks?: string) =>
   api.post<StockEdit>(`/api/warehouse/stock-edits/${id}/reject`, { remarks }).then((r) => r.data);
+
+/** The print queue of new box codes (Labels & Printing > Box labels, 2026-10-26). */
+export const listBoxLabels = (params: { status?: string; warehouse_id?: string; search?: string;
+                                        item_id?: string; batch_id?: string; bin_id?: string;
+                                        page?: number; size?: number }) =>
+  api.get<Page<BoxLabelRow>>("/api/warehouse/box-labels", {
+    // batch_id / bin_id "0" is a real choice (no batch / no location), so it is kept.
+    params: clean({ status: params.status || undefined,
+                    warehouse_id: params.warehouse_id || undefined,
+                    item_id: params.item_id || undefined,
+                    batch_id: params.batch_id, bin_id: params.bin_id,
+                    search: params.search?.trim() || undefined,
+                    page: params.page ?? 1, size: params.size ?? 200 }),
+  }).then((r) => r.data);
+
+/** What each step of the Box labels cascade may offer (warehouse -> item -> batch ->
+ *  location), with how many labels each choice holds. */
+export const getBoxLabelFacets = (params: { warehouse_id: string; status?: string;
+                                            item_id?: string; batch_id?: string }) =>
+  api.get<BoxLabelFacets>("/api/warehouse/box-labels/facets", {
+    params: clean({ warehouse_id: params.warehouse_id, status: params.status || undefined,
+                    item_id: params.item_id || undefined, batch_id: params.batch_id }),
+  }).then((r) => r.data);
+
+export const markBoxLabelsPrinted = (ids: number[]) =>
+  api.post<{ printed: number }>("/api/warehouse/box-labels/printed", { ids }).then((r) => r.data);

@@ -2,10 +2,13 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  ITEM_SECTIONS, ItemSectionTabs, brandsForGeneralName, itemCodePreview,
+  ITEM_SECTIONS, ItemSectionTabs, brandsForGeneralName, groupBrandNames,
+  groupItemsByProduct, itemCodePreview,
   manufacturersForBrand, missingRequiredTags, packagingBreakupText,
 } from "../components/ItemMasterTab";
-import type { MasterBrand, MasterCategoryTag, MasterGeneralName } from "../types";
+import type {
+  MasterBrand, MasterCategoryTag, MasterGeneralName, MasterItem,
+} from "../types";
 
 const manufacturers = [
   { id: 10, code: "ACME", name: "Acme", is_active: true },
@@ -148,5 +151,40 @@ describe("item packaging breakup", () => {
       base_quantity: 100,
       base_uom_code: "L",
     }, "L", "Milk")).toBe("1 Tanker = 100 L of Milk");
+  });
+});
+
+describe("item list product grouping", () => {
+  const item = (over: Partial<MasterItem>): MasterItem => ({
+    id: 1, code: "101010-001", name: "Bolt M8", is_active: true,
+    is_asset: false, has_components: false, has_expiry: false,
+    requires_qi: false, valuation_method: "FIFO",
+    requires_special_storage: false, requires_special_transport: false,
+    general_name_id: 5, general_name: "Bolt",
+    brand_name: "Elanpro", manufacturer_name: "Maker",
+    ...over,
+  });
+
+  it("collapses variants of one product into a single row", () => {
+    const groups = groupItemsByProduct([
+      item({ id: 1, code: "101010-001", brand_name: "Elanpro" }),
+      item({ id: 2, code: "101010-001", brand_name: "Western" }),
+      item({ id: 3, code: "101010-002", brand_name: "Elanpro", is_active: false }),
+    ]);
+    // All three share the general name, so they are one product row…
+    expect(groups).toHaveLength(1);
+    expect(groups[0].variants).toHaveLength(3);
+    // …represented by an active row, showing every brand once.
+    expect(groups[0].representative.id).toBe(1);
+    expect(groupBrandNames(groups[0])).toEqual(["Elanpro", "Western"]);
+  });
+
+  it("keeps different products and unlinked items on their own rows", () => {
+    const groups = groupItemsByProduct([
+      item({ id: 1, general_name_id: 5, general_name: "Bolt" }),
+      item({ id: 2, general_name_id: 6, general_name: "Nut" }),
+      item({ id: 3, general_name_id: null, general_name: null, name: "Loose" }),
+    ]);
+    expect(groups.map((g) => g.key)).toEqual(["g-5", "g-6", "i-3"]);
   });
 });

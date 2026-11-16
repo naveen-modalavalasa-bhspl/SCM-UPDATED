@@ -1,5 +1,5 @@
 import {
-  Bell, LayoutDashboard, List, PackageCheck, ScrollText, type LucideIcon,
+  LayoutDashboard, List, PackageCheck, ScrollText, type LucideIcon,
 } from "lucide-react";
 
 import { useAuth } from "@/shared/auth/AuthContext";
@@ -35,7 +35,8 @@ const destinations: Destination[] = [
   { key: "/indents/acknowledgements", label: "Acknowledgements", icon: PackageCheck,
     was: ["/indents/deliveries", "/indents/acknowledgments"] },
   { key: "/indents/reports", label: "Activity ledger", icon: ScrollText },
-  { key: "/indents/notifications", label: "Alert & Notification", icon: Bell },
+  // SCM_0056: moved to the top-level Alerts & Notifications page (/notifications),
+  // which is `always_on` and never carried a grant this strip needs to check.
 ];
 
 export function IndentsNav({ embedded = false }: { embedded?: boolean }) {

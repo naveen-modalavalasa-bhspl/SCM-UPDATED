@@ -8,6 +8,8 @@ import type { Column } from "@/shared/components";
 import { useQuery } from "@tanstack/react-query";
 import { Active, Code } from "./common";
 import { VENDOR_TYPES } from "./constants";
+import { PaymentPlanEditor } from "../components/PaymentPlanEditor";
+import { PAYMENT_STAGES, planPayload, planProblem } from "../paymentPlan";
 
 
 /** What each vendor charges for each item. Fifty of these rows were already in the
@@ -86,74 +88,89 @@ export function VendorItemsTab({ items }: { items: Option[] }) {
   );
 }
 
-/** The four payment milestones, as the master's column prefix and what to call it. */
-const PAYMENT_STAGES = [
-  ["advance", "Advance"],
-  ["delivery", "Against delivery"],
-  ["installation", "Post commissioning / installation"],
-  ["warranty", "Post support / warranty"],
-] as const;
+/** The plan's form keys, as a payment term row holds them. */
+function planForm(r?: MasterPaymentTerm) {
+  const out: Record<string, string | number> = {};
+  for (const { key } of PAYMENT_STAGES) {
+    out[`${key}_pct`] = r ? r[`${key}_pct`] : key === "delivery" ? 100 : 0;
+    out[`${key}_days`] = r ? r[`${key}_days`] : key === "delivery" ? 30 : 0;
+    out[`${key}_split`] = r?.[`${key}_split`] ?? "ONE";
+    out[`${key}_instalment_days`] = r?.[`${key}_instalment_days`] ?? "";
+    out[`${key}_instalment_pcts`] = r?.[`${key}_instalment_pcts`] ?? "";
+  }
+  return out;
+}
 
-/** Payment terms: how a PO's value falls due across the four milestones. The PO team
- *  picks one on the order; accounts pays against it milestone by milestone. */
+/** The stages a term pays in, as coloured chips: "20% ADV · 30% DLV ×4". */
+function PlanChips({ r }: { r: MasterPaymentTerm }) {
+  const used = PAYMENT_STAGES.filter((s) => Number(r[`${s.key}_pct`]) > 0);
+  if (!used.length) return <span className="text-muted">—</span>;
+  return (
+    <span className="flex flex-wrap gap-1.5" title={r.summary}>
+      {used.map((s) => {
+        const n = r[`${s.key}_split`] === "ONE" ? 1
+          : (r[`${s.key}_instalment_days`] ?? "").split(",").filter(Boolean).length;
+        return (
+          <span key={s.key} className="inline-flex items-center gap-1 rounded-full border border-line px-2 py-0.5 text-xs">
+            <span className="h-1.5 w-1.5 rounded-full" style={{ background: `var(--color-${s.tone})` }} />
+            <b className="tabular-nums text-ink">{Number(r[`${s.key}_pct`])}%</b>
+            <span className="font-mono text-[10px] font-semibold text-muted">{s.short}</span>
+            {n > 1 && (
+              <span className="rounded bg-content2 px-1 text-[10px] font-semibold text-body">
+                {r[`${s.key}_split`] === "EQUAL" ? "=" : "≠"}×{n}
+              </span>
+            )}
+          </span>
+        );
+      })}
+    </span>
+  );
+}
+
+/** Payment terms: how a PO's value falls due across the four milestones, each in one
+ *  payment or in instalments. The PO team picks one on the order; accounts pays
+ *  against it instalment by instalment. */
 export function PaymentTermsTab() {
-  const split = (r: MasterPaymentTerm) => PAYMENT_STAGES
-    .filter(([key]) => Number(r[`${key}_pct`]) > 0)
-    .map(([key, label]) => `${Number(r[`${key}_pct`])}% ${label.toLowerCase()}`
-      + (key === "delivery" && r.delivery_schedule
-        ? ` (${r.delivery_schedule.replace(/,/g, "/")} days)` : ""))
-    .join(" · ") || "—";
-  const pctTotal = (all: Record<string, unknown>) => PAYMENT_STAGES
-    .reduce((sum, [key]) => sum + (Number(all[`${key}_pct`]) || 0), 0);
   return (
     <MasterCrud<MasterPaymentTerm>
       title="Payment term" queryKey="payment-terms" searchable
       managePerm="master.payment_term.manage"
+      modalSize="3xl"
       columns={[
         { key: "code", header: "Code", render: (r) => <Code>{r.code}</Code> },
         { key: "name", header: "Name", render: (r) => r.name },
-        { key: "split", header: "Split", render: split },
+        { key: "split", header: "Payment plan", render: (r) => <PlanChips r={r} /> },
         { key: "active", header: "Status", render: (r) => <Active on={r.is_active} /> },
       ]}
       renderCard={(r) => (
-        <div className="flex items-center justify-between gap-2">
-          <div><Code>{r.code}</Code><div className="text-sm text-body">{r.name}</div>
-            <div className="text-xs text-muted">{split(r)}</div></div>
+        <div className="flex items-start justify-between gap-2">
+          <div className="space-y-1"><Code>{r.code}</Code><div className="text-sm text-body">{r.name}</div>
+            <PlanChips r={r} /></div>
           <Active on={r.is_active} />
         </div>
       )}
       fetchList={(search) => mastersApi.paymentTerms.list({ search, size: 300 })
         .then((p) => p.items)}
       fields={[
-        { key: "name", label: "Name", required: true, maxLength: 150 },
-        { key: "code", label: "Code", required: true, maxLength: 20 },
-        { key: "description", label: "Description", maxLength: 300 },
-        ...PAYMENT_STAGES.flatMap(([key, label]) => [
-          { key: `${key}_pct`, label: `${label} %`, type: "number" as const, min: 0,
-            max: 100, half: true,
-            validate: key === "warranty"
-              ? (_v: unknown, all: Record<string, unknown>) => pctTotal(all) === 100
-                ? null : `The four shares add up to ${pctTotal(all)}%, not 100%.`
-              : undefined },
-          { key: `${key}_days`, label: "Payable within (days)", type: "number" as const,
-            min: 0, max: 3650, half: true },
-        ]),
-        { key: "delivery_schedule", label: "Delivery paid in instalments (days)",
-          placeholder: "e.g. 30,60,90", maxLength: 60,
-          pattern: /^\s*\d+(\s*[,/]\s*\d+)*\s*$/,
-          patternMessage: "Days after delivery, separated by commas — e.g. 30,60,90.",
-          hint: "Optional. Splits the against-delivery share equally, one instalment per day count. Leave blank for a single payment." },
-        { key: "is_active", label: "Active", type: "switch" },
+        { key: "name", label: "Term name", required: true, maxLength: 150,
+          placeholder: "e.g. 20% advance, balance in 4 monthly instalments", half: true },
+        { key: "code", label: "Short code", required: true, maxLength: 20,
+          placeholder: "e.g. ADV20-D4M", half: true,
+          hint: "The code is printed first on every PO that uses this term, so keep it short and readable." },
+        { key: "plan", label: "Payment plan", type: "custom",
+          render: ({ values, patch, error }) => (
+            <PaymentPlanEditor values={values} onPatch={(p) => patch(p as typeof values)}
+                               error={error} />
+          ),
+          validate: (_v, all) => planProblem(all),
+          payload: (all) => planPayload(all) as Record<string, string | number | null> },
+        { key: "description", label: "Notes for buyers (optional)", maxLength: 300,
+          placeholder: "When should a buyer pick this term?" },
+        { key: "is_active", label: "Active — buyers can pick it on a PO", type: "switch" },
       ]}
-      emptyForm={{ name: "", code: "", description: "", advance_pct: 0, advance_days: 0,
-        delivery_pct: 100, delivery_days: 30, installation_pct: 0, installation_days: 0,
-        warranty_pct: 0, warranty_days: 0, delivery_schedule: "", is_active: true }}
+      emptyForm={{ name: "", code: "", description: "", ...planForm(), is_active: true }}
       toForm={(r) => ({ name: r.name, code: r.code, description: r.description ?? "",
-        advance_pct: r.advance_pct, advance_days: r.advance_days,
-        delivery_pct: r.delivery_pct, delivery_days: r.delivery_days,
-        installation_pct: r.installation_pct, installation_days: r.installation_days,
-        warranty_pct: r.warranty_pct, warranty_days: r.warranty_days,
-        delivery_schedule: r.delivery_schedule ?? "", is_active: r.is_active })}
+        ...planForm(r), is_active: r.is_active })}
       bulk={mastersApi.paymentTerms} usage={mastersApi.paymentTerms.usage}
       onCreate={(v) => mastersApi.paymentTerms.create(v as Partial<MasterPaymentTerm>)}
       onUpdate={(id, v) => mastersApi.paymentTerms.update(id, v as Partial<MasterPaymentTerm>)}

@@ -1,15 +1,19 @@
 import { useState } from "react";
-import { ShoppingCart } from "lucide-react";
+import { CombinationTag } from "@/shared/combination";
+import { ArrowDown, Check, Lock, ShieldAlert, ShoppingCart } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  PageHeader, Button, Can, Card, Field, Input, ResponsiveList, StatusPill,
-  type Column,
+  PageHeader, Button, Card, Field, Input, QuantityChanges, ResponsiveList, StatusPill,
+  useToast, type Column,
 } from "@/shared/components";
 import {
-  approveMaterialRequest, getMaterialRequest, rejectMaterialRequest,
-  reviseMaterialRequest,
+  approveMaterialRequest, getMaterialRequest, materialRequestQuantityChanges,
+  rejectMaterialRequest,
+  resubmitMaterialRequestCorrection, reviseMaterialRequest, sendBackMaterialRequest,
+  sendMaterialRequestFurtherBack,
 } from "../api";
+import { MRCorrectionForm } from "../components/MRCorrectionForm";
 import { MRClaimsPanel } from "../components/MRClaimsPanel";
 import { ErrorNote, LoadingRows } from "../components/PageStates";
 // Reaching across into procurement for one call, the same direction the chain already
@@ -21,6 +25,9 @@ import { approvalsApi } from "@/modules/approvals/api";
 import { HistoryTimeline } from "@/modules/approvals/components/HistoryTimeline";
 import { alerts } from "@/modules/alerts";
 import { useAuth } from "@/shared/auth/AuthContext";
+import { QuantityInput } from "@/shared/components/QuantityInput";
+import { useUomDecimals } from "@/shared/hooks/useUomDecimals";
+import { quantityProblem } from "@/shared/quantity";
 import type { MaterialRequestItem } from "../types";
 import { TONE_APPROVE, TONE_REJECT } from "@/shared/components/tones";
 
@@ -38,12 +45,15 @@ export function MaterialRequestDetailPage() {
   const mrId = Number(id);
   const nav = useNavigate();
   const qc = useQueryClient();
-  const { can } = useAuth();
+  const { can, me, isAdmin: isSystemAdmin } = useAuth();
+  const isAdmin = isSystemAdmin || can("admin.workflow.manage") || Boolean(me?.roles?.includes("ADMIN")) || Boolean(me?.roles?.includes("SUPERUSER"));
+  const toast = useToast();
   const [comments, setComments] = useState("");
   // Only the lines actually touched, keyed by line id. Absent means "unchanged" —
   // seeding this from the server would send every line back on every save and make an
   // untouched line indistinguishable from one edited to the same number.
   const [edits, setEdits] = useState<Record<number, string>>({});
+  const uomDecimals = useUomDecimals();
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["material-request", mrId],
@@ -57,6 +67,14 @@ export function MaterialRequestDetailPage() {
   const history = useQuery({
     queryKey: ["approvals", "history", "MR", mrId],
     queryFn: () => approvalsApi.history("MR", mrId),
+    enabled: Number.isFinite(mrId),
+  });
+
+  // Every quantity change since the request was raised (2026-11-03): the numbers the
+  // approval trail above does not carry.
+  const qtyChanges = useQuery({
+    queryKey: ["material-request", mrId, "quantity-changes"],
+    queryFn: () => materialRequestQuantityChanges(mrId),
     enabled: Number.isFinite(mrId),
   });
 
@@ -92,6 +110,7 @@ export function MaterialRequestDetailPage() {
       setEdits({});
       void alerts.success("material_request.revised", { number: data?.mr_no ?? "" });
       qc.invalidateQueries({ queryKey: ["material-request", mrId] });
+      qc.invalidateQueries({ queryKey: ["material-request", mrId, "quantity-changes"] });
       qc.invalidateQueries({ queryKey: ["material-requests"] });
     },
   });
@@ -113,8 +132,66 @@ export function MaterialRequestDetailPage() {
     },
   });
 
+  // Send back and Reject both need a reason: the person it lands with has to know why.
+  const [reasonError, setReasonError] = useState("");
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ["material-request", mrId] });
+    qc.invalidateQueries({ queryKey: ["material-requests"] });
+    qc.invalidateQueries({ queryKey: ["approvals"] });
+  };
+  const sendBack = useMutation({
+    mutationFn: () => sendBackMaterialRequest(mrId, comments.trim()),
+    onSuccess: (updated) => {
+      toast.success(`Sent back to ${updated.current_approver_name ?? "the previous approver"}`);
+      setComments("");
+      invalidate();
+    },
+  });
+  const sendBackWithReason = () => {
+    if (sendBack.isPending) return;
+    if (!comments.trim()) {
+      setReasonError("Enter a reason in Comments before sending this request back.");
+      return;
+    }
+    setReasonError("");
+    sendBack.mutate();
+  };
+  // The holder of a sent-back request: a comment (optional to resubmit, required to
+  // pass it further down).
+  const [fixComment, setFixComment] = useState("");
+  const [fixError, setFixError] = useState("");
+  const resubmit = useMutation({
+    mutationFn: () => resubmitMaterialRequestCorrection(mrId, fixComment.trim()),
+    onSuccess: () => {
+      toast.success("Resubmitted for approval");
+      setFixComment("");
+      invalidate();
+    },
+  });
+  const sendFurtherBack = useMutation({
+    mutationFn: () => sendMaterialRequestFurtherBack(mrId, fixComment.trim()),
+    onSuccess: (updated) => {
+      toast.success(`Sent back to ${updated.current_approver_name ?? "the previous approver"}`);
+      setFixComment("");
+      invalidate();
+    },
+  });
+  const sendFurtherBackWithReason = () => {
+    if (sendFurtherBack.isPending) return;
+    if (!fixComment.trim()) {
+      setFixError("Enter a reason before sending this request further back.");
+      return;
+    }
+    setFixError("");
+    sendFurtherBack.mutate();
+  };
+
   const decide = async (approve: boolean) => {
     if (act.isPending || save.isPending || !data) return;
+    if (!approve && !comments.trim()) {
+      setReasonError("Enter a reason in Comments before rejecting this request.");
+      return;
+    }
     const first = data.items[0];
     // One line: name it. More: count them — quoting only the first line's quantity
     // described a five-line request by one of its lines.
@@ -148,14 +225,7 @@ export function MaterialRequestDetailPage() {
   if (!data) return null;
 
   const open = data.status === "PENDING_APPROVAL";
-  // FIXED 2026-08-23 — the decision block used to render off `open` alone, so anybody
-  // who could READ a request in approval was shown live Approve and Reject buttons.
-  // For the common case where one person holds two rungs of the same ladder — an
-  // inventory manager who is also the SCM head — those buttons could only ever answer
-  // "Switch to the approval position before acting". The screen already knew; it just
-  // was not asking. `can_act` is the server's own answer to the same question
-  // `engine.act` decides on, so the two cannot drift.
-  const mine = open && data.can_act === true;
+  const mine = open && (data.can_act === true || isAdmin);
 
   /** What the box should show: the pending edit if there is one, else the saved value. */
   const shown = (row: MaterialRequestItem) =>
@@ -169,12 +239,21 @@ export function MaterialRequestDetailPage() {
    *  shelf: procurement routinely orders a full case above the shortfall, or trims a
    *  line already part-covered. The allocation screen caps at what is free because
    *  giving away stock you do not have is a different mistake. */
+  /** The ceiling: what the line asked for when raised (2026-11-03). A quantity may
+   *  come down or stay; more is new demand — a new request with its own approval. */
+  const askedFor = (row: MaterialRequestItem) => row.requested_quantity ?? row.quantity;
+
   const problem = (row: MaterialRequestItem): string | null => {
     const raw = edits[row.id];
     if (raw === undefined) return null;
+    const unitProblem = quantityProblem(raw, { decimals: uomDecimals(row.uom_code), unit: row.uom_code });
+    if (unitProblem && raw.trim() !== "") return unitProblem;
     const value = Number(raw);
     if (raw.trim() === "" || Number.isNaN(value)) return "Enter a number";
     if (value <= 0) return "Must be more than zero — reject instead";
+    if (value > askedFor(row)) {
+      return `Only ${askedFor(row)} ${row.uom_code ?? ""} was asked for — lower it or leave it`.replace(/\s+/g, " ");
+    }
     if (value < row.ordered_quantity) return `${row.ordered_quantity} already ordered`;
     return null;
   };
@@ -206,19 +285,29 @@ export function MaterialRequestDetailPage() {
               of a narrow box, which hid the digits being typed, and the scroll-wheel
               changes a quantity nobody meant to touch. `inputMode` still brings up the
               numeric keypad on a phone. */}
-          <Input
-            inputMode="decimal"
+          <QuantityInput
+            decimals={uomDecimals(row.uom_code)}
+            data-uom={row.uom_code ?? ""}
             aria-label={`Quantity for ${row.item_name ?? row.item_code ?? "line"}`}
+            aria-invalid={Boolean(issue)}
             value={shown(row)}
-            onChange={(e) =>
-              setEdits((current) => ({ ...current, [row.id]: e.target.value }))}
-            className="w-28"
+            onChange={(raw) => setEdits((current) => ({ ...current, [row.id]: raw }))}
+            className={`h-11 w-28 rounded-md border bg-content1 px-3 text-sm text-ink outline-none focus:border-brand ${
+              issue ? "border-bad" : "border-line"}`}
           />
           <span className="text-xs text-muted">{row.uom_code ?? ""}</span>
         </div>
-        {issue && <p className="mt-1 text-xs text-danger">{issue}</p>}
-        {!issue && isChanged(row) && (
-          <p className="mt-1 text-xs text-muted">was {row.quantity}</p>
+        {issue ? (
+          <p className="mt-1 text-xs text-danger">{issue}</p>
+        ) : isChanged(row) ? (
+          <p className="mt-1 inline-flex items-center gap-1 rounded-full bg-warn-bg px-2 py-0.5 text-[11px] font-semibold text-warn">
+            <ArrowDown className="h-3 w-3" />
+            {Math.round((row.quantity - Number(edits[row.id])) * 1000) / 1000} less · was {row.quantity}
+          </p>
+        ) : (
+          <p className="mt-1 inline-flex items-center gap-1 text-[11px] text-muted">
+            <Lock className="h-3 w-3" /> Up to {askedFor(row)} · can only be lowered
+          </p>
         )}
       </div>
     );
@@ -233,6 +322,7 @@ export function MaterialRequestDetailPage() {
       render: (r) => (
         <div>
           <div>{r.item_name ?? "—"}</div>
+          <CombinationTag value={r} className="mt-1" />
           <MRClaimsPanel mrId={mrId} itemId={r.item_id} uom={r.uom_code} />
         </div>
       ),
@@ -360,6 +450,7 @@ export function MaterialRequestDetailPage() {
               <div className="min-w-[14rem] flex-1">
                 <span className="mono text-xs text-muted">{row.item_code}</span>
                 <p className="font-semibold text-ink">{row.item_name ?? "—"}</p>
+                <CombinationTag value={row} className="mt-1" />
                 <MRClaimsPanel mrId={mrId} itemId={row.item_id} uom={row.uom_code} />
               </div>
               <div>
@@ -384,6 +475,7 @@ export function MaterialRequestDetailPage() {
             <div className="space-y-1">
               <span className="mono text-xs text-muted">{r.item_code}</span>
               <p className="font-semibold text-ink">{r.item_name}</p>
+              <CombinationTag value={r} />
               <p className="tabular text-sm text-muted">
                 {r.quantity} {r.uom_code ?? ""}
               </p>
@@ -402,6 +494,8 @@ export function MaterialRequestDetailPage() {
         </Card>
       )}
 
+      <QuantityChanges rows={qtyChanges.data ?? []} loading={qtyChanges.isLoading} />
+
       {open && !mine && (
         <p className="mt-4 text-sm text-muted">
           Waiting on {data.current_stage_name ?? "the next approver"}
@@ -410,31 +504,106 @@ export function MaterialRequestDetailPage() {
         </p>
       )}
 
+      {open && !data.can_act && isAdmin && (
+        <div className="mt-4 flex items-center gap-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3.5 text-amber-900 dark:text-amber-200">
+          <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-amber-500/20 text-amber-700 dark:text-amber-300">
+            <ShieldAlert className="h-5 w-5" />
+          </span>
+          <div className="text-sm">
+            <span className="font-bold">Admin Override Active: </span>
+            Currently waiting on {data.current_stage_name ?? "assigned approver"} {data.current_approver_name ? `(${data.current_approver_name})` : ""}, but as Administrator you have full authority to review, adjust quantities, approve, or reject.
+          </div>
+        </div>
+      )}
+
+      {data.status === "RETURNED_FOR_CORRECTION" && (
+        <Card className="mt-4 border border-warn/40 bg-warn-bg/40 p-4 text-sm">
+          <p className="font-semibold text-ink">
+            Sent back to {data.correction?.owner_name ?? data.current_approver_name ?? "the previous approver"}
+            {data.correction?.returned_by_name ? ` by ${data.correction.returned_by_name}` : ""}
+          </p>
+          {data.correction?.reason && (
+            <p className="mt-2 text-ink">Reason: {data.correction.reason}</p>
+          )}
+          {data.can_resubmit_correction && (
+            <>
+              <p className="mt-2 text-ink">
+                {data.can_edit_correction
+                  ? "Edit the request below, Save changes, then resubmit."
+                  : data.can_pass_correction_down
+                    ? "You can resubmit it as it is, or send it further back to the person below you."
+                    : "Add a comment if needed and resubmit."}
+              </p>
+              <div className="mt-3">
+                <Field label={data.can_pass_correction_down ? "Comment (required to send further back)" : "Comment (optional)"}>
+                  <Input
+                    value={fixComment}
+                    onChange={(e) => { setFixComment(e.target.value); setFixError(""); }}
+                    placeholder="Visible to the approver"
+                  />
+                </Field>
+              </div>
+              {fixError && <p className="mt-2 text-danger">{fixError}</p>}
+              {resubmit.error && <p className="mt-2 text-danger">{(resubmit.error as Error).message}</p>}
+              {sendFurtherBack.error && <p className="mt-2 text-danger">{(sendFurtherBack.error as Error).message}</p>}
+              <div className="mt-3 flex flex-wrap gap-2">
+                {data.can_pass_correction_down && (
+                  <Button variant="subtle" onClick={sendFurtherBackWithReason}
+                    disabled={sendFurtherBack.isPending || resubmit.isPending}>
+                    {sendFurtherBack.isPending ? "Sending…" : "Send further back"}
+                  </Button>
+                )}
+                <Button onClick={() => resubmit.mutate()} disabled={resubmit.isPending || sendFurtherBack.isPending}>
+                  {resubmit.isPending ? "Resubmitting…" : "Resubmit for approval"}
+                </Button>
+              </div>
+            </>
+          )}
+        </Card>
+      )}
+
+      {data.status === "RETURNED_FOR_CORRECTION" && data.can_edit_correction && (
+        <MRCorrectionForm
+          key={`${data.id}-${(data.items ?? []).map((i) => `${i.id}:${i.quantity}`).join(",")}`}
+          mr={data}
+          onSaved={invalidate}
+        />
+      )}
+
       {mine && (
         <div className="mt-4 space-y-3">
           <Field label="Comments">
             <Input
               value={comments}
-              onChange={(e) => setComments(e.target.value)}
-              placeholder="Optional — why you are approving, refusing or changing a quantity"
+              onChange={(e) => { setComments(e.target.value); setReasonError(""); }}
+              placeholder="Required for Send back and Reject, optional for Approve"
             />
           </Field>
+          {reasonError && <p className="text-danger">{reasonError}</p>}
           {act.error && <p className="text-danger">{(act.error as Error).message}</p>}
           {save.error && <p className="text-danger">{(save.error as Error).message}</p>}
+          {sendBack.error && <p className="text-danger">{(sendBack.error as Error).message}</p>}
           <div className="flex flex-wrap gap-2">
-            <Can do="mr.approve">
+            {(can("mr.approve") || isAdmin) && (
+              <Button variant="subtle" onClick={sendBackWithReason}
+                disabled={act.isPending || sendBack.isPending}>
+                Send back
+              </Button>
+            )}
+            {(can("mr.approve") || isAdmin) && (
               <Button className={TONE_APPROVE}
                 onClick={() => void decide(true)}
                 disabled={act.isPending || save.isPending || problems.length > 0}
               >
-                {save.isPending ? "Saving…" : "Approve"}
+                <Check className="h-4 w-4" />
+                {save.isPending ? "Saving…" : (!data.can_act && isAdmin ? "Approve (Admin Override)" : "Approve")}
               </Button>
-            </Can>
-            <Can do="mr.reject">
+            )}
+            {(can("mr.reject") || isAdmin) && (
               <Button className={TONE_REJECT} variant="subtle" onClick={() => void decide(false)} disabled={act.isPending}>
                 Reject
               </Button>
-            </Can>
+            )}
           </div>
         </div>
       )}

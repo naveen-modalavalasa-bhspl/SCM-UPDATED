@@ -1,3 +1,5 @@
+import type { ContainerUsage } from "@/shared/packing";
+import type { ContainerUsageView } from "./types";
 import { api } from "@/shared/api/client";
 import type { Paginated } from "@/shared/types";
 import type {
@@ -8,10 +10,12 @@ import type {
   MasterAttribute, MasterBin, MasterBom, MasterBomGroup, MasterBomItem, MasterBrand,
   MasterCategory, MasterCategoryTag, MasterFeature, MasterItem,
   MasterHsnCode, MasterItemClass, MasterItemComponent, MasterItemGroup,
-  MasterItemPackaging, MasterItemSpec, MasterPackaging, MasterSpec,
+  MasterItemPackaging, MasterItemSpec, MasterPackHierarchy, MasterPackaging, MasterSpec,
   MasterUom, MasterUomConversion, MasterVendor, MasterVendorItem, PackagingBreakdown,
   MasterWarehouse, Project, RefRow, UomClass, UomSuggestion,
   MasterBrandManufacturer, MasterGeneralName, MasterItemSubClass, NamedMaster,
+  MasterBrandModel, MasterBrandVariant,
+  MasterBrandItemMapping, BrandItemMappingSources, MasterItemCombination,
 } from "./types";
 
 type ListParams = {
@@ -22,7 +26,8 @@ type ListParams = {
 
 const page = <T>(url: string, params: ListParams) =>
   api.get<Paginated<T>>(url, { params }).then((r) => r.data);
-const all = <T>(url: string) => api.get<{ items: T[] }>(url).then((r) => r.data.items);
+const all = <T>(url: string, params?: Record<string, unknown>) =>
+  api.get<{ items: T[] }>(url, params ? { params } : undefined).then((r) => r.data.items);
 
 /**
  * Every mst_ master is served by the same backend factory, so the client for one is
@@ -104,6 +109,14 @@ export interface VendorMappingSave {
   vendor_ids: number[]; item_ids: number[]; category_ids: number[];
   lead_time_days: number | null; min_order_qty: number | null;
   last_rate: number | null; is_preferred: boolean;
+}
+
+export type { BrandItemMappingSources };
+
+export interface BrandItemMappingSave {
+  brand_ids: number[];
+  item_ids: number[];
+  category_ids: number[];
 }
 
 export interface ItemPhoto {
@@ -221,11 +234,12 @@ export const mastersApi = {
   // shared/masters/defs.py). There is nothing here to create or edit.
   projects: { list: (p: ListParams = {}) => page<Project>("/api/projects", p) },
   brands: crud<MasterBrand>("/api/brands"),
+  brandVariants: crud<MasterBrandVariant>("/api/brand-variants"),
+  brandModels: crud<MasterBrandModel>("/api/brand-models"),
   manufacturers: crud<NamedMaster>("/api/manufacturers"),
   generalNames: crud<MasterGeneralName>("/api/general-names"),
   dosageForms: crud<NamedMaster>("/api/dosage-forms"),
   /** What a unit measures (Count, Weight ...). A master since 2026-10-01. */
-  uomClasses: crud<NamedMaster>("/api/uom-classes"),
   /** How suppliers are grouped (Glassware, Reagents ...). */
   vendorCategories: crud<MasterVendorCategory>("/api/vendor-categories"),
   paymentTerms: crud<MasterPaymentTerm>("/api/payment-terms"),
@@ -235,6 +249,52 @@ export const mastersApi = {
     save: (body: VendorMappingSave) => api.post<{
       created: number; updated: number; suppliers: number; items: number;
     }>("/api/vendor-items/mapping", body).then((r) => r.data),
+  },
+  /** Item + brand + variant + model (2026-10-23). Derived from the mapped brands;
+   *  switched on/off per item (off only while none of it is in stock). */
+  itemCombinations: {
+    list: (itemId: number) =>
+      api.get<{ items: MasterItemCombination[] }>(`/api/items/${itemId}/combinations`)
+        .then((r) => r.data.items),
+    switch: (itemId: number, id: number, isActive: boolean) =>
+      api.put<MasterItemCombination>(`/api/items/${itemId}/combinations/${id}`,
+                                     { is_active: isActive }).then((r) => r.data),
+    /** Map EXACTLY the brand / variant / model picked (2026-10-26). */
+    add: (itemId: number, pick: { brand_id: number; variant_id?: number | null; model_id?: number | null }) =>
+      api.post<{ items: MasterItemCombination[] }>(`/api/items/${itemId}/combinations`, pick)
+        .then((r) => r.data.items),
+    remove: (itemId: number, id: number) =>
+      api.delete<{ items: MasterItemCombination[] }>(`/api/items/${itemId}/combinations/${id}`)
+        .then((r) => r.data.items),
+    mapBrands: (itemId: number, brandIds: number[]) =>
+      api.post<{ items: MasterItemCombination[] }>(`/api/items/${itemId}/brands`,
+                                                   { brand_ids: brandIds })
+        .then((r) => r.data.items),
+    unmapBrand: (itemId: number, brandId: number) =>
+      api.delete<{ items: MasterItemCombination[] }>(`/api/items/${itemId}/brands/${brandId}`)
+        .then((r) => r.data.items),
+    /** Each item's combinations that are ON — what a document offers. */
+    options: (itemIds: number[]) =>
+      api.get<Record<string, MasterItemCombination[]>>("/api/item-combinations",
+                                                       { params: { item_ids: itemIds.join(",") } })
+        .then((r) => r.data),
+  },
+  brandItemMapping: {
+    /** All brands, categories and items needed to drive the mapping panel. */
+    sources: () => api.get<BrandItemMappingSources>("/api/brand-item-mapping/sources")
+      .then((r) => r.data),
+    /** Bulk-create/restore brand ↔ item pairings. */
+    save: (body: { brand_ids: number[]; item_ids: number[]; category_ids: number[];
+                   combinations?: { brand_id: number; variant_id?: number | null; model_id?: number | null }[] }) =>
+      api.post<{ created: number; updated: number; brands: number; items: number }>(
+        "/api/brand-item-mapping", body,
+      ).then((r) => r.data),
+    /** All mappings for a single item, for the detail view row. */
+    listForItem: (itemId: number) =>
+      api.get<MasterBrandItemMapping[]>(`/api/brand-item-mapping?item_id=${itemId}`)
+        .then((r) => r.data),
+    deactivate: (id: number) =>
+      api.delete(`/api/brand-item-mapping/${id}`).then((r) => r.data),
   },
   itemPhotos: {
     list: (itemId: number) =>
@@ -308,13 +368,36 @@ export const mastersApi = {
 
   itemPackaging: {
     ...crud<MasterItemPackaging>("/api/item-packaging"),
-    /** The ladder with its running totals. Multiplied up on the server on every
-     *  read, so the totals cannot drift from the rungs they come from. */
-    breakdown: (itemId: number) =>
-      all<PackagingBreakdown>(`/api/items/${itemId}/packaging-breakdown`),
+    /** The ladder with its running totals, for ONE pack hierarchy (the item's default
+     *  when none is named). Multiplied up on the server on every read, so the totals
+     *  cannot drift from the rungs they come from. */
+    breakdown: (itemId: number, hierarchyId?: number | null) =>
+      all<PackagingBreakdown>(`/api/items/${itemId}/packaging-breakdown`,
+        hierarchyId ? { hierarchy_id: hierarchyId } : undefined),
+  },
+  /** The named families an item is packed in — "Strip of 10", "Strip of 15". */
+  packHierarchies: crud<MasterPackHierarchy>("/api/pack-hierarchies"),
+  /** Which containers of an item serve indent, purchase, storage, issue and
+   *  consumption (2026-10-23). */
+  containerUsage: {
+    get: (itemId: number) =>
+      api.get<ContainerUsageView>(`/api/items/${itemId}/container-usage`).then((r) => r.data),
+    save: (itemId: number, rows: { package_id: number; usages: ContainerUsage[] }[]) =>
+      api.put<ContainerUsageView>(`/api/items/${itemId}/container-usage`, { rows })
+        .then((r) => r.data),
   },
 
   departments: () => all<RefRow>("/api/departments"),
+  /** The organisation directory: read-only, written only by its own sync. */
+  organisations: () => all<RefRow>("/api/organisations", { include_inactive: true }),
+  orgDepartments: () => all<RefRow>("/api/org-departments", { include_inactive: true }),
+  orgSyncStatus: () => api.get<{
+    configured: boolean; last_status?: string | null; last_error?: string | null;
+    last_success_at?: string | null;
+  }>("/api/organisations/sync-status").then((r) => r.data),
+  orgSyncNow: () =>
+    api.post<{ organisations: number; departments: number }>("/api/organisations/sync")
+      .then((r) => r.data),
   ownershipDepartments: () => all<RefRow>("/api/departments/ownership-options"),
   facilities: () => all<RefRow>("/api/facilities"),
 

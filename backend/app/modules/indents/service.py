@@ -9,6 +9,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 from sqlalchemy import BigInteger, DateTime, Numeric, String, and_, case, cast, exists, false, func, literal, or_, select, text, union_all
 from sqlalchemy.exc import DBAPIError
@@ -27,8 +28,10 @@ from app.core.dependencies import via_scoped_grant
 from app.modules.inventory import allocations, locations
 from app.modules.inventory import service as inventory_service
 from app.modules.inventory.models import (
-    Allocation, AllocationItem, MaterialRequest, MaterialRequestItem, Stock,
+    Allocation, AllocationItem, MaterialRequest, MaterialRequestItem, PositionLocation, Stock,
+    StockTransferOrder,
 )
+from app.platform.doc_numbering import scope as org_scope
 from app.platform.hcm import mappers
 from app.platform.hcm.models import (
     HcmDepartment, HcmEmployee, HcmOffice, HcmPosition, HcmPositionAssignment,
@@ -53,12 +56,17 @@ from app.modules.indents.enums import (
     ConsolidationStatus, DocType, IndentActivityType, IndentItemStatus, IndentStatus,
     IndentType, InstanceStatus, MRStatus, MaterialDirection, Priority, RuleActionType,
 )
+from app.modules.inventory.enums import LocationTier
+from app.shared.enums import WarehouseType
 from app.modules.indents import eligibility
-from app.modules.indents.models import Consolidation, Indent, IndentItem
-from app.modules.indents.schemas import IndentCreate, IndentItemIn, IndentUpdate
+from app.modules.indents.models import Consolidation, Indent, IndentItem, StrSourceChange
+from app.modules.indents.schemas import (
+    ACK_DAMAGE_REASONS, ACK_REJECTION_LABELS, IndentCreate, IndentItemIn, IndentUpdate,
+)
 from app.shared.time import now as ist_now, today as ist_today
 from app.shared.time import to_ist
 from app.shared import uom
+from app.shared.masters import combinations
 
 
 logger = logging.getLogger(__name__)
@@ -123,8 +131,13 @@ def _validate_priority(priority: str | None) -> str | None:
 
 
 def _validate_unique_item_ids(items) -> None:
-    item_ids = [line.item_id for line in items]
-    if len(item_ids) != len(set(item_ids)):
+    """One line per item PER COMBINATION (2026-10-23): the same item in two brands is
+    two lines; twice in the same one is the duplicate this refuses."""
+    keys = [(line.item_id, int(getattr(line, "brand_id", 0) or 0),
+             int(getattr(line, "variant_id", 0) or 0), int(getattr(line, "model_id", 0) or 0),
+             bool(getattr(line, "combination_any", False)))
+            for line in items]
+    if len(keys) != len(set(keys)):
         raise ValidationError(DUPLICATE_ITEM_ERROR)
 
 
@@ -350,6 +363,23 @@ async def _assert_can_raise_str(db: AsyncSession, user) -> None:
         raise PermissionError_("You are not allowed to raise a stock transfer request")
 
 
+def indent_series(indent_type: str | None) -> str:
+    """The number series an indent is drawn from. An STR carries its own (STR prefix) so a
+    transfer is never read as an indent on paper; a monthly indent its own (MI-IND,
+    2026-11-09) so it is never read as an ordinary one."""
+    if indent_type == IndentType.STR.value:
+        return "str"
+    if indent_type == IndentType.MONTHLY.value:
+        return "monthly_indent"
+    return "indent"
+
+
+def _scope_view(scope: dict):
+    """A resolved selection, read the way `org_scope.number_args` reads a document."""
+    from types import SimpleNamespace
+    return SimpleNamespace(department_name=None, **scope)
+
+
 async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
     _validate_required_date(data.required_date)
     priority = _validate_priority(data.priority) or Priority.NORMAL.value
@@ -382,6 +412,22 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
     # Ahead of next_number(): a rejected vehicle must not burn a document number.
     vehicle_id, vehicle_number = await _resolve_vehicle(
         db, getattr(data, "vehicle_id", None))
+    # An STR says where the stock comes FROM (2026-11-04); refused before a number is
+    # minted, for the same reason as the vehicle above.
+    source = (await _resolve_str_source(db, getattr(data, "source_warehouse_id", None))
+              if indent_type == IndentType.STR.value else None)
+    context = await _requester_context(db, user)
+    if source is not None:
+        await assert_str_source_fits(db, source, await _draft_str_destination(db, context))
+    # Whose paper it is on (2026-11-09): what HCM fixes for the raiser, else what the
+    # form selected. Ahead of next_number() so a refused selection burns no number. A
+    # request naming no organisation where none is configured keeps the old numbering.
+    scope = None
+    if getattr(data, "organization_id", None) or await org_scope.default_organisation(db):
+        scope = await org_scope.resolve_for_raiser(
+            db, user, organization_id=data.organization_id,
+            org_department_id=data.org_department_id, project_id=data.project_id,
+            fiscal_year=data.fiscal_year)
 
     indent_date = utcnow().date()
     if indent_type == IndentType.MONTHLY.value:
@@ -389,19 +435,23 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
         await monthly_indent_service.assert_can_submit_monthly(db, user)
         indent_date = await monthly_indent_service.local_today(db)
 
-    context = await _requester_context(db, user)
     total_qty = sum(line.quantity for line in data.items)
     indent = Indent(
         # An STR carries its own series (STR prefix) so a transfer is never read as an
         # indent on paper.
-        indent_no=await next_number(
-            db, "str" if indent_type == IndentType.STR.value else "indent",
-            project=context["project_name"]),
+        indent_no=(await next_number(db, indent_series(indent_type),
+                                     **org_scope.number_args(_scope_view(scope)))
+                   if scope is not None else
+                   await next_number(db, indent_series(indent_type),
+                                     project=context["project_name"])),
         indent_type=indent_type,
         indent_date=indent_date,
         required_date=data.required_date,
         vehicle_id=vehicle_id,
         vehicle_number=vehicle_number,
+        source_warehouse_id=source.id if source else None,
+        source_warehouse_name=source.name if source else None,
+        source_warehouse_code=source.code if source else None,
         requested_by_id=user.id,
         requested_by_name=user.full_name,
         requested_by_code=user.emp_code,
@@ -423,6 +473,8 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
         created_by_id=user.id,
         created_by_name=user.full_name,
     )
+    if scope is not None:
+        org_scope.stamp_with_project(indent, scope)
     db.add(indent)
     await db.flush()
 
@@ -432,13 +484,16 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
             indent_id=indent.id, line_no=line_no, item_id=item.id, item_code=item.code,
             item_name=item.name, uom_code=item.uom_code,
             quantity=line.quantity, remarks=line.remarks,
+            **await combinations.resolve(db, item.id, line, allow_any=True, default_any=True,
+                                         label=f"Line {line_no} ({item.name})"),
         ))
     await write_audit(
         db, entity="ind_indents", entity_id=indent.id, entity_no=indent.indent_no,
         action=AuditAction.CREATE, actor=user,
         after={"status": indent.status, "total_items": indent.total_items,
                "indent_type": indent.indent_type,
-               "vehicle_number": indent.vehicle_number},
+               "vehicle_number": indent.vehicle_number,
+               "source_warehouse_name": indent.source_warehouse_name},
     )
     await notify_indent_status_event(
         db,
@@ -462,7 +517,7 @@ def unknown_indent_statuses(statuses) -> set[str]:
 
 
 def _workflow_context_for_indent(indent: Indent) -> dict:
-    is_str = indent.indent_type == IndentType.STR.value
+    is_str = getattr(indent, "indent_type", None) == IndentType.STR.value
     return {
         # An STR is an indent on its own ladder: the instance stays INDENT (inbox, deep
         # links, approve permission), only the ladder lookup reads the STR's chain.
@@ -792,12 +847,82 @@ async def _scm_stage_statuses(db: AsyncSession, user) -> list[str]:
         IndentStatus.APPROVED.value,
         IndentStatus.AWAITING_ALLOCATION.value,
         IndentStatus.ALLOCATED.value,
+        IndentStatus.PARTIALLY_ALLOCATED.value,
         IndentStatus.PARTIALLY_FULFILLED.value,
         IndentStatus.PENDING_PROCUREMENT.value,
         IndentStatus.PARTIALLY_ORDERED.value,
         IndentStatus.ORDERED.value,
         IndentStatus.CLOSED.value,
     ]
+
+
+async def _served_points(db: AsyncSession, user) -> set[int] | None:
+    """The stocking points whose fulfilment work this login does (2026-11-02), or
+    None when it is the CENTRAL desk and serves every indent.
+
+    Read off the shelf the hat in hand holds (`locations.held_location_ids`, per POST):
+    an LIP serves itself; an MDP serves itself and every LIP under it
+    (`locations.parent_points`); a main warehouse — or a login holding no point at
+    all, the SCM desk that has always worked the whole queue — serves everyone.
+
+    Before this the SCM stage was gated on PERMISSIONS alone, so an LIP store keeper
+    holding `stock.view` (which his Stock screens need) read every indent past approval
+    in the company: Puthalapattu's store keeper listed Punganur's and Nr Peta's.
+    """
+    cache = db.info.setdefault("served_points_memo", {}) if isinstance(getattr(db, "info", None), dict) else {}
+    hat = getattr(user, "active_position_id", None)
+    key = (user.id, hat)
+    if key in cache:
+        return cache[key]
+
+    posts = {hat} if hat is not None else await locations.active_positions_of(db, user)
+    held: set[int] = set()
+    for position_id in posts:
+        held |= await locations.held_location_ids(db, position_id, subtree=False)
+    if not held:
+        cache[key] = None
+        return None
+    types = dict((await db.execute(
+        select(Warehouse.id, Warehouse.warehouse_type).where(Warehouse.id.in_(held))
+    )).all())
+    if any(locations.tier_of(types.get(w)) == LocationTier.WAREHOUSE for w in held):
+        cache[key] = None
+        return None
+
+    served = set(held)
+    mdps = {w for w in held if locations.tier_of(types.get(w)) == LocationTier.MDP}
+    if mdps:
+        lips = set((await db.execute(
+            select(Warehouse.id).where(Warehouse.warehouse_type == WarehouseType.LIP.value)
+        )).scalars().all())
+        parents = await locations.parent_points(db, lips)
+        served |= {lip for lip, parent in parents.items() if parent in mdps}
+    cache[key] = served
+    return served
+
+
+async def _scm_stage_condition(db: AsyncSession, user):
+    """Indents past approval that are this login's FULFILMENT work, or None.
+
+    The permission check says whether the login works the inventory stage at all;
+    `_served_points` says WHERE. An indent belongs to the point linked to the post
+    that raised it (`inv_position_locations` — the same link that answers "which point
+    serves this post"), and an STR also to the point its transfer order is bound for.
+    """
+    scm_statuses = await _scm_stage_statuses(db, user)
+    if not scm_statuses:
+        return None
+    at_stage = Indent.status.in_(scm_statuses)
+    served = await _served_points(db, user)
+    if served is None:
+        return at_stage
+    raised_here = Indent.position_id.in_(
+        select(PositionLocation.position_id).where(
+            PositionLocation.warehouse_id.in_(served),
+            PositionLocation.is_active == 1,
+        )
+    )
+    return and_(at_stage, or_(raised_here, str_addressed_to(served)))
 
 
 async def indent_access_condition(db: AsyncSession, user):
@@ -854,9 +979,9 @@ async def indent_access_condition(db: AsyncSession, user):
     # and the SCM department sits on posts with no children, so no branch above can ever
     # show them one. Holding the SCM read permissions does — and only from the point the
     # request reaches inventory, never before approval.
-    scm_statuses = await _scm_stage_statuses(db, user)
-    if scm_statuses:
-        visible.append(Indent.status.in_(scm_statuses))
+    scm_stage = await _scm_stage_condition(db, user)
+    if scm_stage is not None:
+        visible.append(scm_stage)
 
     clause = or_(*visible)
     cache[key] = clause
@@ -900,6 +1025,42 @@ async def indent_participant_condition(db: AsyncSession, user):
     return clause
 
 
+async def own_shelf_points(db: AsyncSession, user) -> set[int]:
+    """The stocking points whose SHELF this login holds, across every live post —
+    never its reportees'. Signing for a delivery is "it reached MY shelf"."""
+    points: set[int] = set()
+    for position_id in await locations.active_positions_of(db, user):
+        points |= await locations.held_location_ids(db, position_id, subtree=False)
+    return points
+
+
+def str_addressed_to(points: set[int]):
+    """An STR served by a Stock Transfer Order bound for one of these points
+    (2026-10-29). The destination storekeeper is a party to that delivery: anyone who
+    holds the receiving shelf may see it arrive and sign for it, not only the person
+    who happened to raise it. One rule for the list, the read and the sign-off."""
+    if not points:
+        return false()
+    return and_(
+        Indent.indent_type == IndentType.STR.value,
+        select(StockTransferOrder.id)
+        .where(StockTransferOrder.str_id == Indent.id,
+               StockTransferOrder.to_warehouse_id.in_(points))
+        .correlate(Indent).exists(),
+    )
+
+
+async def _receives_str(db: AsyncSession, indent: Indent, user) -> bool:
+    """Is this login a receiver of this STR by holding the shelf it is bound for?"""
+    if indent.indent_type != IndentType.STR.value:
+        return False
+    points = await own_shelf_points(db, user)
+    return bool(points) and bool(await db.scalar(
+        select(func.count()).select_from(StockTransferOrder)
+        .where(StockTransferOrder.str_id == indent.id,
+               StockTransferOrder.to_warehouse_id.in_(points))))
+
+
 async def _indent_visibility(db: AsyncSession, user):
     """Both halves of "may this login read this indent": the access rule AND the rung.
 
@@ -921,8 +1082,11 @@ async def _indent_visibility(db: AsyncSession, user):
     for the same reason `scope_condition` always OR-s in `mine`: narrow the rung and
     you narrow whose work you see, never whether you can do your own.
     """
-    return or_(
-        await indent_participant_condition(db, user),
+    scm_stage = await _scm_stage_condition(db, user)
+    branches = [await indent_participant_condition(db, user)]
+    if scm_stage is not None:
+        branches.append(scm_stage)
+    branches.append(
         and_(
             await indent_access_condition(db, user),
             await scope_condition(
@@ -932,8 +1096,9 @@ async def _indent_visibility(db: AsyncSession, user):
                 office_col=Indent.office_id,
                 project_col=Indent.project_id,
             ),
-        ),
+        )
     )
+    return or_(*branches)
 
 
 async def _assert_can_view_indent(db: AsyncSession, indent_id: int, user) -> Indent:
@@ -945,6 +1110,14 @@ async def _assert_can_view_indent(db: AsyncSession, indent_id: int, user) -> Ind
     )
     indent = (await db.execute(stmt)).scalar_one_or_none()
     if not indent:
+        # The receiving point of an STR may read the one document it is signing for
+        # even when its rung would not list it (2026-10-29). Asked only on a miss, so
+        # every read the scope already answers costs nothing more.
+        candidate = (await db.execute(
+            select(Indent).options(selectinload(Indent.items)).where(Indent.id == indent_id)
+        )).scalar_one_or_none()
+        if candidate is not None and await _receives_str(db, candidate, user):
+            return candidate
         raise NotFoundError(f"Indent {indent_id} not found")
     return indent
 
@@ -961,8 +1134,12 @@ async def _has_pending_approval(db: AsyncSession, indent_id: int, user_id: int) 
     ))
 
 
-async def _assert_active_workflow_task(db: AsyncSession, indent_id: int, user_id: int) -> None:
+async def _assert_active_workflow_task(db: AsyncSession, indent_id: int, user_id: int, user=None) -> None:
     if not await _has_pending_approval(db, indent_id, user_id):
+        if user is not None:
+            from app.platform.workflow.engine import is_workflow_admin
+            if await is_workflow_admin(db, user):
+                return
         raise PermissionError_("This indent is not currently assigned to you for approval")
 
 
@@ -1001,6 +1178,18 @@ async def _pending_indent_return_instance(
 async def _active_position_matches_return_task(
     db: AsyncSession, instance: Instance, user,
 ) -> bool:
+    # No ladder on this instance at all (`resolved_chain` is only ever frozen by a
+    # ladder-routed submit — engine.py) means a classic, stage-based workflow, where
+    # a rung is not a rank one person can hold through several positions. The caller
+    # (`_pending_indent_return_instance`) already proved this user is the pending
+    # approver at the CURRENT stage, which is the whole question on that workflow —
+    # there is no second position of theirs to disambiguate. Without this, every
+    # classic-workflow indent answered `_current_workflow_link` with None and Correction
+    # never offered itself to anyone (SCM_0078), because the ladder-only check below
+    # ran on indents that were never on a ladder.
+    if not instance.resolved_chain:
+        return True
+
     active_position_id = getattr(user, "active_position_id", None)
     if active_position_id is None:
         return False
@@ -1073,6 +1262,13 @@ async def _attach_capabilities(db: AsyncSession, indent: Indent, user) -> Indent
         indent.status == IndentStatus.RETURNED_FOR_CORRECTION.value
         and is_correction_owner
     )
+    # An owner who is not already the requester can pass it further back.
+    indent.can_send_correction_back = bool(
+        indent.status == IndentStatus.RETURNED_FOR_CORRECTION.value
+        and is_correction_owner
+        and await engine.get_correction_send_back_targets(
+            db, DocType.INDENT.value, indent.id, user, _workflow_context_for_indent(indent))
+    )
     indent.correction_owner = _correction_owner_payload(correction_state)
     indent.returned_from_stage = (
         correction_state or {}
@@ -1101,6 +1297,199 @@ async def _attach_office_sac(db: AsyncSession, indent: Indent) -> Indent:
     """
     office = await db.get(HcmOffice, indent.office_id) if indent.office_id else None
     indent.office_sac = mappers.office_sac(office.raw) if office else None
+    return await _attach_str_route(db, indent)
+
+
+async def _resolve_str_source(db: AsyncSession, warehouse_id: int | None) -> Warehouse:
+    """The source point an STR names. Required — an approver decides whether the
+    point is theirs, and cannot decide that about nothing."""
+    if not warehouse_id:
+        raise ValidationError("Choose the source point this transfer should come from")
+    point = await db.get(Warehouse, int(warehouse_id))
+    if point is None or not point.is_active:
+        raise ValidationError("That source point no longer exists or is inactive")
+    return point
+
+
+async def assert_str_source_fits(db: AsyncSession, source: Warehouse | None,
+                                 destination_id: int | None) -> None:
+    """What an STR's source may not be, whatever screen or route named it (SCM_0182).
+
+    - Never the point the stock is going INTO: that is not a transfer, and its issue
+      would leave and land on the same shelf.
+    - A WAREHOUSE delivery point is served by another warehouse: warehouses transfer
+      between warehouses by TYPE, not by who holds them (2026-11-09), so an LIP or an
+      MDP is never the source of a warehouse's STR.
+
+    The source LIST (`locations.same_rank_points`) already leaves both out; this is the
+    check that decides, because a request can name any point.
+    """
+    if source is None or not destination_id:
+        return
+    if source.id == destination_id:
+        raise ValidationError(
+            f"{source.name} is where this stock is going. Pick the point it should "
+            "come from.")
+    destination = await db.get(Warehouse, destination_id)
+    if (destination is not None
+            and locations.tier_of(destination.warehouse_type) == LocationTier.WAREHOUSE
+            and locations.tier_of(source.warehouse_type) != LocationTier.WAREHOUSE):
+        tier = locations.tier_label(locations.tier_of(source.warehouse_type))
+        raise ValidationError(
+            f"{destination.name} is a warehouse, so this transfer comes from another "
+            f"warehouse. {source.name} is {'an' if tier[:1] in 'AEIOU' else 'a'} {tier}.")
+
+
+async def _draft_str_destination(db: AsyncSession, context: dict) -> int | None:
+    """The delivery point of an STR not yet saved, from the raiser's context."""
+    from types import SimpleNamespace
+    return await str_destination_point(db, SimpleNamespace(
+        position_id=context.get("position_id"), office_id=context.get("office_id")))
+
+
+async def str_destination_point(db: AsyncSession, indent: Indent) -> int | None:
+    """The point an STR (or any indent) is delivered INTO: the shelf the raising post
+    holds, else its primary link, else the stocking point of its office."""
+    held = await locations.held_location_ids(db, indent.position_id, subtree=False)
+    if held:
+        return min(held)
+    primary = await locations.primary_location_for(db, indent.position_id)
+    if primary:
+        return primary
+    if indent.office_id:
+        return await db.scalar(
+            select(Warehouse.id).where(Warehouse.office_id == indent.office_id,
+                                       Warehouse.is_active.is_(True))
+            .order_by(Warehouse.id).limit(1))
+    return None
+
+
+def _point_out(point: Warehouse | None, held_by: list[str] | None = None) -> dict | None:
+    if point is None:
+        return None
+    tier = locations.tier_of(point.warehouse_type)
+    return {
+        "warehouse_id": point.id, "warehouse_code": point.code,
+        "warehouse_name": point.name, "warehouse_type": point.warehouse_type,
+        "tier_label": locations.tier_label(tier), "held_by": held_by or [],
+    }
+
+
+async def _attach_str_route(db: AsyncSession, indent: Indent) -> Indent:
+    """Single-document only: where the goods land, whether that point takes a vehicle
+    and an SAC, and — on an STR — where they come from and every move of the source.
+
+    `needs_vehicle_and_sac` is the delivery point's TIER, read off the master: only the
+    bottom rung of the chain runs a vehicle and carries a service area code. No point
+    type is named here, so a chain that grows a rung keeps the rule."""
+    destination_id = await str_destination_point(db, indent)
+    destination = await db.get(Warehouse, destination_id) if destination_id else None
+    bottom = max(LocationTier)
+    indent.needs_vehicle_and_sac = (
+        None if destination is None
+        else locations.tier_of(destination.warehouse_type) == bottom)
+    indent.str_destination = None
+    indent.str_source = None
+    indent.str_source_changes = []
+    if indent.indent_type != IndentType.STR.value:
+        return indent
+    source = (await db.get(Warehouse, indent.source_warehouse_id)
+              if indent.source_warehouse_id else None)
+    held = await locations.point_holder_names(
+        db, {p.id for p in (source, destination) if p is not None})
+    indent.str_destination = _point_out(destination, held.get(destination_id))
+    indent.str_source = _point_out(source, held.get(indent.source_warehouse_id))
+    if source is None and indent.source_warehouse_name:
+        indent.str_source = {"warehouse_id": indent.source_warehouse_id,
+                             "warehouse_code": indent.source_warehouse_code,
+                             "warehouse_name": indent.source_warehouse_name,
+                             "held_by": []}
+    indent.str_source_changes = list((await db.execute(
+        select(StrSourceChange).where(StrSourceChange.indent_id == indent.id)
+        .order_by(StrSourceChange.id))).scalars().all())
+    return indent
+
+
+async def str_sources_in_use(db: AsyncSession, user) -> list[dict]:
+    """The source points named on the STRs this login may read — the Requests tab's
+    Source filter, so it offers exactly the points the list can narrow to."""
+    rows = (await db.execute(
+        select(Indent.source_warehouse_id, func.max(Indent.source_warehouse_name))
+        .where(Indent.indent_type == IndentType.STR.value,
+               Indent.source_warehouse_id.is_not(None),
+               await _indent_visibility(db, user))
+        .group_by(Indent.source_warehouse_id)
+    )).all()
+    return sorted(({"value": wid, "label": name or f"Point {wid}"} for wid, name in rows),
+                  key=lambda o: o["label"].lower())
+
+
+async def str_source_options(db: AsyncSession, user) -> list[dict]:
+    """The points an STR raised by this login may name as its source: other warehouses
+    when it is delivered into a warehouse, else the shelves held at the same HCM rank,
+    network-wide — never the raiser's own points nor the point it is delivered into."""
+    destination = await _draft_str_destination(db, await _requester_context(db, user))
+    return await locations.same_rank_points(db, user, destination_id=destination)
+
+
+async def change_str_source(db: AsyncSession, indent: Indent, warehouse_id: int, user,
+                            *, reason: str, stage_name: str | None = None) -> None:
+    """Move an STR's source point and record the move. Called by the approver who
+    pulls a request onto one of their own points; the caller checks that the point is
+    in their scope. Not committed here — the caller allocates in the same transaction."""
+    point = await _resolve_str_source(db, warehouse_id)
+    if indent.source_warehouse_id == point.id:
+        return
+    position_id = getattr(user, "active_position_id", None)
+    db.add(StrSourceChange(
+        indent_id=indent.id,
+        from_warehouse_id=indent.source_warehouse_id,
+        from_warehouse_name=indent.source_warehouse_name,
+        to_warehouse_id=point.id, to_warehouse_name=point.name,
+        stage_name=stage_name, reason=(reason or "").strip()[:500] or None,
+        changed_by_id=user.id, changed_by_name=getattr(user, "full_name", None),
+        position_name=(await db.scalar(select(HcmPosition.name).where(
+            HcmPosition.id == position_id))) if position_id else None,
+    ))
+    before = indent.source_warehouse_name
+    indent.source_warehouse_id = point.id
+    indent.source_warehouse_name = point.name
+    indent.source_warehouse_code = point.code
+    await write_audit(
+        db, entity="ind_indents", entity_id=indent.id, entity_no=indent.indent_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"source_warehouse_name": before},
+        after={"source_warehouse_name": point.name, "reason": reason},
+        summary=f"Source moved from {before or 'none'} to {point.name}",
+    )
+
+
+async def _attach_brand_changes(db: AsyncSession, indent: Indent) -> Indent:
+    """Per indent line, every allocation that gave ANOTHER brand than it asked for
+    (2026-10-24) — what was given, how much, and why — so the requester reads the
+    change on their own indent. Rejected and cancelled allocations gave nothing."""
+    ids = [line.id for line in (indent.items or [])]
+    rows = (await db.execute(
+        select(AllocationItem, Allocation.allocation_no)
+        .join(Allocation, Allocation.id == AllocationItem.allocation_id)
+        .where(AllocationItem.indent_item_id.in_(ids or [0]),
+               AllocationItem.substituted_from.isnot(None),
+               AllocationItem.quantity > 0,
+               Allocation.status.notin_((AllocationStatus.REJECTED.value,
+                                         AllocationStatus.CANCELLED.value)))
+        .order_by(AllocationItem.id))).all()
+    by_line: dict[int, list[dict]] = {}
+    for item, allocation_no in rows:
+        by_line.setdefault(item.indent_item_id, []).append({
+            "asked_for": item.substituted_from,
+            "given": " · ".join(p for p in (item.brand_name, item.variant_name,
+                                             item.model_name) if p) or "No brand",
+            "quantity": float(item.quantity or 0),
+            "reason": item.substitution_reason,
+            "allocation_no": allocation_no,
+        })
+    for line in indent.items or []:
+        setattr(line, "brand_changes", by_line.get(line.id, []))
     return indent
 
 
@@ -1110,7 +1499,7 @@ async def get_indent(db: AsyncSession, indent_id: int, user=None) -> Indent:
         # indent at all, and the SAC rides on the indent it returns — an indent nobody
         # is allowed to read never reaches `_attach_office_sac`.
         indent = await _assert_can_view_indent(db, indent_id, user)
-        return await _attach_capabilities(db, indent, user)
+        return await _attach_brand_changes(db, await _attach_capabilities(db, indent, user))
     indent = (await db.execute(
         select(Indent).options(selectinload(Indent.items)).where(Indent.id == indent_id)
     )).scalar_one_or_none()
@@ -1234,6 +1623,7 @@ async def list_indents(
     is_bookmarked: str | None = None,
     has_remainder: bool = False,
     to_serve: bool = False,
+    source_warehouse_id: int | None = None,
     sort_by: str = "created_at",
     sort_dir: str = "desc",
 ) -> dict:
@@ -1251,6 +1641,8 @@ async def list_indents(
         include_unassigned_region=include_unassigned_region,
         is_bookmarked=is_bookmarked,
     )
+    if source_warehouse_id:
+        stmt = stmt.where(Indent.source_warehouse_id == source_warehouse_id)
     if to_serve and user is not None:
         # The fulfilment queue asks a narrower question than /indents does: not "may I
         # read this" but "is there fulfilment work in it FOR ME".
@@ -1275,6 +1667,18 @@ async def list_indents(
                 )
             ),
         ))
+        # An approved STR is served at its SOURCE point's desk (2026-11-04): the last
+        # approver signed it without the source in their scope, so the work belongs to
+        # whoever can draw from that point. A desk with unrestricted reach (None) still
+        # sees every one; an STR with no source on record is left as it always was.
+        drawable = await inventory_service.drawable_warehouse_ids(db, user)
+        if drawable is not None:
+            stmt = stmt.where(or_(
+                Indent.indent_type != IndentType.STR.value,
+                Indent.status == IndentStatus.PENDING_APPROVAL.value,
+                Indent.source_warehouse_id.is_(None),
+                Indent.source_warehouse_id.in_(drawable or {0}),
+            ))
     if has_remainder:
         # At least one line still owes something. EXISTS rather than a join, so an
         # indent with three unfulfilled lines is still one row in the queue.
@@ -1321,6 +1725,18 @@ async def list_indents(
             .correlate(IndentItem)
             .scalar_subquery()
         )
+        # If warehouse stock has arrived for this item, on_order stops hiding the
+        # indent: the goods are on the shelf and ready to be allocated.
+        free_stock = (
+            select(func.coalesce(func.sum(Stock.available_qty), 0))
+            .where(
+                Stock.item_id == IndentItem.item_id,
+                or_(Stock.expiry_date.is_(None), Stock.expiry_date >= ist_today()),
+            )
+            .correlate(IndentItem)
+            .scalar_subquery()
+        )
+        effective_on_order = func.greatest(on_order - free_stock, 0)
         # The SQL twin of `owed_quantity`: what the approver granted, falling back to
         # what was asked for. Reading `approved_quantity` raw hid every line that
         # predates the approval flow and carries 0 there — 69 of the live ones — so the
@@ -1333,7 +1749,8 @@ async def list_indents(
         stmt = stmt.where(exists(
             select(IndentItem.id).where(
                 IndentItem.indent_id == Indent.id,
-                owed_qty > IndentItem.allocated_quantity + committed + on_order,
+                IndentItem.is_excluded.is_(False),
+                owed_qty > IndentItem.allocated_quantity + committed + effective_on_order,
             ).correlate(Indent)
         ))
         # An allocation still awaiting approval takes the indent out of the queue
@@ -1359,7 +1776,102 @@ async def list_indents(
         ))
     id_tie_breaker = Indent.id.asc() if sort_dir.lower() == "asc" else Indent.id.desc()
     stmt = stmt.order_by(_indent_sort(sort_by, sort_dir), id_tie_breaker)
-    return await paginate(db, stmt, params)
+    page_data = await paginate(db, stmt, params)
+    await _enrich_indents_with_operational_status(db, page_data.get("items", []))
+    return page_data
+
+
+async def _enrich_indents_with_operational_status(db: AsyncSession, indents: list[Indent]) -> None:
+    """Enrich list view indents with their real-time downstream operational stage."""
+    candidate_indents = [
+        ind for ind in indents
+        if ind.status in (
+            IndentStatus.ALLOCATED.value,
+            IndentStatus.PARTIALLY_ALLOCATED.value,
+            IndentStatus.APPROVED.value,
+            IndentStatus.AWAITING_ALLOCATION.value,
+        )
+    ]
+    if not candidate_indents:
+        return
+
+    from collections import defaultdict
+    from app.modules.warehouse.models import MaterialIssue, OutboundInspection, Dispatch, DispatchSource
+    from app.modules.warehouse.enums import IssueDirection
+
+    candidate_ids = [ind.id for ind in candidate_indents]
+    issues = (await db.execute(
+        select(MaterialIssue.id, MaterialIssue.indent_id, MaterialIssue.is_stock_posted, MaterialIssue.status)
+        .where(
+            MaterialIssue.indent_id.in_(candidate_ids),
+            MaterialIssue.direction == IssueDirection.OUT.value,
+        )
+    )).all()
+
+    if not issues:
+        return
+
+    indent_issue_ids: dict[int, list[int]] = defaultdict(list)
+    issue_ids = []
+    for issue in issues:
+        indent_issue_ids[issue.indent_id].append(issue.id)
+        issue_ids.append(issue.id)
+
+    # QC Inspections
+    inspections = (await db.execute(
+        select(OutboundInspection.issue_id, OutboundInspection.status)
+        .where(OutboundInspection.issue_id.in_(issue_ids))
+        .order_by(OutboundInspection.id.desc())
+    )).all()
+    issue_qcs: dict[int, list] = defaultdict(list)
+    for qc in inspections:
+        issue_qcs[qc.issue_id].append(qc)
+
+    # Dispatches - direct
+    dispatches_direct = (await db.execute(
+        select(Dispatch.id, Dispatch.ref_id, Dispatch.status, Dispatch.gate_out_at, Dispatch.delivered_at)
+        .where(
+            Dispatch.ref_id.in_(issue_ids),
+            Dispatch.ref_type.in_(("WH_ISSUE", "MATERIAL_ISSUE", "ISSUE")),
+        )
+        .order_by(Dispatch.id.desc())
+    )).all()
+    issue_dispatches: dict[int, list] = defaultdict(list)
+    for d in dispatches_direct:
+        issue_dispatches[d.ref_id].append(d)
+
+    # Dispatches - via DispatchSource
+    sources = (await db.execute(
+        select(DispatchSource.dispatch_id, DispatchSource.issue_id)
+        .where(DispatchSource.issue_id.in_(issue_ids))
+    )).all()
+    if sources:
+        dispatch_ids = [s.dispatch_id for s in sources]
+        source_dispatches = (await db.execute(
+            select(Dispatch.id, Dispatch.status, Dispatch.gate_out_at, Dispatch.delivered_at)
+            .where(Dispatch.id.in_(dispatch_ids))
+            .order_by(Dispatch.id.desc())
+        )).all()
+        dispatch_by_id = {d.id: d for d in source_dispatches}
+        for s in sources:
+            if s.dispatch_id in dispatch_by_id:
+                issue_dispatches[s.issue_id].append(dispatch_by_id[s.dispatch_id])
+
+    for ind in candidate_indents:
+        i_ids = indent_issue_ids.get(ind.id, [])
+        all_d = [d for i_id in i_ids for d in issue_dispatches.get(i_id, [])]
+        all_q = [q for i_id in i_ids for q in issue_qcs.get(i_id, [])]
+
+        if any(d.delivered_at is not None or str(d.status or "").upper() == "DELIVERED" for d in all_d):
+            ind.status = IndentStatus.DELIVERED.value
+        elif any(d.gate_out_at is not None or str(d.status or "").upper() in ("DISPATCHED", "GATED_OUT", "IN_TRANSIT") for d in all_d):
+            ind.status = IndentStatus.IN_TRANSIT.value
+        elif all_d:
+            ind.status = IndentStatus.IN_CONSIGNMENT.value
+        elif any(str(q.status or "").upper() in ("COMPLETED", "PASSED") for q in all_q):
+            ind.status = IndentStatus.QC_PASSED.value
+        elif all_q:
+            ind.status = IndentStatus.QC_IN_PROGRESS.value
 
 
 async def set_indent_bookmark(
@@ -1387,6 +1899,34 @@ async def set_indent_bookmark(
     return await _attach_capabilities(db, indent, user)
 
 
+_SCOPE_INPUTS = ("organization_id", "org_department_id", "project_id", "fiscal_year")
+
+
+async def _apply_scope_edit(db: AsyncSession, indent: Indent, data, user) -> None:
+    """A draft's organisation / project / department / year, changed on the form: the
+    same rules as at create, and a new number when the selection moved. Fixed once
+    submitted (a correction is not a draft). An indent raised before organisations is
+    left exactly as it was."""
+    given = {field for field in _SCOPE_INPUTS if field in data.model_fields_set}
+    if not given or not org_scope.uses_org(indent, indent.indent_no):
+        return
+    stated = {field: getattr(data, field) for field in given}
+    org_scope.assert_lockable(
+        indent, indent.indent_no, is_draft=indent.status == IndentStatus.DRAFT.value,
+        source_has_org=False, given=given, **stated)
+    org_scope.remember_number_args(indent)
+    pick = {field: stated.get(field, getattr(indent, field, None)) for field in _SCOPE_INPUTS}
+    if "project_id" in given and stated["project_id"] and "org_department_id" not in given:
+        pick["org_department_id"] = None   # picking a project replaces the department
+    if "org_department_id" in given and stated["org_department_id"] and "project_id" not in given:
+        pick["project_id"] = None
+    scope = await org_scope.resolve_for_raiser(db, user, keep=indent, **pick)
+    org_scope.stamp_with_project(indent, scope)
+    org_scope.assert_complete(indent)
+    await org_scope.renumber(db, indent, indent_series(indent.indent_type), "indent_no",
+                             "ind_indents", user)
+
+
 async def update_indent(db: AsyncSession, indent_id: int, data: IndentUpdate, user) -> Indent:
     indent = await get_indent(db, indent_id, user)
     if indent.status == IndentStatus.DRAFT.value:
@@ -1405,6 +1945,7 @@ async def update_indent(db: AsyncSession, indent_id: int, data: IndentUpdate, us
         raise ValidationError(f"Cannot edit an indent in {indent.status} status")
 
     _validate_required_date(data.required_date)
+    await _apply_scope_edit(db, indent, data, user)
 
     before = {
         "required_date": indent.required_date.isoformat() if indent.required_date else None,
@@ -1417,6 +1958,7 @@ async def update_indent(db: AsyncSession, indent_id: int, data: IndentUpdate, us
         "remarks": indent.remarks,
         "total_items": indent.total_items,
         "total_qty": float(indent.total_qty or 0),
+        "source_warehouse_name": indent.source_warehouse_name,
     }
     indent.required_date = data.required_date
     if data.priority is not None:
@@ -1446,6 +1988,13 @@ async def update_indent(db: AsyncSession, indent_id: int, data: IndentUpdate, us
         indent.office_name = office.name if office else None
     if "remarks" in data.model_fields_set:
         indent.remarks = data.remarks
+    if (indent.indent_type == IndentType.STR.value
+            and "source_warehouse_id" in data.model_fields_set):
+        source = await _resolve_str_source(db, data.source_warehouse_id)
+        await assert_str_source_fits(db, source, await str_destination_point(db, indent))
+        indent.source_warehouse_id = source.id
+        indent.source_warehouse_name = source.name
+        indent.source_warehouse_code = source.code
 
     if data.items is not None:
         if not data.items:
@@ -1465,6 +2014,9 @@ async def update_indent(db: AsyncSession, indent_id: int, data: IndentUpdate, us
             indent.items.append(IndentItem(
                 line_no=line_no, item_id=item.id, item_code=item.code, item_name=item.name,
                 uom_code=item.uom_code, quantity=line.quantity, remarks=line.remarks,
+                **await combinations.resolve(db, item.id, line, allow_any=True,
+                                             default_any=True,
+                                             label=f"Line {line_no} ({item.name})"),
             ))
         indent.total_items = len(data.items)
         indent.total_qty = sum(line.quantity for line in data.items)
@@ -1483,6 +2035,7 @@ async def update_indent(db: AsyncSession, indent_id: int, data: IndentUpdate, us
             "remarks": indent.remarks,
             "total_items": indent.total_items,
             "total_qty": float(indent.total_qty or 0),
+            "source_warehouse_name": indent.source_warehouse_name,
         },
     )
     await db.commit()
@@ -1549,6 +2102,19 @@ async def submit_indent(db: AsyncSession, indent_id: int, user) -> Indent:
         raise PermissionError_("Only the requester can submit this indent")
     if indent.status != IndentStatus.DRAFT.value:
         raise ValidationError(f"Cannot submit an indent in {indent.status} status")
+    if indent.indent_type == IndentType.STR.value and not indent.source_warehouse_id:
+        # A draft saved before the field existed: it has to say where the stock comes
+        # from before an approver can judge whether that point is theirs.
+        raise ValidationError(
+            "Choose the source point this transfer should come from, then submit")
+    if org_scope.uses_org(indent, indent.indent_no):
+        # The number was drawn from this selection; it must not print NA (2026-11-09).
+        org_scope.assert_complete(indent)
+    if indent.indent_type == IndentType.STR.value:
+        # A draft saved before SCM_0182 may name its own delivery point.
+        await assert_str_source_fits(
+            db, await db.get(Warehouse, indent.source_warehouse_id),
+            await str_destination_point(db, indent))
 
     if indent.indent_type == IndentType.MONTHLY.value:
         from app.platform.monthly_indent import service as monthly_indent_service
@@ -1629,6 +2195,7 @@ def _d(value) -> Decimal:
 # approved or already finished, and has nothing to acknowledge.
 _RECEIVABLE_STATUSES = frozenset({
     IndentStatus.ALLOCATED.value,
+    IndentStatus.PARTIALLY_ALLOCATED.value,
     IndentStatus.PARTIALLY_FULFILLED.value,
     IndentStatus.PARTIALLY_ORDERED.value,
     IndentStatus.ORDERED.value,
@@ -1685,13 +2252,22 @@ def owed_quantity(item) -> Decimal:
     cosmetic: most live indent lines predate the approval flow and carry `approved_qty`
     0, and treating that as "owed nothing" would close an indent the moment anyone
     acknowledged it. Same rule the allocation code already uses.
+    A line marked excluded or rejected by the approver is owed nothing.
     """
+    if getattr(item, "is_excluded", False):
+        return Decimal("0")
+    if getattr(item, "approved_quantity", None) is not None and _d(item.approved_quantity) > Decimal("0"):
+        return _d(item.approved_quantity)
     return _d(item.approved_quantity) or _d(item.quantity)
 
 
 def _fulfilment_status(items) -> str:
-    """CLOSED once every line is fully received, else PARTIALLY_FULFILLED."""
-    if all(_d(i.received_quantity) >= owed_quantity(i) for i in items):
+    """CLOSED once every active line is fully received, else PARTIALLY_FULFILLED."""
+    active_items = [
+        i for i in items
+        if not getattr(i, "is_excluded", False) and owed_quantity(i) > Decimal("0")
+    ]
+    if not active_items or all(_d(i.received_quantity) >= owed_quantity(i) for i in active_items):
         return IndentStatus.CLOSED.value
     return IndentStatus.PARTIALLY_FULFILLED.value
 
@@ -1708,7 +2284,7 @@ async def add_receipt_attachment(db: AsyncSession, indent_id: int, upload, *,
     # matches on the position the indent was raised in, which would stop somebody who
     # has since changed posts from confirming goods they themselves asked for.
     indent = await get_indent(db, indent_id)
-    if indent.requested_by_id != user.id:
+    if indent.requested_by_id != user.id and not await _receives_str(db, indent, user):
         raise PermissionError_(
             "Only the person who raised this indent can attach its delivery proof")
     if indent.status not in _RECEIVABLE_STATUSES:
@@ -1745,7 +2321,7 @@ async def delete_receipt_attachment(db: AsyncSession, attachment_id: int, user) 
     row = await attachments.require_attachment(
         db, attachment_id, entity_type=ACK_ENTITY_TYPE)
     indent = await get_indent(db, int(row.entity_id))
-    if indent.requested_by_id != user.id:
+    if indent.requested_by_id != user.id and not await _receives_str(db, indent, user):
         raise PermissionError_(
             "Only the person who raised this indent can remove its delivery proof")
     if indent.status not in _RECEIVABLE_STATUSES:
@@ -1794,11 +2370,136 @@ def _delivery_condition(condition: str | None, remarks: str | None) -> str:
     return value
 
 
+def rejection_groups(by_id: dict, rejections: dict[int, list[dict]] | None) -> list[dict]:
+    """The rejections of one acknowledgement, grouped BY REASON across its lines.
+
+    One group per reason ("" when none was given, which is now the usual case): a return
+    holds several reason rows, so the groups feed ONE return per acknowledgement. Within a
+    group the same item is merged into one line (its quantities added, its comments
+    joined), so a return never lists an item twice. `by_id` maps a line id to anything with `item_id`; it serves an
+    indent's lines and a direct issue's alike.
+    """
+    groups: dict[str, dict] = {}
+    for line_id, rows in (rejections or {}).items():
+        line = by_id.get(line_id)
+        if line is None:
+            continue
+        for row in rows:
+            reason = str(row.get("reason") or "").upper()
+            group = groups.setdefault(reason, {
+                "reason": reason, "total": 0.0, "notes": [], "lines": {}})
+            quantity = float(row["quantity"])
+            group["total"] += quantity
+            comment = (row.get("comment") or "").strip() or None
+            if comment and comment not in group["notes"]:
+                group["notes"].append(comment)
+            merged = group["lines"].setdefault(line.item_id, {
+                "item_id": line.item_id, "line_id": line_id, "quantity": 0.0, "remarks": None,
+                "serial_numbers": []})
+            merged["quantity"] += quantity
+            merged["serial_numbers"].extend(row.get("serial_numbers") or [])
+            if comment:
+                merged["remarks"] = " · ".join(
+                    p for p in (merged["remarks"], comment) if p)[:500]
+    return [{**group, "lines": list(group["lines"].values())} for group in groups.values()]
+
+
+async def resolve_rejection_units(db, by_id: dict, rejections: dict[int, list[dict]] | None):
+    """The units named as turned away, checked (2026-11-06).
+
+    Returns `(rows, prefer)`: the unit rows, and `{item_id: [code, ...]}` for the landing to
+    shelve first. Goods that carry serial numbers or IMEIs MUST name them, one per unit; bulk
+    goods and asset-coded goods may. A code can be named once, across every reason."""
+    from app.modules.warehouse import service as _warehouse
+    from app.shared.models.master import Item
+
+    rows: list = []
+    prefer: dict[int, list[str]] = {}
+    seen: set[str] = set()
+    for line_id, entries in (rejections or {}).items():
+        line = by_id.get(line_id)
+        if line is None:
+            continue
+        codes = [c for entry in entries for c in (entry.get("serial_numbers") or [])]
+        item = await db.get(Item, line.item_id)
+        label = getattr(line, "item_name", None) or getattr(line, "item_code", None) or "Item"
+        if not codes:
+            if item is not None and (getattr(item, "is_serial_tracked", False)
+                                     or getattr(item, "is_imei_tracked", False)):
+                raise ValidationError(
+                    f"{label}: choose which serial numbers are being turned away.")
+            continue
+        if any(c in seen for c in codes):
+            raise ValidationError(f"{label}: a serial number is turned away twice.")
+        seen.update(codes)
+        found = await _warehouse.resolve_rejected_units(db, item_id=line.item_id, codes=codes)
+        rows.extend(found)
+        prefer.setdefault(line.item_id, []).extend(codes)
+    return rows, prefer
+
+
+def rejection_remark(groups: list[dict]) -> str:
+    """"Not accepted: Damaged 10 (two cartons crushed), Expired 2" — what the receipt, the
+    carrier claim and the audit row say about the goods that were turned away."""
+    parts = []
+    for group in groups:
+        text = f"{ACK_REJECTION_LABELS.get(group['reason']) or 'Returned'} {group['total']:g}"
+        notes = "; ".join(group["notes"])
+        parts.append(f"{text} ({notes})" if notes else text)
+    return "Not accepted: " + ", ".join(parts)
+
+
+async def _raise_rejection_returns(db: AsyncSession, user, source: dict,
+                                   groups: list[dict]) -> list[dict]:
+    """Hand the rejected goods to whoever raises returns. Inside the caller's transaction."""
+    if not groups:
+        return []
+    from app.modules.indents import hooks
+    return await hooks.raise_returns(db, user, source, groups)
+
+
+async def _package_receipt_notes(db: AsyncSession, indent,
+                                 receipts: dict[int, dict]) -> list[str]:
+    """"…450-STRIP: 3 of 10 arrived", "…454-STRIP missing" — per package that came
+    short, refused for a code that is not a package this indent line was issued in."""
+    from app.modules.warehouse import models as wm
+    from app.modules.warehouse import box_codes
+    from app.shared import packing
+    notes: list[str] = []
+    for line_id, by_code in receipts.items():
+        if not by_code:
+            continue
+        sent: dict[str, Decimal] = {}
+        for issue_id, issue_line_id in (await db.execute(
+                select(wm.MaterialIssueLine.issue_id, wm.MaterialIssueLine.id)
+                .where(wm.MaterialIssueLine.indent_item_id == line_id))).all():
+            for box in await box_codes.line_boxes(db, issue_id, issue_line_id):
+                sent[box.hu_code] = box_codes.held(box)
+        label = next((i.item_code for i in indent.items if i.id == line_id), str(line_id))
+        for code, got in by_code.items():
+            if code not in sent:
+                raise ValidationError(f"{label}: {code} is not a package sent on this line")
+            got = _d(got)
+            if got < 0 or got > sent[code]:
+                raise ValidationError(
+                    f"{label}: {code} carried {packing.fmt(sent[code])}; "
+                    f"{packing.fmt(got)} cannot have arrived in it")
+            notes.append(f"{code} missing" if got == 0
+                         else f"{code}: {packing.fmt(got)} of {packing.fmt(sent[code])} arrived")
+    return notes
+
+
 async def acknowledge_receipt(db: AsyncSession, indent_id: int,
                               lines: dict[int, Decimal], user, *,
                               condition: str | None = None,
-                              remarks: str | None = None) -> Indent:
+                              remarks: str | None = None,
+                              package_receipts: dict[int, dict] | None = None,
+                              rejections: dict[int, list[dict]] | None = None) -> Indent:
     """The requester confirms what physically reached them.
+
+    `lines` is what was ACCEPTED. `rejections` is what reached them and was not, by reason
+    (2026-11-06): it counts as arrived — the goods are on the receiving shelf and a return
+    is raised for them — but not as received, so the line stays owed.
 
     This is the only thing that closes an indent. The warehouse issuing and dispatching
     stock says the goods left; only the person who asked for them can say they arrived,
@@ -1812,9 +2513,11 @@ async def acknowledge_receipt(db: AsyncSession, indent_id: int,
     # Unscoped load, raiser-only gate — see add_receipt_attachment. Changing post must
     # not orphan the goods you are still waiting for.
     indent = await get_indent(db, indent_id)
-    if indent.requested_by_id != user.id:
+    # Or, for an STR, whoever holds the shelf it is bound for (2026-10-29).
+    if indent.requested_by_id != user.id and not await _receives_str(db, indent, user):
         raise PermissionError_(
-            "Only the person who raised this indent can acknowledge its delivery")
+            "Only the person who raised this indent, or the receiving point, can "
+            "acknowledge its delivery")
     if indent.status not in _RECEIVABLE_STATUSES:
         raise ValidationError(
             f"{indent.indent_no} is not awaiting delivery (status {indent.status})")
@@ -1857,16 +2560,37 @@ async def acknowledge_receipt(db: AsyncSession, indent_id: int,
         raise ValidationError(
             "Take a photo of each item you are confirming. Still without one: "
             f"{named}{f' and {more} more' if more > 0 else ''}.")
+    rejections = {k: v for k, v in (rejections or {}).items() if v}
+    for line_id in rejections:
+        if line_id not in by_id:
+            raise ValidationError(f"Line {line_id} is not on {indent.indent_no}")
+    delivered: dict[int, Decimal] = {}
+    if rejections:
+        # Imported here, not at module load: warehouse sits after indents in the chain.
+        from app.modules.warehouse import service as _warehouse
+        delivered = await _warehouse.delivered_by_indent_item(db, list(rejections))
     before = {str(i.id): float(_d(i.received_quantity)) for i in indent.items}
     for line_id, quantity in lines.items():
         item = by_id.get(line_id)
         if item is None:
             raise ValidationError(f"Line {line_id} is not on {indent.indent_no}")
         received = _d(quantity)
-        if received <= 0:
+        rejected_now = sum((_d(r["quantity"]) for r in rejections.get(line_id, [])), ZERO)
+        if received < 0 or (received == 0 and rejected_now <= 0):
             raise ValidationError(
                 f"{item.item_name or item.item_code}: received quantity must be more "
                 "than zero")
+        if rejected_now > 0:
+            # Accepted + rejected can be no more than reached the requester and is not yet
+            # accounted for. Only checked where something is rejected, so a plain
+            # acknowledgement behaves exactly as it always did.
+            unaccounted = (delivered.get(line_id, ZERO) - _d(item.received_quantity)
+                           - _d(item.rejected_quantity))
+            if received + rejected_now > unaccounted:
+                raise ValidationError(
+                    f"{item.item_name or item.item_code}: {received + rejected_now:g} "
+                    f"accepted and rejected is more than the {max(unaccounted, ZERO):g} "
+                    "that reached you and is not yet accounted for.")
         running = _d(item.received_quantity) + received
         owed = owed_quantity(item)
         if running > owed:
@@ -1874,16 +2598,34 @@ async def acknowledge_receipt(db: AsyncSession, indent_id: int,
                 f"{item.item_name or item.item_code}: {running} received is more than "
                 f"the {owed} approved. Acknowledge only what you were given.")
         item.received_quantity = running
+        if rejected_now > 0:
+            item.rejected_quantity = _d(item.rejected_quantity) + rejected_now
         if running >= owed:
             item.status = IndentItemStatus.ISSUED.value
 
     indent.status = _fulfilment_status(indent.items)
 
+    # Packages that came short or missing (2026-10-26): checked against the packages
+    # the line was issued in, and written onto the receipt so the claim reads WHICH.
+    package_notes = await _package_receipt_notes(db, indent, package_receipts or {})
+    if package_notes:
+        remarks = " · ".join(p for p in ((remarks or "").strip(), "; ".join(package_notes)) if p)
+    groups = rejection_groups(by_id, rejections)
+    if groups:
+        # Said on the receipt, and — where the goods were harmed — a claim on the carrier
+        # too, which needs a description (`_delivery_condition`): this supplies it.
+        remarks = " · ".join(p for p in ((remarks or "").strip(), rejection_remark(groups)) if p)
+        if condition is None and any(g["reason"] in ACK_DAMAGE_REASONS for g in groups):
+            condition = ACK_CONDITION_DAMAGED
     ack_condition = _delivery_condition(condition, remarks)
 
     # Imported here, not at module load: warehouse sits after indents in the import
     # chain, so a top-level import would run it backwards.
     from app.modules.warehouse import service as warehouse_service
+
+    # The units being turned away (2026-11-06): named, checked, and landed first below so
+    # that the return can send those very ones back.
+    turned_units, prefer_units = await resolve_rejection_units(db, by_id, rejections)
 
     # The raiser saying "this reached me" IS the acknowledgement. Asking the warehouse
     # to sign the same delivery again afterwards recorded nothing new and left indents
@@ -1891,12 +2633,26 @@ async def acknowledge_receipt(db: AsyncSession, indent_id: int,
     # transaction as the receipt that made them settleable.
     signed = await warehouse_service.auto_acknowledge_for_indent(
         db, indent.id, user, condition=ack_condition, remarks=remarks,
+        # What arrived in each package that came short or missing (2026-10-26).
+        box_received={code: Decimal(str(got)) for by_code in (package_receipts or {}).values()
+                      for code, got in (by_code or {}).items()},
         # Whether anything is still owed on this indent, which decides how far back the
         # receipt is allowed to reach into the outward legs. A partial receipt settles
         # only what has actually left; a complete one may also settle a leg still
         # reading READY, because nothing can be sitting in a yard for an indent whose
         # every line has now arrived. See `_sign_transport_for_indent`.
-        fully_received=indent.status == IndentStatus.CLOSED.value)
+        fully_received=indent.status == IndentStatus.CLOSED.value,
+        prefer_units=prefer_units or None)
+    await warehouse_service.mark_rejected_units(db, turned_units, indent.indent_no)
+
+    # The rejected goods are on the requester's shelf now (the confirmation above counts
+    # them as arrived), so a return can be raised from it — one per reason, in this same
+    # transaction. If one cannot be raised the whole acknowledgement fails with the reason,
+    # rather than closing the delivery and losing track of the goods turned away.
+    receipt_returns = await _raise_rejection_returns(db, user, {
+        "kind": "INDENT", "number": indent.indent_no, "indent_id": indent.id,
+        "issue_id": None,
+    }, groups)
 
     await write_audit(
         db, entity="ind_indents", entity_id=indent.id, entity_no=indent.indent_no,
@@ -1904,11 +2660,17 @@ async def acknowledge_receipt(db: AsyncSession, indent_id: int,
         before=before,
         after={"status": indent.status,
                **({"acknowledged_issues": ", ".join(signed)} if signed else {}),
+               **({"package_receipts": "; ".join(package_notes)} if package_notes else {}),
+               **({"rejected": rejection_remark(groups),
+                   "returns": ", ".join(r["return_no"] for r in receipt_returns)}
+                  if groups else {}),
                **{str(i.id): float(_d(i.received_quantity)) for i in indent.items}},
     )
     await db.commit()
     await db.refresh(indent)
-    return await _attach_capabilities(db, indent, user)
+    result = await _attach_capabilities(db, indent, user)
+    result.receipt_returns = receipt_returns
+    return result
 
 
 async def act_on_indent(db: AsyncSession, indent_id: int, action: ApprovalAction,
@@ -1919,13 +2681,14 @@ async def act_on_indent(db: AsyncSession, indent_id: int, action: ApprovalAction
     for the approvers above to decide.
     """
     indent = await get_indent(db, indent_id, user)
-    if indent.status == IndentStatus.RETURNED_FOR_CORRECTION.value:
-        raise ValidationError("Indent is returned for correction")
     if indent.status != IndentStatus.PENDING_APPROVAL.value:
         raise ValidationError(f"Indent is not awaiting approval (status {indent.status})")
+    from app.platform.workflow.engine import is_workflow_admin
+    is_admin = await is_workflow_admin(db, user)
     if indent.requested_by_id == user.id:
         raise ValidationError("Requester cannot approve or reject their own indent")
-    await _assert_active_workflow_task(db, indent.id, user.id)
+    if not is_admin:
+        await _assert_active_workflow_task(db, indent.id, user.id, user=user)
     if action == ApprovalAction.REJECTED:
         comments = (comments or "").strip()
         if not comments:
@@ -1943,9 +2706,11 @@ async def act_on_indent(db: AsyncSession, indent_id: int, action: ApprovalAction
         indent.approved_at = utcnow()
         indent.current_approver_name = None
         await _fulfil(db, indent, user)
+        await _finish_str_approval(db, indent, user)
     elif instance.status == InstanceStatus.REJECTED.value:
         indent.status = IndentStatus.REJECTED.value
         indent.current_approver_name = None
+        await _withdraw_str_allocations(db, indent, user, f"{indent.indent_no} was rejected")
         # Whatever this indent was holding goes back on the shelf immediately —
         # otherwise a rejected request quietly keeps stock out of everyone's reach.
         await inventory_service.release_for_indent(db, indent.id)
@@ -1963,8 +2728,26 @@ async def act_on_indent(db: AsyncSession, indent_id: int, action: ApprovalAction
     return await _attach_capabilities(db, indent, user)
 
 
+async def get_indent_return_targets(
+    db: AsyncSession, indent_id: int, user,
+) -> list[dict]:
+    """The steps this approver may send the indent back to (empty when they may not
+    return it at all). The one just below the current step is marked as the default."""
+    indent = await get_indent(db, indent_id, user)
+    if indent.status == IndentStatus.RETURNED_FOR_CORRECTION.value:
+        # Already returned: the only person who can move it is the correction owner, and
+        # what they may pick are the steps earlier than their own.
+        return await engine.get_correction_send_back_targets(
+            db, DocType.INDENT.value, indent.id, user, _workflow_context_for_indent(indent))
+    if not await can_return_indent_for_correction(db, indent, user):
+        return []
+    return await engine.get_return_targets(
+        db, DocType.INDENT.value, indent.id, _workflow_context_for_indent(indent))
+
+
 async def return_indent_for_correction(
     db: AsyncSession, indent_id: int, comments: str, user,
+    target_sequence: int | None = None,
 ) -> Indent:
     indent = await get_indent(db, indent_id, user)
     if indent.status != IndentStatus.PENDING_APPROVAL.value:
@@ -1974,16 +2757,28 @@ async def return_indent_for_correction(
     await _assert_active_workflow_task(db, indent.id, user.id)
 
     before_status = indent.status
+    context = _workflow_context_for_indent(indent)
+    if target_sequence is None:
+        # No step chosen: the nearest earlier step, which is where a return has always
+        # gone. Resolved here, against the signed steps, so a rung nobody signed can no
+        # longer leave the indent with nowhere to go.
+        offered = await engine.get_return_targets(
+            db, DocType.INDENT.value, indent.id, context)
+        target_sequence = next(
+            (row["sequence"] for row in offered if row["is_default"]), None)
     await engine.return_for_correction(
         db,
         DocType.INDENT.value,
         indent.id,
         user,
         comments,
-        context=_workflow_context_for_indent(indent),
+        context=context,
+        target_sequence=target_sequence,
     )
     indent.status = IndentStatus.RETURNED_FOR_CORRECTION.value
     indent.current_approver_name = None
+    await _withdraw_str_allocations(
+        db, indent, user, f"{indent.indent_no} was returned for correction")
     await notify_indent_followers(db, indent, indent.status)
     await write_audit(
         db, entity="ind_indents", entity_id=indent.id, entity_no=indent.indent_no,
@@ -2027,6 +2822,42 @@ async def resubmit_indent_correction(
     return await _attach_capabilities(db, indent, user)
 
 
+async def send_indent_correction_back(
+    db: AsyncSession, indent_id: int, comments: str, user,
+    target_sequence: int | None = None,
+) -> Indent:
+    """The correction owner sends a returned indent further back, to the requester or
+    any earlier signer, rather than correcting it themselves."""
+    indent = await get_indent(db, indent_id, user)
+    if indent.status != IndentStatus.RETURNED_FOR_CORRECTION.value:
+        raise ValidationError(f"Indent is not returned for correction (status {indent.status})")
+    comments = (comments or "").strip()
+    if not comments:
+        raise ValidationError("Say what must be corrected before sending it back")
+
+    before_status = indent.status
+    await engine.send_correction_back(
+        db,
+        DocType.INDENT.value,
+        indent.id,
+        user,
+        comments,
+        context=_workflow_context_for_indent(indent),
+        target_sequence=target_sequence,
+    )
+    indent.current_approver_name = None
+    await notify_indent_followers(db, indent, indent.status)
+    await write_audit(
+        db, entity="ind_indents", entity_id=indent.id, entity_no=indent.indent_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": before_status}, after={"status": indent.status},
+        summary="Sent indent correction further back",
+    )
+    await db.commit()
+    await db.refresh(indent)
+    return await _attach_capabilities(db, indent, user)
+
+
 async def approved_pending_po(db: AsyncSession, params: PageParams, user=None) -> dict:
     """Approved indents not yet fully converted to POs — the procurement screen.
 
@@ -2039,6 +2870,7 @@ async def approved_pending_po(db: AsyncSession, params: PageParams, user=None) -
         .where(Indent.status.in_([
             IndentStatus.APPROVED.value,
             IndentStatus.PENDING_PROCUREMENT.value,
+            IndentStatus.PARTIALLY_ALLOCATED.value,
             IndentStatus.PARTIALLY_FULFILLED.value,
             IndentStatus.PARTIALLY_ORDERED.value,
         ]))
@@ -2123,6 +2955,7 @@ async def _fulfil(db: AsyncSession, indent: Indent, user) -> None:
     _fulfilment_target(actions)
     _fulfilment_warehouse_types(actions)
 
+    total_approved = sum(_d(line.approved_quantity) for line in indent.items)
     for line in indent.items:
         # allocated_quantity is NOT reset here. It used to be, back when nothing could
         # be served before the ladder finished, so zeroing was just clearing a field
@@ -2130,11 +2963,16 @@ async def _fulfil(db: AsyncSession, indent: Indent, user) -> None:
         # part-way up (approvals/fulfilment.py), and wiping it here told inventory the
         # line was untouched — so the units already handed over would be issued a
         # second time, with the stk_ledger rows for the first lot still on file.
+        line_approved = _d(line.approved_quantity)
         line.status = (
             IndentItemStatus.ISSUED.value
-            if line.allocated_quantity and line.allocated_quantity >= line.approved_quantity
+            if (line.allocated_quantity and line.allocated_quantity >= line.approved_quantity) or line_approved <= 0
             else IndentItemStatus.PENDING.value
         )
+    if total_approved <= 0:
+        indent.status = IndentStatus.CLOSED.value
+        return
+
     indent.status = IndentStatus.AWAITING_ALLOCATION.value
     # The one place a monthly indent enters the fulfilment queue, so the one place it
     # can pick up its consolidation. Every downstream screen groups by that document
@@ -2156,6 +2994,7 @@ _POST_APPROVAL_STATUSES = {
     IndentStatus.APPROVED.value,
     IndentStatus.AWAITING_ALLOCATION.value,
     IndentStatus.ALLOCATED.value,
+    IndentStatus.PARTIALLY_ALLOCATED.value,
     IndentStatus.PARTIALLY_FULFILLED.value,
     IndentStatus.PENDING_PROCUREMENT.value,
     IndentStatus.PARTIALLY_ORDERED.value,
@@ -2601,7 +3440,7 @@ def _journey_history(
                 "event_type": "READY_FOR_ALLOCATION",
                 "title": "Ready for allocation",
                 "description": f"{indent.indent_no} sent to inventory",
-                "actor_name": audit.actor_name,
+                "actor_name": None,
                 "position_name": None,
                 "timestamp": audit.created_at,
                 "comments": None,
@@ -2724,7 +3563,7 @@ def _split_reporting_ladder(positions: list[dict]) -> tuple[list[dict], list[dic
     if len(positions) == 1:
         return ([], positions) if positions[0].get("is_top") else (positions, [])
     if positions[-1].get("is_top"):
-        return positions[:-2], positions[-2:]
+        return positions[:-1], positions[-1:]
     return positions, []
 
 
@@ -2759,6 +3598,8 @@ def _occurred_action_title(action: Action, link: dict | None, domain: str) -> st
         or frozen_label
         or f"{domain} approval"
     )
+    if label and "(before a consignment may be raised)" in label:
+        label = label.replace("(before a consignment may be raised)", "").strip()
     if action.action == ApprovalAction.APPROVED.value:
         generic_labels = {
             "approval", domain.lower(), f"{domain.lower()} approval",
@@ -3086,7 +3927,9 @@ async def _journey_operational_evidence(
     this function runs, so these joins cannot broaden access to another indent.
     """
     from app.modules.warehouse.enums import DispatchStatus, IssueDirection
-    from app.modules.warehouse.models import Dispatch, MaterialIssue
+    from app.modules.warehouse.models import (
+        Dispatch, MaterialIssue, OutboundInspection,
+    )
 
     graph = await _resolve_journey_document_graph(db, indent)
     target_item_ids = {row.id for row in graph.indent_items}
@@ -3141,6 +3984,16 @@ async def _journey_operational_evidence(
         .order_by(Dispatch.created_at.asc(), Dispatch.id.asc())
     )).scalars().all())
 
+    issue_ids = [row.id for row in all_issues]
+    inspections = []
+    if issue_ids:
+        inspections = list((await db.execute(
+            select(OutboundInspection)
+            .options(selectinload(OutboundInspection.items))
+            .where(OutboundInspection.issue_id.in_(issue_ids))
+            .order_by(OutboundInspection.created_at.asc(), OutboundInspection.id.asc())
+        )).scalars().all())
+
     approved_total = sum(required_by_line.values(), Decimal("0"))
     received_total = sum(received_by_line.values(), Decimal("0"))
 
@@ -3176,6 +4029,34 @@ async def _journey_operational_evidence(
             "approval_mode": None,
             "_sort_order": 40,
         })
+    # A brand given in place of the one asked for (2026-10-24) is a decision the
+    # requester must be able to read on the journey, not only on the indent's lines.
+    # Rejected and cancelled allocations gave nothing, so they changed nothing.
+    for row in allocations:
+        if row.status in (AllocationStatus.REJECTED.value, AllocationStatus.CANCELLED.value):
+            continue
+        for item in row.items:
+            if (item.indent_item_id not in target_item_ids or not item.substituted_from
+                    or _d(item.quantity) <= 0):
+                continue
+            given = " · ".join(p for p in (item.brand_name, item.variant_name,
+                                            item.model_name) if p) or "No brand"
+            events.append({
+                "id": f"allocation-brand:{row.id}:{item.id}",
+                "event_type": "BRAND_CHANGED",
+                "title": "Brand changed",
+                "description": (f"{item.item_name or 'Item'}: brand substituted from "
+                                f"{item.substituted_from} to {given}"),
+                "actor_name": row.allocated_by_name,
+                "position_name": None,
+                "timestamp": row.created_at,
+                "comments": item.substitution_reason,
+                "reference_no": row.allocation_no,
+                "quantity_summary": f"{float(_d(item.quantity)):g} {item.uom_code or ''}".strip(),
+                "stage_type": "allocation",
+                "approval_mode": None,
+                "_sort_order": 41,
+            })
 
     warehouse_workflow_events, _ = await _related_workflow_events(
         db,
@@ -3183,16 +4064,22 @@ async def _journey_operational_evidence(
         domain="Warehouse",
         stage_type="warehouse_approval",
         include_submission=False,
-        sort_order=55,
+        sort_order=54,
         references={row.id: row.issue_no for row in all_issues},
     )
     events.extend(warehouse_workflow_events)
     for row in all_issues:
+        issue_status = str(row.status or "").upper()
+        is_draft = issue_status == "DRAFT" and not row.is_stock_posted
         events.append({
             "id": f"material-issue-created:{row.id}",
             "event_type": "MATERIAL_ISSUE_CREATED",
-            "title": "Material issue created",
-            "description": "Warehouse material issue recorded",
+            "title": "Material issue draft created" if is_draft else "Material issue created",
+            "description": (
+                "Warehouse material issue draft recorded"
+                if is_draft else "Warehouse material issue recorded"
+            ),
+            "status": "DRAFT" if is_draft else issue_status,
             "actor_name": row.created_by_name,
             "position_name": None,
             "timestamp": row.created_at,
@@ -3201,7 +4088,45 @@ async def _journey_operational_evidence(
             "quantity_summary": None,
             "stage_type": "warehouse",
             "approval_mode": None,
-            "_sort_order": 50,
+            "_sort_order": 52,
+        })
+
+    qc_workflow_events, _ = await _related_workflow_events(
+        db,
+        doc_type="QC_OUTWARD",
+        doc_ids=[row.id for row in inspections],
+        domain="Quality Inspection",
+        stage_type="warehouse_approval",
+        include_submission=False,
+        sort_order=59,
+        references={row.id: row.inspection_no for row in inspections},
+    )
+    events.extend(qc_workflow_events)
+    for row in inspections:
+        qc_status = str(row.status or "").upper()
+        is_completed = qc_status in ("COMPLETED", "PASSED")
+        is_draft = qc_status == "DRAFT"
+        events.append({
+            "id": f"quality-inspection:{row.id}",
+            "event_type": "QUALITY_INSPECTION_COMPLETED" if is_completed else "QUALITY_INSPECTION_CREATED",
+            "title": "Quality inspection completed" if is_completed else "Quality inspection draft created" if is_draft else f"Quality inspection ({qc_status.capitalize()})",
+            "description": (
+                f"Quality inspection completed ({row.passed_items} passed, {row.failed_items} failed)"
+                if is_completed
+                else f"Quality inspection draft recorded ({row.total_items} items)"
+                if is_draft
+                else f"Quality inspection: {qc_status}"
+            ),
+            "status": qc_status,
+            "actor_name": row.inspector_name or row.approved_by_name,
+            "position_name": None,
+            "timestamp": row.approved_at or row.created_at,
+            "comments": row.remarks,
+            "reference_no": row.inspection_no,
+            "quantity_summary": f"{row.passed_items} of {row.total_items} passed" if row.total_items else None,
+            "stage_type": "warehouse",
+            "approval_mode": None,
+            "_sort_order": 58 if is_draft else 60,
         })
 
     dispatch_workflow_events, _ = await _related_workflow_events(
@@ -3210,7 +4135,7 @@ async def _journey_operational_evidence(
         domain="Dispatch",
         stage_type="dispatch_approval",
         include_submission=False,
-        sort_order=65,
+        sort_order=66,
         references={row.id: row.dispatch_no for row in dispatches},
     )
     events.extend(dispatch_workflow_events)
@@ -3228,7 +4153,7 @@ async def _journey_operational_evidence(
             "quantity_summary": None,
             "stage_type": "delivery",
             "approval_mode": None,
-            "_sort_order": 60,
+            "_sort_order": 64,
         })
 
     def stage(
@@ -3418,7 +4343,7 @@ async def _journey_operational_evidence(
                 "quantity_summary": _quantity_text(quantity, approved_total),
                 "stage_type": "warehouse",
                 "approval_mode": None,
-                "_sort_order": 60,
+                "_sort_order": 56,
             })
             if row.acknowledged_at is not None:
                 events.append({
@@ -3450,8 +4375,24 @@ async def _journey_operational_evidence(
                 "quantity_summary": _quantity_text(issued_total, approved_total),
                 "stage_type": "warehouse",
                 "approval_mode": None,
-                "_sort_order": 61,
+                "_sort_order": 57,
             })
+
+    if inspections:
+        latest_qc = inspections[-1]
+        latest_qc_st = str(latest_qc.status or "").upper()
+        stage(
+            "Quality inspection completed" if latest_qc_st in ("COMPLETED", "PASSED")
+            else "Quality inspection in progress",
+            latest_qc_st,
+            "warehouse",
+            actor=latest_qc.inspector_name or latest_qc.approved_by_name,
+            timestamp=latest_qc.approved_at or latest_qc.created_at,
+            comments=latest_qc.remarks,
+            reference=latest_qc.inspection_no,
+            quantity=f"{latest_qc.passed_items} of {latest_qc.total_items} items passed" if latest_qc.total_items else None,
+            source="whs_inspections.status",
+        )
 
     active_dispatch_statuses = {
         DispatchStatus.DISPATCHED.value,
@@ -3643,34 +4584,45 @@ async def _journey_operational_evidence(
             "_sort_order": 120,
         })
     is_complete = has_genuine_closure
-    if not allocations_found:
-        missing_sources.append("inv_allocations.status=APPROVED and approved_at")
-    elif awaiting_procurement:
-        # Not a gap in the evidence: the shortfall is a live material request and no
-        # warehouse document can exist until procurement delivers against it. Listing
-        # `out_issues` here fired the "missing evidence" banner on every indent that
-        # is simply out of stock, and named the wrong document as the next step.
-        pass
-    elif not issues:
-        missing_sources.append("out_issues.is_stock_posted=true and posted_at")
-    elif not issue_complete:
-        missing_sources.append("remaining posted out_issue_items.issued_qty")
-    elif not dispatched:
-        missing_sources.append("out_dispatches.gate_out_at")
-    elif not delivered and not fully_received:
-        missing_sources.append("out_dispatches.delivered_at")
-    elif not delivery_complete and not fully_received:
-        missing_sources.append("remaining out_dispatch_items.delivered_qty")
-    elif received_total <= 0:
-        missing_sources.append(
-            "ind_indent_items.received_qty and acknowledgement audit"
-        )
-    elif not fully_received:
-        missing_sources.append("remaining ind_indent_items.received_qty")
-    elif indent.status == IndentStatus.CLOSED.value and closed_audit is None:
-        missing_sources.append("sys_audit_log status.to=CLOSED")
-    elif not is_complete:
-        missing_sources.append("ind_indents.status=CLOSED audit transition")
+    if indent.status == IndentStatus.CLOSED.value:
+        if not allocations_found:
+            missing_sources.append("inv_allocations.status=APPROVED and approved_at")
+        elif awaiting_procurement:
+            # Not a gap in the evidence: the shortfall is a live material request and no
+            # warehouse document can exist until procurement delivers against it. Listing
+            # `out_issues` here fired the "missing evidence" banner on every indent that
+            # is simply out of stock, and named the wrong document as the next step.
+            pass
+        elif not issues:
+            missing_sources.append("out_issues.is_stock_posted=true and posted_at")
+        elif not issue_complete:
+            missing_sources.append("remaining posted out_issue_items.issued_qty")
+        elif not dispatched:
+            missing_sources.append("out_dispatches.gate_out_at")
+        elif not delivered and not fully_received:
+            missing_sources.append("out_dispatches.delivered_at")
+        elif not delivery_complete and not fully_received:
+            missing_sources.append("remaining out_dispatch_items.delivered_qty")
+        elif received_total <= 0:
+            missing_sources.append(
+                "ind_indent_items.received_qty and acknowledgement audit"
+            )
+        elif not fully_received:
+            missing_sources.append("remaining ind_indent_items.received_qty")
+        elif closed_audit is None:
+            missing_sources.append("sys_audit_log status.to=CLOSED")
+        elif not is_complete:
+            missing_sources.append("ind_indents.status=CLOSED audit transition")
+    else:
+        # Open indents are still in progress. Downstream stages that have not occurred
+        # yet (such as allocation, issue, dispatch, etc.) are normal pending steps,
+        # not missing records. Only flag genuine data inconsistencies where a status
+        # claims a stage completed without records.
+        if (
+            indent.status == IndentStatus.ALLOCATED.value
+            and not allocations_found
+        ):
+            missing_sources.append("inv_allocations.status=APPROVED and approved_at")
 
     return {
         "stages": stages,
@@ -3683,6 +4635,15 @@ async def _journey_operational_evidence(
         "has_material_request": bool(material_requests),
         "has_issue": bool(issues),
         "issue_complete": issue_complete,
+        "has_qc": bool(inspections),
+        "qc_complete": bool(inspections) and all(str(row.status or "").upper() in ("COMPLETED", "PASSED") for row in inspections),
+        "qc_in_progress": bool(inspections) and any(str(row.status or "").upper() in ("DRAFT", "IN_PROGRESS", "PENDING_APPROVAL") for row in inspections),
+        "latest_qc_no": inspections[-1].inspection_no if inspections else None,
+        "latest_qc_status": str(inspections[-1].status or "").upper() if inspections else None,
+        "has_consignment": bool(dispatches),
+        "pending_consignment": any(row.gate_out_at is None for row in dispatches),
+        "latest_dispatch_no": dispatches[-1].dispatch_no if dispatches else None,
+        "latest_dispatch_status": str(dispatches[-1].status or "").upper() if dispatches else None,
         "has_dispatch": bool(dispatched),
         "has_delivery": bool(delivered),
         "delivery_complete": delivery_complete,
@@ -4214,10 +5175,37 @@ async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
         operational["receipt_complete"]
         or (delivery_done and operational["has_warehouse_acknowledgement"])
     )
-    allocation_current = approvals_complete and not allocation_done
-    warehouse_current = allocation_done and not warehouse_done
+    allocation_current = (
+        approvals_complete
+        and not allocation_done
+        and not operational["has_issue"]
+    )
+    warehouse_current = (
+        (allocation_done or operational["has_issue"])
+        and not warehouse_done
+    )
     delivery_current = warehouse_done and not delivery_done
     acknowledgement_current = delivery_done and not acknowledgement_done
+
+    has_posted_issue = bool(operational.get("has_issue"))
+    has_qc = bool(operational.get("has_qc"))
+    qc_complete = bool(operational.get("qc_complete"))
+    qc_in_progress = bool(operational.get("qc_in_progress"))
+    has_consignment = bool(operational.get("has_consignment"))
+    is_dispatched = bool(operational.get("has_dispatch"))
+    is_delivered = bool(operational.get("has_delivery"))
+
+    warehouse_phase_message = None
+    delivery_phase_message = None
+    if has_posted_issue:
+        if qc_in_progress:
+            warehouse_phase_message = "QC in progress"
+        elif qc_complete and not has_consignment:
+            warehouse_phase_message = "QC completed"
+        elif has_consignment and not is_dispatched:
+            delivery_phase_message = "Pending dispatch"
+        elif is_dispatched:
+            delivery_phase_message = "In transit"
 
     phases = [
         phase(1, "Draft", "APPROVED" if request_submitted else "PENDING",
@@ -4229,22 +5217,24 @@ async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
             message=(approval_current or {}).get("title") if approval_current else None,
         ),
         phase(
-            4, "Allocation", "APPROVED" if allocation_done else "PENDING",
-            current=allocation_current,
+            4, "Allocation", "APPROVED" if (allocation_done or has_posted_issue or operational["has_issue"]) else "PENDING",
+            current=allocation_current and not has_posted_issue,
             # Why the leg is still open, for the stepper caption. Without it the step
             # reads a bare "Current" and the requester has no way to tell an indent
             # nobody has looked at from one that is out of stock and on order.
             message=(
                 _PROCUREMENT_STAGE_MESSAGES.get(
                     indent.status, "Sourcing from procurement")
-                if allocation_current and operational["awaiting_procurement"]
+                if (allocation_current or operational["awaiting_procurement"])
                 else None
             ),
         ),
-        phase(5, "Warehouse", "APPROVED" if warehouse_done else "PENDING",
-              current=warehouse_current),
+        phase(5, "Warehouse", "APPROVED" if (warehouse_done or (has_posted_issue and qc_complete)) else "PENDING",
+              current=warehouse_current and not (has_posted_issue and (qc_complete or is_dispatched or has_consignment)),
+              message=warehouse_phase_message),
         phase(6, "Delivery", "APPROVED" if delivery_done else "PENDING",
-              current=delivery_current),
+              current=(delivery_current or is_dispatched) and not (has_posted_issue and qc_complete and not is_dispatched) and not delivery_done,
+              message=delivery_phase_message),
         phase(7, "Acknowledgement", "APPROVED" if acknowledgement_done else "PENDING",
               current=acknowledgement_current),
     ]
@@ -4268,20 +5258,30 @@ async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
             if operational["awaiting_procurement"]
             else "Waiting for allocation"
         )
-    elif warehouse_current:
-        current_stage = "Waiting for warehouse issue"
-    elif delivery_current:
-        current_stage = (
-            "In delivery" if operational["has_dispatch"] else "Waiting for dispatch"
-        )
+    elif acknowledgement_done or all(p["status"] == "APPROVED" for p in phases):
+        current_stage = "Completed"
     elif acknowledgement_current:
         current_stage = (
             "Partially received"
             if operational["has_receipt"]
             else "Waiting for acknowledgement"
         )
-    elif acknowledgement_done:
-        current_stage = "Completed"
+    elif has_posted_issue and (qc_in_progress or (has_qc and not qc_complete)):
+        qc_no = operational.get("latest_qc_no")
+        ref_txt = f" · Ref {qc_no}" if qc_no else ""
+        current_stage = f"Quality inspection in progress{ref_txt}"
+    elif has_posted_issue and qc_complete and not has_consignment and not delivery_done:
+        current_stage = "QC completed — awaiting consignment"
+    elif has_posted_issue and qc_complete and has_consignment and not is_dispatched and not delivery_done:
+        dsp_no = operational.get("latest_dispatch_no")
+        ref_txt = f" · Ref {dsp_no}" if dsp_no else ""
+        current_stage = f"Pending in consignment — ready for dispatch{ref_txt}"
+    elif delivery_current:
+        current_stage = (
+            "In delivery" if operational["has_dispatch"] else "Waiting for dispatch"
+        )
+    elif warehouse_current:
+        current_stage = "Waiting for warehouse issue"
 
     history = _journey_history(
         indent,
@@ -4305,6 +5305,9 @@ async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
         "READY_FOR_ALLOCATION": "allocation",
         "STOCK_ALLOCATED": "allocation",
         "WAREHOUSE_ISSUED": "warehouse",
+        "QUALITY_INSPECTION_CREATED": "warehouse",
+        "QUALITY_INSPECTION_COMPLETED": "warehouse",
+        "DISPATCH_CREATED": "delivery",
         "DISPATCHED": "delivery",
         "DELIVERED": "delivery",
         "ACKNOWLEDGEMENT_SUBMITTED": "acknowledgement",
@@ -4334,6 +5337,9 @@ async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
             "REJECTED": "REJECTED",
             "RETURNED": "RETURNED",
             "APPROVED": "APPROVED",
+            "READY_FOR_ALLOCATION": (
+                "COMPLETED" if operational.get("has_allocation") else "AWAITING_ALLOCATION"
+            ),
             "ACKNOWLEDGEMENT_SUBMITTED": "ACKNOWLEDGED",
         }.get(event_type)
         if status is None:
@@ -4384,6 +5390,11 @@ async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
         "phases": phases,
         "history": history,
         "missing_sources": operational["missing_sources"],
+        "qc_status": operational.get("latest_qc_status"),
+        "qc_inspection_no": operational.get("latest_qc_no"),
+        "qc_complete": operational.get("qc_complete", False),
+        "consignment_no": operational.get("latest_dispatch_no"),
+        "consignment_status": operational.get("latest_dispatch_status"),
     }
 
 
@@ -4459,8 +5470,8 @@ async def indent_stats(
     # outcomes -- so counting only APPROVED would report zero approvals forever.
     approved_active = sum(counts.get(v, 0) for v in (
         S.APPROVED.value, S.AWAITING_ALLOCATION.value, S.ALLOCATED.value,
-        S.PARTIALLY_FULFILLED.value, S.PENDING_PROCUREMENT.value,
-        S.ORDERED.value, S.PARTIALLY_ORDERED.value,
+        S.PARTIALLY_ALLOCATED.value, S.PARTIALLY_FULFILLED.value,
+        S.PENDING_PROCUREMENT.value, S.ORDERED.value, S.PARTIALLY_ORDERED.value,
     ))
     line_totals = (
         select(func.count(IndentItem.id), func.coalesce(func.sum(IndentItem.quantity), 0))
@@ -5380,6 +6391,7 @@ async def list_notifications(
         IndentStatus.DRAFT.value, IndentStatus.PENDING_APPROVAL.value,
         IndentStatus.APPROVED.value,
         IndentStatus.AWAITING_ALLOCATION.value, IndentStatus.ALLOCATED.value,
+        IndentStatus.PARTIALLY_ALLOCATED.value,
         IndentStatus.PARTIALLY_FULFILLED.value,
         IndentStatus.PENDING_PROCUREMENT.value,
         IndentStatus.REJECTED.value, IndentStatus.RETURNED_FOR_CORRECTION.value,
@@ -5393,8 +6405,12 @@ async def list_notifications(
         (Indent.status == IndentStatus.AWAITING_ALLOCATION.value, "Request approved"),
         (Indent.status == IndentStatus.ALLOCATED.value, "Stock set aside"),
         (
-            Indent.status == IndentStatus.PARTIALLY_FULFILLED.value,
+            Indent.status == IndentStatus.PARTIALLY_ALLOCATED.value,
             "Part of it is coming from stock",
+        ),
+        (
+            Indent.status == IndentStatus.PARTIALLY_FULFILLED.value,
+            "Partially fulfilled",
         ),
         (Indent.status == IndentStatus.PENDING_PROCUREMENT.value, "Going to procurement"),
         (Indent.status == IndentStatus.REJECTED.value, "Request rejected"),
@@ -5434,9 +6450,14 @@ async def list_notifications(
             literal("Stock for ") + Indent.indent_no + literal(" has been set aside."),
         ),
         (
-            Indent.status == IndentStatus.PARTIALLY_FULFILLED.value,
+            Indent.status == IndentStatus.PARTIALLY_ALLOCATED.value,
             literal("Some of ") + Indent.indent_no
             + literal(" is from stock; the rest is on order."),
+        ),
+        (
+            Indent.status == IndentStatus.PARTIALLY_FULFILLED.value,
+            literal("Some of ") + Indent.indent_no
+            + literal(" has been received; the rest is on its way."),
         ),
         (
             Indent.status == IndentStatus.PENDING_PROCUREMENT.value,
@@ -5626,6 +6647,8 @@ async def list_notifications(
 # The queue and the allocation guards both subtract what is "on order", and both must
 # read the same list — a delivered request counted as outstanding is stock nobody can
 # allocate, a rejected one counted as outstanding is a line nobody can serve.
+ZERO = Decimal("0")
+
 #: What of an MR line is still being bought: asked for, less what has already reached
 #: stock. A request delivered in parts stays OPEN, so the status filter alone kept the
 #: lines that had arrived counting as on order and the desk offered 0 of them.
@@ -5653,6 +6676,7 @@ _SETTLED_MR_STATUSES = (
 
 _ALLOCATION_ELIGIBLE_STATUSES = {
     IndentStatus.AWAITING_ALLOCATION.value,
+    IndentStatus.PARTIALLY_ALLOCATED.value,
     IndentStatus.PARTIALLY_FULFILLED.value,
     IndentStatus.PENDING_PROCUREMENT.value,
     # An approver serving the request out of their own stocking point allocates while
@@ -5802,7 +6826,7 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
         raise NotFoundError(f"Indent {indent_id} not found")
 
     committed = await _committed_by_line(db, indent_id)
-    on_order = await _on_order_by_line(db, indent_id)
+    on_order = await _on_order_by_line(db, indent_id, user)
 
     # Read-only, so it never refuses. Every row in the fulfilment queue opens THIS
     # screen — one row, one destination — and the screen says what state the indent is
@@ -5825,6 +6849,16 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
     )).all()
     unapproved = [row for row in live
                   if row.status in allocations.UNAPPROVED_ALLOCATION_STATUSES]
+
+    eligible_items = [
+        line for line in indent.items
+        if not getattr(line, "is_excluded", False)
+        and not (
+            recorded
+            and _owed_quantity(line, recorded) <= Decimal("0")
+            and Decimal(str(line.allocated_quantity or 0)) <= Decimal("0")
+        )
+    ]
 
     blocked_reason = None
     if indent.status not in _ALLOCATION_ELIGIBLE_STATUSES:
@@ -5855,13 +6889,19 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
         - Decimal(str(line.allocated_quantity or 0))
         - committed.get(line.id, Decimal("0"))
         - on_order.get(line.id, Decimal("0")) > 0
-        for line in indent.items
+        for line in eligible_items
     ):
-        blocked_reason = (
-            "Every line is already covered by an allocation or an active material "
-            "request. Outstanding demand becomes available again when procurement "
-            "is received, rejected or cancelled."
-        )
+        if not eligible_items:
+            blocked_reason = (
+                "All items in this indent were rejected during approval — "
+                "there is nothing to allocate."
+            )
+        else:
+            blocked_reason = (
+                "Every line is already covered by an allocation or an active material "
+                "request. Outstanding demand becomes available again when procurement "
+                "is received, rejected or cancelled."
+            )
 
     lines = [{
         "indent_item_id": line.id,
@@ -5885,7 +6925,9 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
         ),
         "on_order_qty": float(on_order.get(line.id, Decimal("0"))),
         "project_id": indent.project_id,
-    } for line in indent.items]
+        # What the indent asked for — a brand / variant / model, or Any (2026-10-23).
+        **combinations.carry(line),
+    } for line in eligible_items]
 
     # Points this person may DRAW FROM: the stocking points they hold or that report
     # under them, UNION whatever their job profile's data scope opens up. The subtree
@@ -5911,6 +6953,12 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
         "blocked_reason": blocked_reason,
         "allocations": [{"id": row.id, "allocation_no": row.allocation_no,
                          "status": row.status} for row in live],
+        # The point an STR asked to be served from (2026-11-04): the screen opens every
+        # line on it when this login can draw from it.
+        "str_source_warehouse_id": (indent.source_warehouse_id
+                                    if indent.indent_type == IndentType.STR.value else None),
+        "str_source_warehouse_name": (indent.source_warehouse_name
+                                      if indent.indent_type == IndentType.STR.value else None),
         "lines": [{**p, "available_total": float(p["available_total"]),
                    # What the WAREHOUSE can serve, LIP and MDP points excluded. Zero
                    # here with stock still showing in `available_total` is the case the
@@ -6007,7 +7055,77 @@ async def decide_allocations_batch(db: AsyncSession, body, user) -> dict:
             "sealed_consolidations": sealed, "failed": failed}
 
 
-async def _on_order_by_line(db: AsyncSession, indent_id: int) -> dict[int, Decimal]:
+async def _reconcile_indent_mr_receipts(db: AsyncSession, indent_id: int) -> None:
+    """If POs or receipts exist for this indent, ensure the shortfall MRs reflect the received goods."""
+    try:
+        from app.modules.procurement.models import PurchaseOrder, POItem, Requisition
+        from app.modules.warehouse import models as whs_models
+        from app.modules.warehouse.enums import ReceiptStatus
+
+        mrs = list((await db.execute(
+            select(MaterialRequest)
+            .options(selectinload(MaterialRequest.items))
+            .where(
+                MaterialRequest.indent_id == indent_id,
+                MaterialRequest.status.notin_(_SETTLED_MR_STATUSES),
+            )
+        )).scalars().unique().all())
+        if not mrs:
+            return
+
+        mr_ids = [mr.id for mr in mrs]
+        po_ids = list((await db.execute(
+            select(PurchaseOrder.id).where(PurchaseOrder.indent_id == indent_id)
+        )).scalars().all())
+
+        req_po_ids = list((await db.execute(
+            select(PurchaseOrder.id)
+            .join(Requisition, Requisition.id == PurchaseOrder.requisition_id)
+            .where(Requisition.source_mr_id.in_(mr_ids))
+        )).scalars().all())
+
+        all_po_ids = list(set(po_ids) | set(req_po_ids))
+        if not all_po_ids:
+            return
+
+        receipt_rows = (await db.execute(
+            select(
+                POItem.item_id,
+                POItem.indent_item_id,
+                func.coalesce(func.sum(whs_models.ReceiptItem.received_qty), 0),
+            )
+            .join(whs_models.Receipt, whs_models.Receipt.id == whs_models.ReceiptItem.receipt_id)
+            .join(POItem, POItem.id == whs_models.ReceiptItem.po_item_id)
+            .where(
+                whs_models.Receipt.po_id.in_(all_po_ids),
+                whs_models.Receipt.status.in_([
+                    ReceiptStatus.RECEIVED.value, ReceiptStatus.INSPECTED.value,
+                    ReceiptStatus.CLOSED.value,
+                ]),
+            )
+            .group_by(POItem.item_id, POItem.indent_item_id)
+        )).all()
+
+        for item_id, indent_line_id, qty in receipt_rows:
+            q = _d(qty)
+            if q <= ZERO:
+                continue
+            for mr in mrs:
+                for mr_item in mr.items:
+                    if (indent_line_id and mr_item.indent_item_id == indent_line_id) or (mr_item.item_id == item_id):
+                        mr_item.received_quantity = max(
+                            _d(mr_item.received_quantity or 0),
+                            min(_d(mr_item.quantity), q),
+                        )
+                if all(_d(mi.received_quantity or 0) >= _d(mi.quantity) for mi in mr.items):
+                    mr.status = MRStatus.RECEIVED.value
+        await db.commit()
+    except Exception:
+        pass
+
+
+async def _on_order_by_line(db: AsyncSession, indent_id: int,
+                            user=None) -> dict[int, Decimal]:
     """Quantity per indent line already handed to procurement as a material request.
 
     The Fulfilment Queue subtracts this before it offers an indent for allocation
@@ -6018,10 +7136,21 @@ async def _on_order_by_line(db: AsyncSession, indent_id: int) -> dict[int, Decim
     would have been bought and issued.
 
     Same status filter as the queue: a rejected or cancelled request is not on order.
+
+    What has already arrived in stock comes off the request, so a later round can
+    allocate it. Only stock the ALLOCATOR can draw counts (`user`'s own stocking points
+    and their reportees', when they have any). Counted company-wide, a unit sitting at
+    a point they cannot reach made a line that had gone to procurement look unserved,
+    so they could keep submitting allocations that give nothing (IND/2026-27/00169).
+    Without a `user`, or for a desk that holds no point of its own, every point counts,
+    as before.
     """
+    await _reconcile_indent_mr_receipts(db, indent_id)
+    drawable = (await locations.location_ids_for_user(db, user)) if user is not None else set()
     rows = (await db.execute(
         select(
             MaterialRequestItem.indent_item_id,
+            MaterialRequestItem.item_id,
             func.coalesce(func.sum(_MR_STILL_COMING), 0),
         )
         .join(MaterialRequest, MaterialRequest.id == MaterialRequestItem.mr_id)
@@ -6030,9 +7159,25 @@ async def _on_order_by_line(db: AsyncSession, indent_id: int) -> dict[int, Decim
             IndentItem.indent_id == indent_id,
             MaterialRequest.status.notin_(_SETTLED_MR_STATUSES),
         )
-        .group_by(MaterialRequestItem.indent_item_id)
+        .group_by(MaterialRequestItem.indent_item_id, MaterialRequestItem.item_id)
     )).all()
-    return {int(line_id): _d(quantity) for line_id, quantity in rows if line_id}
+    result: dict[int, Decimal] = {}
+    for line_id, item_id, quantity in rows:
+        if not line_id:
+            continue
+        q = _d(quantity)
+        stock_stmt = (
+            select(func.coalesce(func.sum(Stock.available_qty), 0))
+            .where(
+                Stock.item_id == item_id,
+                or_(Stock.expiry_date.is_(None), Stock.expiry_date >= ist_today()),
+            )
+        )
+        if drawable:
+            stock_stmt = stock_stmt.where(Stock.warehouse_id.in_(drawable))
+        stock_qty = (await db.scalar(stock_stmt)) or ZERO
+        result[int(line_id)] = max(ZERO, q - _d(stock_qty))
+    return result
 
 
 def _reject_over_allocation(indent: Indent, decisions: list[dict],
@@ -6087,6 +7232,54 @@ def _reject_over_allocation(indent: Indent, decisions: list[dict],
             )
 
 
+async def _decide_combinations(db: AsyncSession, indent: Indent,
+                               decisions: list[dict]) -> None:
+    """Which brand / variant / model each decision gives (2026-10-23).
+
+    An indent line that named one gives exactly that — the client cannot change it.
+    A line that said Any is settled HERE, by the storekeeper's pick off the shelf,
+    checked against the item's ON combinations; with no pick it stays Any and the
+    reservation draws from whichever combination the point holds.
+    """
+    lines = {line.id: line for line in indent.items}
+    for d in decisions:
+        line = lines.get(d.get("indent_item_id"))
+        no_brand = bool(d.get("no_brand")) and not int(d.get("brand_id") or 0)
+        d["no_brand"] = no_brand
+        if line is not None and line.brand_id:
+            asked = combinations.carry(line)
+            chosen = (int(d.get("brand_id") or 0), int(d.get("variant_id") or 0),
+                      int(d.get("model_id") or 0))
+            if no_brand:
+                # Stock booked in before brands were recorded (2026-10-24): which
+                # brand it is cannot be known, so it is given AS no brand — and
+                # recorded as a change from what the indent asked for.
+                d.update(combinations.NONE)
+                d["substituted_from"] = " · ".join(
+                    p for p in (asked["brand_name"], asked["variant_name"],
+                                asked["model_name"]) if p) or "the brand asked for"
+            elif chosen[0] and chosen != (asked["brand_id"], asked["variant_id"],
+                                        asked["model_id"]):
+                # ANOTHER brand than the indent named (2026-10-24): allowed, checked
+                # against the item's combinations, and recorded on the line with what
+                # was asked for — so the change is never silent.
+                d.update(await combinations.resolve(
+                    db, d["item_id"], d, label=d.get("item_name") or ""))
+                d["substituted_from"] = " · ".join(
+                    p for p in (asked["brand_name"], asked["variant_name"],
+                                asked["model_name"]) if p) or "the brand asked for"
+            else:
+                d.update(asked)
+        elif d.get("brand_id"):
+            d.update(await combinations.resolve(
+                db, d["item_id"], d, label=d.get("item_name") or ""))
+        elif no_brand:
+            d.update(combinations.NONE)
+        else:
+            d.update({**combinations.NONE,
+                      "combination_any": bool(line is not None and line.combination_any)})
+
+
 async def create_allocation_for_indent(db: AsyncSession, indent: Indent,
                                        decisions: list[dict], user,
                                        remarks: str | None = None):
@@ -6097,10 +7290,6 @@ async def create_allocation_for_indent(db: AsyncSession, indent: Indent,
     approver commits their own stock while the indent is still PENDING_APPROVAL, which
     is exactly the moment the allocation screen must refuse.
     """
-    # Imported here, not at module load: warehouse sits after indents in the import
-    # chain, so a top-level import would run it backwards.
-    from app.modules.warehouse import service as warehouse_service
-
     # Approved allocations do not block a further one while the indent still owes
     # something — that IS the cascade, each rung allocating what it holds. Only
     # inventory knows about allocations and only indents knows the remainder, so the
@@ -6116,13 +7305,31 @@ async def create_allocation_for_indent(db: AsyncSession, indent: Indent,
     # to procurement, but any other door into the allocation form — a saved URL, the
     # own-stock path, the batch screen — still passed, and `allow_additional` then let
     # `ensure_no_active` wave a second allocation through for quantity already bought.
-    on_order = await _on_order_by_line(db, indent.id)
+    on_order = await _on_order_by_line(db, indent.id, user)
     still_owed = any(
         owed_quantity(line)
         > _d(line.allocated_quantity) + on_order.get(line.id, Decimal("0"))
         for line in indent.items
     )
     _reject_over_allocation(indent, decisions, on_order)
+
+    # "Give nothing" is a real decision, but only the first one: it is what sends the
+    # short lines to procurement. Once an allocation is already signed for this indent,
+    # another one that gives nothing adds no stock and no information, and (approved on
+    # submit when the allocator holds the point) just stacks empty approved documents -
+    # ALL0089 and ALL0090 on IND/2026-27/00169.
+    if not any(_d(d.get("quantity")) > ZERO for d in decisions):
+        signed = (await db.execute(
+            select(Allocation.allocation_no)
+            .where(Allocation.indent_id == indent.id,
+                   Allocation.status.in_(allocations.SETTLED_ALLOCATION_STATUSES))
+            .order_by(Allocation.id).limit(1)
+        )).scalar_one_or_none()
+        if signed:
+            raise ValidationError(
+                f"Nothing to allocate: every line is 0 and {signed} is already approved "
+                "for this indent. Allocate a quantity from a point that holds stock, or "
+                "leave the rest with procurement.")
 
     # Which approval event this is. Every source point inside the raiser's own
     # reporting subtree means he is serving his own stock, and the point owner — not
@@ -6156,6 +7363,7 @@ async def create_allocation_for_indent(db: AsyncSession, indent: Indent,
     # only to its own project's decisions — so trusting the client hid every hold.
     for d in decisions:
         d["project_id"] = indent.project_id or 0
+    await _decide_combinations(db, indent, decisions)
 
     alloc = await allocations.create(
         db, indent.id, indent.indent_no, decisions, user,
@@ -6173,7 +7381,7 @@ async def create_allocation_for_indent(db: AsyncSession, indent: Indent,
         # The ladder can approve at submit (the allocator IS the top of it, or the
         # policy lets him sign his own). The warehouse drafts must be generated then
         # too, exactly as they are when a separate approver acts.
-        on_approved=warehouse_service.create_fulfilment_drafts_for_allocation,
+        on_approved=_fulfilment_drafts,
     )
 
     # Approved the moment it was raised, so the indent has to move here too — the
@@ -6423,10 +7631,6 @@ async def allocation_histories(db: AsyncSession,
 async def act_on_allocation(db: AsyncSession, allocation_id: int, action: str, user,
                             comments: str = "", revisions: list[dict] | None = None):
     """Approve or reject. Approval reserves the stock and updates the indent."""
-    # Imported at the handoff rather than module load: Warehouse reads indent models
-    # for fulfilment sources, so a top-level import would make the dependency circular.
-    from app.modules.warehouse import service as warehouse_service
-
     # Read the indent first: approval can raise a material request, and only this side
     # of the chain can tell inventory which project that request belongs to.
     existing = await allocations.get(db, allocation_id)
@@ -6435,7 +7639,7 @@ async def act_on_allocation(db: AsyncSession, allocation_id: int, action: str, u
         db, allocation_id, action, user, comments,
         ctx={"project_id": getattr(indent, "project_id", None),
              "project_name": getattr(indent, "project_name", None)},
-        on_approved=warehouse_service.create_fulfilment_drafts_for_allocation,
+        on_approved=_fulfilment_drafts,
         revisions=revisions,
     )
 
@@ -6455,6 +7659,67 @@ async def act_on_allocation(db: AsyncSession, allocation_id: int, action: str, u
     return alloc
 
 
+async def _draft_str_issues(db: AsyncSession, indent: Indent, user) -> list:
+    """Draft an STR's material issues over EVERY allocation signed for it. Levels may
+    each allocate from one point, and the warehouse drafts `allocated - already issued`
+    per point, so the allocations must be handed over together: one at a time, the
+    second of two from one point reads as already issued and drafts nothing."""
+    # Imported here, not at module load: warehouse sits after indents in the chain.
+    from app.modules.warehouse import service as warehouse_service
+
+    signed = (await db.execute(select(Allocation).where(
+        Allocation.indent_id == indent.id,
+        Allocation.status.in_(allocations.SETTLED_ALLOCATION_STATUSES),
+    ).order_by(Allocation.id))).scalars().all()
+    if not signed:
+        return []
+    return await warehouse_service.create_fulfilment_drafts_for_allocation(
+        db,
+        SimpleNamespace(indent_id=indent.id,
+                        items=[line for alloc in signed for line in alloc.items]),
+        user,
+    )
+
+
+async def _fulfilment_drafts(db: AsyncSession, alloc, user) -> list:
+    """What a signed allocation hands the warehouse. An STR still in approval hands
+    over nothing: its stock is reserved, but no issue exists to post until its approval
+    has ended, so goods cannot leave under a request that can still be refused."""
+    from app.modules.warehouse import service as warehouse_service
+
+    indent = await db.get(Indent, alloc.indent_id)
+    if indent is None or indent.indent_type != IndentType.STR.value:
+        return await warehouse_service.create_fulfilment_drafts_for_allocation(db, alloc, user)
+    if indent.status == IndentStatus.PENDING_APPROVAL.value:
+        return []
+    return await _draft_str_issues(db, indent, user)
+
+
+async def _finish_str_approval(db: AsyncSession, indent: Indent, user) -> None:
+    """An STR's approval has ended: what was allocated on the way up goes to the
+    warehouse, and a request nothing more is owed on reads as allocated, not as waiting
+    at the Fulfilment Desk. An allocation still unsigned arrives through its own
+    signature, by `_fulfilment_drafts`."""
+    if indent.indent_type != IndentType.STR.value:
+        return
+    if indent.status != IndentStatus.AWAITING_ALLOCATION.value:
+        return
+    await _draft_str_issues(db, indent, user)
+    served = any(_d(line.allocated_quantity) > 0 for line in indent.items)
+    owed = any(_d(line.approved_quantity) > _d(line.allocated_quantity) for line in indent.items)
+    if served and not owed:
+        await _recalculate_indent_allocation_state(db, indent)
+
+
+async def _withdraw_str_allocations(db: AsyncSession, indent: Indent, user, reason: str) -> None:
+    """An STR refused or returned part-way up gives back what was allocated for it."""
+    if indent.indent_type != IndentType.STR.value:
+        return
+    if await allocations.withdraw_for_indent(db, indent.id, user, reason):
+        for line in indent.items:
+            line.allocated_quantity = Decimal("0")
+
+
 async def _settle_indent_approval(db: AsyncSession, indent: Indent, user,
                                   was_in_approval: bool) -> None:
     """After an allocation is approved, decide whether the indent is still climbing.
@@ -6469,6 +7734,12 @@ async def _settle_indent_approval(db: AsyncSession, indent: Indent, user,
     status — so goods that were already dispatched had nowhere to be acknowledged.
     """
     if not was_in_approval:
+        return
+    # An STR's ladder is ended by its approver's own press (`approve_indent`, which
+    # ends it when nothing is owed), and that is what hands its stock to the warehouse
+    # (`_finish_str_approval`). Settling here would end it with no issue drafted.
+    if indent.indent_type == IndentType.STR.value:
+        indent.status = IndentStatus.PENDING_APPROVAL.value
         return
     still_owed = any(
         Decimal(str(line.approved_quantity or 0)) > Decimal(str(line.allocated_quantity or 0))
@@ -6493,9 +7764,12 @@ _LIFECYCLE_NOTICES: dict[str, tuple[str, str]] = {
         "{no} submitted for approval", "{actor} submitted it."),
     IndentStatus.ALLOCATED.value: (
         "Stock set aside", "Stock for {no} has been set aside."),
-    IndentStatus.PARTIALLY_FULFILLED.value: (
+    IndentStatus.PARTIALLY_ALLOCATED.value: (
         "Part of it is coming from stock",
         "Some of {no} is from stock; the rest is on order."),
+    IndentStatus.PARTIALLY_FULFILLED.value: (
+        "Partially fulfilled",
+        "Some of {no} has been received; the rest is on its way."),
     IndentStatus.PENDING_PROCUREMENT.value: (
         "Going to procurement", "{no} is being bought in."),
     IndentStatus.ORDERED.value: (
@@ -6615,7 +7889,17 @@ async def _recalculate_indent_allocation_state(db: AsyncSession, indent: Indent)
         total_allocated += allocated
 
     was = indent.status
-    if total_requested <= 0:
+    has_received = any(_d(item_line.received_quantity) > 0 for item_line in indent.items)
+    all_received = (
+        total_requested > 0
+        and all(_d(item_line.received_quantity) >= _owed_quantity(item_line, recorded) for item_line in indent.items)
+    )
+
+    if all_received:
+        indent.status = IndentStatus.CLOSED.value
+    elif has_received:
+        indent.status = IndentStatus.PARTIALLY_FULFILLED.value
+    elif total_requested <= 0:
         # Every line approved at zero: there is nothing to allocate and nothing to
         # buy. Falling through to PENDING_PROCUREMENT would ask procurement to source
         # nothing. Rejecting it is the approver's call, not this function's.
@@ -6625,7 +7909,7 @@ async def _recalculate_indent_allocation_state(db: AsyncSession, indent: Indent)
     elif total_requested > 0 and total_allocated >= total_requested:
         indent.status = IndentStatus.ALLOCATED.value
     else:
-        indent.status = IndentStatus.PARTIALLY_FULFILLED.value
+        indent.status = IndentStatus.PARTIALLY_ALLOCATED.value
     # Only on an actual transition. This function is re-run on every allocation touch,
     # and re-announcing the status it already held would put a duplicate in the bell
     # every time somebody opened the desk.
@@ -6788,6 +8072,7 @@ def preview_split(item_row: dict, giving: float) -> list[dict]:
 _BATCH_STATUSES = (
     IndentStatus.APPROVED.value,
     IndentStatus.AWAITING_ALLOCATION.value,
+    IndentStatus.PARTIALLY_ALLOCATED.value,
     IndentStatus.PARTIALLY_FULFILLED.value,
     # A cycle member whose shortfall went to procurement is not finished and not done
     # with the store: the goods arrive, the allocation reopens
@@ -7031,6 +8316,14 @@ async def fulfilment_batches(db: AsyncSession, user,
             "oldest_raised_at": min(
                 (ind.created_at for ind in group if ind.created_at), default=None,
             ),
+            # SCM_0082: the queue showed only the oldest date in the cycle and
+            # called it "raised" with nothing saying it was a range — a cycle
+            # spanning 21-22 Oct read as "raised 21 Oct", a day earlier than half
+            # the indents in it. Served so the screen can say "raised 21-22 Oct"
+            # instead of composing a range from a single timestamp.
+            "newest_raised_at": max(
+                (ind.created_at for ind in group if ind.created_at), default=None,
+            ),
         })
     # Newest month first, newest document within it. Sorting on the key alone would put
     # C9 after C10, and sorting on the label would put April after August.
@@ -7070,6 +8363,11 @@ async def _on_order_by_lines(db: AsyncSession,
     """
     if not line_ids:
         return {}
+    indent_ids = (await db.execute(
+        select(IndentItem.indent_id).where(IndentItem.id.in_(line_ids)).distinct()
+    )).scalars().all()
+    for i_id in indent_ids:
+        await _reconcile_indent_mr_receipts(db, i_id)
     return {int(row[0]): _d(row[1]) for row in (await db.execute(
         select(MaterialRequestItem.indent_item_id,
                func.coalesce(func.sum(_MR_STILL_COMING), 0))
@@ -7480,12 +8778,20 @@ async def copy_monthly_cycle(db: AsyncSession, user, *, required_date=None,
     # Straight through create_indent, so numbering, the requester snapshot, validation
     # and the audit row are all identical to a hand-typed indent. A second create path
     # is a second set of rules to keep in step.
+    # Last cycle's organisation / department / project carry forward (2026-11-09); what
+    # HCM fixes for the raiser still wins inside create_indent. The year is today's.
+    source = (await db.execute(select(Indent).where(
+        Indent.indent_no == previous["indent_no"]))).scalars().first()
     return await create_indent(db, IndentCreate(
         required_date=required_date or _next_cycle_required_date(
             previous.get("required_date")),
         indent_type=IndentType.MONTHLY,
         remarks=remarks or f"Copied from {previous['indent_no']}",
         items=lines,
+        organization_id=getattr(source, "organization_id", None),
+        org_department_id=getattr(source, "org_department_id", None),
+        project_id=(getattr(source, "project_id", None)
+                    if getattr(source, "organization_id", None) else None),
     ), user)
 
 

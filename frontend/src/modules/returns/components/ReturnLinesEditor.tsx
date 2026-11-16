@@ -1,8 +1,13 @@
 import { useState, type KeyboardEvent, type WheelEvent } from "react";
 import { PackageSearch, Plus, Trash2 } from "lucide-react";
-import { Field, Input } from "@/shared/components";
+import { Field, Input, Select } from "@/shared/components";
 import { ItemCombobox } from "@/modules/indents/components/ItemCombobox";
 import type { MyStockRow, ReturnLineWrite } from "../types";
+import {
+  CombinationPicker, combinationKey, inStockOptions, pickCombination, type CombinationValue,
+} from "@/shared/combination";
+import { fmtQty, ladderFor, levelsFor, packable, usePackOptions } from "@/shared/packing";
+import { uomDecimals, useUomDecimals } from "@/shared/numberGuard";
 
 /**
  * The LINE ITEMS card — the same Item / Qty / delete row the indent form uses, and the
@@ -44,22 +49,21 @@ const NO_SILENT_STEPPING = {
 };
 
 /**
- * UoMs that cannot be split. Half a box is not a thing anybody can put on a shelf, so
- * the quantity box steps in whole units and refuses a decimal outright rather than
- * accepting 2.5 and letting the backend round it to something the returner never typed.
+ * Whole units only? Read off the UOM master's own "Allows decimal" switch (2026-11-04),
+ * the same table the save enforces — never a hardcoded list of unit names. A line with
+ * no unit yet says nothing; a unit the table does not know is whole, as the guard reads it.
  */
-const WHOLE_UNIT_UOMS = new Set([
-  "NOS", "NO", "NUM", "EA", "EACH", "PCS", "PC", "PIECE", "UNIT", "UNITS",
-  "PACK", "PKT", "PACKET", "BOX", "BOXES", "CTN", "CARTON", "BAG", "BAGS",
-  "BTL", "BOTTLE", "TUBE", "VIAL", "AMP", "STRIP", "ROLL", "SET", "PAIR", "DOZ",
-]);
-
 export function isWholeUnit(uom: string | null | undefined) {
-  return WHOLE_UNIT_UOMS.has(String(uom ?? "").trim().toUpperCase());
+  if (!uom) return false;
+  return (uomDecimals(uom) ?? 0) === 0;
 }
 
-export function holdingFor(stock: MyStockRow[], itemId: number) {
-  const rows = stock.filter((row) => row.item_id === itemId);
+/** What the raiser holds of an item — of one brand / variant / model when the line
+ *  names one (2026-10-23). */
+export function holdingFor(stock: MyStockRow[], itemId: number, combo?: CombinationValue | null) {
+  const want = combo?.brand_id ? combinationKey(combo) : "";
+  const rows = stock.filter((row) => row.item_id === itemId
+    && (!want || (row.brand_id && combinationKey(row) === want)));
   if (rows.length === 0) return null;
   return {
     quantity: rows.reduce((running, row) => running + num(row.available_qty), 0),
@@ -89,6 +93,8 @@ export function ReturnLinesEditor({
    */
   lockedNote?: string | null;
 }) {
+  // Loads the per-UOM decimals table once and re-renders when it lands (isWholeUnit).
+  useUomDecimals(stock[0]?.uom_code ?? null);
   // Which line last tried to pick an item that was already taken. Cleared on the next
   // successful pick, so the warning does not outlive the mistake.
   const [warnedAt, setWarnedAt] = useState<number | null>(null);
@@ -109,14 +115,29 @@ export function ReturnLinesEditor({
   const patch = (index: number, changes: Partial<ReturnLineWrite>) =>
     onChange(lines.map((line, at) => (at === index ? { ...line, ...changes } : line)));
 
+  // Each item's ladders, for the Issue containers a return may be typed in.
+  const packOptions = usePackOptions(lines.map((line) => line.item_id).filter(Boolean));
+
+  /** The brand / variant / model the raiser holds of an item, with quantities. */
+  const combosOf = (itemId: number) => inStockOptions(itemId, stock
+    .filter((row) => row.item_id === itemId)
+    .map((row) => ({ ...row, qty: num(row.available_qty) })));
+  const keyOf = (line: ReturnLineWrite) =>
+    `${line.item_id}|${line.brand_id ? combinationKey(line) : ""}`;
+
   /** Items already on another line — offered greyed out rather than hidden, so the
-   * returner can see the item exists and understand why it cannot be picked twice. */
+   * returner can see the item exists and understand why it cannot be picked twice. An
+   * item held in several brands / variants / models stays pickable: another line of it
+   * is another combination. */
   const takenElsewhere = (index: number) =>
     new Set(
       lines
-        .filter((line, at) => at !== index && line.item_id)
+        .filter((line, at) => at !== index && line.item_id && !combosOf(line.item_id).length)
         .map((line) => line.item_id),
     );
+  const sameElsewhere = (index: number) =>
+    lines.some((line, at) => at !== index && line.item_id
+      && keyOf(line) === keyOf(lines[index]));
 
   const remove = (index: number) =>
     // Never down to zero rows: an empty card gives the raiser nothing to type into and
@@ -156,11 +177,13 @@ export function ReturnLinesEditor({
         * is where the indent puts them — the words are unchanged. */}
       <ul className="space-y-3">
         {lines.map((line, index) => {
-          const holding = line.item_id ? holdingFor(stock, line.item_id) : null;
+          const holding = line.item_id ? holdingFor(stock, line.item_id, line) : null;
+          const combos = line.item_id ? combosOf(line.item_id) : [];
           const wanted = num(line.quantity);
           const over = holding !== null && wanted > holding.quantity;
           const taken = takenElsewhere(index);
-          const duplicate = Boolean(line.item_id) && taken.has(line.item_id);
+          const duplicate = Boolean(line.item_id)
+            && (taken.has(line.item_id) || sameElsewhere(index));
           const whole = isWholeUnit(holding?.uom);
           const fractional = whole && Number.isFinite(wanted) && !Number.isInteger(wanted);
 
@@ -170,7 +193,16 @@ export function ReturnLinesEditor({
                 <Field label={index === 0 ? "Item" : ""}>
                   <ItemCombobox
                     value={line.item_id || ""}
-                    onChange={(value) => patch(index, { item_id: Number(value) || 0 })}
+                    onChange={(value) => {
+                      // Starts on the combination held most of, not already on a line.
+                      const itemId = Number(value) || 0;
+                      const used = new Set(lines.filter((l, at) => at !== index
+                        && l.item_id === itemId).map(keyOf));
+                      const first = combosOf(itemId)
+                        .find((o) => !used.has(`${itemId}|${combinationKey(o)}`));
+                      patch(index, { item_id: itemId,
+                                     ...(first ? pickCombination(first) : pickCombination(null)) });
+                    }}
                     options={options.map((option) => ({
                       ...option,
                       isDisabled: taken.has(option.value),
@@ -181,6 +213,59 @@ export function ReturnLinesEditor({
                     placeholder="Type item code or name…"
                   />
                 </Field>
+                {combos.length > 0 && (
+                  <div className="mt-2">
+                    <CombinationPicker
+                      options={combos}
+                      value={line}
+                      locked={disabled}
+                      uom={holding?.uom}
+                      invalid={sameElsewhere(index)}
+                      ariaLabel={`Brand, variant and model for line ${index + 1}`}
+                      onChange={(combo) => patch(index, combo)}
+                    />
+                  </div>
+                )}
+                {(() => {
+                  // Typed in an Issue container (2026-10-23): a site returns what it was
+                  // issued — strips, boxes — and the line still saves base units.
+                  const ladder = line.item_id
+                    ? ladderFor(packable(packOptions.data?.[line.item_id]), line.brand_id) : undefined;
+                  const levels = ladder ? levelsFor(ladder, "ISSUE").filter((lv) => lv.level > 0) : [];
+                  if (!ladder || !levels.length || ladder.unmapped_usages?.includes("ISSUE")) return null;
+                  const level = levels.find((lv) => lv.level === line.packLevel) ?? levels[0];
+                  const count = line.packLevel === level.level ? line.packCount ?? "" : "";
+                  return (
+                    <div className="mt-2 grid grid-cols-[minmax(0,1fr)_110px] items-end gap-2">
+                      <Field label="Return in">
+                        <Select
+                          value={level.level}
+                          ariaLabel={`Return container for line ${index + 1}`}
+                          isDisabled={disabled}
+                          options={levels.map((lv) => ({
+                            value: lv.level, label: `${lv.name} · ${fmtQty(lv.size)} ${holding?.uom ?? ""}`.trim(),
+                          }))}
+                          onChange={(v) => patch(index, { packLevel: Number(v), packCount: "" })}
+                        />
+                      </Field>
+                      <Field label={`No. of ${level.name}`}>
+                        <Input
+                          type="number" min="0" step="1" className={NO_SPINNER}
+                          data-decimals={0}
+                          value={String(count)} disabled={disabled}
+                          aria-label={`Number of ${level.name}`}
+                          {...NO_SILENT_STEPPING}
+                          onChange={(event) => {
+                            const n = event.target.value === ""
+                              ? "" : Math.max(0, Math.floor(Number(event.target.value)));
+                            patch(index, { packLevel: level.level, packCount: n,
+                                           quantity: n === "" ? "" : String(n * level.size) });
+                          }}
+                        />
+                      </Field>
+                    </div>
+                  );
+                })()}
                 {duplicate || warnedAt === index ? (
                   <p className="mt-1 text-xs text-bad">
                     That item is already on another line — change the quantity there
@@ -199,6 +284,7 @@ export function ReturnLinesEditor({
                 <Field label={index === 0 ? "Qty" : ""}>
                   <Input
                     type="number"
+                    data-uom={holding?.uom ?? ""}
                     min="0"
                     // The shelf quantity is the ceiling: the browser's own number input
                     // then refuses the spinner past it, before any typing is validated.

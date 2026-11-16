@@ -9,7 +9,7 @@ Inventory is the base module — it imports nothing from app.modules — so ever
 module can call move_stock() without inverting the import chain.
 """
 from sqlalchemy import (
-    JSON, BigInteger, Column, Date, DateTime, ForeignKey, Index, Integer, Numeric,
+    JSON, BigInteger, Boolean, Column, Date, DateTime, ForeignKey, Index, Integer, Numeric,
     String, Text, UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
@@ -19,6 +19,8 @@ from app.platform.workflow import doc_registry
 from app.shared.enums import DocType
 from app.shared.enums import Priority, ProjectHoldStatus, ReservationStatus
 from app.shared.models.base import created_at_col, pk, soft_fk, updated_at_col, utcnow
+from app.shared.models.combination import CombinationMixin
+from app.shared.models.master import OrgScopeColumns
 
 """0 rather than NULL means "not set" for bin, batch and project.
 
@@ -52,6 +54,13 @@ class Stock(Base):
     expiry_date = Column(Date, nullable=True)
     project_id = Column(BigInteger, index=True, nullable=False, default=NO_PROJECT)
     project_name = Column(String(200), nullable=True)     # snapshot
+    # The item's COMBINATION — brand, variant, model (mst_item_combinations,
+    # 2026-10-23). Part of the key: 100 of Brand A and 50 of Brand B are two rows, and
+    # nothing issues one for the other. 0 = no combination named (stock booked before
+    # this, or an item with no brands).
+    brand_id = Column(BigInteger, nullable=False, default=0, server_default="0")
+    variant_id = Column(BigInteger, nullable=False, default=0, server_default="0")
+    model_id = Column(BigInteger, nullable=False, default=0, server_default="0")
     # JSON, not a string: the live column is `json` and a lot holds many units, so it
     # is a LIST of serials / IMEIs. It was mapped as String(50) here, which is why
     # nothing ever managed to write one — MySQL rejects a bare string into a json
@@ -74,7 +83,8 @@ class Stock(Base):
     updated_at = updated_at_col()
     __table_args__ = (
         UniqueConstraint("item_id", "warehouse_id", "bin_id", "batch_id", "project_id",
-                         name="uq_stk_balance_item_wh_bin_batch_proj"),
+                         "brand_id", "variant_id", "model_id",
+                         name="uq_stk_balance_item_wh_bin_batch_proj_combo"),
     )
 
 
@@ -94,6 +104,10 @@ class StockMovement(Base):
     batch_id = Column(BigInteger, nullable=False, default=NO_BATCH)
     batch_no = Column(String(50), nullable=True)
     project_id = Column(BigInteger, index=True, nullable=False, default=NO_PROJECT)
+    # Which combination moved (2026-10-23) — see stk_balance.brand_id.
+    brand_id = Column(BigInteger, nullable=False, default=0, server_default="0")
+    variant_id = Column(BigInteger, nullable=False, default=0, server_default="0")
+    model_id = Column(BigInteger, nullable=False, default=0, server_default="0")
     direction = Column(String(3), nullable=False)   # StockDirection: IN | OUT
     quantity = Column(Numeric(16, 3), nullable=False)
     balance_after = Column(Numeric(16, 3), nullable=False)
@@ -112,6 +126,10 @@ class StockMovement(Base):
     ref_id = Column(BigInteger, nullable=True)
     ref_no = Column(String(50), nullable=True)
     remarks = Column(String(500), nullable=True)
+    # How this movement was PACKED, as the sentence the document said at the time
+    # ("2 Box + 5 Strip = 25 TAB", 2026-10-08). A snapshot like every other name on the
+    # row: the ledger is append-only and must read the same after any repack.
+    pack_text = Column(String(300), nullable=True)
     created_by_id = soft_fk()
     created_by_name = Column(String(200), nullable=True)
     created_at = created_at_col()
@@ -137,7 +155,7 @@ Index("ix_stk_ledger_ref", StockMovement.ref_type, StockMovement.ref_id)
 Index("ix_stk_ledger_created", StockMovement.created_at.desc())
 
 
-class Reservation(Base):
+class Reservation(CombinationMixin, Base):
     """One row per promised quantity — stock spoken for but not yet issued.
 
     Exists so stk_balance.reserved_qty is explainable: a reserved quantity with no
@@ -255,7 +273,7 @@ class Allocation(Base):
     id = pk()
     allocation_no = Column(String(30), unique=True, nullable=False)
     indent_id = Column(BigInteger, index=True, nullable=False)
-    indent_no = Column(String(30), nullable=True)
+    indent_no = Column(String(50), nullable=True)
     status = Column(String(30), nullable=False)
     allocated_by_id = soft_fk()
     allocated_by_name = Column(String(200), nullable=True)
@@ -274,7 +292,7 @@ Index("ix_inv_allocations_status_created", Allocation.status,
       Allocation.created_at.desc())
 
 
-class AllocationItem(Base):
+class AllocationItem(CombinationMixin, Base):
     """One decision: this indent line gets this much, out of this warehouse.
 
     A line can appear more than once when the allocator splits it across warehouses.
@@ -295,6 +313,13 @@ class AllocationItem(Base):
     warehouse_name = Column(String(200), nullable=True)
     project_id = Column(BigInteger, nullable=False, default=NO_PROJECT)
     remarks = Column(String(500), nullable=True)
+    # A brand given in place of the one the indent named (2026-10-24): what it asked
+    # for ("Calpol"), and why. NULL = the line gives what was asked.
+    substituted_from = Column(String(300), nullable=True)
+    substitution_reason = Column(String(300), nullable=True)
+    # The desk gave stock with NO brand recorded (booked in before brands were) —
+    # brand 0 here then means "untagged only", never "any" (2026-10-24).
+    no_brand = Column(Boolean, nullable=False, default=False, server_default="0")
 
     allocation = relationship("Allocation", back_populates="items")
 
@@ -312,7 +337,7 @@ class MaterialRequest(Base):
     mr_date = Column(Date, nullable=True)
     # backward pointer to the indent that ran short (business flow: each doc points back)
     indent_id = Column(BigInteger, index=True, nullable=True)
-    indent_no = Column(String(30), nullable=True)
+    indent_no = Column(String(50), nullable=True)
     requested_by_id = soft_fk()
     requested_by_name = Column(String(200), nullable=True)
     department_id = soft_fk()
@@ -340,7 +365,7 @@ Index("ix_inv_material_requests_status_created", MaterialRequest.status,
       MaterialRequest.created_at.desc())
 
 
-class MaterialRequestItem(Base):
+class MaterialRequestItem(CombinationMixin, Base):
     __tablename__ = "inv_material_request_items"
     id = pk()
     mr_id = Column(ForeignKey("inv_material_requests.id", ondelete="CASCADE"),
@@ -351,6 +376,11 @@ class MaterialRequestItem(Base):
     item_name = Column(String(300), nullable=True)    # snapshot
     uom_code = Column(String(20), nullable=True)      # snapshot
     quantity = Column(Numeric(16, 3), nullable=False)
+    # What the line asked for when it was raised (2026-11-03) — the CEILING. Every
+    # later change (an approver's revision, the raiser's correction) may lower the
+    # quantity or leave it, never raise it past this. Set when the request is raised:
+    # an MR is submitted the moment it exists, from the shortfall or by hand.
+    requested_quantity = Column(Numeric(16, 3), nullable=True)
     ordered_quantity = Column(Numeric(16, 3), nullable=False, default=0)
     # How much of THIS line has reached stock, set (never added to) by
     # `mark_mrs_received` from the cumulative receipts. "On order" is
@@ -366,7 +396,36 @@ class MaterialRequestItem(Base):
     mr = relationship("MaterialRequest", back_populates="items")
 
 
-class StockAdjustment(Base):
+class MRQtyChange(Base):
+    """One quantity change on a material request line, after it was raised
+    (2026-11-03): an approver's revision or the raiser's correction. Append-only —
+    the record of who took the request down, from what, to what, and why. A change
+    can only ever LOWER the line (`requested_quantity` is the ceiling), so `to_qty`
+    is never above `ceiling_qty`."""
+
+    __tablename__ = "inv_mr_qty_changes"
+
+    id = pk()
+    mr_id = Column(BigInteger, ForeignKey("inv_material_requests.id", ondelete="CASCADE"),
+                   index=True, nullable=False)
+    mr_item_id = Column(BigInteger, nullable=True)
+    item_id = Column(BigInteger, nullable=False)
+    item_code = Column(String(100), nullable=True)
+    item_name = Column(String(300), nullable=True)
+    uom_code = Column(String(30), nullable=True)
+    from_qty = Column(Numeric(16, 3), nullable=False)
+    to_qty = Column(Numeric(16, 3), nullable=False)
+    ceiling_qty = Column(Numeric(16, 3), nullable=True)
+    # APPROVAL (an approver revised it) | CORRECTION (the raiser, after a send-back)
+    stage = Column(String(20), nullable=False)
+    comments = Column(String(500), nullable=True)
+    changed_by_id = Column(BigInteger, nullable=True)
+    changed_by_name = Column(String(200), nullable=True)
+    changed_by_position = Column(String(200), nullable=True)
+    changed_at = created_at_col()
+
+
+class StockAdjustment(OrgScopeColumns, Base):
     """Stock adjustment with reason (damage, expiry, count variance, found).
 
     Must go through move_stock() so a ledger row is written. Large adjustments
@@ -374,7 +433,10 @@ class StockAdjustment(Base):
     """
     __tablename__ = "inv_adjustments"
     id = pk()
-    adjustment_no = Column(String(30), unique=True, nullable=False)
+    adjustment_no = Column(String(50), unique=True, nullable=False)
+    # The project its NUMBER is drawn under (2026-11-11); its lines keep their own.
+    project_id = soft_fk()
+    project_name = Column(String(200), nullable=True)
     warehouse_id = Column(BigInteger, index=True, nullable=False)
     warehouse_name = Column(String(200), nullable=True)
     reason = Column(String(50), nullable=False)   # DAMAGE, EXPIRY, COUNT_VARIANCE, FOUND, etc.
@@ -395,7 +457,7 @@ class StockAdjustment(Base):
                          cascade="all, delete-orphan", lazy="selectin")
 
 
-class StockAdjustmentItem(Base):
+class StockAdjustmentItem(CombinationMixin, Base):
     __tablename__ = "inv_adjustment_items"
     id = pk()
     adjustment_id = Column(ForeignKey("inv_adjustments.id", ondelete="CASCADE"),
@@ -417,6 +479,11 @@ class StockAdjustmentItem(Base):
     system_qty = Column(Numeric(16, 3), nullable=True)
     physical_qty = Column(Numeric(16, 3), nullable=True)
     unit_cost = Column(Numeric(16, 2), nullable=True, default=0.00)
+    # The unit codes an OUT line writes off, on a coded item. The warehouse module
+    # retires exactly these rows through `inventory.hooks.ON_ADJUSTMENT_OUT`, so the
+    # audit's own record of which physical units died is the row itself, not remarks
+    # prose. Stored as JSON beside the stock the movement carries on its ledger row.
+    serial_numbers = Column(JSON, nullable=True)
     remarks = Column(String(500), nullable=True)
 
     adjustment = relationship("StockAdjustment", back_populates="items")
@@ -440,7 +507,7 @@ STO_KIND_TRANSFER = "STO"
 STO_KIND_MOVEMENT = "SMO"
 
 
-class StockTransferOrder(Base):
+class StockTransferOrder(OrgScopeColumns, Base):
     """Stock Transfer Order (STO) and Stock Movement Order (SMO).
 
     STO: create -> approval -> dispatch -> receive. Stock moves physically ONLY upon
@@ -454,7 +521,12 @@ class StockTransferOrder(Base):
     """
     __tablename__ = "inv_sto"
     id = pk()
-    sto_no = Column(String(30), unique=True, nullable=False)
+    sto_no = Column(String(50), unique=True, nullable=False)
+    # The project the NUMBER is drawn under (2026-11-09) — selected on a direct STO,
+    # copied from the STR on one that serves an STR. Not `from_project_id` /
+    # `to_project_id`, which say whose STOCK moves.
+    project_id = soft_fk()
+    project_name = Column(String(200), nullable=True)
     #: STO or SMO. Defaulted to STO so every row written before this reads correctly.
     doc_kind = Column(String(10), nullable=False, index=True,
                       default=STO_KIND_TRANSFER, server_default=STO_KIND_TRANSFER)
@@ -491,7 +563,7 @@ class StockTransferOrder(Base):
                          cascade="all, delete-orphan", lazy="selectin")
 
 
-class StockTransferOrderItem(Base):
+class StockTransferOrderItem(CombinationMixin, Base):
     __tablename__ = "inv_sto_items"
     id = pk()
     sto_id = Column(ForeignKey("inv_sto.id", ondelete="CASCADE"),

@@ -133,6 +133,9 @@ class TRCreate(BaseModel):
     indent_no: str | None = None
     from_warehouse_id: int | None = None
     from_warehouse_name: str | None = None
+    # SCM_0053: carried from the consignment's own warehouse_address, same rule as
+    # from_warehouse_name — the DC/DOD gate pass is what actually reads this.
+    from_warehouse_address: str | None = None
     to_location_name: str | None = None
     delivery_address: str | None = None
     contact_person: str | None = None
@@ -336,6 +339,7 @@ class TROut(BaseModel):
     indent_no: str | None = None
     from_warehouse_id: int | None = None
     from_warehouse_name: str | None = None
+    from_warehouse_address: str | None = None
     to_location_name: str | None = None
     delivery_address: str | None = None
     contact_person: str | None = None

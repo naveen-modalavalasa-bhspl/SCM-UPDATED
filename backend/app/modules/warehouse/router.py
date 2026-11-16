@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core import throttle
-from app.core.dependencies import get_current_vendor, require_permission, require_permission_or
+from app.core.dependencies import get_current_user, get_current_vendor, require_permission, require_permission_or
 from app.core.pagination import Page, PageParams
 # The acknowledgement rows are an indents-module shape: this endpoint only supplies the
 # warehouse evidence behind them (rule 5 forbids the join happening the other way).
@@ -36,12 +36,18 @@ from app.modules.warehouse import project_holds
 from app.modules.warehouse import stock_edits
 from app.modules.warehouse import stock_report
 from app.modules.warehouse import trips
+from app.modules.warehouse import box_codes
+from app.modules.warehouse import issue_labels as doc_labels
+from app.modules.warehouse import packing as wh_packing
+from app.modules.warehouse import audit_writeoff
+from app.platform.rbac.permissions import STOCK_ADJUST
 from app.platform.rbac.permissions import (
     STOCK_EDIT_APPROVE, STOCK_EDIT_CREATE, STOCK_EDIT_VIEW,
     STOCK_PROJECT_HOLD_MANAGE, STOCK_PROJECT_HOLD_OVERRIDE, STOCK_PROJECT_HOLD_VIEW,
-    INDENT_ACKNOWLEDGE, INDENT_VIEW, STOCK_TRANSFER_ISSUE, STOCK_TRANSFER_ISSUE_POST, STOCK_TRANSFER_QC,
+    INDENT_ACKNOWLEDGE, INDENT_VIEW, ISSUE_SUBMIT, STOCK_TRANSFER_QC,
     STOCK_TRANSFER_QC_APPROVE, STOCK_TRANSFER_RECEIVE, STOCK_TRANSFER_VIEW,
     ADMIN_SETTINGS_MANAGE, TRANSPORT_CREATE, TRANSPORT_TRACK, TRANSPORT_VIEW,
+    STOCK_REPACK,
 )
 from app.modules.warehouse.enums import (
     DISPATCH_ACKNOWLEDGE, DISPATCH_APPROVE, DISPATCH_CREATE, DISPATCH_DELETE,
@@ -114,6 +120,23 @@ async def place_unlocated_stock(warehouse_id: int, db: AsyncSession = Depends(ge
                                 user=Depends(require_permission(MASTER_LOCATION_MANAGE))):
     """Move everything held at no location into the warehouse's Unlocated location."""
     return await service.place_unlocated_stock(db, warehouse_id, user)
+
+
+@router.get("/warehouses/{warehouse_id}/unlocated/audit",
+            response_model=s.UnlocatedStockStatus)
+async def unlocated_audit(warehouse_id: int, db: AsyncSession = Depends(get_db),
+                          _=Depends(require_permission(STOCK_VIEW))):
+    """Stranded units + stale picks standing in the way of the next issue."""
+    return await service.unlocated_audit(db, warehouse_id)
+
+
+@router.post("/warehouses/{warehouse_id}/unlocated/repair",
+             response_model=s.UnlocatedStockStatus)
+async def repair_unlocated_stock(warehouse_id: int, repoint_issues: bool = True,
+                                 db: AsyncSession = Depends(get_db),
+                                 user=Depends(require_permission(MASTER_LOCATION_MANAGE))):
+    """Place, sweep stranded units and repoint stale picks in one press."""
+    return await service.repair_unlocated_stock(db, warehouse_id, user, repoint_issues)
 
 
 @router.get("/warehouses/{warehouse_id}/bins", response_model=list[s.BinRead])
@@ -620,12 +643,53 @@ async def post_issues_batch(body: s.IssueBatchIn, db: AsyncSession = Depends(get
 # Above /issues/{issue_id} for the same reason "cycles" is: FastAPI matches in
 # declaration order and neither of these is an int.
 
+@router.get("/issues/box-sources", response_model=list[s.BoxSourceRead])
+async def issue_box_sources(warehouse_id: int, item_id: int, batch_id: int | None = None,
+                            bin_id: int | None = None, issue_id: int | None = None,
+                            with_units: bool = False,
+                            db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(ISSUE_VIEW))):
+    """Every box of an item an issue line could name here (2026-10-26)."""
+    return await box_codes.box_sources(db, warehouse_id=warehouse_id, item_id=item_id,
+                                       batch_id=batch_id, bin_id=bin_id, issue_id=issue_id,
+                                       with_units=with_units)
+
+
+@router.get("/box-labels", response_model=Page[s.BoxLabelRead])
+async def list_box_labels(status: str | None = None, warehouse_id: int | None = None,
+                          search: str | None = None, item_id: int | None = None,
+                          batch_id: int | None = None, bin_id: int | None = None,
+                          params: PageParams = Depends(),
+                          db: AsyncSession = Depends(get_db),
+                          user=Depends(require_permission(STOCK_VIEW))):
+    """The print queue of new box codes (2026-10-26)."""
+    return await box_codes.list_labels(db, status=status, warehouse_id=warehouse_id,
+                                       search=search, page=params.page, size=params.size,
+                                       item_id=item_id, batch_id=batch_id, bin_id=bin_id)
+
+
+@router.get("/box-labels/facets")
+async def box_label_facets(warehouse_id: int, status: str | None = None,
+                           item_id: int | None = None, batch_id: int | None = None,
+                           db: AsyncSession = Depends(get_db),
+                           user=Depends(require_permission(STOCK_VIEW))):
+    """Items, batches and locations holding box labels — the screen's dropdowns."""
+    return await box_codes.label_facets(db, status=status, warehouse_id=warehouse_id,
+                                        item_id=item_id, batch_id=batch_id)
+
+
+@router.post("/box-labels/printed")
+async def mark_box_labels_printed(body: s.BoxLabelPrintedIn,
+                                  db: AsyncSession = Depends(get_db),
+                                  user=Depends(require_permission(STOCK_VIEW))):
+    return await box_codes.mark_printed(db, body.ids, user)
+
+
 @router.get("/issues/stock-sources", response_model=list[s.IssueStockSource])
 async def issue_stock_sources(warehouse_id: int, item_ids: str,
                               indent_id: int | None = None,
                               db: AsyncSession = Depends(get_db),
-                              user=Depends(require_permission_or(
-        ISSUE_VIEW, STOCK_TRANSFER_ISSUE, service.anywhere_in_reach))):
+                              user=Depends(require_permission(ISSUE_VIEW))):
     """Every (batch, bin) the given items can be drawn from, oldest stock first."""
     return await service.issue_stock_sources(
         db,
@@ -639,8 +703,7 @@ async def issue_stock_sources(warehouse_id: int, item_ids: str,
 @router.post("/issues/stock-sources/fetch", response_model=list[s.IssueStockSource])
 async def issue_stock_sources_post(body: s.IssueStockSourceFetchIn,
                                    db: AsyncSession = Depends(get_db),
-                                   user=Depends(require_permission_or(
-        ISSUE_VIEW, STOCK_TRANSFER_ISSUE, service.anywhere_in_reach))):
+                                   user=Depends(require_permission(ISSUE_VIEW))):
     """Every (batch, bin) the given items can be drawn from, oldest stock first.
     Accepts item_ids in the request body to avoid URI length limits."""
     return await service.issue_stock_sources(
@@ -649,6 +712,7 @@ async def issue_stock_sources_post(body: s.IssueStockSourceFetchIn,
         item_ids=body.item_ids,
         indent_id=body.indent_id,
         project_id=body.project_id,
+        issue_id=body.issue_id,
         user=user,
     )
 
@@ -656,8 +720,7 @@ async def issue_stock_sources_post(body: s.IssueStockSourceFetchIn,
 @router.post("/issues/unit-supply", response_model=list[s.UnitSupplyRead])
 async def issue_unit_supply(body: s.UnitSupplyQuery,
                             db: AsyncSession = Depends(get_db),
-                            user=Depends(require_permission_or(
-        ISSUE_VIEW, STOCK_TRANSFER_ISSUE, service.anywhere_in_reach))):
+                            user=Depends(require_permission(ISSUE_VIEW))):
     """How many identified units each (item, batch, location) could name right now.
 
     A different question from `stock-sources`, off a different table: that one is a
@@ -679,17 +742,49 @@ async def issue_unit_supply(body: s.UnitSupplyQuery,
 # acknowledger who is not also a storekeeper got a 403 on the screen.
 @router.get("/tracking-types", response_model=list[s.TrackingTypeRead])
 async def tracking_types(user=Depends(require_permission_or(
-        ISSUE_VIEW, (STOCK_TRANSFER_ISSUE, INDENT_ACKNOWLEDGE),
-        service.anywhere_in_reach))):
+        ISSUE_VIEW, INDENT_ACKNOWLEDGE, service.anywhere_in_reach))):
     """What each kind of unit identifier is called, so no screen names them itself."""
     return service.tracking_types()
 
 
 @router.get("/issues/{issue_id}", response_model=s.IssueDetail)
 async def get_issue(issue_id: int, db: AsyncSession = Depends(get_db),
-                    user=Depends(require_permission_or(
-        ISSUE_VIEW, STOCK_TRANSFER_ISSUE, service.transfer_issue_in_reach))):
+                    user=Depends(require_permission(ISSUE_VIEW))):
     return await service.get_issue(db, issue_id, user)
+
+
+@router.get("/issues/{issue_id}/labels", response_model=s.DocLabels)
+async def issue_labels(issue_id: int, db: AsyncSession = Depends(get_db),
+                       user=Depends(require_permission(ISSUE_VIEW))):
+    """Every label a POSTED issue's goods carry, item by item (2026-10-28)."""
+    return await doc_labels.issue_labels(db, issue_id)
+
+
+@router.post("/issues/{issue_id}/labels/printed")
+async def issue_labels_printed(issue_id: int, body: s.DocLabelsPrintedIn,
+                               db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission(ISSUE_VIEW))):
+    return await doc_labels.record_printed(
+        db, document_type="ISSUE", document_id=issue_id, label_ids=body.label_ids,
+        printed=body.printed, reprint=body.reprint, user=user)
+
+
+@router.get("/dispatches/{dispatch_id}/received-labels", response_model=s.DocLabels)
+async def received_labels(dispatch_id: int, db: AsyncSession = Depends(get_db),
+                          user=Depends(require_permission_or(
+        INDENT_ACKNOWLEDGE, (DISPATCH_VIEW, STOCK_TRANSFER_RECEIVE), service.anywhere_in_reach))):
+    """Labels for what a site ACKNOWLEDGED on one consignment — never what was sent."""
+    return await doc_labels.received_labels(db, dispatch_id)
+
+
+@router.post("/dispatches/{dispatch_id}/received-labels/printed")
+async def received_labels_printed(dispatch_id: int, body: s.DocLabelsPrintedIn,
+                                  db: AsyncSession = Depends(get_db),
+                                  user=Depends(require_permission_or(
+        INDENT_ACKNOWLEDGE, (DISPATCH_VIEW, STOCK_TRANSFER_RECEIVE), service.anywhere_in_reach))):
+    return await doc_labels.record_printed(
+        db, document_type="RECEIPT", document_id=dispatch_id, label_ids=body.label_ids,
+        printed=body.printed, reprint=body.reprint, user=user)
 
 
 @router.post("/issues", response_model=s.IssueDetail, status_code=201)
@@ -700,23 +795,20 @@ async def create_issue(data: s.IssueWrite, db: AsyncSession = Depends(get_db),
 
 @router.put("/issues/{issue_id}", response_model=s.IssueDetail)
 async def update_issue(issue_id: int, data: s.IssueWrite, db: AsyncSession = Depends(get_db),
-                       user=Depends(require_permission_or(
-        ISSUE_CREATE, STOCK_TRANSFER_ISSUE, service.transfer_issue_in_reach))):
+                       user=Depends(require_permission(ISSUE_CREATE))):
     return await service.update_issue(db, issue_id, data, user)
 
 
 @router.post("/issues/{issue_id}/submit", response_model=s.IssueDetail)
 async def submit_issue(issue_id: int, db: AsyncSession = Depends(get_db),
-                       user=Depends(require_permission_or(
-        ISSUE_CREATE, STOCK_TRANSFER_ISSUE, service.transfer_issue_in_reach))):
+                       user=Depends(require_permission(ISSUE_SUBMIT))):
     return await service.submit_issue(db, issue_id, user)
 
 
 @router.post("/issues/{issue_id}/approve", response_model=s.IssueDetail)
 async def approve_issue(issue_id: int, body: s.ApprovalIn,
                         db: AsyncSession = Depends(get_db),
-                        user=Depends(require_permission_or(
-        ISSUE_POST, STOCK_TRANSFER_ISSUE_POST, service.transfer_issue_in_reach))):
+                        user=Depends(require_permission(ISSUE_POST))):
     return await service.act_on_issue(
         db, issue_id, ApprovalAction.APPROVED.value, body.comments, user
     )
@@ -733,11 +825,17 @@ async def split_issue(issue_id: int, db: AsyncSession = Depends(get_db),
     return await service.split_issue_by_floor(db, issue_id, user)
 
 
+@router.get("/issues/{issue_id}/split-preview")
+async def split_issue_preview(issue_id: int, db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(ISSUE_SPLIT))):
+    """Where a split would send the work, before anything is written."""
+    return await service.preview_floor_split(db, issue_id, user)
+
+
 @router.post("/issues/{issue_id}/reject", response_model=s.IssueDetail)
 async def reject_issue(issue_id: int, body: s.ApprovalIn,
                        db: AsyncSession = Depends(get_db),
-                       user=Depends(require_permission_or(
-        ISSUE_POST, STOCK_TRANSFER_ISSUE_POST, service.transfer_issue_in_reach))):
+                       user=Depends(require_permission(ISSUE_POST))):
     return await service.act_on_issue(
         db, issue_id, ApprovalAction.REJECTED.value, body.comments, user
     )
@@ -745,16 +843,21 @@ async def reject_issue(issue_id: int, body: s.ApprovalIn,
 
 @router.post("/issues/{issue_id}/issue", response_model=s.IssueDetail)
 async def post_issue(issue_id: int, db: AsyncSession = Depends(get_db),
-                     user=Depends(require_permission_or(
-        ISSUE_POST, STOCK_TRANSFER_ISSUE_POST, service.transfer_issue_in_reach))):
+                     user=Depends(require_permission(ISSUE_POST))):
     return await service.post_issue(db, issue_id, user)
+
+
+@router.post("/issues/{issue_id}/issue-split", response_model=s.IssueDetail)
+async def post_split_issue(issue_id: int, db: AsyncSession = Depends(get_db),
+                           user=Depends(require_permission(ISSUE_POST))):
+    """Issue every floor piece of a split issue at once — all or nothing."""
+    return await service.post_split_issue(db, issue_id, user)
 
 
 @router.put("/issues/{issue_id}/serials", response_model=s.IssueDetail)
 async def set_issue_serials(issue_id: int, body: s.IssueSerialsIn,
                             db: AsyncSession = Depends(get_db),
-                            user=Depends(require_permission_or(
-        ISSUE_POST, STOCK_TRANSFER_ISSUE_POST, service.transfer_issue_in_reach))):
+                            user=Depends(require_permission(ISSUE_POST))):
     return await service.set_issue_serials(db, issue_id, body, user)
 
 
@@ -767,8 +870,7 @@ async def acknowledge_issue(issue_id: int, body: s.AcknowledgeIssueIn,
 
 @router.post("/issues/{issue_id}/cancel", response_model=s.IssueDetail)
 async def cancel_issue(issue_id: int, body: s.ReasonIn, db: AsyncSession = Depends(get_db),
-                       user=Depends(require_permission_or(
-        ISSUE_CREATE, STOCK_TRANSFER_ISSUE, service.transfer_issue_in_reach))):
+                       user=Depends(require_permission(ISSUE_CREATE))):
     return await service.cancel_issue(db, issue_id, body.reason, user)
 
 
@@ -895,6 +997,18 @@ async def list_consignments(params: PageParams = Depends(), status: str | None =
 async def get_consignment(consignment_id: int, db: AsyncSession = Depends(get_db),
                           user=Depends(require_permission(DISPATCH_VIEW))):
     return await service.get_dispatch(db, consignment_id, user)
+
+
+@router.get("/consignments/{consignment_id}/transfer-context")
+async def consignment_transfer_context(consignment_id: int, db: AsyncSession = Depends(get_db),
+                                       _=Depends(require_permission(DISPATCH_VIEW))):
+    return await service.consignment_transfer_context(db, consignment_id)
+
+
+@router.get("/issues/{issue_id}/transfer-context")
+async def issue_transfer_context(issue_id: int, db: AsyncSession = Depends(get_db),
+                                 _=Depends(require_permission(ISSUE_VIEW))):
+    return await service.issue_transfer_context(db, issue_id)
 
 
 @router.post("/consignments", response_model=s.DispatchDetail, status_code=201)
@@ -1269,14 +1383,29 @@ async def list_serials(params: PageParams = Depends(), status: str | None = None
                        warehouse_id: int | None = None, bin_id: int | None = None,
                        search: str | None = None, issue_id: int | None = None,
                        issue_line_id: int | None = None, unbatched: bool = False,
-                       claim_free: bool = False,
+                       claim_free: bool = False, scope: str | None = None,
                        db: AsyncSession = Depends(get_db),
                        user=Depends(require_permission(STOCK_VIEW))):
     return await service.list_serials(db, params, status=status, item_id=item_id,
                                       batch_id=batch_id, warehouse_id=warehouse_id,
                                       bin_id=bin_id, search=search, issue_id=issue_id,
                                       issue_line_id=issue_line_id, unbatched=unbatched,
-                                      claim_free=claim_free, user=user)
+                                      claim_free=claim_free, scope=scope, user=user)
+
+
+@router.get("/serials/scope-counts", response_model=s.SerialScopeCounts)
+async def serial_scope_counts(item_id: int, warehouse_id: int,
+                              batch_id: int | None = None,
+                              bin_id: int | None = None,
+                              issue_id: int | None = None,
+                              issue_line_id: int | None = None,
+                              db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(STOCK_VIEW))):
+    """Bay vs batch vs point code counts behind the picker's scope switch."""
+    return await service.serial_scope_counts(db, warehouse_id=warehouse_id,
+                                             item_id=item_id, batch_id=batch_id,
+                                             bin_id=bin_id, issue_id=issue_id,
+                                             issue_line_id=issue_line_id, user=user)
 
 
 @router.get("/serials/lookup")
@@ -1308,6 +1437,38 @@ async def serial_codes(payload: s.UnitCodeQuery, db: AsyncSession = Depends(get_
     The stock ledger names the units that MOVED and needs their codes; the codes live
     on this module's per-unit rows, which inventory may not read (rule 5)."""
     return {"items": await service.unit_codes(db, payload.codes, user=user)}
+
+
+# --- Packs on the shelf (2026-10-08) -------------------------------------------------
+
+@router.post("/packs/summary")
+async def pack_summary(body: s.PackSummaryIn, db: AsyncSession = Depends(get_db),
+                       user=Depends(require_permission(STOCK_VIEW))):
+    """How each of these stock rows is packed: "2 Carton + 3 Box + 14 loose TAB"."""
+    return {"items": await wh_packing.summary_for_stock(db, body.stock_ids)}
+
+
+@router.get("/packs/lots/{stock_id}")
+async def lot_packs(stock_id: int, db: AsyncSession = Depends(get_db),
+                    user=Depends(require_permission(STOCK_VIEW))):
+    """One stock row pack by pack, with each hierarchy's levels and the smallest
+    level a repack may choose — what the repack screen draws."""
+    return await wh_packing.lot_packs_by_stock(db, stock_id)
+
+
+@router.post("/packs/lots/{stock_id}/repack")
+async def repack_lot(stock_id: int, body: s.RepackIn, db: AsyncSession = Depends(get_db),
+                     user=Depends(require_permission(STOCK_REPACK))):
+    """Change the pack levels of stock on the shelf. Never the quantity, never the
+    hierarchy, never below the level a code was minted at."""
+    return await wh_packing.repack_stock(db, stock_id, body, user)
+
+
+@router.get("/packs/code/{code}")
+async def pack_by_code(code: str, db: AsyncSession = Depends(get_db),
+                       user=Depends(require_permission(STOCK_VIEW))):
+    """A scanned pack code and every unit inside it, at any depth."""
+    return await wh_packing.pack_by_code(db, code)
 
 
 # --- Project Lots (Stock Segregation tab): set a lot aside for one project ---------
@@ -1451,6 +1612,18 @@ async def my_acknowledgements(search: str | None = None, status: str | None = No
         indent_types=indent_type)
 
 
+# The reasons a delivered quantity can be turned away for, with the words the screen
+# shows (2026-11-06). Served so the dropdown and the validation cannot disagree.
+@router.get("/acknowledgements/rejection-reasons")
+async def acknowledgement_rejection_reasons(user=Depends(require_permission_or(
+        INDENT_VIEW, STOCK_TRANSFER_RECEIVE, service.anywhere_in_reach))):
+    from app.modules.indents.schemas import ACK_DAMAGE_REASONS, ACK_REJECTION_LABELS
+    return [{"value": value, "label": label,
+             "needs_comment": value == "OTHER",
+             "claims_carrier": value in ACK_DAMAGE_REASONS}
+            for value, label in ACK_REJECTION_LABELS.items()]
+
+
 # Direct issues (no indent) handed to this person. Same gate as /acknowledgements/mine;
 # the service only ever returns issues whose `issued_to_id` is the caller.
 @router.get("/acknowledgements/direct-issues", response_model=list[s.DirectIssueAckRow])
@@ -1460,6 +1633,18 @@ async def my_direct_issue_acknowledgements(search: str | None = None,
                                            user=Depends(require_permission_or(
         INDENT_VIEW, STOCK_TRANSFER_RECEIVE, service.anywhere_in_reach))):
     return await service.direct_issues_for_recipient(
+        db, user, search=search, only_actionable=only_actionable)
+
+
+# Direct STOs arriving at the caller's point: Inventory > Stock Transfer >
+# Acknowledgements (2026-10-29). Received through the direct-issue receipt routes below.
+@router.get("/acknowledgements/stock-transfers", response_model=list[s.StockTransferAckRow])
+async def my_stock_transfer_acknowledgements(search: str | None = None,
+                                             only_actionable: bool = False,
+                                             db: AsyncSession = Depends(get_db),
+                                             user=Depends(require_permission_or(
+        INDENT_VIEW, STOCK_TRANSFER_RECEIVE, service.anywhere_in_reach))):
+    return await service.stock_transfer_issues_for_receiver(
         db, user, search=search, only_actionable=only_actionable)
 
 
@@ -1479,7 +1664,11 @@ async def acknowledge_direct_issue(issue_id: int, body: IndentAcknowledgeIn,
         INDENT_ACKNOWLEDGE, STOCK_TRANSFER_RECEIVE, service.anywhere_in_reach))):
     lines = {line.indent_item_id: Decimal(str(line.received_quantity)) for line in body.lines}
     return await service.acknowledge_direct_issue(
-        db, issue_id, lines, user, condition=body.condition, remarks=body.remarks)
+        db, issue_id, lines, user, condition=body.condition, remarks=body.remarks,
+        package_receipts={line.indent_item_id: line.package_receipts or {}
+                          for line in body.lines},
+        rejections={line.indent_item_id: [r.model_dump() for r in line.rejections]
+                    for line in body.lines if line.rejections})
 
 
 @router.get("/acknowledgements/direct-issues/{issue_id:int}/attachments",
@@ -1534,6 +1723,37 @@ async def indent_fulfilment(indent_id: int, db: AsyncSession = Depends(get_db),
 # Attachments
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Stock audit write-offs (2026-10-31): what the audit form counts and picks from.
+# An audit only takes stock off; the rules are in `audit_writeoff`.
+# ---------------------------------------------------------------------------
+
+@router.get("/stock-audit/items")
+async def stock_audit_items(warehouse_id: int, search: str | None = None,
+                            db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(STOCK_ADJUST))):
+    return await audit_writeoff.audit_items(db, warehouse_id, user, search=search)
+
+
+@router.get("/stock-audit/lots")
+async def stock_audit_lots(warehouse_id: int, item_id: int,
+                           db: AsyncSession = Depends(get_db),
+                           user=Depends(require_permission(STOCK_ADJUST))):
+    return await audit_writeoff.audit_lots(db, warehouse_id, item_id, user)
+
+
+@router.get("/stock-audit/sources")
+async def stock_audit_sources(warehouse_id: int, item_id: int, batch_id: int = 0,
+                              bin_id: int = 0, brand_id: int | None = None,
+                              variant_id: int | None = None, model_id: int | None = None,
+                              db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(STOCK_ADJUST))):
+    return await audit_writeoff.lot_sources(
+        db, warehouse_id=warehouse_id, item_id=item_id, batch_id=batch_id,
+        bin_id=bin_id, user=user, brand_id=brand_id, variant_id=variant_id,
+        model_id=model_id)
+
+
 @router.get("/attachments", response_model=list[s.AttachmentRead])
 async def list_attachments(entity_type: str, entity_id: int,
                            db: AsyncSession = Depends(get_db),
@@ -1548,11 +1768,11 @@ async def list_attachments(entity_type: str, entity_id: int,
 async def add_attachment(entity_type: str = Form(...), entity_id: int = Form(...),
                          doc_category: str | None = Form(None), file: UploadFile = File(...),
                          db: AsyncSession = Depends(get_db),
-                         user=Depends(require_permission_or(
-        RECEIPT_CREATE, (QC_OUTWARD_CREATE, QC_OUTWARD_UPDATE),
-        service.anywhere_in_reach))):
-    # `entity_type`/`entity_id` arrive as form fields — see `service.add_attachment`,
-    # which scopes them before a byte is written.
+                         user=Depends(get_current_user)):
+    # The create permission is per `entity_type` — a gate pass on an ISSUE needs
+    # issue.create, a RECEIPT's needs receipt.create, and so on — so it cannot be a
+    # fixed route guard. `service.add_attachment` checks it (`assert_can_write_attachment`)
+    # and scopes the document before a byte is written.
     return await service.add_attachment(
         db, entity_type=entity_type, entity_id=entity_id, upload=file,
         doc_category=doc_category, user=user)
@@ -1571,9 +1791,9 @@ async def download_attachment(attachment_id: int, db: AsyncSession = Depends(get
 
 @router.delete("/attachments/{attachment_id}", status_code=204)
 async def delete_attachment(attachment_id: int, db: AsyncSession = Depends(get_db),
-                            user=Depends(require_permission_or(
-        RECEIPT_CREATE, (QC_OUTWARD_CREATE, QC_OUTWARD_UPDATE),
-        service.anywhere_in_reach))):
+                            user=Depends(get_current_user)):
+    # Permission is per entity_type, read off the attachment's own document; the
+    # service checks it (`assert_can_write_attachment`) after reading the row.
     await service.delete_attachment(db, attachment_id, user)
 
 
@@ -1734,6 +1954,17 @@ async def incoming_dispatch_options(warehouse_id: int = Query(...),
     return await service.incoming_dispatch_options(db, warehouse_id, search)
 
 
+@router.get("/options/receipt-scope")
+async def receipt_scope(po_id: int | None = None, despatch_note_id: int | None = None,
+                        transfer_id: int | None = None, dispatch_id: int | None = None,
+                        db: AsyncSession = Depends(get_db),
+                        _=Depends(require_permission(RECEIPT_VIEW))):
+    """The organisation a receipt copies from the document before it, or null."""
+    return await service.receipt_scope_source(
+        db, po_id=po_id, despatch_note_id=despatch_note_id, transfer_id=transfer_id,
+        dispatch_id=dispatch_id)
+
+
 @router.get("/options/dispatch-receipt-source", response_model=s.DispatchReceiptSource)
 async def dispatch_receipt_source(dispatch_id: int = Query(...),
                                   warehouse_id: int = Query(...),
@@ -1747,6 +1978,13 @@ async def indent_options(search: str | None = None, warehouse_id: int | None = N
                          db: AsyncSession = Depends(get_db),
                          _=Depends(require_permission(ISSUE_VIEW))):
     return await service.indent_options(db, search, warehouse_id)
+
+
+@router.get("/options/stos")
+async def sto_issue_options(search: str | None = None, warehouse_id: int | None = None,
+                            db: AsyncSession = Depends(get_db),
+                            _=Depends(require_permission(ISSUE_VIEW))):
+    return await service.sto_issue_options(db, search, warehouse_id)
 
 
 @router.get("/options/indent-issue-source", response_model=s.IndentIssueSource)
@@ -1823,6 +2061,26 @@ async def employee_destination(employee_id: int = Query(...),
     return await service.employee_destination(db, employee_id)
 
 
+@router.get("/options/issue-employees", response_model=s.IssueEmployeePage)
+async def issue_employee_options(search: str | None = None, office_id: int | None = None,
+                                 db: AsyncSession = Depends(get_db),
+                                 _=Depends(require_permission(STOCK_VIEW))):
+    """Every active employee, searched on the server; `office_id` narrows to one office."""
+    return await service.issue_employee_options(db, search=search, office_id=office_id)
+
+
+@router.get("/options/issue-destinations", response_model=s.IssueDestinationPage)
+async def issue_destination_options(search: str | None = None,
+                                    from_warehouse_id: int | None = None,
+                                    office_id: int | None = None, with_sac: bool = False,
+                                    db: AsyncSession = Depends(get_db),
+                                    user=Depends(require_permission(STOCK_VIEW))):
+    """Every warehouse, MDP and LIP a direct issue can go to — never the user's own."""
+    return await service.issue_destination_options(
+        db, user, search=search, from_warehouse_id=from_warehouse_id,
+        office_id=office_id, with_sac=with_sac)
+
+
 @router.get("/options/projects", response_model=list[s.Option])
 async def project_options(search: str | None = None, db: AsyncSession = Depends(get_db),
                           _=Depends(require_permission(STOCK_VIEW))):
@@ -1881,8 +2139,7 @@ async def delete_picking(picking_id: int, db: AsyncSession = Depends(get_db),
 
 @router.delete("/issues/{issue_id}", status_code=204)
 async def delete_issue(issue_id: int, db: AsyncSession = Depends(get_db),
-                       user=Depends(require_permission_or(
-        ISSUE_DELETE, STOCK_TRANSFER_ISSUE, service.transfer_issue_in_reach))):
+                       user=Depends(require_permission(ISSUE_DELETE))):
     await service.delete_draft(db, "issue", issue_id, user)
 
 

@@ -16,6 +16,7 @@ import { QuotePriceTrail } from "../components/QuotePriceTrail";
 import { QuoteChangeRequestModal } from "../components/QuoteChangeRequestModal";
 import { money } from "./RequisitionListPage";
 import type { PriceTrailVersion } from "../types";
+import { AskedVsQuoted } from "@/shared/combination";
 
 const GST_LABEL = (region?: string | null) =>
   region === "INTRA" ? "CGST + SGST (intra-state)" : "IGST (inter-state)";
@@ -231,6 +232,13 @@ export function QuotationDetailPage() {
             <div className="mb-4 grid grid-cols-2 gap-x-6 gap-y-2 rounded-xl bg-surface-2/40 p-3 text-sm sm:grid-cols-4">
               <Fact label="Against RFQ" value={quote.rfq_no ?? `#${quote.rfq_id}`}
                     onOpen={() => nav(`/procurement/rfqs/${quote.rfq_id}`)} />
+              {quote.organization_name && (
+                <Fact label="Organisation" value={quote.organization_name} />
+              )}
+              {(quote.project_name ?? quote.org_department_name) && (
+                <Fact label={quote.project_name ? "Project" : "Department"}
+                      value={(quote.project_name ?? quote.org_department_name) as string} />
+              )}
               <Fact label="Submitted"
                     value={quote.submitted_at ? fmtDate(quote.submitted_at) : "Not yet"} />
               <Fact label="Valid till"
@@ -284,6 +292,7 @@ export function QuotationDetailPage() {
                         <div className="font-mono text-[11px] text-muted">
                           {item.item_code ?? "—"}
                         </div>
+                        <AskedVsQuoted value={item} className="mt-1" />
                       </td>
                       <td className="py-2.5 pr-3 text-right font-mono">{item.quantity}</td>
                       <td className="py-2.5 pr-3 text-right font-mono">{money(item.rate)}</td>

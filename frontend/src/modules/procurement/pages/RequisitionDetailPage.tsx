@@ -1,6 +1,10 @@
+import { departmentOf } from "../orgScope";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Can, ErrorBanner, PageHeader, ResponsiveList, StatusPill, useToast, type Column } from "@/shared/components";
+import {
+  Can, ErrorBanner, PageHeader, QuantityChanges, ResponsiveList, StatusPill, useToast, type Column,
+} from "@/shared/components";
+import { useAuth } from "@/shared/auth/AuthContext";
 import { Button } from "../components/ActionButton";
 import { fmtDate } from "@/shared/datetime";
 import { approvalTrailApi, approvalTrailKey, requisitionApi } from "../api";
@@ -9,6 +13,7 @@ import { DetailShell, SectionCard, FactGrid, RefChips, RailStat } from "../compo
 import { money } from "./RequisitionListPage";
 import type { ReqItem } from "../types";
 import { TONE_APPROVE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
+import { CombinationTag } from "@/shared/combination";
 
 /**
  * One requisition, and everything that can be done to it.
@@ -36,6 +41,14 @@ export function RequisitionDetailPage() {
   const trail = useQuery({
     queryKey: approvalTrailKey("REQUISITION", reqId),
     queryFn: () => approvalTrailApi.get("REQUISITION", reqId),
+    enabled: Number.isFinite(reqId),
+  });
+
+  // Every recorded quantity change (2026-11-03) — a line cut below what its material
+  // request asked for. Lines can only ever come down, so each row is a cut.
+  const qtyChanges = useQuery({
+    queryKey: ["requisition", id, "quantity-changes"],
+    queryFn: () => requisitionApi.quantityChanges(reqId),
     enabled: Number.isFinite(reqId),
   });
 
@@ -77,7 +90,9 @@ export function RequisitionDetailPage() {
   // from the person who IS supposed to approve. Falling back to the old status check
   // means the worst case is the pre-2026-08-20 behaviour (a button that 403s), never
   // a document nobody can sign.
-  const canDecide = req?.awaiting_me ?? isPending;
+  const { can, me } = useAuth();
+  const isAdmin = can("admin.workflow.manage") || Boolean(me?.roles.includes("ADMIN")) || Boolean(me?.roles.includes("SUPERUSER"));
+  const canDecide = isPending && (Boolean(req?.awaiting_me) || isAdmin);
   const isApproved = req?.status === "APPROVED";
 
   const columns: Column<ReqItem>[] = [
@@ -88,6 +103,7 @@ export function RequisitionDetailPage() {
         <div className="min-w-0">
           <div className="text-sm font-medium text-ink">{r.item_name ?? `Item ${r.item_id}`}</div>
           <div className="font-mono text-[11px] text-muted">{r.item_code ?? "—"}</div>
+          <CombinationTag value={r} className="mt-1" />
         </div>
       ),
     },
@@ -95,7 +111,14 @@ export function RequisitionDetailPage() {
       key: "qty",
       header: "Quantity",
       className: "text-right",
-      render: (r) => `${r.quantity} ${r.uom_code ?? ""}`.trim(),
+      render: (r) => (
+        <div className="text-right">
+          <div className="tabular font-semibold text-ink">{`${r.quantity} ${r.uom_code ?? ""}`.trim()}</div>
+          {r.requested_quantity != null && r.requested_quantity !== r.quantity && (
+            <div className="text-[11px] text-muted">asked {r.requested_quantity}</div>
+          )}
+        </div>
+      ),
     },
     // No rate, no amount, no "ordered", no per-line indent. Nobody has quoted yet, so a
     // figure here reads as a price when it is a guess; the ordered quantity belongs on
@@ -115,11 +138,18 @@ export function RequisitionDetailPage() {
               * it. The rung comes off the engine's own trail, so a ladder renamed on
               * Settings > Approvals Config renames this badge too. */}
             {req && (
-              <StatusPill
-                status={isPending && trail.data?.stage_name
-                  ? `Pending at ${trail.data.stage_name}`
-                  : req.status}
-              />
+              <div className="flex items-center gap-2">
+                <StatusPill
+                  status={isPending && trail.data?.stage_name
+                    ? `Pending at ${trail.data.stage_name}`
+                    : req.status}
+                />
+                {isAdmin && isPending && (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-purple-500/10 text-purple-700 border border-purple-500/20">
+                    Admin Override
+                  </span>
+                )}
+              </div>
             )}
             <Button variant="subtle" onClick={() => nav("/procurement/requisitions")}>
               Back
@@ -137,15 +167,15 @@ export function RequisitionDetailPage() {
                 </Button>
               </Can>
             )}
-            {canDecide && (
-              <Can do="requisition.approve">
+            {canDecide && (can("requisition.approve") || isAdmin) && (
+              <>
                 <Button className={TONE_REJECT} variant="subtle" disabled={busy} onClick={() => reject.mutate()}>
                   Reject
                 </Button>
                 <Button className={TONE_APPROVE} disabled={busy} onClick={() => approve.mutate()}>
-                  Approve
+                  {isAdmin && !req?.awaiting_me ? "Approve (Admin Override)" : "Approve"}
                 </Button>
-              </Can>
+              </>
             )}
             {/* Explicit, never automatic: approving a requisition does not send it
               * out. A buyer decides who is asked and when, and the form opens
@@ -189,10 +219,11 @@ export function RequisitionDetailPage() {
                         ? <span className="capitalize">{req.priority.toLowerCase()}</span>
                         : "—",
                     },
-                    { label: "Department", value: req.department_name ?? "—" },
+                    { label: "Department", value: departmentOf(req) ?? "—" },
                     { label: "Shipment Address", value: req.warehouse_name ?? "—" },
                     { label: "Project", value: req.project_name ?? "—" },
-                    { label: "Company", value: req.company_name ?? "—" },
+                    { label: req.organization_name ? "Organisation" : "Company",
+                      value: req.organization_name ?? req.company_name ?? "—" },
                   ]}
                 />
 
@@ -228,11 +259,13 @@ export function RequisitionDetailPage() {
                       {r.item_name ?? `Item ${r.item_id}`}
                     </div>
                     <div className="font-mono text-[11px] text-muted">{r.item_code ?? "—"}</div>
+                    <CombinationTag value={r} />
                     <div className="text-xs text-body">{r.quantity} {r.uom_code ?? ""}</div>
                   </div>
                 )}
               />
             </SectionCard>
+            <QuantityChanges rows={qtyChanges.data ?? []} loading={qtyChanges.isLoading} />
           </>
         )}
         rail={(

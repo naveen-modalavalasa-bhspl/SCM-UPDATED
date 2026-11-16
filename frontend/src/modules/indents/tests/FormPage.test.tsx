@@ -51,6 +51,8 @@ vi.mock("../api", async () => {
         scope: { employeeId: number | null; activePositionId: number | null },
         search = "",
       ) => [...scoped(scope), "vehicles", search] as const,
+      strSources: (scope: { employeeId: number | null; activePositionId: number | null }) =>
+        [...scoped(scope), "str-sources"] as const,
       bomChoices: (scope: { employeeId: number | null; activePositionId: number | null }) =>
         [...scoped(scope), "bom-choices"] as const,
       bomChoiceItems: (
@@ -80,6 +82,7 @@ vi.mock("../api", async () => {
         { id: 77, code: "AP39-TT-4512", name: "AP39-TT-4512" },
         { id: 78, code: "TS09-XX-1000", name: "TS09-XX-1000" },
       ])),
+      strSources: vi.fn(() => Promise.resolve([])),
       create: vi.fn(() => Promise.resolve({
         id: 42,
         indent_no: "IND/2026/0042",

@@ -24,7 +24,10 @@ from datetime import date, timedelta
 import pytest
 
 from app.modules.approvals import service as approvals_service
-from app.modules.approvals.schemas import ApprovalQuantityIn, ConsolidationFilters
+from app.modules.approvals.schemas import (
+    ApprovalQuantityIn, ConsolidationApprovalIn, ConsolidationApprovalLineIn,
+    ConsolidationFilters,
+)
 from app.modules.indents import service as indent_service
 from app.modules.indents.enums import IndentStatus, IndentType
 from app.modules.indents.schemas import IndentCreate, IndentItemIn, IndentUpdate
@@ -500,3 +503,114 @@ async def test_final_authority_pair_both_see_the_same_consolidated_batch(db):
     assert len(sph_batches) == 1
     assert sph_batches[0].indent_count == 3
     assert sph_batches[0].current_stage_name == "SPH"
+
+
+# ---------------- the approver decides at the indent ----------------
+#
+# The Consolidation screen no longer shares a batch total out in proportion: every
+# indent's line carries the quantity typed in its own box, and `approve_consolidation`
+# receives exactly that. These pin down what the SERVER does with it — each indent goes
+# on at its own quantity, a line above its ceiling is refused without stopping the
+# others, and a line sent as excluded is marked dropped.
+
+def _batch_line(indent_id, line_id, qty, *, excluded=False):
+    return ConsolidationApprovalLineIn(
+        indent_id=indent_id, line_id=line_id, approved_quantity=qty, excluded=excluded)
+
+
+async def test_each_indent_in_a_batch_goes_on_at_its_own_quantity(db):
+    holders = await _org(db)
+    await _save_ladder(db, holders[801])
+    item = await _item(db)
+    oe = holders[805]
+    indents = [await _raise_monthly(db, holders[p], item, 10) for p in PILOT_IDS]
+    ids = [indent.id for indent in indents]
+    full, cut = indents[0].items[0], indents[1].items[0]
+    full_id, cut_id = full.id, cut.id
+
+    result = await approvals_service.approve_consolidation(
+        db,
+        ConsolidationApprovalIn(
+            indent_ids=[ids[0], ids[1]],
+            lines=[_batch_line(ids[0], full_id, 10), _batch_line(ids[1], cut_id, 4)],
+        ),
+        oe,
+    )
+
+    assert result.approved_count == 2
+    assert result.failed == []
+    await db.refresh(full)
+    await db.refresh(cut)
+    assert float(full.approved_quantity) == 10
+    assert float(cut.approved_quantity) == 4
+    # The third indent was not in the request, so it is still waiting on the OE.
+    batches = await approvals_service.consolidation_batches_for_user(db, oe)
+    assert [row.id for row in batches[0].indents] == [ids[2]]
+
+
+async def test_a_batch_line_above_its_ceiling_is_refused_and_the_others_still_go(db):
+    holders = await _org(db)
+    await _save_ladder(db, holders[801])
+    item = await _item(db)
+    oe = holders[805]
+    indents = [await _raise_monthly(db, holders[p], item, 10) for p in PILOT_IDS]
+    ids = [indent.id for indent in indents]
+    line_ids = [indent.items[0].id for indent in indents]
+
+    result = await approvals_service.approve_consolidation(
+        db,
+        ConsolidationApprovalIn(
+            indent_ids=[ids[0], ids[1]],
+            # Asked for 10: 11 is more than the request, and an approver may only reduce.
+            lines=[_batch_line(ids[0], line_ids[0], 11), _batch_line(ids[1], line_ids[1], 10)],
+        ),
+        oe,
+    )
+
+    assert result.approved_count == 1
+    assert result.approved_indent_ids == [ids[1]]
+    assert [failure.indent_id for failure in result.failed] == [ids[0]]
+    assert "cannot exceed" in result.failed[0].reason
+    # The refused indent is untouched: still in the OE's queue, with the third one.
+    batches = await approvals_service.consolidation_batches_for_user(db, oe)
+    assert {row.id for row in batches[0].indents} == {ids[0], ids[2]}
+
+
+async def test_a_line_sent_as_excluded_is_dropped_while_the_indent_goes_on(db):
+    holders = await _org(db)
+    await _save_ladder(db, holders[801])
+    first = await _item(db)
+    second = Item(code="IT-CONS-2", name="Second Item", uom_id=first.uom_id, uom_code="NOS")
+    db.add(second)
+    await db.flush()
+    requester = holders[811]
+    created = await indent_service.create_indent(
+        db,
+        IndentCreate(
+            required_date=date.today() + timedelta(days=3), priority="NORMAL",
+            indent_type=IndentType.MONTHLY,
+            items=[IndentItemIn(item_id=first.id, quantity=10),
+                   IndentItemIn(item_id=second.id, quantity=6)],
+        ),
+        requester,
+    )
+    indent = await indent_service.submit_indent(db, created.id, requester)
+    kept, dropped = sorted(indent.items, key=lambda line: (line.line_no, line.id))
+    indent_id, kept_id, dropped_id = indent.id, kept.id, dropped.id
+
+    result = await approvals_service.approve_consolidation(
+        db,
+        ConsolidationApprovalIn(
+            indent_ids=[indent_id],
+            lines=[_batch_line(indent_id, kept_id, 10),
+                   _batch_line(indent_id, dropped_id, 0, excluded=True)],
+        ),
+        holders[805],
+    )
+
+    assert result.approved_count == 1
+    await db.refresh(kept)
+    await db.refresh(dropped)
+    assert kept.is_excluded is False and float(kept.approved_quantity) == 10
+    assert dropped.is_excluded is True and float(dropped.approved_quantity) == 0
+

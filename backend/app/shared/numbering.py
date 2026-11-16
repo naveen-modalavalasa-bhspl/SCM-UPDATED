@@ -24,6 +24,13 @@ def _fiscal_year(now: datetime | None = None) -> str:
     return f"{start}-{str(start + 1)[-2:]}"
 
 
+def selectable_fiscal_years(now: datetime | None = None) -> list[str]:
+    """The years a form may pick: this one and the one before it, newest first. Never a
+    future year, because a number cannot belong to a year that has not started."""
+    now = now or ist_now()
+    return [_fiscal_year(now), _fiscal_year(now.replace(year=now.year - 1, day=1))]
+
+
 # CHANGED 2026-08-21 — was "{PREFIX}/{FY}/{SEQ:5}". A number now names the company and
 # the project it belongs to, so `BHS/MED/2026-27/IND0007` says on sight where the paper
 # came from. `c3d4e5f6a7b9` moves the series already in the database; this is what a
@@ -82,6 +89,39 @@ def slug(value: str | None, limit: int = 12) -> str:
     return cleaned[:limit] or UNSET
 
 
+#: How long an organisation / project / department CODE may run in a number
+#: (2026-11-11). Codes replaced the first three letters of the name; twelve keeps the
+#: longest default-pattern number (12 + 12 + year + prefix + sequence) inside the 50
+#: characters every document-number column now holds (`f2c4e6a8b0d1`).
+CODE_TOKEN_LEN = 12
+
+
+def code_token(code: str | None) -> str | None:
+    """A master's CODE as it prints in a document number: upper case, letters, digits
+    and single hyphens (`AP-104-MMU`), at most `CODE_TOKEN_LEN`. None when there is no
+    usable code, so the caller falls back to the name."""
+    cleaned = re.sub(r"-{2,}", "-", re.sub(r"[^A-Za-z0-9-]", "", code or "").upper())
+    cleaned = cleaned.strip("-")[:CODE_TOKEN_LEN].strip("-")
+    return cleaned or None
+
+
+async def scope_codes(db: AsyncSession, *, project_id: int | None = None,
+                      org_department_id: int | None = None) -> str | None:
+    """The code a number prints for its project — else its department — read off the
+    masters by id (2026-11-11). None when neither names a coded row."""
+    from app.shared.models.master import OrgDepartment, Project
+    if project_id:
+        code = await db.scalar(select(Project.code).where(Project.id == project_id))
+        if code_token(code):
+            return code_token(code)
+    if org_department_id:
+        code = await db.scalar(
+            select(OrgDepartment.code).where(OrgDepartment.id == org_department_id))
+        if code_token(code):
+            return code_token(code)
+    return None
+
+
 def tokens_in(pattern: str | None) -> set[str]:
     """The field names a pattern uses, normalised (`{SEQ:5}` -> `num`)."""
     return {_ALIASES[m.group(1)] for m in _FIELD.finditer(pattern or "")
@@ -133,19 +173,24 @@ def render(pattern: str | None, prefix: str, fiscal_year: str, number: int,
         return f"{prefix}/{fiscal_year}/{number:04d}"
 
 
-def scope_key_for(pattern: str | None, **extra: str) -> str | None:
+def scope_key_for(pattern: str | None, *, fiscal_year: str | None = None,
+                  **extra: str) -> str | None:
     """Which counter a document drawn on this pattern belongs to, or None for the one
-    shared counter — which is what every pattern written before this returns, so an
-    existing series keeps using the row it has always used.
+    shared counter.
 
-    Only identity tokens split a counter. Date tokens do not: restarting on a date is
-    what `reset_policy` already does, and splitting on both would mint a row a month.
+    Identity tokens split a counter, and so does {FY}: a number that prints its year
+    restarts in each year, and a form may still pick last year, so last year's counter
+    has to go on from where it stopped. Without this, picking last year would hand out a
+    number that already exists. Other date tokens do not split one: restarting on a date
+    is what `reset_policy` does, and splitting would mint a row a month. `d9e3b5c7a1f4`
+    moved the counters that existed before this under their year.
     """
-    used = tokens_in(pattern) & set(_SCOPE_TOKENS)
-    if not used:
-        return None
+    tokens = tokens_in(pattern)
     values = _context(**extra)
-    return "|".join(f"{_SCOPE_TOKENS[t]}:{values[t]}" for t in sorted(used))
+    parts = [f"{_SCOPE_TOKENS[t]}:{values[t]}" for t in sorted(tokens & set(_SCOPE_TOKENS))]
+    if "fy" in tokens and fiscal_year:
+        parts.append(f"FY:{fiscal_year}")
+    return "|".join(parts) or None
 
 
 def current_period(policy: str | None, now: datetime | None = None) -> str | None:
@@ -160,7 +205,10 @@ def current_period(policy: str | None, now: datetime | None = None) -> str | Non
 
 # Prefixes for the series auto-created when none is configured. Anything not listed
 # falls back to the first three letters of the doc type.
-_DEFAULT_PREFIXES = {"indent": "IND", "mr": "MR", "po": "PO", "grn": "GRN",
+_DEFAULT_PREFIXES = {"indent": "IND",
+                     # A monthly indent is numbered apart from an ordinary one, so the two
+                     # never read alike on paper (2026-11-09).
+                     "monthly_indent": "MI-IND", "mr": "MR", "po": "PO", "grn": "GRN",
                      "issue": "ISS", "gatepass": "GP",
                      # Warehouse. Named here because the three-letter fallback reads
                      # badly for the two-word types ("WH_" for WH_ISSUE, "PUR" for
@@ -221,9 +269,81 @@ async def _company(db: AsyncSession) -> str:
     return slug(row.setting_value if row else None, SCOPE_SLUG_LEN)
 
 
+async def configured_series(db: AsyncSession, doc_type: str) -> tuple[str, str]:
+    """The (pattern, prefix) a document type is numbered with, as `next_number` reads them."""
+    series = (await db.execute(
+        select(DocSeries).where(
+            DocSeries.doc_type == doc_type, DocSeries.is_active.is_(True),
+            DocSeries.scope_key.is_(None),
+        ).order_by(DocSeries.fiscal_year.desc())
+    )).scalars().first()
+    if series is None:
+        return default_pattern(doc_type), default_prefix(doc_type)
+    return series.pattern or DEFAULT_PATTERN, series.prefix
+
+
+def pattern_tokens(pattern: str | None) -> list[str]:
+    """The tokens a pattern names, in the order they print."""
+    return [_ALIASES.get(m.group(1), m.group(1))
+            for m in _FIELD.finditer(pattern or DEFAULT_PATTERN)]
+
+
+def describe_number(pattern: str | None, prefix: str, fiscal_year: str,
+                    **values: str | None) -> list[dict]:
+    """A number part by part, so a screen can say what each part is. `kind` is the token
+    (`company`, `project`, `fy`, `prefix`, `num`, a date token, or `literal`), and `text`
+    is None for a selection not made yet. The running number is `#`: it is drawn on save.
+    """
+    context = _context(**{k: v for k, v in values.items() if v})
+    pattern = pattern or DEFAULT_PATTERN
+    parts: list[dict] = []
+    position = 0
+    for match in _FIELD.finditer(pattern):
+        if match.start() > position:
+            parts.append({"kind": "literal", "text": pattern[position:match.start()]})
+        position = match.end()
+        name = _ALIASES.get(match.group(1))
+        if name == "num":
+            parts.append({"kind": "num", "text": "#" * int(match.group(2) or 4)})
+        elif name == "prefix":
+            parts.append({"kind": "prefix", "text": prefix})
+        elif name == "fy":
+            parts.append({"kind": "fy", "text": fiscal_year})
+        elif name in _SCOPE_TOKENS:
+            parts.append({"kind": name, "text": values.get(name) or None})
+        elif name:
+            parts.append({"kind": name, "text": context[name]})
+        else:
+            # A token only the document knows, a lot's {WH}: filled in when it is drawn.
+            parts.append({"kind": "other", "text": match.group(1)})
+    if position < len(pattern):
+        parts.append({"kind": "literal", "text": pattern[position:]})
+    return parts
+
+
+async def preview_number(db: AsyncSession, doc_type: str, *, company: str | None = None,
+                         project: str | None = None,
+                         fiscal_year: str | None = None) -> str:
+    """The shape of the next number, running part as `#`, taking nothing."""
+    pattern, prefix = await configured_series(db, doc_type)
+    company_part = slug(company, SCOPE_SLUG_LEN) if company else await _company(db)
+    parts = describe_number(pattern, prefix, fiscal_year or _fiscal_year(),
+                            company=company_part, project=slug(project, SCOPE_SLUG_LEN))
+    return "".join(part["text"] or UNSET for part in parts)
+
+
 async def next_number(db: AsyncSession, doc_type: str, *, project: str | None = None,
+                      company: str | None = None, fiscal_year: str | None = None,
+                      company_code: str | None = None, project_id: int | None = None,
+                      org_department_id: int | None = None,
                       **extra: str) -> str:
-    fy = _fiscal_year()
+    """Draw the next number. `company` is the organisation a document names; a caller
+    with none (every document outside procurement) gets Settings > Company, as ever.
+
+    The year is today's unless the caller picked one, and NEVER the year stored on the
+    series row: that row is only written when somebody configures it, so reading it kept
+    printing an old year for ever after 31 March."""
+    fy = fiscal_year or _fiscal_year()
     series = (await db.execute(
         select(DocSeries).where(
             DocSeries.doc_type == doc_type, DocSeries.is_active.is_(True),
@@ -250,13 +370,20 @@ async def next_number(db: AsyncSession, doc_type: str, *, project: str | None = 
 
     # Identity tokens the pattern asks for. Resolved only when asked for, so a plain
     # {PREFIX}/{FY}/{SEQ} series still costs exactly one query.
+    # A document that names its organisation / project / department prints their
+    # CODES (2026-11-11), not the first three letters of their names; a row with no
+    # code falls back to the name, and a document naming none to Settings > Company.
     wanted = tokens_in(series.pattern) & set(_SCOPE_TOKENS)
     if "project" in wanted:
-        extra["project"] = slug(project, SCOPE_SLUG_LEN)
+        extra["project"] = (await scope_codes(db, project_id=project_id,
+                                              org_department_id=org_department_id)
+                            or slug(project, SCOPE_SLUG_LEN))
     if "company" in wanted:
-        extra["company"] = await _company(db)
+        extra["company"] = (code_token(company_code)
+                            or (slug(company, SCOPE_SLUG_LEN) if company
+                                else await _company(db)))
 
-    key = scope_key_for(series.pattern, **extra)
+    key = scope_key_for(series.pattern, fiscal_year=fy, **extra)
     if key is not None:
         # One counter per company/project. The counter row holds nothing but its
         # number: prefix and pattern are read off `series` below, so re-editing the
@@ -267,7 +394,7 @@ async def next_number(db: AsyncSession, doc_type: str, *, project: str | None = 
             ).with_for_update()
         )).scalars().first()
         if row is None:
-            row = DocSeries(doc_type=doc_type, fiscal_year=series.fiscal_year or fy,
+            row = DocSeries(doc_type=doc_type, fiscal_year=fy,
                             prefix=series.prefix, pattern=series.pattern,
                             reset_policy=series.reset_policy, scope_key=key,
                             last_number=0, is_active=True)
@@ -276,15 +403,24 @@ async def next_number(db: AsyncSession, doc_type: str, *, project: str | None = 
 
     # The reset happens here, under the same row lock that guards the increment, so two
     # concurrent documents at a period boundary cannot both reset and both take number 1.
+    # A counter already split by year has nothing to reset yearly: last year's would
+    # restart while last year was being picked, and repeat a number.
     period = current_period(row.reset_policy)
-    if period is not None and row.last_reset_period != period:
+    yearly_by_key = (row.reset_policy == ResetPolicy.YEARLY.value
+                     and "fy" in tokens_in(series.pattern))
+    if period is not None and row.last_reset_period != period and not yearly_by_key:
         row.last_number = 0
         row.last_reset_period = period
 
     row.last_number += 1
     n = row.last_number
+    # The series row is what Settings > Document Numbering reads, so a series with one
+    # counter per year still shows where it has got to. One split by company or project
+    # has no single answer and has always shown 0.
+    if row is not series and not wanted and fy == _fiscal_year():
+        series.last_number = n
     await db.flush()
 
     # Rendered from `series`, never from the counter row: the admin edits one series
     # and every project it split into follows it.
-    return render(series.pattern, series.prefix, series.fiscal_year or fy, n, **extra)
+    return render(series.pattern, series.prefix, fy, n, **extra)

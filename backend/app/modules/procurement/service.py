@@ -12,14 +12,17 @@ import secrets
 from decimal import Decimal
 from types import SimpleNamespace
 
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from sqlalchemy import exists, false, func, select, true, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import set_committed_value
 
 from app.core.config import settings
-from app.core.exceptions import AuthenticationError, NotFoundError, ValidationError
+from app.core.exceptions import (
+    AuthenticationError, NotFoundError, PermissionError_, ValidationError,
+)
 from app.core.pagination import PageParams, paginate
 from app.core.security import (
     create_access_token, hash_password_async, verify_password_async,
@@ -32,7 +35,8 @@ from app.modules.procurement.models import (
     DespatchNote, DespatchNoteItem, POComment, POItem, PurchaseConsolidation,
     PurchaseConsolidationItem, PurchaseConsolidationSource, PurchaseOrder, Quotation,
     QuotationComment, QuotationItem, QuoteChangeRequest, Requisition,
-    POPaymentMilestone, PORevision, RequisitionItem, RequisitionSource, RFQ, RFQItem, RFQVendor,
+    POPaymentMilestone, PORevision, RequisitionItem, RequisitionQtyChange, RequisitionSource,
+    RFQ, RFQItem, RFQVendor,
     VendorNotification, VendorUser,
 )
 from app.modules.procurement.schemas import (
@@ -40,11 +44,17 @@ from app.modules.procurement.schemas import (
     ReqCreate, RFQCreate, RFQQuantitiesIn, RFQUpdate, VendorAccountIn,
 )
 from app.modules.procurement import consolidation, ledger, quote_otp, vendor_documents
-from app.platform.hcm.models import HcmDepartment, HcmEmployee
+from app.platform.hcm.models import HcmDepartment, HcmEmployee, HcmPosition
+from app.shared import ceiling as qty_ceiling
 from app.platform.mail import service as mail_service
 from app.platform.mail import template as mail_template
 from app.platform.mail.schemas import MailSendIn
 from app.platform.notifications import service as notifications
+from app.platform.doc_numbering import scope as org_scope
+from app.modules.procurement import packing as po_packing
+from app.shared.masters import packs
+from app.shared.masters.packs import pack_options
+from app.shared.packing import base_of as base_of_packs
 from app.platform.rbac import permissions as perms
 from app.platform.rbac.service import get_user_permissions
 from app.platform.settings.service import (
@@ -60,14 +70,17 @@ from app.shared.scope import scope_condition
 logger = logging.getLogger(__name__)
 from app.shared.enums import (
     CARRIER_VENDOR_TYPES, SHIPMENT_ADDRESS_WAREHOUSE_TYPES,
-    AuditAction, ConsolidationStatus, DespatchNoteStatus, DocType, IndentStatus,
+    AuditAction, ConsolidationStatus, DespatchNoteStatus, DespatchStatus, DocType, IndentStatus,
     InstanceStatus, MRStatus, POStatus, POVendorStatus, QuoteChangeStatus,
     QuotationStatus, RequisitionStatus, RFQStatus,
 )
 from app.shared.models.base import utcnow
 from app.shared.time import today as ist_today
-from app.shared.models.master import HsnCode, Item, Project, Vendor, VendorItem
+from app.shared.models.master import (
+    HsnCode, Item, OrgDepartment, Organization, Project, Vendor, VendorItem,
+)
 from app.shared.numbering import next_number
+from app.shared.masters import combinations
 
 
 def _d(value) -> Decimal:
@@ -122,6 +135,43 @@ async def _place_names(db: AsyncSession, warehouse_id: int | None,
             project.name if project else None)
 
 
+async def _po_source_has_org(db: AsyncSession, po: PurchaseOrder) -> bool:
+    rfq = await db.get(RFQ, po.rfq_id) if po.rfq_id else None
+    return bool(rfq and rfq.organization_id)
+
+
+async def _apply_po_booking(db: AsyncSession, po: PurchaseOrder, data) -> None:
+    """The organisation, and the project OR organisation department, of an organised
+    order. None says nothing, as everywhere else on this header."""
+    organization_id = getattr(data, "organization_id", None)
+    project_id = getattr(data, "project_id", None)
+    department_id = getattr(data, "org_department_id", None)
+    fiscal_year = getattr(data, "fiscal_year", None)
+    if project_id and department_id:
+        raise ValidationError("Book the order to a project or a department, not both.")
+    given = {"organization_id"} if organization_id else set()
+    if fiscal_year:
+        given.add("fiscal_year")
+    if project_id or department_id:
+        given |= {"project_id", "org_department_id"}
+    org_scope.assert_lockable(
+        po, po.po_no or "this order", is_draft=po.status == POStatus.DRAFT.value,
+        source_has_org=await _po_source_has_org(db, po),
+        organization_id=organization_id, org_department_id=department_id,
+        project_id=project_id, fiscal_year=fiscal_year, given=given)
+    if po.status != POStatus.DRAFT.value:
+        return  # Nothing moved, or the check above refused it; the snapshot stands.
+    kept_department = None if project_id else (department_id or po.org_department_id)
+    org_scope.stamp(po, await org_scope.resolve(
+        db, organization_id or po.organization_id, kept_department, keep=po,
+        fiscal_year=fiscal_year or po.fiscal_year))
+    if project_id:
+        po.project_id = project_id
+        _, po.project_name = await _place_names(db, None, project_id)
+    elif department_id:
+        po.project_id = po.project_name = None
+
+
 async def _apply_po_header(db: AsyncSession, po: PurchaseOrder, data) -> None:
     """Write the header a caller typed onto the order — terms, addresses, project.
 
@@ -133,9 +183,24 @@ async def _apply_po_header(db: AsyncSession, po: PurchaseOrder, data) -> None:
     overwritten when the caller actually chose one — the indent or the RFQ behind the
     order already put its own project on it, and an untouched field must not wipe that.
     """
-    if getattr(data, "project_id", None):
-        po.project_id = data.project_id
-        _, po.project_name = await _place_names(db, None, data.project_id)
+    project_id = getattr(data, "project_id", None)
+    department_id = getattr(data, "department_id", None)
+    # A project OR a department, never both (2026-11-04). Choosing one takes the
+    # other off, so an order is never booked to two places at once.
+    if project_id and department_id:
+        raise ValidationError("Book the order to a project or a department, not both.")
+    if po.organization_id:
+        await _apply_po_booking(db, po, data)
+    elif project_id:
+        po.project_id = project_id
+        _, po.project_name = await _place_names(db, None, project_id)
+        po.department_id = po.department_name = None
+    elif department_id:
+        name = await _department_snapshot(db, department_id)
+        if name is None:
+            raise ValidationError(f"Unknown department {department_id}")
+        po.department_id, po.department_name = department_id, name
+        po.project_id = po.project_name = None
     # FIXED 2026-08-23 — this wrote all six unconditionally, so a caller that did not
     # mention a term BLANKED it. The PO detail screen opened its header form empty and
     # sent those blanks straight back, which meant opening a saved order and pressing
@@ -185,33 +250,19 @@ async def _apply_payment_term(db: AsyncSession, po: PurchaseOrder, term_id: int)
     if term is None or not term.is_active:
         raise ValidationError("Payment terms: pick an active payment term from the list.")
     po.payment_term_id = term.id
-    from app.shared.masters.defs import parse_schedule
+    from app.shared.masters.defs import term_instalments, term_wording
 
-    parts, rows = [], []
+    # One milestone per instalment: a stage paid in four parts is four rows accounts
+    # pays against, each on its own day. `term_instalments` is the same arithmetic the
+    # master form previews, so the order holds exactly what the term promised.
+    rows = []
     for stage in PAYMENT_MILESTONE_META:
-        pct = _d(getattr(term, f"{stage['field']}_pct") or 0)
-        if pct <= 0:
-            continue
-        days = getattr(term, f"{stage['field']}_days") or 0
-        schedule = parse_schedule(term.delivery_schedule) \
-            if stage["field"] == "delivery" else []
-        if len(schedule) > 1:
-            # Equal instalments; the last takes the rounding so they add up to `pct`.
-            share = (pct / len(schedule)).quantize(Decimal("0.01"))
-            shares = [share] * (len(schedule) - 1) + [pct - share * (len(schedule) - 1)]
-            parts.append(f"{float(pct):g}% {stage['label'].lower()} in {len(schedule)} "
-                         f"instalments ({'/'.join(map(str, schedule))} days)")
-            for when, piece in zip(schedule, shares):
-                rows.append(POPaymentMilestone(seq=len(rows) + 1, stage=stage["value"],
-                                               percent=piece, due_days=when))
-            continue
-        days = schedule[0] if schedule else days
-        parts.append(f"{float(pct):g}% {stage['label'].lower()}"
-                     + (f" ({days} days)" if days else ""))
-        rows.append(POPaymentMilestone(seq=len(rows) + 1, stage=stage["value"],
-                                       percent=pct, due_days=days))
+        for part in term_instalments(term, stage["field"]):
+            rows.append(POPaymentMilestone(seq=len(rows) + 1, stage=stage["value"],
+                                           percent=part["order_pct"],
+                                           due_days=part["days"]))
     po.payment_milestones = rows
-    po.payment_terms = f"{term.name}: {', '.join(parts)}"
+    po.payment_terms = term_wording(term)
 
 
 def _apply_po_totals(po: PurchaseOrder, sub_total: Decimal, tax_total: Decimal) -> None:
@@ -250,6 +301,9 @@ async def _header_context(db: AsyncSession, created_by_id: int | None) -> dict:
 
 async def _fill_header_context(db: AsyncSession, document) -> None:
     """Leave what the document says; supply what it does not."""
+    # An organised document says it itself; the raiser's HCM department is not its answer.
+    if org_scope.uses_org(document, getattr(document, "req_no", None)):
+        return
     fallback = await _header_context(db, document.created_by_id)
     for field, value in fallback.items():
         if getattr(document, field, None) in (None, ""):
@@ -302,6 +356,43 @@ def tax_region(company_gstin: str | None, vendor_gstin: str | None) -> str:
     return "INTER"
 
 
+async def _attach_po_tax_context(db: AsyncSession, po) -> None:
+    """Tell the order which tax applies and split each line's tax into it.
+
+    The PO gap this closes: a quotation already derives `tax_region` the moment a
+    vendor submits (`_attach_tax_context`), but nothing carried it onto the order
+    raised from that quotation, and a PO raised cold never computed it at all — so
+    `vendor_gstin` sat on the order with no CGST/SGST/IGST split to go with it, and
+    the printed order showed a flat tax percent with no state-wise breakup at all.
+
+    Transient, same as `_attach_tax_context`: the company's own GSTIN can be
+    corrected on Settings > Company, and re-reading an old order should answer for
+    the CURRENT GSTIN, not freeze whatever was true the day it was raised. Storing
+    the region would be storing an answer that can go stale without anybody editing
+    the order.
+    """
+    company_gstin = await _company_gstin(db)
+    region = tax_region(company_gstin, po.vendor_gstin)
+    po.tax_region = region
+    po.company_gstin = company_gstin
+    for line in po.items:
+        tax_amount = _d(line.amount) * _d(line.tax_percent or 0) / _d(100)
+        if region == "INTRA":
+            half_percent = _d(line.tax_percent or 0) / _d(2)
+            half_amount = tax_amount / _d(2)
+            line.cgst_percent = line.sgst_percent = float(half_percent)
+            line.cgst_amount = line.sgst_amount = float(half_amount)
+            line.igst_percent = 0.0
+            line.igst_amount = 0.0
+        else:
+            line.cgst_percent = 0.0
+            line.sgst_percent = 0.0
+            line.cgst_amount = 0.0
+            line.sgst_amount = 0.0
+            line.igst_percent = float(line.tax_percent or 0)
+            line.igst_amount = float(tax_amount)
+
+
 async def _hsn_ceilings(db: AsyncSession, item_ids: list[int]) -> dict[int, dict]:
     """Per item: the HSN code and the GST rate it notifies. The quote may not exceed it.
 
@@ -351,6 +442,7 @@ async def create_po_from_indent(db: AsyncSession, indent_id: int, data: POCreate
         IndentStatus.APPROVED.value,
         IndentStatus.PARTIALLY_ORDERED.value,
         IndentStatus.PENDING_PROCUREMENT.value,
+        IndentStatus.PARTIALLY_ALLOCATED.value,
         IndentStatus.PARTIALLY_FULFILLED.value,
     )
     if indent.status not in BUYABLE:
@@ -361,6 +453,7 @@ async def create_po_from_indent(db: AsyncSession, indent_id: int, data: POCreate
     approved_mr_items: list[MaterialRequestItem] = []
     if indent.status in {
         IndentStatus.PENDING_PROCUREMENT.value,
+        IndentStatus.PARTIALLY_ALLOCATED.value,
         IndentStatus.PARTIALLY_FULFILLED.value,
     }:
         approved_mr_items = list((await db.execute(
@@ -385,8 +478,11 @@ async def create_po_from_indent(db: AsyncSession, indent_id: int, data: POCreate
         select(Item).where(Item.id.in_([l.item_id for l in data.lines]))
     )).scalars().all()}
 
+    # The indent names a project but no organisation, so the buyer selects it here.
+    scope = await org_scope.resolve(db, data.organization_id, None,
+                                    fiscal_year=data.fiscal_year)
     po = PurchaseOrder(
-        po_no=await next_number(db, "po", project=getattr(indent, "project_name", None)),
+        po_no="",  # Drawn below, once the header has said what the order is booked to.
         po_date=utcnow().date(),
         expected_date=data.expected_date,
         indent_id=indent.id,
@@ -407,7 +503,10 @@ async def create_po_from_indent(db: AsyncSession, indent_id: int, data: POCreate
         status=POStatus.DRAFT.value,
         remarks=data.remarks,
     )
+    org_scope.stamp(po, scope)
     await _apply_po_header(db, po, data)
+    org_scope.assert_complete(po)
+    po.po_no = await next_number(db, "po", **org_scope.number_args(po))
     db.add(po)
     await db.flush()
 
@@ -434,12 +533,16 @@ async def create_po_from_indent(db: AsyncSession, indent_id: int, data: POCreate
         tax = amount * _d(line.tax_percent) / _d(100)
         sub_total += amount
         tax_total += tax
-        db.add(POItem(
+        po_line = POItem(
             po_id=po.id, indent_item_id=line.indent_item_id, item_id=item.id,
             item_code=item.code, item_name=item.name, uom_code=item.uom_code,
             quantity=_d(line.quantity), rate=_d(line.rate),
             tax_percent=_d(line.tax_percent), amount=amount,
-        ))
+            **await _po_line_combination(db, item, line, line.indent_item_id),
+        )
+        db.add(po_line)
+        await po_packing.stamp_line(db, po_line, hierarchy_id=line.pack_hierarchy_id,
+                                    entries=line.pack_breakdown)
         # roll the ordered quantity up onto the indent line
         if line.indent_item_id:
             ind_item = await db.get(IndentItem, line.indent_item_id)
@@ -455,6 +558,8 @@ async def create_po_from_indent(db: AsyncSession, indent_id: int, data: POCreate
             to_apply -= applied
 
     _apply_po_totals(po, sub_total, tax_total)
+    await db.flush()
+    await po_packing.sync_po_packing(db, po.id)
 
     indent.status = IndentStatus.ORDERED.value
     await indent_service.notify_indent_followers(db, indent, indent.status)
@@ -498,12 +603,22 @@ async def create_po(db: AsyncSession, data: POCreate, user) -> PurchaseOrder:
     if vendor is None:
         raise ValidationError(f"Unknown vendor {data.vendor_id}")
 
+    # Exactly one of project / department, mandatory on a hand-raised order
+    # (2026-11-04): nothing upstream supplied either, so the buyer must say which.
+    if bool(data.project_id) == bool(data.org_department_id):
+        raise ValidationError("Choose the project or the department this order is booked "
+                              "to — one of them, not both.")
+    scope = await org_scope.resolve(db, data.organization_id, None,
+                                    fiscal_year=data.fiscal_year)
+
     items = {row.id: row for row in (await db.execute(
         select(Item).where(Item.id.in_([line.item_id for line in data.lines]))
     )).scalars().all()}
 
+    # The number is drawn AFTER the booking is known, below. It used to be drawn with no
+    # project at all, so every hand-raised order read BHS/NA/... whatever was picked.
     po = PurchaseOrder(
-        po_no=await next_number(db, "po"),
+        po_no="",
         po_date=utcnow().date(),
         expected_date=data.expected_date,
         vendor_id=vendor.id,
@@ -519,7 +634,15 @@ async def create_po(db: AsyncSession, data: POCreate, user) -> PurchaseOrder:
         status=POStatus.DRAFT.value,
         remarks=data.remarks,
     )
+    if data.copied_from_po_id:
+        source = await db.get(PurchaseOrder, data.copied_from_po_id)
+        if source is None:
+            raise ValidationError(f"Unknown purchase order {data.copied_from_po_id}")
+        po.copied_from_po_id, po.copied_from_po_no = source.id, source.po_no
+    org_scope.stamp(po, scope)
     await _apply_po_header(db, po, data)
+    org_scope.assert_complete(po)
+    po.po_no = await next_number(db, "po", **org_scope.number_args(po))
     db.add(po)
     await db.flush()
 
@@ -532,17 +655,147 @@ async def create_po(db: AsyncSession, data: POCreate, user) -> PurchaseOrder:
         tax = amount * _d(line.tax_percent) / _d(100)
         sub_total += amount
         tax_total += tax
-        db.add(POItem(
+        po_line = POItem(
             po_id=po.id, item_id=item.id, item_code=item.code, item_name=item.name,
             uom_code=item.uom_code, quantity=_d(line.quantity), rate=_d(line.rate),
             tax_percent=_d(line.tax_percent), amount=amount,
-        ))
+            **await _po_line_combination(db, item, line, None),
+        )
+        db.add(po_line)
+        await po_packing.stamp_line(db, po_line, hierarchy_id=line.pack_hierarchy_id,
+                                    entries=line.pack_breakdown)
 
     _apply_po_totals(po, sub_total, tax_total)
+    await db.flush()
+    await po_packing.sync_po_packing(db, po.id)
     await db.commit()
     logger.info("purchase order %s raised directly by %s (%d line(s))",
                 po.po_no, user.full_name, len(data.lines))
     return await get_po(db, po.id)
+
+
+async def copy_po_template(db: AsyncSession, po_id: int, user) -> dict:
+    """"Copy as new PO": an existing order's content as a New PO form, nothing saved.
+
+    Nothing is written and no number is drawn — the form saves through `create_po`
+    like any hand-raised order, so a copy opened and abandoned leaves no trace. What
+    this decides is what the form may be pre-filled WITH, checked against today's
+    masters so the save does not fail on something the buyer cannot see:
+
+    - an inactive or blacklisted vendor, an inactive payment term or project is left
+      blank (the term's wording stays — it is the buyer's text);
+    - a line whose item is inactive is dropped; tax and unit come from the item master
+      when it has them, since the old order's may be out of date;
+    - the indent, requisition, RFQ and quotation links are never carried. That demand
+      was already ordered, so the copy is a direct PO and orders nothing twice;
+    - the expected date keeps its distance from the order date, counted from today.
+
+    Any order the caller can open may be copied, whatever its status — only the
+    content is taken, never its approvals, receipts, payments or attachments.
+    """
+    from app.shared.models.master import PaymentTerm
+
+    if perms.PO_VIEW not in await get_user_permissions(
+            db, user, getattr(user, "active_position_id", None)):
+        raise PermissionError_(f"Missing permission: {perms.PO_VIEW}")
+    source = await get_po(db, po_id, user, include_approver=True)
+    warnings: list[str] = []
+
+    vendor = await db.get(Vendor, source.vendor_id)
+    vendor_ok = bool(vendor and vendor.is_active and not vendor.is_blacklisted)
+    if not vendor_ok:
+        warnings.append(f"Vendor {source.vendor_name or source.vendor_id} is no longer "
+                        "active — pick the vendor again.")
+
+    payment_term_id = source.payment_term_id
+    if payment_term_id:
+        term = await db.get(PaymentTerm, payment_term_id)
+        if term is None or not term.is_active:
+            payment_term_id = None
+            warnings.append("The payment term on the original order is no longer active "
+                            "— pick one again. Its wording has been kept.")
+
+    project_id = source.project_id
+    if project_id:
+        project = await db.get(Project, project_id)
+        if project is None or not project.is_active:
+            project_id = None
+            warnings.append(f"Project {source.project_name or project_id} is no longer "
+                            "active — pick the project again.")
+
+    # The same check as the project just above: only what can still be saved is offered.
+    organization_id = source.organization_id
+    org_department_id = None if project_id else source.org_department_id
+    if organization_id:
+        organisation = await db.get(Organization, organization_id)
+        if organisation is None or not organisation.is_active:
+            organization_id = None
+            warnings.append(f"Organisation {source.organization_name} is no longer active "
+                            "— pick the organisation again.")
+    if org_department_id:
+        department = await db.get(OrgDepartment, org_department_id)
+        if department is None or not department.is_active:
+            org_department_id = None
+            warnings.append(f"Department {source.org_department_name} is no longer active "
+                            "— pick the department again.")
+
+    items = {row.id: row for row in (await db.execute(
+        select(Item).where(Item.id.in_([line.item_id for line in source.items]))
+    )).scalars().all()} if source.items else {}
+    lines, dropped = [], []
+    for line in sorted(source.items, key=lambda row: row.id):
+        item = items.get(line.item_id)
+        if item is None or not item.is_active:
+            dropped.append(line.item_name or line.item_code or str(line.item_id))
+            continue
+        lines.append({
+            "item_id": item.id, "item_code": item.code, "item_name": item.name,
+            "uom_code": item.uom_code or line.uom_code,
+            "quantity": float(line.quantity), "rate": float(line.rate),
+            "tax_percent": float(item.tax_percent if item.tax_percent is not None
+                                 else line.tax_percent),
+            **combinations.carry(line),
+        })
+    if dropped:
+        warnings.append("Left out because the item is no longer active: "
+                        + ", ".join(dropped) + ".")
+
+    # The order-level discount was agreed on the full order; on fewer lines it may now
+    # exceed what is left, which `create_po` would refuse.
+    sub_total = sum(line["quantity"] * line["rate"] for line in lines)
+    discount = float(source.discount_amount or 0)
+    if discount > sub_total:
+        discount = 0.0
+        warnings.append("The discount was cleared: it is more than the copied lines "
+                        "add up to.")
+
+    expected_date = None
+    if source.expected_date and source.po_date and source.expected_date > source.po_date:
+        expected_date = ist_today() + (source.expected_date - source.po_date)
+
+    return {
+        "source_po_id": source.id, "source_po_no": source.po_no,
+        "source_po_date": source.po_date,
+        "vendor_id": source.vendor_id if vendor_ok else None,
+        "vendor_name": source.vendor_name if vendor_ok else None,
+        "expected_date": expected_date,
+        "project_id": project_id,
+        "department_id": None if project_id else source.department_id,
+        "organization_id": organization_id,
+        "org_department_id": org_department_id,
+        "remarks": source.remarks,
+        "payment_term_id": payment_term_id,
+        "payment_terms": source.payment_terms,
+        "delivery_terms": source.delivery_terms,
+        "material_terms": source.material_terms,
+        "logistics_terms": source.logistics_terms,
+        "billing_address": source.billing_address,
+        "shipping_address": source.shipping_address,
+        "discount_amount": discount,
+        "freight_amount": float(source.freight_amount or 0),
+        "lines": lines,
+        "warnings": warnings,
+    }
 
 
 #: A purchase order that has stopped claiming anything — it never reaches a vendor and
@@ -641,20 +894,24 @@ async def create_po_from_quotation(db: AsyncSession, quotation_id: int,
             f"{quote.quotation_no} already became {live_orders[0].po_no}")
 
     if share:
-        already_ordered: dict[int, Decimal] = {}
+        # Per RFQ LINE (2026-10-26), traced through the winning quotation line; an
+        # award saved before keeps reading by item.
+        prior_keys = await _po_line_keys(db, [po.id for po in live_orders])
+        already_ordered: dict[str, Decimal] = {}
         for prior_po in live_orders:
             for prior_line in prior_po.items:
-                already_ordered[prior_line.item_id] = (
-                    already_ordered.get(prior_line.item_id, Decimal("0"))
-                    + _d(prior_line.quantity))
+                key = prior_keys.get(prior_line.id, str(prior_line.item_id))
+                already_ordered[key] = already_ordered.get(key, Decimal("0")) + _d(prior_line.quantity)
         kept = []
         for line in lines:
-            won = _d(share.get(str(line.item_id), 0))
+            line_key = _line_key(line.rfq_item_id) if line.rfq_item_id else str(line.item_id)
+            key = line_key if line_key in share else str(line.item_id)
+            won = _d(share.get(key, 0))
             # The saved award says how many this supplier may receive in total.
             # Existing live POs have already consumed part of it, so this PO contains
             # only the positive balance.  This is why a 6-unit PO followed by a
             # re-award of 10 produces a second 4-unit PO rather than duplicating 10.
-            balance = won - already_ordered.get(line.item_id, Decimal("0"))
+            balance = won - already_ordered.get(key, Decimal("0"))
             if balance <= 0:
                 continue
             # The award endpoint already rejects a share above the submitted offer.
@@ -694,7 +951,7 @@ async def create_po_from_quotation(db: AsyncSession, quotation_id: int,
                       if row.indent_id == indent_id and row.indent_no), None)
 
     po = PurchaseOrder(
-        po_no=await next_number(db, "po", project=rfq.project_name),
+        po_no="",  # Drawn below: it used to ignore whatever the buyer picked on the way.
         po_date=utcnow().date(),
         expected_date=data.expected_date,
         indent_id=indent_id,
@@ -720,7 +977,20 @@ async def create_po_from_quotation(db: AsyncSession, quotation_id: int,
         status=POStatus.DRAFT.value,
         remarks=data.remarks or f"Raised from {quote.quotation_no} against {rfq.rfq_no}",
     )
+    # Copied from the tender; an RFQ older than organisations has none to give, so the
+    # buyer selects it here. An order is booked to ONE of project and department.
+    if rfq.organization_id:
+        org_scope.carry(rfq, po)
+    else:
+        org_scope.stamp(po, await org_scope.resolve(db, data.organization_id, None,
+                                                    fiscal_year=data.fiscal_year))
+    if po.project_name:
+        po.org_department_id = po.org_department_name = None
+    elif not po.org_department_name:
+        po.department_id, po.department_name = rfq.department_id, rfq.department_name
     await _apply_po_header(db, po, data)
+    org_scope.assert_complete(po)
+    po.po_no = await next_number(db, "po", **org_scope.number_args(po))
     db.add(po)
     await db.flush()
 
@@ -762,6 +1032,7 @@ async def create_po_from_quotation(db: AsyncSession, quotation_id: int,
             # What the vendor promised on this line, kept with the line rather than
             # summarised into the header date above.
             delivery_days=line.delivery_days,
+            **combinations.carry(line),
         ))
 
     # The offer's own document-level money, carried across so the order comes to the
@@ -810,6 +1081,10 @@ async def create_po_from_quotation(db: AsyncSession, quotation_id: int,
     if rfq.consolidation_id:
         await _close_sheet_if_ordered(db, rfq.consolidation_id)
 
+    # A quotation says nothing about packing; describe each line in the item's
+    # default hierarchy so the supplier is told how to pack it (2026-10-08).
+    await db.flush()
+    await po_packing.sync_po_packing(db, po.id)
     await db.commit()
     logger.info("purchase order %s raised from %s (%s, %d line(s))",
                 po.po_no, quote.quotation_no, rfq.rfq_no, len(lines))
@@ -1006,7 +1281,8 @@ async def get_po(db: AsyncSession, po_id: int, user=None, *,
         vendor_name = (await db.execute(select(Vendor.name).where(Vendor.id == po.vendor_id))).scalar_one_or_none()
         if vendor_name:
             po.vendor_name = vendor_name
-            
+
+    await _attach_po_tax_context(db, po)
     return po
 
 
@@ -1026,16 +1302,24 @@ async def update_po_header(db: AsyncSession, po_id: int,
     The totals are recomputed from the stored lines, never from the caller: this route
     can move discount and freight and must never be able to move a rate.
     """
-    po = await get_po(db, po_id, user)
-    if po.status != POStatus.DRAFT.value:
+    po = await get_po(db, po_id, user, include_approver=True)
+    if po.status == POStatus.DRAFT.value:
+        # A draft keeps the raiser's own scope; this raises if it is outside it.
+        await get_po(db, po_id, user)
+    elif not (po.status == POStatus.RETURNED_FOR_CORRECTION.value
+              and await _raiser_owns_correction(db, po, user)):
         raise ValidationError(
-            f"Only a draft purchase order can be edited (this one is {po.status})")
+            "Only a draft purchase order, or one sent back to its raiser for "
+            f"correction, can be edited (this one is {po.status})")
 
     if data.expected_date is not None:
         po.expected_date = data.expected_date
     if data.remarks is not None:
         po.remarks = data.remarks
+    org_scope.remember_number_args(po)
     await _apply_po_header(db, po, data)
+    if po.organization_id and po.status == POStatus.DRAFT.value:
+        await org_scope.renumber(db, po, "po", "po_no", "pro_purchase_orders", user)
 
     sub_total = tax_total = Decimal("0")
     for line in po.items:
@@ -1046,7 +1330,7 @@ async def update_po_header(db: AsyncSession, po_id: int,
 
     await db.commit()
     logger.info("purchase order %s header edited by %s", po.po_no, user.full_name)
-    return await get_po(db, po_id, user)
+    return await get_po(db, po_id, user, include_approver=True)
 
 
 async def list_pos(
@@ -1087,8 +1371,10 @@ async def list_pos(
     if date_to:
         stmt = stmt.where(PurchaseOrder.po_date <= date_to)
 
-    return await _attach_pending_with(db, DocType.PO.value, await paginate(
+    page = await _attach_pending_with(db, DocType.PO.value, await paginate(
         db, stmt.order_by(PurchaseOrder.created_at.desc()), params))
+    await _attach_despatch_status(db, page.get("items"))
+    return page
 
 async def export_pos(
     db: AsyncSession,
@@ -1195,6 +1481,9 @@ async def act_on_po(db: AsyncSession, po_id: int, action: str, comments: str, us
     po = await get_po(db, po_id)
     if po.status != POStatus.PENDING_APPROVAL.value:
         raise ValidationError(f"PO is not awaiting approval (status {po.status})")
+    # A rejection ends the order, so the raiser must be told why.
+    if action.upper().startswith("REJECT") and not (comments or "").strip():
+        raise ValidationError("A reason is required to reject this order")
     instance = await engine.act(db, DocType.PO.value, po.id, action, user, comments)
     if instance.status == InstanceStatus.APPROVED.value:
         po.status = POStatus.APPROVED.value
@@ -1209,6 +1498,233 @@ async def act_on_po(db: AsyncSession, po_id: int, action: str, comments: str, us
     await db.commit()
     await db.refresh(po)
     return po
+
+
+def _po_workflow_context(po: PurchaseOrder) -> dict:
+    """The same context `submit_po` starts the ladder with, so a resubmitted rung
+    resolves its conditions exactly as it did the first time."""
+    return {"total_amount": float(po.total_amount),
+            "project_id": po.project_id or None,
+            "doc_no": po.po_no}
+
+
+async def send_back_po(db: AsyncSession, po_id: int, comments: str, user) -> PurchaseOrder:
+    """Send a PO back ONE rung for correction: to the approver who signed just below,
+    or to the raiser when it is still at the first rung. The reason is compulsory —
+    the person it lands with has to know what to fix."""
+    reason = (comments or "").strip()
+    if not reason:
+        raise ValidationError("A reason is required to send this order back")
+    po = await get_po(db, po_id, user, include_approver=True)
+    if po.status != POStatus.PENDING_APPROVAL.value:
+        raise ValidationError(f"PO is not awaiting approval (status {po.status})")
+    await engine.return_for_correction(
+        db, DocType.PO.value, po.id, user, reason, context=_po_workflow_context(po))
+    correction = await engine.get_correction_state(db, DocType.PO.value, po.id) or {}
+    before_status = po.status
+    po.status = POStatus.RETURNED_FOR_CORRECTION.value
+    po.current_approver_name = correction.get("correction_owner_name")
+    await write_audit(
+        db, entity="pro_purchase_orders", entity_id=po.id, entity_no=po.po_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": before_status}, after={"status": po.status},
+        summary=f"Sent PO back to {po.current_approver_name or 'previous approver'}: {reason}",
+    )
+    owner_id = correction.get("correction_owner_employee_id")
+    if owner_id:
+        await notifications.notify(
+            db, [int(owner_id)], title=f"{po.po_no} sent back to you",
+            body=f"{user.full_name}: {reason}",
+            entity_type="PO", entity_id=po.id, deep_link=f"/pos/{po.id}")
+    await db.commit()
+    await db.refresh(po)
+    return await get_po_detail(db, po.id, user)
+
+
+async def resubmit_po_correction(db: AsyncSession, po_id: int, user,
+                                 comments: str = "") -> PurchaseOrder:
+    """The person a PO was sent back to hands it up again; it reopens at the rung
+    that sent it back, never at the bottom of the ladder. An optional comment goes
+    on the PO's conversation so the approver sees what was done."""
+    po = await get_po(db, po_id, user, include_approver=True)
+    if po.status != POStatus.RETURNED_FOR_CORRECTION.value:
+        raise ValidationError(f"PO is not sent back for correction (status {po.status})")
+    await engine.resubmit_correction(
+        db, DocType.PO.value, po.id, user, context=_po_workflow_context(po))
+    before_status = po.status
+    po.status = POStatus.PENDING_APPROVAL.value
+    await _refresh_current_approver(db, po)
+    await write_audit(
+        db, entity="pro_purchase_orders", entity_id=po.id, entity_no=po.po_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": before_status}, after={"status": po.status},
+        summary="Resubmitted PO after correction"
+                + (f": {comments.strip()}" if (comments or "").strip() else ""),
+    )
+    if (comments or "").strip():
+        db.add(POComment(po_id=po.id, author_id=user.id, author_name=user.full_name,
+                         message=f"Resubmitted: {comments.strip()}"[:2000]))
+    await db.commit()
+    await db.refresh(po)
+    return await get_po_detail(db, po.id, user)
+
+
+async def correct_po(db: AsyncSession, po_id: int, data, user) -> PurchaseOrder:
+    """The raiser's full edit of a PO sent back to them: vendor, expected date, lines
+    (item, quantity, rate, tax — add and remove) and the whole header, exactly what the
+    create form asks. Nothing has been sent or received on a sent-back order, so no
+    receipt guard applies. The vendor is locked on an order written off a quotation."""
+    po = await get_po(db, po_id, user, include_approver=True)
+    if po.status != POStatus.RETURNED_FOR_CORRECTION.value:
+        raise ValidationError(f"PO is not sent back for correction (status {po.status})")
+    if not await _raiser_owns_correction(db, po, user):
+        raise ValidationError("Only the raiser can edit a PO that was sent back")
+    return await _rewrite_po(db, po, data, user, "Corrected PO after it was sent back")
+
+
+async def edit_draft_po(db: AsyncSession, po_id: int, data, user) -> PurchaseOrder:
+    """The full edit of a DRAFT order (2026-10-19): vendor, expected date, every line
+    and the header — the same fields, rules and save as a sent-back correction.
+
+    Before this a draft could only have its header filled in, so a wrong item or
+    quantity on an order nobody had signed yet meant cancelling and raising it again.
+    Nothing has been approved, sent or received on a draft, so nothing guards it but
+    the raiser's own scope (`get_po` without the approver reach) and `po.edit`.
+    """
+    po = await get_po(db, po_id, user)
+    if po.status != POStatus.DRAFT.value:
+        raise ValidationError(
+            f"Only a draft purchase order can be edited here (this one is {po.status})")
+    return await _rewrite_po(db, po, data, user, "Edited draft PO")
+
+
+async def _rewrite_po(db: AsyncSession, po: PurchaseOrder, data, user,
+                      summary: str) -> PurchaseOrder:
+    """Write a whole edit onto an order not yet signed — a draft, or one sent back.
+    The caller has already decided this order may be edited by this login."""
+    if not data.lines:
+        raise ValidationError("A purchase order must have at least one line")
+    _assert_po_addresses(
+        data.billing_address if data.billing_address is not None else po.billing_address,
+        data.shipping_address if data.shipping_address is not None else po.shipping_address)
+
+    if data.vendor_id and data.vendor_id != po.vendor_id:
+        if po.quotation_id:
+            raise ValidationError(
+                f"{po.po_no} was written off quotation {po.quotation_no or ''} — its "
+                "vendor cannot be changed here. Reject it and raise a new order instead.")
+        vendor = await db.get(Vendor, data.vendor_id)
+        if vendor is None:
+            raise ValidationError(f"Unknown vendor {data.vendor_id}")
+        po.vendor_id = vendor.id
+        po.vendor_name = vendor.name
+        po.vendor_gstin = vendor.gstin
+
+    items = {row.id: row for row in (await db.execute(
+        select(Item).where(Item.id.in_([line.item_id for line in data.lines]))
+    )).scalars().all()}
+    by_id = {line.id: line for line in po.items}
+    kept = {line.id for line in data.lines if line.id is not None}
+    for incoming in data.lines:
+        item = items.get(incoming.item_id)
+        if item is None:
+            raise ValidationError(f"Unknown item id: {incoming.item_id}")
+        amount = _d(incoming.quantity) * _d(incoming.rate)
+        existing = by_id.get(incoming.id) if incoming.id is not None else None
+        if incoming.id is not None and existing is None:
+            raise ValidationError(f"Unknown PO line id {incoming.id}")
+        if existing is not None:
+            if existing.item_id != item.id:
+                existing.item_id = item.id
+                existing.item_code = item.code
+                existing.item_name = item.name
+                existing.uom_code = item.uom_code
+            existing.quantity = _d(incoming.quantity)
+            existing.rate = _d(incoming.rate)
+            existing.tax_percent = _d(incoming.tax_percent)
+            existing.amount = amount
+            for key, value in (await _po_line_combination(
+                    db, item, incoming, existing.indent_item_id, keep=existing)).items():
+                setattr(existing, key, value)
+        else:
+            db.add(POItem(
+                po_id=po.id, item_id=item.id, item_code=item.code,
+                item_name=item.name, uom_code=item.uom_code,
+                quantity=_d(incoming.quantity), rate=_d(incoming.rate),
+                tax_percent=_d(incoming.tax_percent), amount=amount,
+                **await _po_line_combination(db, item, incoming, None),
+            ))
+    for line in list(po.items):
+        if line.id not in kept:
+            await db.delete(line)
+    await db.flush()
+
+    if data.expected_date is not None:
+        po.expected_date = data.expected_date
+    if data.remarks is not None:
+        po.remarks = data.remarks
+    org_scope.remember_number_args(po)
+    await _apply_po_header(db, po, data)
+    if po.organization_id and po.status == POStatus.DRAFT.value:
+        await org_scope.renumber(db, po, "po", "po_no", "pro_purchase_orders", user)
+
+    # Lines were added and quantities moved: their packing must follow (2026-10-08).
+    await db.flush()
+    await po_packing.sync_po_packing(db, po.id)
+    lines = list((await db.execute(
+        select(POItem).where(POItem.po_id == po.id))).scalars().all())
+    sub_total = tax_total = Decimal("0")
+    for line in lines:
+        amount = _d(line.amount)
+        sub_total += amount
+        tax_total += amount * _d(line.tax_percent or 0) / _d(100)
+    _apply_po_totals(po, sub_total, tax_total)
+
+    await write_audit(
+        db, entity="pro_purchase_orders", entity_id=po.id, entity_no=po.po_no,
+        action=AuditAction.UPDATE, actor=user,
+        after={"vendor_id": po.vendor_id, "lines": len(lines),
+               "total_amount": float(po.total_amount or 0)},
+        summary=summary,
+    )
+    # Expire only the order, so its lines are re-read. `expire_all` also expired the
+    # signed-in employee, and the scope check then read `user.id` synchronously —
+    # which an async session refuses (MissingGreenlet).
+    po_id = po.id
+    await db.commit()
+    db.expire(po)
+    return await get_po_detail(db, po_id, user)
+
+
+async def pass_po_correction_down(db: AsyncSession, po_id: int, comments: str,
+                                  user) -> PurchaseOrder:
+    """An approver a PO was sent back to passes it one rung further down — to the
+    approver below, or to the raiser. Reason compulsory, as for any send-back."""
+    reason = (comments or "").strip()
+    if not reason:
+        raise ValidationError("A reason is required to send this order back")
+    po = await get_po(db, po_id, user, include_approver=True)
+    if po.status != POStatus.RETURNED_FOR_CORRECTION.value:
+        raise ValidationError(f"PO is not sent back for correction (status {po.status})")
+    await engine.pass_correction_down(
+        db, DocType.PO.value, po.id, user, reason, context=_po_workflow_context(po))
+    correction = await engine.get_correction_state(db, DocType.PO.value, po.id) or {}
+    po.current_approver_name = correction.get("correction_owner_name")
+    await write_audit(
+        db, entity="pro_purchase_orders", entity_id=po.id, entity_no=po.po_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": po.status}, after={"status": po.status},
+        summary=f"Sent PO further back to {po.current_approver_name or 'previous approver'}: {reason}",
+    )
+    owner_id = correction.get("correction_owner_employee_id")
+    if owner_id:
+        await notifications.notify(
+            db, [int(owner_id)], title=f"{po.po_no} sent back to you",
+            body=f"{user.full_name}: {reason}",
+            entity_type="PO", entity_id=po.id, deep_link=f"/pos/{po.id}")
+    await db.commit()
+    await db.refresh(po)
+    return await get_po_detail(db, po.id, user)
 
 
 async def send_to_vendor(db: AsyncSession, po_id: int, user) -> PurchaseOrder:
@@ -1236,6 +1752,12 @@ async def send_to_vendor(db: AsyncSession, po_id: int, user) -> PurchaseOrder:
     # a mailbox being down must not roll that back or fail the request.
     sent = await get_po(db, po_id, user)
     await email_po_copy(db, sent, user)
+    # A failed send can have rolled the session back (`_heal_session`), which expires
+    # `sent`; it is about to be serialised, and an expired attribute cannot be re-read
+    # on an async session. Re-read only in that case.
+    from sqlalchemy import inspect as sa_inspect
+    if sa_inspect(sent).expired_attributes:
+        sent = await get_po(db, po_id, user)
     return sent
 
 
@@ -1283,6 +1805,26 @@ async def _vendor_has_dispatched(db: AsyncSession, po_id: int) -> str | None:
     )).scalar_one_or_none()
 
 
+async def _po_line_combination(db: AsyncSession, item, line, indent_item_id,
+                               *, keep=None) -> dict:
+    """Which brand / variant / model a PO line buys (2026-10-23).
+
+    The buyer's pick, checked against the item's ON combinations — a buyer may change
+    what the indent asked for (an alternative brand). Nothing picked: the line it was
+    already (an edit), else the indent line's own, else none. An indent that said
+    "Any" leaves the PO line without one until the buyer picks.
+    """
+    if getattr(line, "brand_id", None):
+        return await combinations.resolve(db, item.id, line, label=item.code)
+    if keep is not None:
+        return combinations.carry(keep)
+    if indent_item_id:
+        source = await db.get(IndentItem, indent_item_id)
+        if source is not None and source.brand_id:
+            return combinations.carry(source)
+    return dict(combinations.NONE)
+
+
 def _po_snapshot(po: PurchaseOrder) -> dict:
     """The whole order as it stands, header and lines, ready to be filed away.
 
@@ -1312,6 +1854,9 @@ def _po_snapshot(po: PurchaseOrder) -> dict:
             "tax_percent": float(line.tax_percent or 0),
             "amount": float(line.amount or 0),
             "received_quantity": float(line.received_quantity or 0),
+            "pack_hierarchy_id": line.pack_hierarchy_id,
+            "pack_breakdown": line.pack_breakdown,
+            **combinations.carry(line),
         } for line in po.items],
     }
 
@@ -1441,13 +1986,24 @@ async def amend_po(db: AsyncSession, po_id: int, data, user) -> PurchaseOrder:
                 existing.rate = _d(incoming.rate)
                 existing.tax_percent = _d(incoming.tax_percent)
                 existing.amount = amount
+                for key, value in (await _po_line_combination(
+                        db, item, incoming, existing.indent_item_id, keep=existing)).items():
+                    setattr(existing, key, value)
+                await po_packing.stamp_line(
+                    db, existing, hierarchy_id=incoming.pack_hierarchy_id,
+                    entries=incoming.pack_breakdown)
             else:
-                db.add(POItem(
+                po_line = POItem(
                     po_id=po.id, item_id=item.id, item_code=item.code,
                     item_name=item.name, uom_code=item.uom_code,
                     quantity=_d(incoming.quantity), rate=_d(incoming.rate),
                     tax_percent=_d(incoming.tax_percent), amount=amount,
-                ))
+                    **await _po_line_combination(db, item, incoming, None),
+                )
+                db.add(po_line)
+                await po_packing.stamp_line(
+                    db, po_line, hierarchy_id=incoming.pack_hierarchy_id,
+                    entries=incoming.pack_breakdown)
         for line in list(po.items):
             if line.id is not None and line.id not in kept:
                 await db.delete(line)
@@ -1459,6 +2015,8 @@ async def amend_po(db: AsyncSession, po_id: int, data, user) -> PurchaseOrder:
         po.remarks = data.remarks
     await _apply_po_header(db, po, data)
 
+    await db.flush()
+    await po_packing.sync_po_packing(db, po.id)
     lines = list((await db.execute(
         select(POItem).where(POItem.po_id == po.id)
     )).scalars().all())
@@ -1667,6 +2225,28 @@ def _po_copy_parts(po: PurchaseOrder, company: mail_template.Company,
     return "\n".join(lines), html
 
 
+async def _heal_session(db: AsyncSession, user) -> bool:
+    """Make the session usable again after a courtesy email failed. Returns whether it
+    had to roll back.
+
+    A rollback is conditional on purpose. `platform.mail` already rolls back when
+    recording its own FAILED row fails, and an ordinary SMTP failure leaves the
+    session healthy — rolling back then expires EVERY object on it, and an expired
+    attribute cannot be re-read on an async session (MissingGreenlet), so the "fix"
+    turned a logged mail failure into a 500 on whatever touched the order next.
+    Only a session actually left "pending rollback" needs it, and when that happens
+    the caller must treat everything it loaded earlier as expired.
+    """
+    if db.sync_session.is_active:
+        return False
+    await db.rollback()
+    try:
+        await db.refresh(user)   # the acting user is expired by the rollback too
+    except Exception:  # noqa: BLE001 - not every caller's user belongs to this session
+        pass
+    return True
+
+
 async def email_po_copy(db: AsyncSession, po: PurchaseOrder, user) -> bool:
     """Email the supplier their copy of the order. Returns whether it went.
 
@@ -1679,27 +2259,38 @@ async def email_po_copy(db: AsyncSession, po: PurchaseOrder, user) -> bool:
     No new permission: this is a side effect of `po.send` and `po.edit`, never its own
     route, so nothing here widens what anybody can do.
     """
+    # Read into plain locals BEFORE anything that touches the session below: a
+    # failed flush/commit inside `send_mail` can leave the session needing a
+    # rollback, and `po` has `expire_on_commit` attributes that would then try
+    # to re-fetch from that dead session — turning "the mail failed" into a
+    # second, unrelated 500 from this very except block (SCM_0076/SCM_0072).
+    po_no = po.po_no
+    revision_no = po.revision_no or 0
     try:
         vendor = await db.get(Vendor, po.vendor_id) if po.vendor_id else None
         address = (getattr(vendor, "email", None) or "").strip()
         if not address:
             logger.info("no email on file for vendor %s; %s not sent",
-                        po.vendor_name or po.vendor_id, po.po_no)
+                        po.vendor_name or po.vendor_id, po_no)
             return False
-        subject = f"Purchase order {po.po_no}"
-        if (po.revision_no or 0) > 0:
-            subject += f" — revision {po.revision_no}"
+        subject = f"Purchase order {po_no}"
+        if revision_no > 0:
+            subject += f" — revision {revision_no}"
         company = mail_template.Company.of(await get_company_letterhead(db))
         portal_url = (f"{settings.APP_BASE_URL.rstrip('/')}/supplier/login"
                       f"?next=/supplier/pos/{po.id}")
         text, html = _po_copy_parts(po, company, portal_url)
         await mail_service.send_mail(
             db, MailSendIn(to=[address], subject=subject, body=text, html=html), user,
-            attachments=[(f"{po.po_no}.pdf", vendor_documents.po_pdf(po, company), "application/pdf")])
-        logger.info("%s emailed to %s", po.po_no, address)
+            attachments=[(f"{po_no}.pdf", vendor_documents.po_pdf(po, company), "application/pdf")])
+        logger.info("%s emailed to %s", po_no, address)
         return True
     except Exception as exc:  # noqa: BLE001 - a courtesy must not cost the order
-        logger.warning("could not email %s to the vendor: %s", po.po_no, exc)
+        # The real change (SENT_TO_VENDOR) is already committed by the caller. If the
+        # failure left the session "pending rollback", heal it so it doesn't poison
+        # whatever the caller reads next; `po` is expired if that happened.
+        await _heal_session(db, user)
+        logger.warning("could not email %s to the vendor: %s", po_no, exc)
         return False
 
 
@@ -1806,11 +2397,19 @@ async def update_po_approval_quantities(
     never inflate it.
     """
     po = await get_po(db, po_id, user, include_approver=True)
-    if po.status != POStatus.PENDING_APPROVAL.value:
+    if po.status == POStatus.RETURNED_FOR_CORRECTION.value:
+        # Sent back: the person it was sent back to fixes it, under the same
+        # decrease-only rule an approver works to.
+        if not await _raiser_owns_correction(db, po, user):
+            raise ValidationError(
+                "Only the raiser can edit a sent-back PO. An approver it was sent back "
+                "to can resubmit it or send it further back.")
+    elif po.status != POStatus.PENDING_APPROVAL.value:
         raise ValidationError(f"Only a PO awaiting approval can be edited (status {po.status})")
-    actionable = await engine.actionable_doc_ids(db, DocType.PO.value, [po.id], user)
-    if po.id not in actionable:
-        raise ValidationError("Only the current approver can edit quantities during approval")
+    else:
+        actionable = await engine.actionable_doc_ids(db, DocType.PO.value, [po.id], user)
+        if po.id not in actionable:
+            raise ValidationError("Only the current approver can edit quantities during approval")
 
     by_id = {line.id: line for line in po.items}
     if not by_id:
@@ -1876,6 +2475,9 @@ async def update_po_approval_quantities(
         tax_total += amount * _d(line.tax_percent or 0) / _d(100)
     _apply_po_totals(po, sub_total, tax_total)
 
+    # A trimmed quantity is rescaled in the same hierarchy (2 Carton -> 18 Box).
+    await db.flush()
+    await po_packing.sync_po_packing(db, po.id)
     await db.commit()
     logger.info("PO %s quantities trimmed during approval by %s: %s",
                 po.po_no, getattr(user, "full_name", user), trimmed)
@@ -2033,7 +2635,73 @@ async def get_po_detail(db: AsyncSession, po_id: int, user=None):
             or (po.vendor_status is None and po.status == POStatus.SENT_TO_VENDOR.value)
         )
     )
+    await _attach_correction(db, DocType.PO.value, po,
+                             po.status == POStatus.RETURNED_FOR_CORRECTION.value, user,
+                             raiser_id=po.created_by_id)
+    await _attach_despatch_status(db, [po])
     return await _attach_pending_one(db, DocType.PO.value, po, user)
+
+
+async def po_correction_in_reach(db: AsyncSession, request, user) -> bool:
+    """`require_permission_or` hook: an approver without `po.edit` may still edit the
+    header of a PO that was sent back to THEM — they are the one asked to fix it."""
+    try:
+        po_id = int(request.path_params.get("po_id"))
+    except (TypeError, ValueError):
+        return False
+    po = await db.get(PurchaseOrder, po_id)
+    return bool(po is not None
+                and po.status == POStatus.RETURNED_FOR_CORRECTION.value
+                and await _raiser_owns_correction(db, po, user))
+
+
+async def _is_correction_owner(db: AsyncSession, doc_type: str, doc_id: int, user) -> bool:
+    """Is THIS login the person a sent-back document was handed to?"""
+    state = await engine.get_correction_state(db, doc_type, doc_id)
+    return bool(state and user is not None
+                and int(state.get("correction_owner_employee_id") or 0) == int(user.id))
+
+
+async def _raiser_owns_correction(db: AsyncSession, po: PurchaseOrder, user) -> bool:
+    """Editing a sent-back PO is the RAISER's job only. An approver it was handed back
+    to may resubmit it or pass it further down, never change it."""
+    return bool(user is not None and po.created_by_id == user.id
+                and await _is_correction_owner(db, DocType.PO.value, po.id, user))
+
+
+async def _attach_correction(db: AsyncSession, doc_type: str, doc, returned: bool, user,
+                             raiser_id: int | None = None):
+    """Who a sent-back document went to, by whom and why — and whether THIS login is
+    the one who can hand it up again. Served so the screen never guesses ownership
+    from a name."""
+    doc.correction = None
+    doc.can_resubmit_correction = False
+    doc.can_edit_correction = False
+    doc.can_pass_correction_down = False
+    if not returned:
+        return doc
+    state = await engine.get_correction_state(db, doc_type, doc.id)
+    if state:
+        doc.correction = {
+            "owner_name": state.get("correction_owner_name"),
+            "returned_by_name": state.get("returned_by_name"),
+            "returned_from_stage": state.get("returned_from_stage"),
+            "returned_at": state.get("returned_at"),
+            "reason": state.get("correction_comment"),
+        }
+        doc.can_resubmit_correction = bool(
+            user is not None
+            and int(state.get("correction_owner_employee_id") or 0) == int(user.id)
+        )
+        # Only the raiser edits. An approver holding it can only resubmit, or pass it
+        # further down while there is a rung below them.
+        doc.can_edit_correction = bool(
+            doc.can_resubmit_correction and raiser_id is not None
+            and int(raiser_id) == int(user.id))
+        doc.can_pass_correction_down = bool(
+            doc.can_resubmit_correction
+            and int(state.get("returned_from_sequence") or 0) > 1)
+    return doc
 
 
 async def get_requisition_detail(db: AsyncSession, req_id: int, user=None):
@@ -2042,9 +2710,11 @@ async def get_requisition_detail(db: AsyncSession, req_id: int, user=None):
 
 
 async def get_rfq_detail(db: AsyncSession, rfq_id: int, user=None):
-    return await _attach_pending_one(
-        db, DocType.RFQ.value,
-        await get_rfq(db, rfq_id, user, include_approver=True), user)
+    rfq = await get_rfq(db, rfq_id, user, include_approver=True)
+    await _attach_correction(db, DocType.RFQ.value, rfq,
+                             rfq.status == RFQStatus.RETURNED_FOR_CORRECTION.value, user,
+                             raiser_id=rfq.created_by_id)
+    return await _attach_pending_one(db, DocType.RFQ.value, rfq, user)
 
 
 async def get_consolidation_detail(db: AsyncSession, cons_id: int, user=None):
@@ -2085,20 +2755,15 @@ async def _item_snapshot(db: AsyncSession, item_id: int) -> Item | None:
 async def create_requisition(db: AsyncSession, data: ReqCreate, user) -> Requisition:
     warehouse_name, project_name = await _place_names(
         db, data.warehouse_id, data.project_id)
+    scope = await org_scope.resolve(db, data.organization_id, data.org_department_id,
+                                    fiscal_year=data.fiscal_year)
     req = Requisition(
-        # The project goes into the number (2026-08-21): a requisition now reads
-        # BHS/MMU/2026-27/REQ0001. Same `project_name` the snapshot column below
-        # uses, so the number and the document can never disagree.
-        req_no=await next_number(db, DocType.REQUISITION.value,
-                                 project=project_name),
+        req_no="",  # Drawn below from the document itself, so the two cannot disagree.
         req_date=utcnow().date(),
         warehouse_id=data.warehouse_id,
         warehouse_name=warehouse_name,
         project_id=data.project_id,
         project_name=project_name,
-        department_id=data.department_id,
-        department_name=await _department_snapshot(db, data.department_id),
-        company_name=data.company_name,
         required_date=data.required_date,
         priority=data.priority,
         remarks=data.remarks,
@@ -2106,6 +2771,9 @@ async def create_requisition(db: AsyncSession, data: ReqCreate, user) -> Requisi
         created_by_id=user.id,
         created_by_name=user.full_name,
     )
+    org_scope.stamp(req, scope)
+    org_scope.assert_complete(req)
+    req.req_no = await next_number(db, DocType.REQUISITION.value, **org_scope.number_args(req))
     db.add(req)
     await db.flush()
     await _write_requisition_lines(db, req, data.lines,
@@ -2178,12 +2846,10 @@ async def create_requisition_from_mr(db: AsyncSession, mr_id: int, user) -> Requ
     # The MR names a project but no stocking point; the buyer picks one on the edit.
     _, project_name = await _place_names(db, None, mr.project_id)
     req = Requisition(
-        # The project goes into the number (2026-08-21): a requisition now reads
-        # BHS/MMU/2026-27/REQ0001. Same `project_name` the snapshot column below
-        # uses, so the number and the document can never disagree.
-        req_no=await next_number(db, DocType.REQUISITION.value,
-                                 project=project_name
-                                 or getattr(mr, "project_name", None)),
+        # Nobody is at a form when this runs: it fires as the MR is approved, and an MR
+        # names no organisation. So a holding reference, not a number that would read NA.
+        # The buyer selects the organisation on the draft and the real number comes then.
+        req_no=org_scope.holding_number(mr.id),
         req_date=utcnow().date(),
         warehouse_id=None,
         project_id=mr.project_id,
@@ -2199,7 +2865,7 @@ async def create_requisition_from_mr(db: AsyncSession, mr_id: int, user) -> Requ
     )
     db.add(req)
     await db.flush()
-    await _write_requisition_lines(db, req, lines)
+    await _write_requisition_lines(db, req, lines, lock=True)
     await db.commit()
     logger.info("requisition %s raised from %s (%d line(s))",
                 req.req_no, mr.mr_no, len(lines))
@@ -2354,24 +3020,17 @@ async def create_requisition_from_mrs(db: AsyncSession, data, user) -> Requisiti
     warehouse_name, project_name = await _place_names(
         db, data.warehouse_id, project_id)
     numbers = ", ".join(mr.mr_no for mr in requests)
+    scope = await org_scope.resolve(db, data.organization_id, data.org_department_id,
+                                    fiscal_year=data.fiscal_year)
 
     req = Requisition(
-        # The project goes into the number (2026-08-21): a requisition now reads
-        # BHS/MMU/2026-27/REQ0001. Same `project_name` the snapshot column below
-        # uses, so the number and the document can never disagree.
-        req_no=await next_number(db, DocType.REQUISITION.value,
-                                 project=project_name or next(
-                                     (mr.project_name for mr in requests
-                                      if mr.project_name), None)),
+        req_no="",  # Drawn below from the document itself, so the two cannot disagree.
         req_date=utcnow().date(),
         warehouse_id=data.warehouse_id,
         warehouse_name=warehouse_name,
         project_id=project_id,
         project_name=project_name or next(
             (mr.project_name for mr in requests if mr.project_name), None),
-        department_id=data.department_id,
-        department_name=await _department_snapshot(db, data.department_id),
-        company_name=data.company_name,
         required_date=data.required_date,
         priority=data.priority,
         remarks=data.remarks or f"Consolidated from {numbers}",
@@ -2385,9 +3044,12 @@ async def create_requisition_from_mrs(db: AsyncSession, data, user) -> Requisiti
         created_by_id=user.id,
         created_by_name=user.full_name,
     )
+    org_scope.stamp(req, scope)
+    org_scope.assert_complete(req)
+    req.req_no = await next_number(db, DocType.REQUISITION.value, **org_scope.number_args(req))
     db.add(req)
     await db.flush()
-    await _write_requisition_lines(db, req, list(merged.values()),
+    await _write_requisition_lines(db, req, list(merged.values()), lock=True,
                                    default_date=data.required_date)
 
     for mr in requests:
@@ -2455,11 +3117,23 @@ async def _last_known_rates(db: AsyncSession, item_ids: list[int]) -> dict[int, 
     return rates
 
 
+def _req_line_key(item_id, combo: dict) -> tuple:
+    """A requisition line's identity across an edit, which rewrites every line."""
+    return (int(item_id), combo.get("brand_id"), combo.get("variant_id"),
+            combo.get("model_id"))
+
+
 async def _write_requisition_lines(db: AsyncSession, req: Requisition, lines,
-                                   default_date=None) -> None:
+                                   default_date=None, *, ceilings: dict | None = None,
+                                   lock: bool = False) -> None:
     """`default_date` is the header's "needed by", applied to every line that does not
     name its own. The date was being asked per line, which meant typing one date forty
-    times to say something true of the whole document."""
+    times to say something true of the whole document.
+
+    The ceiling (2026-11-03): `ceilings` carries each line's `requested_quantity` across
+    an edit, keyed by item + brand / variant / model, and a line may not come back above
+    it. `lock` gives every line written its own quantity as the ceiling — a requisition
+    drawn from material requests is capped by them from the moment it exists."""
     total = Decimal(0)
     # Only consulted for lines that came in at zero — a buyer who typed a rate meant it.
     fallback = await _last_known_rates(
@@ -2477,12 +3151,23 @@ async def _write_requisition_lines(db: AsyncSession, req: Requisition, lines,
         item = await _item_snapshot(db, line.item_id)
         if item is None:
             raise ValidationError(f"Item {line.item_id} does not exist")
-        if line.item_id in seen_items:
+        combo = await _po_line_combination(
+            db, item, line, getattr(line, "indent_item_id", None))
+        key = (line.item_id, combo["brand_id"], combo["variant_id"], combo["model_id"])
+        if key in seen_items:
             raise ValidationError(
                 f"Item '{item.name or item.code}' is already added. "
-                "An item cannot be added more than once in the same requisition."
+                "An item cannot be added more than once in the same requisition "
+                "in the same brand / variant / model."
             )
-        seen_items.add(line.item_id)
+        seen_items.add(key)
+        cap = (ceilings or {}).get(_req_line_key(line.item_id, combo))
+        if cap is not None:
+            qty_ceiling.assert_not_raised(line.quantity, cap,
+                                      label=item.code or item.name or "Line",
+                                      uom=line.uom_code or getattr(item, "uom_code", None))
+        elif lock:
+            cap = _d(line.quantity)
         rate = _d(line.estimated_rate) or fallback.get(line.item_id, Decimal(0))
         amount = _d(line.quantity) * rate
         total += amount
@@ -2492,9 +3177,10 @@ async def _write_requisition_lines(db: AsyncSession, req: Requisition, lines,
             indent_no=getattr(line, "indent_no", None) or indent_nos.get(line.indent_id),
             item_id=item.id, item_code=item.code, item_name=item.name,
             uom_code=line.uom_code or getattr(item, "uom_code", None),
-            quantity=_d(line.quantity), estimated_rate=rate,
+            quantity=_d(line.quantity), requested_quantity=cap, estimated_rate=rate,
             estimated_amount=amount,
             required_date=line.required_date or default_date,
+            **combo,
         ))
     req.total_items = len(lines)
     req.estimated_value = total
@@ -2659,6 +3345,25 @@ async def update_requisition(db: AsyncSession, req_id: int, data: ReqCreate,
     req = await get_requisition(db, req_id, user)
     if req.status != RequisitionStatus.DRAFT.value:
         raise ValidationError(f"Cannot edit a requisition in {req.status} status")
+    # Checked before the lines are touched. An older draft keeps its fields as they are.
+    organised = org_scope.uses_org(req, req.req_no)
+    scope = (await org_scope.resolve(db, data.organization_id, data.org_department_id,
+                                     keep=req, fiscal_year=data.fiscal_year or req.fiscal_year)
+             if organised else None)
+    if organised:
+        org_scope.remember_number_args(req)
+    # What each line was before the edit and its ceiling, by item + combination: the
+    # lines are rewritten below, so the identity has to be carried, not the row.
+    before = {_req_line_key(line.item_id, {"brand_id": line.brand_id,
+                                           "variant_id": line.variant_id,
+                                           "model_id": line.model_id}): line
+              for line in req.items}
+    ceilings = {key: line.requested_quantity for key, line in before.items()
+                if line.requested_quantity is not None}
+    snapshot = {key: (line.item_id, line.item_code, line.item_name, line.uom_code,
+                      _d(line.quantity), line.requested_quantity,
+                      " · ".join(x for x in (line.brand_name, line.variant_name, line.model_name) if x) or None)
+                for key, line in before.items()}
     for line in list(req.items):
         await db.delete(line)
     await db.flush()
@@ -2669,22 +3374,95 @@ async def update_requisition(db: AsyncSession, req_id: int, data: ReqCreate,
     req.project_id = data.project_id
     req.warehouse_name, req.project_name = await _place_names(
         db, data.warehouse_id, data.project_id, keep_id=kept_warehouse_id)
-    req.department_id = data.department_id
-    req.department_name = await _department_snapshot(db, data.department_id)
-    req.company_name = data.company_name
+    if organised:
+        org_scope.stamp(req, scope)
+        org_scope.assert_complete(req)
+        await org_scope.renumber(db, req, DocType.REQUISITION.value, "req_no",
+                                 "pro_requisitions", user)
+    else:
+        req.department_id = data.department_id
+        req.department_name = await _department_snapshot(db, data.department_id)
+        req.company_name = data.company_name
     req.required_date = data.required_date
     req.priority = data.priority
     req.remarks = data.remarks
     await _write_requisition_lines(db, req, data.lines,
-                                   default_date=data.required_date)
+                                   default_date=data.required_date, ceilings=ceilings)
+    await db.flush()
+    await _record_req_changes(db, req, snapshot, user)
     await db.commit()
     return await get_requisition(db, req_id)
+
+
+async def _record_req_changes(db: AsyncSession, req: Requisition, snapshot: dict,
+                              user) -> None:
+    """A line that had a ceiling and came out of the edit lower — or not at all — is
+    recorded (2026-11-03). A hand-made draft's free edits have no ceiling and are not."""
+    after = {}
+    for line in (await db.execute(select(RequisitionItem).where(
+            RequisitionItem.requisition_id == req.id))).scalars().all():
+        after[_req_line_key(line.item_id, {"brand_id": line.brand_id,
+                                           "variant_id": line.variant_id,
+                                           "model_id": line.model_id})] = _d(line.quantity)
+    position = await _position_name(db, user)
+    for key, (item_id, code, name, uom, was, cap, combo_label) in snapshot.items():
+        if cap is None:
+            continue
+        now = after.get(key, Decimal(0))
+        if now == was:
+            continue
+        db.add(RequisitionQtyChange(
+            requisition_id=req.id, item_id=item_id, item_code=code, item_name=name,
+            uom_code=uom, combination=combo_label, from_qty=was, to_qty=now,
+            ceiling_qty=cap, stage="DRAFT_EDIT",
+            comments=None if key in after else "Line removed",
+            changed_by_id=getattr(user, "id", None),
+            changed_by_name=getattr(user, "full_name", None),
+            changed_by_position=position,
+        ))
+
+
+async def _position_name(db: AsyncSession, user) -> str | None:
+    """The post the change was made in — snapshotted onto the change record."""
+    position_id = getattr(user, "active_position_id", None)
+    if not position_id:
+        return None
+    position = await db.get(HcmPosition, position_id)
+    return getattr(position, "name", None)
+
+
+async def requisition_quantity_changes(db: AsyncSession, req_id: int, user) -> list[dict]:
+    """Every recorded quantity change on a requisition, oldest first (2026-11-03)."""
+    await get_requisition(db, req_id, user)   # its visibility rule
+    rows = (await db.execute(select(RequisitionQtyChange).where(
+        RequisitionQtyChange.requisition_id == req_id).order_by(RequisitionQtyChange.id)
+    )).scalars().all()
+    return [{
+        "id": r.id, "item_id": r.item_id, "item_code": r.item_code, "item_name": r.item_name,
+        "uom_code": r.uom_code, "combination": r.combination,
+        "from_qty": float(r.from_qty), "to_qty": float(r.to_qty),
+        "ceiling_qty": None if r.ceiling_qty is None else float(r.ceiling_qty),
+        "stage": r.stage, "comments": r.comments, "changed_by_name": r.changed_by_name,
+        "changed_by_position": r.changed_by_position, "changed_at": r.changed_at,
+    } for r in rows]
 
 
 async def submit_requisition(db: AsyncSession, req_id: int, user) -> Requisition:
     req = await get_requisition(db, req_id, user)
     if req.status != RequisitionStatus.DRAFT.value:
         raise ValidationError(f"Cannot submit a requisition in {req.status} status")
+    if org_scope.is_holding(req.req_no):
+        raise org_scope.OrganisationRequired(
+            "Select the organisation on this requisition and save it before submitting. "
+            "It takes its number then.")
+    # Locked once submitted (2026-11-03): what it asks for now is the most any later
+    # change may leave it at. Lines drawn from material requests already carry theirs.
+    # Read off the table, not `req.items`: an edit rewrites the lines without touching
+    # the loaded collection, which would still hold the ones it deleted.
+    for line in (await db.execute(select(RequisitionItem).where(
+            RequisitionItem.requisition_id == req.id))).scalars().all():
+        if line.requested_quantity is None:
+            line.requested_quantity = _d(line.quantity)
     instance = await engine.start(
         db, DocType.REQUISITION.value, req.id,
         context={"total_amount": float(req.estimated_value),
@@ -2775,7 +3553,35 @@ async def _validate_rfq_source_quantities(db: AsyncSession, lines,
                 f"document quantity ({maximum})")
 
 
+#: The business runs on India time, and so does every date box on the screens
+#: (`todayIst` in shared/datetime.ts). Comparing against the server's UTC date would
+#: refuse a perfectly good "today" for the first 5 h 30 min of every Indian day.
+_BUSINESS_TZ = ZoneInfo("Asia/Kolkata")
+
+
+def _business_today() -> date:
+    return datetime.now(_BUSINESS_TZ).date()
+
+
+def assert_rfq_due_date(due_date: date | None, *, today: date | None = None) -> None:
+    """SCM_0172: an RFQ may not close before the day it is raised or edited.
+
+    A closing date behind us shuts the tender the moment it goes out — no supplier
+    can quote on it. The date box on the form already greys out past days, but a
+    typed date went straight through it and nothing here asked. Empty stays allowed:
+    "no closing date" is a tender left open, which is a decision, not a mistake.
+    """
+    if due_date is None:
+        return
+    today = today or _business_today()
+    if due_date < today:
+        raise ValidationError(
+            f"The closing date {due_date:%d %b %Y} has already passed. Pick today "
+            f"({today:%d %b %Y}) or a later date.")
+
+
 async def create_rfq(db: AsyncSession, data: RFQCreate, user) -> RFQ:
+    assert_rfq_due_date(data.due_date)
     requisition = None
     if data.requisition_id:
         requisition = await get_requisition(db, data.requisition_id)
@@ -2843,13 +3649,21 @@ async def create_rfq(db: AsyncSession, data: RFQCreate, user) -> RFQ:
     warehouse_name, project_name = await _place_names(
         db, warehouse_id, project_id, keep_id=inherited)
 
+    # Copied from the document it is raised from, or selected here when that document
+    # has none: raised cold, or from one older than organisations. A linked tender
+    # keeps its source's organisation, so one chain cannot change company halfway.
+    source_org = getattr(source, "organization_id", None)
+    if source_org and data.organization_id and data.organization_id != source_org:
+        raise ValidationError(
+            f"The organisation comes from {getattr(source, 'req_no', None) or source.cons_no} "
+            "and cannot be changed here.")
+    scope = await org_scope.resolve(
+        db, source_org or data.organization_id,
+        data.org_department_id or getattr(source, "org_department_id", None),
+        keep=source, fiscal_year=data.fiscal_year)
+
     rfq = RFQ(
-        # The project goes into the number (2026-08-21): a requisition now reads
-        # BHS/MMU/2026-27/REQ0001. Same `project_name` the snapshot column below
-        # uses, so the number and the document can never disagree.
-        rfq_no=await next_number(db, DocType.RFQ.value,
-                                 project=project_name
-                                 or getattr(source, "project_name", None)),
+        rfq_no="",  # Drawn below from the document itself, so the two cannot disagree.
         rfq_date=utcnow().date(),
         title=data.title or (f"Quotation for {requisition.req_no}" if requisition
                              else f"Quotation for {sheet.cons_no}" if sheet else None),
@@ -2863,18 +3677,21 @@ async def create_rfq(db: AsyncSession, data: RFQCreate, user) -> RFQ:
         project_name=project_name or getattr(source, "project_name", None),
         # Carried from the source, or typed on the form when the RFQ is raised cold —
         # a tender with no requisition behind it still has to say who is buying.
-        department_id=data.department_id or getattr(source, "department_id", None),
-        department_name=(await _department_snapshot(db, data.department_id)
-                         or getattr(source, "department_name", None)),
-        company_name=data.company_name or getattr(source, "company_name", None),
+        # The older HCM department, only ever from an older source. A new one is below.
+        department_id=None if scope["org_department_id"] else getattr(source, "department_id", None),
+        department_name=None if scope["org_department_id"] else getattr(source, "department_name", None),
         due_date=data.due_date,
         terms=data.terms or (getattr(source, "remarks", None) if source else None),
         evaluation_method=(data.evaluation_method.upper()
                            if data.evaluation_method else None),
+        freight_required=bool(data.freight_required),
         status=RFQStatus.DRAFT.value,
         created_by_id=user.id,
         created_by_name=user.full_name,
     )
+    org_scope.stamp(rfq, scope)
+    org_scope.assert_complete(rfq)
+    rfq.rfq_no = await next_number(db, DocType.RFQ.value, **org_scope.number_args(rfq))
     db.add(rfq)
     await db.flush()
     await _write_rfq_lines(db, rfq, data.lines)
@@ -2895,6 +3712,8 @@ async def _write_rfq_lines(db: AsyncSession, rfq: RFQ, lines) -> None:
             description=line.description,
             uom_code=line.uom_code or getattr(item, "uom_code", None),
             quantity=_d(line.quantity), required_date=line.required_date,
+            **await _po_line_combination(
+                db, item, line, getattr(line, "indent_item_id", None)),
         ))
     rfq.total_items = len(lines)
 
@@ -3039,6 +3858,31 @@ async def get_rfq(db: AsyncSession, rfq_id: int, user=None, *,
     ))).scalar_one_or_none()
     if not rfq:
         raise NotFoundError(f"RFQ {rfq_id} not found")
+    # This enrichment is read-only context for the response — never the reason an
+    # action that already committed gets reported as failed. `act_on_rfq` calls this
+    # AFTER its own `db.commit()`, purely to build the reply; a buyer who pressed
+    # Approve and watched it error, then pressed it again and was told the RFQ was
+    # "not awaiting approval" (SCM_0071/SCM_0072), had their approval go through both
+    # times — it was THIS lookup that failed, after the state change it was reporting
+    # on had already succeeded. Same rule as `email_rfq_copies`: a secondary failure
+    # must never undo, or look like it undid, the primary one.
+    try:
+        await _attach_rfq_context(db, rfq)
+    except Exception:
+        logger.exception(
+            "Could not attach PO/requisition context to RFQ %s; returning the bare "
+            "document rather than reporting the caller's own action as failed.",
+            rfq.rfq_no)
+        rfq.po_id = rfq.po_no = rfq.po_status = None
+        rfq.purchase_orders = []
+        for invitation in rfq.vendors:
+            invitation.live_allocated_quantities = None
+        rfq.priority = rfq.requisition_status = None
+        rfq.source_indent_nos = []
+    return rfq
+
+
+async def _attach_rfq_context(db: AsyncSession, rfq: RFQ) -> None:
     # The order this award already became, if it became one. Transient attributes off a
     # lookup rather than columns on pro_rfqs: the PO already points backward at the RFQ,
     # and a second copy of that link on the RFQ is a second thing that can go stale.
@@ -3061,14 +3905,17 @@ async def get_rfq(db: AsyncSession, rfq_id: int, user=None, *,
     # comparison screen needs to say *which* earlier PO carried (say) six batteries,
     # before the buyer enters the new total award.  A header-only reference cannot
     # explain why the next PO will contain only the remaining quantity.
+    # Keyed by RFQ LINE (2026-10-26) — two brands of one item are two lines.
+    line_keys = await _po_line_keys(db, [row.id for row in po_rows])
     po_item_rows = (await db.execute(
-        select(POItem.po_id, POItem.item_id, func.sum(POItem.quantity))
+        select(POItem.id, POItem.po_id, POItem.item_id, POItem.quantity)
         .where(POItem.po_id.in_([row.id for row in po_rows]))
-        .group_by(POItem.po_id, POItem.item_id)
     )).all() if po_rows else []
     quantities_by_po: dict[int, dict[str, float]] = {}
-    for po_id, item_id, quantity in po_item_rows:
-        quantities_by_po.setdefault(po_id, {})[str(item_id)] = float(_d(quantity))
+    for line_id, po_id, item_id, quantity in po_item_rows:
+        key = line_keys.get(line_id, str(item_id))
+        bucket = quantities_by_po.setdefault(po_id, {})
+        bucket[key] = bucket.get(key, 0.0) + float(_d(quantity))
     rfq.purchase_orders = [SimpleNamespace(
         id=row.id, po_no=row.po_no, status=row.status,
         quotation_id=row.quotation_id, vendor_id=row.vendor_id,
@@ -3082,16 +3929,17 @@ async def get_rfq(db: AsyncSession, rfq_id: int, user=None, *,
     # the audit record of who was originally awarded it.  Reading live PO lines also
     # keeps this figure correct if an approver trims a pending order's quantity.
     live_rows = (await db.execute(
-        select(PurchaseOrder.vendor_id, POItem.item_id, func.sum(POItem.quantity))
+        select(PurchaseOrder.vendor_id, POItem.id, POItem.item_id, POItem.quantity)
         .select_from(PurchaseOrder)
         .join(POItem, POItem.po_id == PurchaseOrder.id)
         .where(PurchaseOrder.rfq_id == rfq.id,
                PurchaseOrder.status.notin_(_DEAD_PO_STATUSES))
-        .group_by(PurchaseOrder.vendor_id, POItem.item_id)
     )).all()
     live_by_vendor: dict[int, dict[str, float]] = {}
-    for vendor_id, item_id, quantity in live_rows:
-        live_by_vendor.setdefault(vendor_id, {})[str(item_id)] = float(_d(quantity))
+    for vendor_id, line_id, item_id, quantity in live_rows:
+        key = line_keys.get(line_id, str(item_id))
+        bucket = live_by_vendor.setdefault(vendor_id, {})
+        bucket[key] = bucket.get(key, 0.0) + float(_d(quantity))
     for invitation in rfq.vendors:
         invitation.live_allocated_quantities = live_by_vendor.get(invitation.vendor_id) or None
 
@@ -3101,17 +3949,19 @@ async def get_rfq(db: AsyncSession, rfq_id: int, user=None, *,
     # department that asked is the useful fact.
     requisition = (await db.get(Requisition, rfq.requisition_id)
                    if rfq.requisition_id else None)
-    if requisition is not None:
-        for field in ("department_id", "department_name", "company_name"):
+    # An organised tender says all of this itself. These stay for the older ones.
+    if not rfq.organization_id:
+        if requisition is not None:
+            for field in ("department_id", "department_name", "company_name"):
+                if getattr(rfq, field, None) in (None, ""):
+                    setattr(rfq, field, getattr(requisition, field, None))
+        # Still blank on both documents: fall back to whoever asked — the requisition's
+        # raiser where there is one, the buyer otherwise.
+        fallback = await _header_context(
+            db, requisition.created_by_id if requisition else rfq.created_by_id)
+        for field, value in fallback.items():
             if getattr(rfq, field, None) in (None, ""):
-                setattr(rfq, field, getattr(requisition, field, None))
-    # Still blank on both documents: fall back to whoever asked — the requisition's
-    # raiser where there is one, the buyer otherwise.
-    fallback = await _header_context(
-        db, requisition.created_by_id if requisition else rfq.created_by_id)
-    for field, value in fallback.items():
-        if getattr(rfq, field, None) in (None, ""):
-            setattr(rfq, field, value)
+                setattr(rfq, field, value)
     rfq.priority = requisition.priority if requisition else None
     rfq.requisition_status = requisition.status if requisition else None
     rfq.source_indent_nos = _indent_numbers(
@@ -3121,7 +3971,43 @@ async def get_rfq(db: AsyncSession, rfq_id: int, user=None, *,
             .order_by(RequisitionItem.line_no)
         )).scalars().all()
     ) if requisition else []
-    return rfq
+
+
+# --------------------------------------------------------------------------- #
+#  The Approved Requisitions tab (SCM_0058) — what the RFQ screen offers before
+#  anybody has pressed Create RFQ
+# --------------------------------------------------------------------------- #
+#  An approved requisition used to be invisible from the RFQ screen until a buyer
+#  opened it from the Requisitions register and pressed Create RFQ there — the one
+#  press this tab is a second doorway onto. Same shape as `consolidation.candidates`,
+#  for the same reason: filtered in the query, not in Python, because the register is
+#  thousands of rows on a live database and loading them all to drop the converted
+#  ones puts the whole history through the app for a screen that shows twenty.
+
+async def rfq_candidates(db: AsyncSession, params: PageParams,
+                         project_id: int | None = None) -> dict:
+    """Approved requisitions with neither a live RFQ nor a live consolidation sheet
+    against them yet — what the Approved Requisitions tab offers.
+
+    Not CONSOLIDATED: once a requisition is folded into a sheet it is bought through
+    the sheet's own tender, not tendered again on its own, so it drops off this list
+    the same way it drops off the consolidation candidates list.
+    """
+    taken_by_sheet = select(PurchaseConsolidationSource.requisition_id).join(
+        PurchaseConsolidation,
+        PurchaseConsolidation.id == PurchaseConsolidationSource.consolidation_id
+    ).where(PurchaseConsolidation.status.notin_([
+        ConsolidationStatus.CANCELLED.value, ConsolidationStatus.REJECTED.value]))
+    taken_by_rfq = select(RFQ.requisition_id).where(
+        RFQ.requisition_id.isnot(None), RFQ.status != RFQStatus.CANCELLED.value)
+    stmt = (select(Requisition)
+            .where(Requisition.status == RequisitionStatus.APPROVED.value,
+                   Requisition.id.notin_(taken_by_sheet),
+                   Requisition.id.notin_(taken_by_rfq))
+            .order_by(Requisition.created_at.desc()))
+    if project_id:
+        stmt = stmt.where(Requisition.project_id == project_id)
+    return await paginate(db, stmt, params)
 
 
 async def list_rfqs(db: AsyncSession, params: PageParams, status: str | None = None,
@@ -3159,19 +4045,51 @@ async def list_rfqs(db: AsyncSession, params: PageParams, status: str | None = N
         db, stmt.order_by(RFQ.created_at.desc()), params))
 
 
+async def _rfq_source_has_org(db: AsyncSession, rfq: RFQ) -> bool:
+    source = (await db.get(Requisition, rfq.requisition_id) if rfq.requisition_id
+              else await db.get(PurchaseConsolidation, rfq.consolidation_id)
+              if rfq.consolidation_id else None)
+    return bool(source and source.organization_id)
+
+
 async def update_rfq(db: AsyncSession, rfq_id: int, data: RFQUpdate, user) -> RFQ:
     rfq = await get_rfq(db, rfq_id, user)
     EDITABLE = (RFQStatus.DRAFT.value, RFQStatus.PENDING_APPROVAL.value)
-    if rfq.status not in EDITABLE:
+    if rfq.status == RFQStatus.RETURNED_FOR_CORRECTION.value:
+        # Sent back: only its raiser edits it, and only once it has reached them.
+        if not await _rfq_raiser_owns_correction(db, rfq, user):
+            raise ValidationError(
+                "Only the raiser can edit an RFQ that was sent back. An approver it was "
+                "sent back to can resubmit it or send it further back.")
+    elif rfq.status not in EDITABLE:
         raise ValidationError(f"Cannot edit an RFQ in {rfq.status} status")
+    # An older tender skips all of this: its fields keep working as they always did.
+    organised = bool(rfq.organization_id)
+    is_draft = rfq.status == RFQStatus.DRAFT.value
+    booking = data.model_fields_set & {"organization_id", "org_department_id", "project_id",
+                                       "fiscal_year"}
+    if organised:
+        org_scope.assert_lockable(
+            rfq, rfq.rfq_no, is_draft=is_draft,
+            source_has_org=await _rfq_source_has_org(db, rfq),
+            organization_id=data.organization_id, org_department_id=data.org_department_id,
+            project_id=data.project_id, fiscal_year=data.fiscal_year, given=booking)
+        org_scope.remember_number_args(rfq)
     if data.evaluation_method is not None:
         if not evaluation.is_valid(data.evaluation_method):
             raise ValidationError(
                 f"{data.evaluation_method!r} is not an evaluation method")
         rfq.evaluation_method = data.evaluation_method.upper()
+    if data.freight_required is not None:
+        rfq.freight_required = data.freight_required
     # Read before the loop overwrites it, for the reason `_place_names` gives about
     # grandfathering: 9 live RFQs sit on an LIP address they were raised with.
     kept_warehouse_id = rfq.warehouse_id
+    # Checked only when the date MOVES: an older draft already holding a date that has
+    # since passed must still be editable for its other fields, and the buyer is told
+    # about that date the moment they change it.
+    if data.due_date is not None and data.due_date != rfq.due_date:
+        assert_rfq_due_date(data.due_date)
     for field in ("title", "due_date", "terms", "warehouse_id", "project_id"):
         value = getattr(data, field)
         if value is not None:
@@ -3179,11 +4097,26 @@ async def update_rfq(db: AsyncSession, rfq_id: int, data: RFQUpdate, user) -> RF
     if data.warehouse_id is not None or data.project_id is not None:
         rfq.warehouse_name, rfq.project_name = await _place_names(
             db, rfq.warehouse_id, rfq.project_id, keep_id=kept_warehouse_id)
-    if data.department_id is not None:
-        rfq.department_id = data.department_id
-        rfq.department_name = await _department_snapshot(db, data.department_id)
-    if data.company_name is not None:
-        rfq.company_name = data.company_name
+    if organised:
+        # Stated as empty means take it off, which the older PATCH rule cannot say.
+        if "project_id" in booking and data.project_id is None:
+            rfq.project_id = rfq.project_name = None
+        if is_draft and booking & {"organization_id", "org_department_id", "fiscal_year"}:
+            org_scope.stamp(rfq, await org_scope.resolve(
+                db,
+                data.organization_id if "organization_id" in booking else rfq.organization_id,
+                data.org_department_id if "org_department_id" in booking
+                else rfq.org_department_id,
+                keep=rfq, fiscal_year=data.fiscal_year or rfq.fiscal_year))
+        org_scope.assert_complete(rfq)
+        if is_draft:
+            await org_scope.renumber(db, rfq, DocType.RFQ.value, "rfq_no", "pro_rfqs", user)
+    else:
+        if data.department_id is not None:
+            rfq.department_id = data.department_id
+            rfq.department_name = await _department_snapshot(db, data.department_id)
+        if data.company_name is not None:
+            rfq.company_name = data.company_name
     if data.lines is not None:
         await _validate_rfq_source_quantities(
             db, data.lines, rfq.requisition_id, rfq.consolidation_id)
@@ -3387,7 +4320,10 @@ async def submit_rfq(db: AsyncSession, rfq_id: int, user) -> RFQ:
         rfq.current_approver_name = await _approver_names(db, DocType.RFQ.value, rfq.id)
     await db.commit()
     if rfq.status == RFQStatus.PUBLISHED.value:
-        await email_rfq_copies(db, rfq, user)
+        try:
+            await email_rfq_copies(db, rfq, user)
+        except Exception as exc:
+            logger.warning("could not email RFQ copies for %s: %s", rfq.id, exc)
     return await get_rfq(db, rfq_id)
 
 
@@ -3396,6 +4332,9 @@ async def act_on_rfq(db: AsyncSession, rfq_id: int, action: str, comments: str,
     rfq = await get_rfq(db, rfq_id)
     if rfq.status != RFQStatus.PENDING_APPROVAL.value:
         raise ValidationError(f"RFQ is not awaiting approval (status {rfq.status})")
+    # A rejection cancels the RFQ, so the raiser must be told why.
+    if action.upper().startswith("REJECT") and not (comments or "").strip():
+        raise ValidationError("A reason is required to reject this RFQ")
     instance = await engine.act(db, DocType.RFQ.value, rfq.id, action, user, comments)
     if instance.status == InstanceStatus.APPROVED.value:
         # Approved means published: the tokens go live and the vendors can quote.
@@ -3407,8 +4346,105 @@ async def act_on_rfq(db: AsyncSession, rfq_id: int, action: str, comments: str,
         rfq.current_approver_name = await _approver_names(db, DocType.RFQ.value, rfq.id)
     await db.commit()
     if rfq.status == RFQStatus.PUBLISHED.value:
-        await email_rfq_copies(db, rfq, user)
+        try:
+            await email_rfq_copies(db, rfq, user)
+        except Exception as exc:
+            logger.warning("could not email RFQ copies for %s: %s", rfq.id, exc)
     return await get_rfq(db, rfq_id)
+
+
+def _rfq_workflow_context(rfq: RFQ) -> dict:
+    """The same context `submit_rfq` starts the ladder with."""
+    return {"vendor_count": rfq.vendor_count,
+            "project_id": rfq.project_id or None,
+            "doc_no": rfq.rfq_no}
+
+
+async def send_back_rfq(db: AsyncSession, rfq_id: int, comments: str, user):
+    """Send an RFQ back ONE rung for correction (previous approver, or the raiser at
+    the first rung). Reason compulsory. It stays unpublished: vendors see nothing."""
+    reason = (comments or "").strip()
+    if not reason:
+        raise ValidationError("A reason is required to send this RFQ back")
+    rfq = await get_rfq(db, rfq_id, user, include_approver=True)
+    if rfq.status != RFQStatus.PENDING_APPROVAL.value:
+        raise ValidationError(f"RFQ is not awaiting approval (status {rfq.status})")
+    await engine.return_for_correction(
+        db, DocType.RFQ.value, rfq.id, user, reason, context=_rfq_workflow_context(rfq))
+    correction = await engine.get_correction_state(db, DocType.RFQ.value, rfq.id) or {}
+    before_status = rfq.status
+    rfq.status = RFQStatus.RETURNED_FOR_CORRECTION.value
+    rfq.current_approver_name = correction.get("correction_owner_name")
+    await write_audit(
+        db, entity="pro_rfqs", entity_id=rfq.id, entity_no=rfq.rfq_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": before_status}, after={"status": rfq.status},
+        summary=f"Sent RFQ back to {rfq.current_approver_name or 'previous approver'}: {reason}",
+    )
+    owner_id = correction.get("correction_owner_employee_id")
+    if owner_id:
+        await notifications.notify(
+            db, [int(owner_id)], title=f"{rfq.rfq_no} sent back to you",
+            body=f"{user.full_name}: {reason}",
+            entity_type="RFQ", entity_id=rfq.id, deep_link=f"/procurement/rfqs/{rfq.id}")
+    await db.commit()
+    return await get_rfq_detail(db, rfq.id, user)
+
+
+async def _rfq_raiser_owns_correction(db: AsyncSession, rfq: RFQ, user) -> bool:
+    """Editing a sent-back RFQ is the RAISER's job only (see _raiser_owns_correction)."""
+    return bool(user is not None and rfq.created_by_id == user.id
+                and await _is_correction_owner(db, DocType.RFQ.value, rfq.id, user))
+
+
+async def pass_rfq_correction_down(db: AsyncSession, rfq_id: int, comments: str, user):
+    """An approver an RFQ was sent back to passes it one rung further down. Reason
+    compulsory."""
+    reason = (comments or "").strip()
+    if not reason:
+        raise ValidationError("A reason is required to send this RFQ back")
+    rfq = await get_rfq(db, rfq_id, user, include_approver=True)
+    if rfq.status != RFQStatus.RETURNED_FOR_CORRECTION.value:
+        raise ValidationError(f"RFQ is not sent back for correction (status {rfq.status})")
+    await engine.pass_correction_down(
+        db, DocType.RFQ.value, rfq.id, user, reason, context=_rfq_workflow_context(rfq))
+    correction = await engine.get_correction_state(db, DocType.RFQ.value, rfq.id) or {}
+    rfq.current_approver_name = correction.get("correction_owner_name")
+    await write_audit(
+        db, entity="pro_rfqs", entity_id=rfq.id, entity_no=rfq.rfq_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": rfq.status}, after={"status": rfq.status},
+        summary=f"Sent RFQ further back to {rfq.current_approver_name or 'previous approver'}: {reason}",
+    )
+    owner_id = correction.get("correction_owner_employee_id")
+    if owner_id:
+        await notifications.notify(
+            db, [int(owner_id)], title=f"{rfq.rfq_no} sent back to you",
+            body=f"{user.full_name}: {reason}",
+            entity_type="RFQ", entity_id=rfq.id, deep_link=f"/procurement/rfqs/{rfq.id}")
+    await db.commit()
+    return await get_rfq_detail(db, rfq.id, user)
+
+
+async def resubmit_rfq_correction(db: AsyncSession, rfq_id: int, user, comments: str = ""):
+    """Hand a sent-back RFQ up again; it reopens at the rung that sent it back."""
+    rfq = await get_rfq(db, rfq_id, user, include_approver=True)
+    if rfq.status != RFQStatus.RETURNED_FOR_CORRECTION.value:
+        raise ValidationError(f"RFQ is not sent back for correction (status {rfq.status})")
+    await engine.resubmit_correction(
+        db, DocType.RFQ.value, rfq.id, user, context=_rfq_workflow_context(rfq))
+    before_status = rfq.status
+    rfq.status = RFQStatus.PENDING_APPROVAL.value
+    rfq.current_approver_name = await _approver_names(db, DocType.RFQ.value, rfq.id)
+    await write_audit(
+        db, entity="pro_rfqs", entity_id=rfq.id, entity_no=rfq.rfq_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": before_status}, after={"status": rfq.status},
+        summary="Resubmitted RFQ after correction"
+                + (f": {comments.strip()}" if (comments or "").strip() else ""),
+    )
+    await db.commit()
+    return await get_rfq_detail(db, rfq.id, user)
 
 
 async def _publish_rfq(db: AsyncSession, rfq: RFQ) -> None:
@@ -3453,13 +4489,14 @@ async def _publish_rfq(db: AsyncSession, rfq: RFQ) -> None:
             # The RFQ's project: a quote answers one enquiry and belongs to whatever
             # that enquiry was raised for.
             quotation_no=await next_number(db, DocType.QUOTATION.value,
-                                           project=rfq.project_name),
+                                           **org_scope.number_args(rfq, carried=True)),
             rfq_id=rfq.id, rfq_no=rfq.rfq_no,
             vendor_id=invited.vendor_id, vendor_name=invited.vendor_name,
             quotation_date=now.date(),
             status=QuotationStatus.DRAFT.value,
             currency="INR",
         )
+        org_scope.carry(rfq, quote, project=True)
         db.add(quote)
         await db.flush()
         for line in rfq.items:
@@ -3471,47 +4508,63 @@ async def _publish_rfq(db: AsyncSession, rfq: RFQ) -> None:
                 item_code=line.item_code, item_name=line.item_name,
                 description=line.description, uom_code=line.uom_code,
                 quantity=_d(item_quantities[str(line.item_id)]),
+                **combinations.carry(line),
             ))
 
 
 async def email_rfq_copies(db: AsyncSession, rfq: RFQ, user) -> None:
     """Email each vendor's RFQ after its approved publication is committed."""
-    for invited in rfq.vendors:
-        address = (invited.vendor_email or "").strip()
+    # Plain locals, read before any vendor's send can leave the session needing a
+    # rollback (SCM_0087). A rollback expires every object on the session, and an
+    # expired attribute cannot be re-read on an async session, so the loop must not
+    # walk `rfq.vendors` — one failed vendor would break the ones after it.
+    rfq_id = rfq.id
+    rfq_no = rfq.rfq_no
+    due_date = str(rfq.due_date or "")
+    recipients = [
+        (v.vendor_id, v.vendor_name, (v.vendor_email or "").strip(),
+         list(v.mapped_item_ids or []), dict(v.item_quantities or {}))
+        for v in rfq.vendors
+    ]
+    for vendor_id, vendor_name, address, mapped_item_ids, item_quantities in recipients:
         if not address:
-            logger.warning("%s not emailed to %s: no vendor email", rfq.rfq_no,
-                           invited.vendor_name or invited.vendor_id)
+            logger.warning("%s not emailed to %s: no vendor email", rfq_no,
+                           vendor_name or vendor_id)
             continue
-        portal_url = (f"{settings.APP_BASE_URL.rstrip('/')}/supplier/login"
-                      f"?next=/supplier/rfqs/{rfq.id}")
-        subject = f"Request for quotation {rfq.rfq_no}"
-        text = (f"Hello {invited.vendor_name or 'Supplier'},\n\n"
-                f"Your RFQ copy is attached. Sign in with your supplier username and "
-                f"password to submit your quotation.\n\nSupplier Portal: {portal_url}")
-        company = await mail_service._company(db)
-        html = mail_template.render(
-            subject=subject, eyebrow="Request for quotation", heading=subject,
-            preheader=f"Quotation requested from {invited.vendor_name or 'supplier'}.",
-            blocks=[
-                mail_template.paragraph(f"Hello {invited.vendor_name or 'Supplier'},"),
-                mail_template.paragraph(
-                    "Your RFQ copy is attached. Sign in with your supplier username "
-                    "and password to submit your quotation."),
-                mail_template.facts([("RFQ", rfq.rfq_no), ("Due date", str(rfq.due_date or ""))]),
-                mail_template.button("Open Supplier Portal", portal_url),
-            ], company=company,
-            footer_note="Use your existing supplier username and password to sign in.")
         try:
+            portal_url = (f"{settings.APP_BASE_URL.rstrip('/')}/supplier/login"
+                          f"?next=/supplier/rfqs/{rfq_id}")
+            subject = f"Request for quotation {rfq_no}"
+            text = (f"Hello {vendor_name or 'Supplier'},\n\n"
+                    f"Your RFQ copy is attached. Sign in with your supplier username and "
+                    f"password to submit your quotation.\n\nSupplier Portal: {portal_url}")
+            company = await mail_service._company(db)
+            html = mail_template.render(
+                subject=subject, eyebrow="Request for quotation", heading=subject,
+                preheader=f"Quotation requested from {vendor_name or 'supplier'}.",
+                blocks=[
+                    mail_template.paragraph(f"Hello {vendor_name or 'Supplier'},"),
+                    mail_template.paragraph(
+                        "Your RFQ copy is attached. Sign in with your supplier username "
+                        "and password to submit your quotation."),
+                    mail_template.facts([("RFQ", rfq_no), ("Due date", due_date)]),
+                    mail_template.button("Open Supplier Portal", portal_url),
+                ], company=company,
+                footer_note="Use your existing supplier username and password to sign in.")
             await mail_service.send_mail(
                 db, MailSendIn(to=[address], subject=subject, body=text, html=html), user,
-                attachments=[(f"{rfq.rfq_no}.pdf",
+                attachments=[(f"{rfq_no}.pdf",
                               vendor_documents.rfq_pdf(
-                                  rfq, invited.vendor_name or "Supplier", company,
-                                  invited.mapped_item_ids or [],
-                                  invited.item_quantities or {}),
+                                  rfq, vendor_name or "Supplier", company,
+                                  mapped_item_ids, item_quantities),
                               "application/pdf")])
         except Exception as exc:  # delivery cannot unpublish an approved RFQ
-            logger.warning("could not email %s to %s: %s", rfq.rfq_no, address, exc)
+            # The publish/approval is already committed; a dead session from a
+            # failed send must not poison the next vendor's send or the caller's
+            # next statement. After a heal `rfq` is expired, so read it afresh.
+            if await _heal_session(db, user):
+                rfq = await get_rfq(db, rfq_id)
+            logger.warning("could not email %s to %s: %s", rfq_no, address, exc)
 
 
 async def close_rfq(db: AsyncSession, rfq_id: int, user) -> RFQ:
@@ -3621,6 +4674,11 @@ async def get_quotation(db: AsyncSession, quote_id: int, user=None) -> Quotation
         db, quote.rfq_id, quote.vendor_id,
         invited.mapped_item_ids if invited is not None else None)
     _apply_vendor_quote_scope(quote, allowed)
+    # FIXED: `tax_region`/`company_gstin` are derived, never stored (see
+    # `_attach_tax_context`) — the supplier portal's own reads already call it, but
+    # the buyer's Quotation Detail screen never did, so it showed the tax split only
+    # in the instant right after a vendor submitted and blank on every later reload.
+    await _attach_tax_context(db, quote)
     return quote
 
 
@@ -3783,6 +4841,8 @@ def _quote_snapshot(quote: Quotation) -> dict:
             "discount_percent": float(_d(line.discount_percent)),
             "tax_percent": float(_d(line.tax_percent)),
             "amount": float(_d(line.amount)),
+            # The brand quoted (2026-10-26) — a change request may move it.
+            **combinations.carry(line),
         } for line in quote.items],
     }
 
@@ -3797,6 +4857,37 @@ async def _load_quotation_locked(db: AsyncSession, quotation_id: int) -> Quotati
     if quote is None:
         raise NotFoundError(f"Quotation {quotation_id} not found")
     return quote
+
+
+async def _rfq_asked(db: AsyncSession, quote) -> dict[int, Decimal]:
+    """{quotation line id: what the RFQ asked for on it} — the ceiling a quotation
+    amendment is held to (2026-11-03). A line no RFQ line names has no ceiling."""
+    rfq_item_ids = {line.rfq_item_id for line in quote.items if line.rfq_item_id}
+    asked = dict((await db.execute(
+        select(RFQItem.id, RFQItem.quantity).where(RFQItem.id.in_(rfq_item_ids or {0}))
+    )).all())
+    return {line.id: _d(asked[line.rfq_item_id]) for line in quote.items
+            if line.rfq_item_id in asked}
+
+
+def _assert_amendment_within_rfq(lines: list[dict], by_id: dict, asked: dict) -> None:
+    """A proposed or countered quantity may go above what the RFQ asked for, but only
+    with a reason on that line (2026-11-11; until then it could only come down). The
+    reason is the line's `note`, kept on the change request with the numbers."""
+    for entry in lines:
+        line = by_id.get(entry.get("quotation_item_id"))
+        if line is None or entry.get("proposed_quantity") is None:
+            continue
+        ceiling = asked.get(line.id)
+        if ceiling is None or _d(entry["proposed_quantity"]) <= _d(ceiling):
+            continue
+        if not str(entry.get("note") or "").strip():
+            uom = getattr(line, "uom_code", None) or ""
+            raise ValidationError(
+                f"{line.item_code or line.item_name or 'Line'}: "
+                f"{_d(entry['proposed_quantity']).normalize():f} {uom} is more than the "
+                f"{_d(ceiling).normalize():f} {uom} the RFQ asked for. Give a reason on "
+                "this line for the higher quantity.".replace("  ", " "))
 
 
 async def propose_quote_change(db: AsyncSession, quotation_id: int,
@@ -3828,14 +4919,29 @@ async def propose_quote_change(db: AsyncSession, quotation_id: int,
         raise ValidationError("Say why the supplier is being asked to change prices")
 
     by_id = {line.id: line for line in quote.items}
+    proposed_combo: dict[int, dict] = {}
     for incoming in data.lines:
         if incoming.quotation_item_id not in by_id:
             raise ValidationError(
                 f"Line {incoming.quotation_item_id} is not on this quotation")
+        # Another brand / variant / model asked for (2026-10-26), checked against the
+        # item's ON combinations — the supplier may take it, or counter it.
+        if incoming.brand_id:
+            line = by_id[incoming.quotation_item_id]
+            proposed_combo[incoming.quotation_item_id] = await combinations.resolve(
+                db, line.item_id, incoming, label=line.item_code or line.item_name or "")
+
+    # Above what the RFQ asked for only with a reason on the line (2026-11-11).
+    _assert_amendment_within_rfq(
+        [{"quotation_item_id": line.quotation_item_id,
+          "proposed_quantity": line.proposed_quantity,
+          "note": line.note} for line in data.lines],
+        by_id, await _rfq_asked(db, quote))
 
     cr = QuoteChangeRequest(
         quotation_id=quote.id, rfq_id=rfq.id,
-        cr_no=await next_number(db, "quote_change_request"),
+        cr_no=await next_number(db, "quote_change_request",
+                                **org_scope.number_args(rfq, carried=True)),
         status=_CR_OPEN,
         reason=data.reason.strip(),
         proposed_lines=[{
@@ -3844,18 +4950,23 @@ async def propose_quote_change(db: AsyncSession, quotation_id: int,
             "proposed_rate": float(_d(line.proposed_rate)),
             "proposed_discount_percent": float(_d(line.proposed_discount_percent)),
             "note": line.note,
+            **_proposed_combo_fields(proposed_combo.get(line.quotation_item_id)),
         } for line in data.lines],
         snapshot_before=_quote_snapshot(quote),
         proposed_by_id=getattr(user, "id", None),
         proposed_by_name=getattr(user, "full_name", None),
     )
+    org_scope.carry(rfq, cr, project=True)
     db.add(cr)
     quote.under_negotiation = True
     await db.commit()
     await db.refresh(cr)
 
-    await notifications.notify(
-        db, [quote.vendor_id], title=f"{quote.quotation_no} — the buyer proposed changes",
+    # The VENDOR's own bell. `notifications.notify` is keyed on employee ids, so handing
+    # it a vendor id filed this in the bell of whichever employee shares that number,
+    # with a supplier-portal link they could not open (found fixing SCM_0074/0075).
+    await notify_vendor(
+        db, quote.vendor_id, title=f"{quote.quotation_no} — the buyer proposed changes",
         body=f"{cr.proposed_by_name or 'The buyer'} asked for changes on "
              f"{rfq.rfq_no} ({cr.cr_no}). Review and respond on your portal.",
         entity_type="QUOTATION", entity_id=quote.id,
@@ -3888,6 +4999,28 @@ async def withdraw_quote_change(db: AsyncSession, quotation_id: int, cr_id: int,
     return cr
 
 
+def _proposed_combo_fields(combo: dict | None) -> dict:
+    """A proposed brand / variant / model as a change-request line stores it."""
+    if not combo:
+        return {}
+    return {"proposed_brand_id": combo["brand_id"], "proposed_brand_name": combo["brand_name"],
+            "proposed_variant_id": combo["variant_id"],
+            "proposed_variant_name": combo["variant_name"],
+            "proposed_model_id": combo["model_id"], "proposed_model_name": combo["model_name"]}
+
+
+def _apply_proposed_combo(line, proposed: dict) -> None:
+    if not proposed.get("proposed_brand_id"):
+        return
+    line.brand_id = proposed["proposed_brand_id"]
+    line.brand_name = proposed.get("proposed_brand_name")
+    line.variant_id = proposed.get("proposed_variant_id") or 0
+    line.variant_name = proposed.get("proposed_variant_name")
+    line.model_id = proposed.get("proposed_model_id") or 0
+    line.model_name = proposed.get("proposed_model_name")
+    line.combination_any = False
+
+
 def _apply_proposed_lines(quote: Quotation, cr: QuoteChangeRequest) -> None:
     """Write the accepted proposal onto the quotation and re-derive every total
     through `_quote_totals` — the same arithmetic that priced the original offer.
@@ -3902,6 +5035,7 @@ def _apply_proposed_lines(quote: Quotation, cr: QuoteChangeRequest) -> None:
         line.rate = _d(proposed.get("proposed_rate", line.rate))
         line.discount_percent = _d(proposed.get("proposed_discount_percent",
                                                 line.discount_percent))
+        _apply_proposed_combo(line, proposed)
     _quote_totals(quote)
 
 
@@ -3931,12 +5065,22 @@ async def accept_quote_change(db: AsyncSession, vendor_id: int, cr_id: int,
 
     if counter_lines:
         parsed_counter = [c.model_dump() if hasattr(c, "model_dump") else dict(c) for c in counter_lines]
-        cr.supplier_counter_lines = parsed_counter
         by_id = {line.id: line for line in quote.items}
+        # The supplier may answer with another brand again (2026-10-26).
+        for item_data in parsed_counter:
+            line = by_id.get(item_data.get("quotation_item_id"))
+            if line is not None and item_data.get("brand_id"):
+                item_data.update(_proposed_combo_fields(await combinations.resolve(
+                    db, line.item_id, item_data,
+                    label=line.item_code or line.item_name or "")))
+        # The supplier's counter follows the same rule as the buyer's ask.
+        _assert_amendment_within_rfq(parsed_counter, by_id, await _rfq_asked(db, quote))
+        cr.supplier_counter_lines = parsed_counter
         for item_data in parsed_counter:
             line = by_id.get(item_data.get("quotation_item_id"))
             if line is None:
                 continue
+            _apply_proposed_combo(line, item_data)
             if "proposed_quantity" in item_data:
                 line.quantity = _d(item_data["proposed_quantity"])
             if "proposed_rate" in item_data:
@@ -4032,6 +5176,16 @@ def _cr_out_lines(cr: QuoteChangeRequest) -> list[dict]:
             "current_rate": row.get("rate", 0),
             "current_discount_percent": row.get("discount_percent", 0),
             "current_amount": row.get("amount", 0),
+            # The brand as quoted, and as proposed (2026-10-26).
+            "current_brand_id": row.get("brand_id") or 0,
+            "current_variant_id": row.get("variant_id") or 0,
+            "current_model_id": row.get("model_id") or 0,
+            "current_combination": _combo_label(SimpleNamespace(**{
+                k: row.get(k) for k in ("brand_name", "variant_name", "model_name")})) or None,
+            "proposed_combination": _combo_label(SimpleNamespace(
+                brand_name=proposed.get("proposed_brand_name"),
+                variant_name=proposed.get("proposed_variant_name"),
+                model_name=proposed.get("proposed_model_name"))) or None,
         })
     return out
 
@@ -4271,8 +5425,15 @@ def _comparison_grid(rfq: RFQ, quotes) -> list[dict]:
             )
             if line is None or not _d(line.rate):
                 continue
+            offered = (int(line.brand_id or 0), int(line.variant_id or 0),
+                       int(line.model_id or 0))
             cells.append({"quotation_id": quote.id, "vendor_id": quote.vendor_id,
-                          "vendor_name": quote.vendor_name, **_line_breakup(line)})
+                          "vendor_name": quote.vendor_name, **_line_breakup(line),
+                          # The brand quoted, and whether it is not what was asked.
+                          "combination": _combo_label(line) or None,
+                          "brand_changed": bool(item.brand_id) and offered != (
+                              int(item.brand_id or 0), int(item.variant_id or 0),
+                              int(item.model_id or 0))})
         def _unit_cost(c):
             return c["line_total"] / c["quantity"] if c["quantity"] else c["line_total"]
 
@@ -4287,6 +5448,9 @@ def _comparison_grid(rfq: RFQ, quotes) -> list[dict]:
             "uom_code": item.uom_code,
             "quantity": float(_d(item.quantity)),
             "required_date": item.required_date,
+            # What the RFQ asked for — a brand / variant / model, or Any.
+            "requested_combination": (_combo_label(item) or
+                                      ("Any brand" if item.combination_any else None)),
             "best_quotation_id": best["quotation_id"] if best else None,
             "cells": cells,
         })
@@ -4431,6 +5595,55 @@ async def comparison(db: AsyncSession, rfq_id: int, user,
     }
 
 
+def shared_fmt(value) -> str:
+    """150, not 150.000 — quantities in a sentence."""
+    text = f"{_d(value):f}"
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def _line_key(rfq_item_id) -> str:
+    """The award key of one RFQ LINE (2026-10-26). Shares used to be keyed by item id,
+    which added two brands of one item together; older awards still read that way."""
+    return f"L{rfq_item_id}"
+
+
+def _line_label(line) -> str:
+    """"HP LaserJet Toner 85A (HP · Victus · 15)" — never "item 13"."""
+    name = getattr(line, "item_name", None) or getattr(line, "item_code", None) \
+        or f"item {getattr(line, 'item_id', '')}"
+    combo = _combo_label(line)
+    return f"{name} ({combo})" if combo else name
+
+
+def _combo3_of(row) -> tuple:
+    return (int(row.item_id), int(row.brand_id or 0), int(row.variant_id or 0),
+            int(row.model_id or 0))
+
+
+async def _po_line_keys(db: AsyncSession, po_ids: list[int]) -> dict[int, str]:
+    """Each PO line's RFQ-line award key, traced through the quotation line that won
+    it (same item, same brand / variant / model). A PO line with no such match keeps
+    the older item-id key."""
+    if not po_ids:
+        return {}
+    pos = {po.id: po for po in (await db.execute(
+        select(PurchaseOrder).options(selectinload(PurchaseOrder.items))
+        .where(PurchaseOrder.id.in_(po_ids)))).scalars().all()}
+    quote_ids = {po.quotation_id for po in pos.values() if po.quotation_id}
+    by_quote: dict[int, dict[tuple, int]] = {}
+    for qline in (await db.execute(select(QuotationItem).where(
+            QuotationItem.quotation_id.in_(quote_ids or {0})))).scalars().all():
+        if qline.rfq_item_id:
+            by_quote.setdefault(qline.quotation_id, {})[_combo3_of(qline)] = qline.rfq_item_id
+    out: dict[int, str] = {}
+    for po in pos.values():
+        lines = by_quote.get(po.quotation_id, {})
+        for line in po.items:
+            rfq_item_id = lines.get(_combo3_of(line))
+            out[line.id] = _line_key(rfq_item_id) if rfq_item_id else str(line.item_id)
+    return out
+
+
 def _same_share(before, after) -> bool:
     """Do two awarded-quantity maps say the same thing?
 
@@ -4459,11 +5672,12 @@ async def _live_po_awards(db: AsyncSession, rfq_id: int) -> tuple[
     )).scalars().all())
     quantities: dict[int, dict[str, Decimal]] = {}
     po_nos: dict[int, str] = {}
+    keys = await _po_line_keys(db, [po.id for po in rows])
     for po in rows:
         po_nos.setdefault(po.vendor_id, po.po_no)
         vendor_quantities = quantities.setdefault(po.vendor_id, {})
         for line in po.items:
-            key = str(line.item_id)
+            key = keys.get(line.id, str(line.item_id))
             vendor_quantities[key] = (
                 vendor_quantities.get(key, Decimal("0")) + _d(line.quantity))
     return quantities, po_nos
@@ -4482,6 +5696,7 @@ async def _split_award_winners(db: AsyncSession, rfq: RFQ, allocations,
     locked_quantities = locked_quantities or {}
     locked_po_nos = locked_po_nos or {}
     rfq_quantities = {line.item_id: _d(line.quantity) for line in rfq.items}
+    rfq_lines = {line.id: line for line in rfq.items}
     invited_rows = list((await db.execute(
         select(RFQVendor).where(RFQVendor.rfq_id == rfq.id)
     )).scalars().all())
@@ -4495,12 +5710,21 @@ async def _split_award_winners(db: AsyncSession, rfq: RFQ, allocations,
     }
 
     shares: dict[int, dict[str, float]] = {}
-    totals: dict[int, Decimal] = {}
+    totals: dict[str, Decimal] = {}
+    line_of_key: dict[str, object] = {}
     for allocation in allocations:
         item_id, vendor_id = allocation.item_id, allocation.vendor_id
         quantity = _d(allocation.quantity)
-        if item_id not in rfq_quantities:
-            raise ValidationError(f"Item {item_id} is not on {rfq.rfq_no}")
+        # The RFQ LINE this share is for (2026-10-26): named, or the item's only line.
+        rfq_line = rfq_lines.get(allocation.rfq_item_id) if allocation.rfq_item_id else None
+        if rfq_line is None:
+            same_item = [line for line in rfq.items if line.item_id == item_id]
+            rfq_line = same_item[0] if len(same_item) == 1 else None
+        if rfq_line is None or rfq_line.item_id != item_id:
+            raise ValidationError(
+                f"Item {item_id} is not on {rfq.rfq_no}" if item_id not in rfq_quantities
+                else f"{rfq.rfq_no} asks for this item in more than one brand — say "
+                     "which line the award is for")
         invitation = invited.get(vendor_id)
         if invitation is None:
             raise ValidationError(f"Vendor {vendor_id} was not invited to {rfq.rfq_no}")
@@ -4509,26 +5733,33 @@ async def _split_award_winners(db: AsyncSession, rfq: RFQ, allocations,
             raise ValidationError(
                 f"{invitation.vendor_name or f'Vendor {vendor_id}'} has not "
                 "submitted a quotation")
-        quote_line = next((line for line in quote.items if line.item_id == item_id), None)
+        quote_line = next((line for line in quote.items
+                           if line.rfq_item_id == rfq_line.id), None) or next(
+            (line for line in quote.items
+             if not line.rfq_item_id and line.item_id == item_id), None)
+        label = _line_label(rfq_line)
         if quote_line is None or _d(quote_line.quantity) <= 0:
             raise ValidationError(
-                f"{quote.vendor_name or vendor_id} did not quote item {item_id}")
+                f"{quote.vendor_name or vendor_id} did not quote {label}")
 
         vendor_shares = shares.setdefault(vendor_id, {})
-        key = str(item_id)
+        key = _line_key(rfq_line.id)
+        line_of_key[key] = rfq_line
         combined = _d(vendor_shares.get(key, 0)) + quantity
         if combined > _d(quote_line.quantity):
             raise ValidationError(
-                f"{quote.vendor_name or vendor_id} quoted {_d(quote_line.quantity)} "
-                f"of item {item_id}, but {combined} was awarded")
+                f"{quote.vendor_name or vendor_id} quoted "
+                f"{shared_fmt(_d(quote_line.quantity))} of {label}, but "
+                f"{shared_fmt(combined)} was awarded")
         vendor_shares[key] = float(combined)
-        totals[item_id] = totals.get(item_id, Decimal("0")) + quantity
+        totals[key] = totals.get(key, Decimal("0")) + quantity
 
-    for item_id, total in totals.items():
-        if total > rfq_quantities[item_id]:
+    for key, total in totals.items():
+        line = line_of_key[key]
+        if total > _d(line.quantity):
             raise ValidationError(
-                f"{total} allocated for item {item_id}, but the RFQ quantity is "
-                f"{rfq_quantities[item_id]}")
+                f"{shared_fmt(total)} allocated for {_line_label(line)}, but the RFQ "
+                f"quantity is {shared_fmt(_d(line.quantity))}")
 
     for invitation in invited_rows:
         fresh = shares.get(invitation.vendor_id)
@@ -4541,9 +5772,12 @@ async def _split_award_winners(db: AsyncSession, rfq: RFQ, allocations,
             fresh_quantity = _d((fresh or {}).get(item_id, 0))
             if fresh_quantity < ordered_quantity:
                 po_no = locked_po_nos.get(invitation.vendor_id, "a live purchase order")
+                held = (rfq_lines.get(int(item_id[1:])) if str(item_id).startswith("L")
+                        else next((l for l in rfq.items if str(l.item_id) == str(item_id)), None))
                 raise ValidationError(
                     f"{invitation.vendor_name or f'Vendor {invitation.vendor_id}'} "
-                    f"already has {ordered_quantity} of item {item_id} on {po_no}. "
+                    f"already has {shared_fmt(ordered_quantity)} of "
+                    f"{_line_label(held) if held else f'item {item_id}'} on {po_no}. "
                     "Keep at least that quantity, or cancel/reject the PO first.")
         invitation.awarded_quantities = fresh
     winning_quotes = [submitted[vendor_id] for vendor_id in shares]
@@ -4635,6 +5869,13 @@ async def award_rfq(db: AsyncSession, rfq_id: int, data: AwardIn, user) -> RFQ:
         for quote in winners:
             try:
                 await create_po_from_quotation(db, quote.id, POFromQuotationIn(), user)
+            except org_scope.OrganisationRequired:
+                # An RFQ older than organisations: nothing to copy and nobody to ask
+                # here. The award stands; the buyer raises the PO from the comparison,
+                # which asks. Raised before the order was added, so nothing to undo.
+                logger.info("%s has no organisation; leaving its PO to the buyer",
+                            rfq.rfq_no)
+                continue
             except ValidationError as err:
                 if "no remaining awarded quantities" in str(err):
                     continue
@@ -4823,6 +6064,62 @@ async def vendor_profile(db: AsyncSession, vendor_id: int) -> Vendor:
     return vendor
 
 
+async def vendor_item_combinations(db: AsyncSession, vendor_id: int,
+                                   item_ids: list[int]) -> dict:
+    """The ON brand / variant / model combinations of items THIS vendor deals in
+    (2026-10-23) — what the portal's quote and despatch-note lines may switch to.
+
+    Only items the vendor is mapped to, has been asked to quote, or has been ordered;
+    any other id in the request is dropped, so the portal never lists another
+    supplier's catalogue.
+    """
+    if not item_ids:
+        return {}
+    wanted = set(item_ids)
+    allowed = set((await db.execute(
+        select(VendorItem.item_id).where(VendorItem.vendor_id == vendor_id,
+                                         VendorItem.item_id.in_(wanted)))).scalars())
+    allowed |= set((await db.execute(
+        select(POItem.item_id).join(PurchaseOrder, PurchaseOrder.id == POItem.po_id)
+        .where(PurchaseOrder.vendor_id == vendor_id, POItem.item_id.in_(wanted))
+    )).scalars())
+    allowed |= set((await db.execute(
+        select(RFQItem.item_id).join(RFQVendor, RFQVendor.rfq_id == RFQItem.rfq_id)
+        .where(RFQVendor.vendor_id == vendor_id, RFQItem.item_id.in_(wanted))
+    )).scalars())
+    rows = await combinations.combination_options(db, sorted(allowed))
+    return {str(k): v for k, v in rows.items()}
+
+
+async def vendor_item_packing(db: AsyncSession, vendor_id: int) -> dict:
+    """The pack hierarchies of the items mapped to THIS vendor, every level with its
+    size and minimum fill (2026-10-11) — what the portal's Packing tab shows, so a
+    supplier knows how each item is to be packed before an order arrives.
+
+    Scoped by the vendor id from the token: only rows of `mst_vendor_items` naming
+    this vendor are read, so no supplier ever sees another's items.
+    """
+    rows = (await db.execute(
+        select(VendorItem.item_id, VendorItem.vendor_item_code, Item.code, Item.name,
+               Item.uom_code)
+        .join(Item, Item.id == VendorItem.item_id)
+        .where(VendorItem.vendor_id == vendor_id, Item.is_active.is_(True))
+        .order_by(Item.name)
+    )).all()
+    options = await pack_options(db, {r[0] for r in rows})
+    seen: set[int] = set()
+    items = []
+    for item_id, vendor_code, code, name, uom in rows:
+        if item_id in seen:
+            continue
+        seen.add(item_id)
+        hierarchies = [h for h in options.get(item_id, []) if len(h["levels"]) > 1]
+        items.append({"item_id": item_id, "item_code": code, "item_name": name,
+                      "uom_code": uom, "vendor_item_code": vendor_code,
+                      "hierarchies": hierarchies})
+    return {"items": items}
+
+
 def _vendor_visible():
     """The statuses a vendor may see. A DRAFT or PENDING_APPROVAL RFQ is internal —
     the company has not decided to ask them yet."""
@@ -4939,7 +6236,8 @@ async def vendor_get_quotation(db: AsyncSession, vendor_id: int,
         vendor = await db.get(Vendor, vendor_id)
         now = utcnow()
         quote = Quotation(
-            quotation_no=await next_number(db, DocType.QUOTATION.value, project=rfq.project_name),
+            quotation_no=await next_number(db, DocType.QUOTATION.value,
+                                           **org_scope.number_args(rfq, carried=True)),
             rfq_id=rfq.id,
             rfq_no=rfq.rfq_no,
             vendor_id=vendor_id,
@@ -4948,6 +6246,7 @@ async def vendor_get_quotation(db: AsyncSession, vendor_id: int,
             status=QuotationStatus.DRAFT.value,
             currency="INR",
         )
+        org_scope.carry(rfq, quote, project=True)
         db.add(quote)
         await db.flush()
 
@@ -4968,6 +6267,7 @@ async def vendor_get_quotation(db: AsyncSession, vendor_id: int,
                 uom_code=line.uom_code,
                 quantity=qty,
                 requested_quantity=qty,
+                **combinations.carry(line),
                 rate=0,
                 discount_percent=0,
                 tax_percent=line.tax_percent or 0,
@@ -4990,6 +6290,27 @@ async def vendor_get_quotation(db: AsyncSession, vendor_id: int,
 
     await _attach_tax_context(db, quote)
     return quote
+
+
+def _combo_label(row) -> str:
+    return " · ".join(p for p in (getattr(row, "brand_name", None),
+                                  getattr(row, "variant_name", None),
+                                  getattr(row, "model_name", None)) if p)
+
+
+def _attach_requested_combo(line, source) -> None:
+    """The RFQ line's combination on a quotation line, and whether it was changed."""
+    asked = combinations.carry(source) if source is not None else dict(combinations.NONE)
+    line.requested_brand_id = asked["brand_id"]
+    line.requested_brand_name = asked["brand_name"]
+    line.requested_variant_id = asked["variant_id"]
+    line.requested_variant_name = asked["variant_name"]
+    line.requested_model_id = asked["model_id"]
+    line.requested_model_name = asked["model_name"]
+    line.requested_any = bool(asked["combination_any"])
+    offered = (int(line.brand_id or 0), int(line.variant_id or 0), int(line.model_id or 0))
+    named = (asked["brand_id"], asked["variant_id"], asked["model_id"])
+    line.brand_changed = bool(named[0]) and offered != named
 
 
 async def _attach_tax_context(db: AsyncSession, quote: Quotation) -> dict[int, dict]:
@@ -5025,6 +6346,10 @@ async def _attach_tax_context(db: AsyncSession, quote: Quotation) -> dict[int, d
         if quote.status == QuotationStatus.DRAFT.value and (quote.revision_count or 0) == 0:
             line.quantity = req_qty
         line.required_date = source.required_date if source else None
+        # What the BUYER asked for (2026-10-26) — the RFQ line's brand / variant /
+        # model, or Any — and whether this offer changed it. Read here so the buyer's
+        # page, the supplier's portal and the compare sheet all say the same thing.
+        _attach_requested_combo(line, source)
         limits = ceilings.get(line.item_id)
         line.hsn_code = limits["hsn_code"] if limits else None
         # No HSN means no ceiling — the field stays open rather than closing to zero.
@@ -5107,13 +6432,20 @@ async def vendor_submit_quotation(db: AsyncSession, vendor_id: int, rfq_id: int,
         # is a fact about the two GSTINs and never rewrites the number.
         line.tax_percent = _d(gst)
         line.delivery_days = incoming.delivery_days
+        # The supplier may offer another brand / variant / model of the item
+        # (2026-10-23) — checked against the item's ON combinations.
+        if getattr(incoming, "brand_id", None):
+            for key, value in (await combinations.resolve(
+                    db, line.item_id, incoming, label=label)).items():
+                setattr(line, key, value)
 
     quote.vendor_ref_no = data.vendor_ref_no
     quote.valid_till = data.valid_till
     quote.expected_delivery_date = data.expected_delivery_date
     quote.payment_terms = data.payment_terms
     quote.delivery_days = data.delivery_days
-    quote.freight_amount = _d(data.freight_amount)
+    # Freight only where the buyer asked for it; otherwise nothing a client sends lands.
+    quote.freight_amount = _d(data.freight_amount) if rfq.freight_required else _d(0)
     quote.discount_amount = _d(data.discount_amount)
     quote.remarks = data.remarks
     _quote_totals(quote)
@@ -5352,6 +6684,9 @@ async def _revert_rejected_amendment(db: AsyncSession, po: PurchaseOrder,
             line.rate = _d(row.get("rate", 0))
             line.tax_percent = _d(row.get("tax_percent", 0))
             line.amount = _d(row.get("amount", 0))
+            if "pack_breakdown" in row:
+                line.pack_hierarchy_id = row.get("pack_hierarchy_id")
+                line.pack_breakdown = row.get("pack_breakdown")
         else:
             # Added by the amendment the supplier has just refused. It can only be a
             # line nothing has been received against: amendment is closed once the
@@ -5366,8 +6701,12 @@ async def _revert_rejected_amendment(db: AsyncSession, po: PurchaseOrder,
                 tax_percent=_d(row.get("tax_percent", 0)),
                 amount=_d(row.get("amount", 0)),
                 received_quantity=_d(row.get("received_quantity", 0)),
+                pack_hierarchy_id=row.get("pack_hierarchy_id"),
+                pack_breakdown=row.get("pack_breakdown"),
+                **combinations.carry(row),
             ))
     await db.flush()
+    await po_packing.sync_po_packing(db, po.id)
 
     # Standing where it stood, including the supplier's own yes - which the amendment
     # cleared and which this puts back. No workflow is started: the agreement being
@@ -5387,7 +6726,7 @@ async def _revert_rejected_amendment(db: AsyncSession, po: PurchaseOrder,
     body += f". The order is back to revision {po.revision_no}."
     await notifications.notify(
         db, [po.created_by_id], title=f"{po.po_no} - amendment declined", body=body,
-        entity_type="PO", entity_id=po.id, deep_link=f"/procurement/pos/{po.id}")
+        entity_type="PO", entity_id=po.id, deep_link=f"/pos/{po.id}")
     logger.info("%s revision %s declined by vendor; reverted to revision %s",
                 po.po_no, declined, po.revision_no)
     return True
@@ -5477,6 +6816,59 @@ async def _despatched_by_po_item(db: AsyncSession, po_id: int) -> dict[int, Deci
     return {row[0]: _d(row[1]) for row in rows if row[0]}
 
 
+def _despatch_status_from(ordered: Decimal, despatched: Decimal) -> str | None:
+    """The vendor's despatch stage of one order, from its two totals. Pure.
+
+    None until a SUBMITTED note names any quantity; DISPATCHED once the notes cover
+    everything ordered; PARTIALLY_DISPATCHED in between.
+    """
+    if despatched <= 0:
+        return None
+    if ordered > 0 and despatched >= ordered:
+        return DespatchStatus.DISPATCHED.value
+    return DespatchStatus.PARTIALLY_DISPATCHED.value
+
+
+async def _despatch_status_by_po(db: AsyncSession, po_ids) -> dict[int, str]:
+    """`{po_id: despatch stage}` for a screenful of orders, in two grouped queries.
+
+    READ, never stored — the PO status stays where it is (ACCEPTED_BY_SUPPLIER until a
+    receipt moves it), because every GRN guard, filter and report reads that column.
+    This only lets a screen say that the vendor has already sent goods against it.
+    """
+    ids = [int(i) for i in po_ids if i]
+    if not ids:
+        return {}
+    despatched = dict((await db.execute(
+        select(DespatchNote.po_id,
+               func.coalesce(func.sum(DespatchNoteItem.despatched_qty), 0))
+        .join(DespatchNoteItem, DespatchNoteItem.despatch_note_id == DespatchNote.id)
+        .where(DespatchNote.po_id.in_(ids),
+               DespatchNote.status == DespatchNoteStatus.SUBMITTED.value)
+        .group_by(DespatchNote.po_id)
+    )).all())
+    if not despatched:
+        return {}
+    ordered = dict((await db.execute(
+        select(POItem.po_id, func.coalesce(func.sum(POItem.quantity), 0))
+        .where(POItem.po_id.in_(list(despatched)))
+        .group_by(POItem.po_id)
+    )).all())
+    out: dict[int, str] = {}
+    for po_id, qty in despatched.items():
+        stage = _despatch_status_from(_d(ordered.get(po_id, 0)), _d(qty))
+        if stage:
+            out[po_id] = stage
+    return out
+
+
+async def _attach_despatch_status(db: AsyncSession, rows) -> None:
+    rows = list(rows or [])
+    stages = await _despatch_status_by_po(db, [row.id for row in rows])
+    for row in rows:
+        row.despatch_status = stages.get(row.id)
+
+
 async def vendor_list_pos(db: AsyncSession, vendor_id: int, params: PageParams,
                           search: str | None = None,
                           status: str | None = None) -> dict:
@@ -5510,6 +6902,7 @@ async def vendor_list_pos(db: AsyncSession, vendor_id: int, params: PageParams,
         # but its CURRENT status is not one the vendor holds — it is back with us
         # being revised, and nothing may be done against it until we re-issue it.
         row.under_revision = row.status not in _VENDOR_READABLE
+    await _attach_despatch_status(db, page["items"])
     return page
 
 
@@ -5522,7 +6915,9 @@ async def vendor_get_po(db: AsyncSession, vendor_id: int, po_id: int) -> Purchas
     """
     po = await _vendor_po_visible(db, vendor_id, po_id)
     po.under_revision = po.status not in _VENDOR_READABLE
+    await _attach_despatch_status(db, [po])
     already = await _despatched_by_po_item(db, po.id)
+    options = await pack_options(db, {line.item_id for line in po.items})
 
     po.lines = [
         SimpleNamespace(
@@ -5534,6 +6929,10 @@ async def vendor_get_po(db: AsyncSession, vendor_id: int, po_id: int) -> Purchas
                             Decimal(0)),
             rate=float(line.rate),
             amount=float(line.amount),
+            pack_hierarchy_id=line.pack_hierarchy_id,
+            pack_breakdown=line.pack_breakdown,
+            pack_options=options.get(line.item_id, []),
+            **combinations.carry(line),
         )
         for line in po.items
     ]
@@ -5602,6 +7001,16 @@ async def vendor_save_despatch_note(db: AsyncSession, vendor_id: int, po_id: int
             if line.po_item_id in already:
                 already[line.po_item_id] -= _d(line.despatched_qty)
 
+    # A line stated in packs carries its own total; work it out before the ceiling
+    # check below, so "1 Carton" is capped exactly as "1,200 TAB" would be.
+    for line in data.lines:
+        po_line = po_items.get(line.po_item_id)
+        if line.pack_breakdown and po_line is not None:
+            _hid, packed = await packs.snapshot(
+                db, item_id=po_line.item_id,
+                hierarchy_id=line.pack_hierarchy_id or po_line.pack_hierarchy_id,
+                entries=[e.model_dump() for e in line.pack_breakdown])
+            line.despatched_qty = float(base_of_packs(packed))
     lines = [line for line in data.lines if _d(line.despatched_qty) > 0]
     if not lines:
         raise ValidationError("A despatch note needs at least one quantity")
@@ -5617,6 +7026,8 @@ async def vendor_save_despatch_note(db: AsyncSession, vendor_id: int, po_id: int
     # for a day that has not happened.
     if data.invoice_date and data.invoice_date > today:
         raise ValidationError(f"Invoice date {data.invoice_date} is in the future")
+    if data.invoice_amount is not None and data.invoice_amount < 0:
+        raise ValidationError("Invoice amount cannot be negative")
 
     # REQ_111 — one PO line may be sent in several batches, one note line per batch.
     # The ceiling is therefore checked on the SUM of this note's lines per PO line:
@@ -5655,11 +7066,12 @@ async def vendor_save_despatch_note(db: AsyncSession, vendor_id: int, po_id: int
             # The order's project: a despatch note is the vendor's statement about one
             # purchase order and belongs wherever that order does.
             dn_no=await next_number(db, DocType.DESPATCH_NOTE.value,
-                                    project=po.project_name),
+                                    **org_scope.number_args(po, carried=True)),
             po_id=po.id, po_no=po.po_no,
             vendor_id=vendor_id, vendor_name=po.vendor_name,
             status=DespatchNoteStatus.DRAFT.value,
         )
+        org_scope.carry(po, note, project=True)
         db.add(note)
         await db.flush()
 
@@ -5684,7 +7096,7 @@ async def vendor_save_despatch_note(db: AsyncSession, vendor_id: int, po_id: int
 
     for index, line in enumerate(lines, start=1):
         po_line = po_items[line.po_item_id]
-        db.add(DespatchNoteItem(
+        note_line = DespatchNoteItem(
             despatch_note_id=note.id, line_no=index,
             po_item_id=line.po_item_id, item_id=po_line.item_id,
             item_code=po_line.item_code, item_name=po_line.item_name,
@@ -5692,7 +7104,18 @@ async def vendor_save_despatch_note(db: AsyncSession, vendor_id: int, po_id: int
             despatched_qty=_d(line.despatched_qty),
             batch_no=line.batch_no, mfg_date=line.mfg_date,
             expiry_date=line.expiry_date, remarks=line.remarks,
-        ))
+            # What was ordered, unless the supplier says they are sending another
+            # brand / variant / model of the item (2026-10-23) — checked against the
+            # item's ON combinations; the receipt then books what actually came.
+            **(await combinations.resolve(db, po_line.item_id, line,
+                                          label=po_line.item_code or "A line")
+               if getattr(line, "brand_id", None) else combinations.carry(po_line)),
+        )
+        # How it is packed; a hierarchy other than the order's goes to the buyer.
+        await po_packing.stamp_despatch_line(
+            db, note_line, po_line, hierarchy_id=line.pack_hierarchy_id,
+            entries=line.pack_breakdown, reason=line.pack_change_reason)
+        db.add(note_line)
 
     await db.commit()
     return await vendor_get_despatch_note(db, vendor_id, note.id)
@@ -5771,6 +7194,11 @@ async def vendor_submit_despatch_note(db: AsyncSession, vendor_id: int,
 
     note.status = DespatchNoteStatus.SUBMITTED.value
     note.submitted_at = utcnow()
+    # A changed packing is never silent: the buyer is told the moment the note is
+    # filed, which is when the goods are actually on their way.
+    po = await db.get(PurchaseOrder, note.po_id)
+    if po is not None:
+        await po_packing.notify_buyer_of_changes(db, note, po)
     await db.commit()
     logger.info("despatch note %s submitted against %s", note.dn_no, note.po_no)
     return await vendor_get_despatch_note(db, vendor_id, note.id)
@@ -5916,3 +7344,39 @@ async def _draft_requisition_on_mr_approval(db: AsyncSession, mr, user) -> None:
 # Guarded so a module reload cannot register the same hook twice and raise two drafts.
 if _draft_requisition_on_mr_approval not in inventory_hooks.ON_MR_APPROVED:
     inventory_hooks.ON_MR_APPROVED.append(_draft_requisition_on_mr_approval)
+
+
+# =========================================================================== #
+#  Supplier changes of packing — see `procurement/packing.py`
+# =========================================================================== #
+
+async def list_po_pack_changes(db: AsyncSession, po_id: int, user) -> list[dict]:
+    await get_po(db, po_id, user, include_approver=True)   # the scope check
+    return await po_packing.list_pack_changes(db, po_id)
+
+
+async def decide_po_pack_change(db: AsyncSession, po_id: int, line_id: int,
+                                accept: bool, data, user) -> dict:
+    await get_po(db, po_id, user)                          # the raiser's scope
+    return await po_packing.decide_pack_change(db, po_id, line_id, accept=accept,
+                                               note=data.note, user=user)
+
+
+async def repack_po_line(db: AsyncSession, po_id: int, line_id: int, data, user):
+    """See `procurement/packing.repack_po_line`. Scoped like every PO edit."""
+    po = await get_po(db, po_id, user)
+    line = next((row for row in po.items if row.id == line_id), None)
+    if line is None:
+        raise NotFoundError("That line is not on this order.")
+    await po_packing.repack_po_line(
+        db, po, line, hierarchy_id=data.pack_hierarchy_id, entries=data.pack_breakdown,
+        user=user, closed_statuses=_UNAMENDABLE,
+        despatched_no=await _vendor_has_dispatched(db, po.id))
+    sub_total = tax_total = Decimal("0")
+    for row in po.items:
+        amount = _d(row.amount)
+        sub_total += amount
+        tax_total += amount * _d(row.tax_percent or 0) / _d(100)
+    _apply_po_totals(po, sub_total, tax_total)
+    await db.commit()
+    return await get_po_detail(db, po.id, user)

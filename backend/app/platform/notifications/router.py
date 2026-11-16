@@ -12,14 +12,15 @@ service.py of its own.
 from datetime import datetime
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, ConfigDict
-from sqlalchemy import func, select, update
+from pydantic import BaseModel, ConfigDict, computed_field
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_user
 from app.core.exceptions import NotFoundError
 from app.core.pagination import Page, PageParams, paginate
+from app.platform.notifications.service import resolve_link
 from app.platform.settings.models import Notification
 
 router = APIRouter(prefix="/api/notifications", tags=["notifications"])
@@ -36,6 +37,13 @@ class NotificationRow(BaseModel):
     is_read: bool
     created_at: datetime
 
+    @computed_field
+    @property
+    def target(self) -> str | None:
+        """Where a click goes (SCM_0074/0075): the row's own document, resolved on
+        read so old rows with a stale or generic link open the right screen too."""
+        return resolve_link(self.deep_link, self.entity_type, self.entity_id)
+
 
 class UnreadCount(BaseModel):
     count: int
@@ -47,11 +55,17 @@ def _mine(stmt, user):
 
 @router.get("", response_model=Page[NotificationRow])
 async def list_notifications(params: PageParams = Depends(), unread_only: bool = False,
+                             search: str | None = None,
                              db: AsyncSession = Depends(get_db),
                              user=Depends(get_current_user)):
     stmt = _mine(select(Notification), user)
     if unread_only:
         stmt = stmt.where(Notification.is_read.is_(False))
+    term = (search or "").strip()
+    if term:
+        pattern = f"%{term}%"
+        stmt = stmt.where(or_(
+            Notification.title.ilike(pattern), Notification.body.ilike(pattern)))
     return await paginate(db, stmt.order_by(Notification.id.desc()), params)
 
 

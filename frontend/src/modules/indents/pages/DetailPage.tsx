@@ -1,18 +1,23 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { CombinationTag } from "@/shared/combination";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowLeft, ChevronRight, FileText, Loader2, Pencil, RefreshCw, Send, Trash2,
+  ArrowLeft, ChevronRight, FileText, Loader2, Pencil, RefreshCw, Repeat2, Send, Trash2, Undo2,
 } from "lucide-react";
 import {
   CardBody, Skeleton,
   Table, TableBody, TableCell, TableColumn, TableHeader, TableRow,
 } from "@heroui/react";
-import { PageHeader, Button, Can, Card, ErrorBanner, useToast } from "@/shared/components";
+import {
+  PageHeader, Button, Can, Card, ConfirmModal, DocumentScopeStrip, ErrorBanner, useToast,
+} from "@/shared/components";
+import { ReturnTargetSelect, targetLabel } from "../components/ReturnTargetSelect";
 import { alerts } from "@/modules/alerts";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { FlowStepper } from "../components/FlowStepper";
 import { TripDeliveryCard } from "../components/TripDeliveryCard";
+import { StrRouteCard } from "../components/StrRoute";
 import { IndentStatusBadge } from "../components/IndentStatusBadge";
 import { activityLedgerReturnUrlFromState } from "../context/ActivityLedgerUrlState";
 import { allRequestsReturnUrlFromState } from "../context/AllRequestsUrlState";
@@ -30,6 +35,7 @@ import { displayUom, splitDeliveryOffice } from "../displayFormat";
 import type { Indent } from "../types";
 import { TONE_MINT, TONE_RED, TONE_YELLOW } from "../buttonTones";
 import { TONE_SUBMIT } from "@/shared/components/tones";
+import { PackChips, packsIn, usePackOptions } from "@/shared/packing";
 
 function Detail({ label, value }: { label: string; value: ReactNode }) {
   return (
@@ -114,6 +120,8 @@ export function IndentDetailPage() {
     refetchOnWindowFocus: true,
   });
 
+  // Each line's Indent containers (2026-10-23), said under its quantity.
+  const packOptions = usePackOptions((indent?.items ?? []).map((it) => it.item_id));
   const isRaiser = Boolean(indent && indent.requested_by_id === me?.employee.id);
   const { data: shipments } = useQuery({
     queryKey: indentKeys.shipments(accountScope, indentId),
@@ -180,6 +188,33 @@ export function IndentDetailPage() {
       toast.success({
         title: "Draft deleted",
         message: `${indent?.indent_no ?? "The draft"} has been removed.`,
+      });
+    },
+    onError: onErr,
+  });
+  // The correction owner passing a returned indent further back, down to the requester.
+  const [sendBackOpen, setSendBackOpen] = useState(false);
+  const [sendBackReason, setSendBackReason] = useState("");
+  const [sendBackTarget, setSendBackTarget] = useState<number | null>(null);
+  const sendBackTargets = useQuery({
+    queryKey: ["indents", "return-targets", indentId],
+    queryFn: () => indentApi.returnTargets(indentId),
+    enabled: sendBackOpen && Number.isFinite(indentId) && indentId > 0,
+  });
+  const sendBackOptions = sendBackTargets.data ?? [];
+  const sendBackDefault = sendBackOptions.find((target) => target.is_default)?.sequence ?? null;
+  const sendBackChosen = sendBackTarget ?? sendBackDefault;
+  const sendBackOption = sendBackOptions.find((target) => target.sequence === sendBackChosen);
+  const sendCorrectionBack = useMutation({
+    mutationFn: () => indentApi.sendCorrectionBack(
+      indentId, sendBackReason.trim(), sendBackChosen === null ? undefined : sendBackChosen),
+    onSuccess: (updated) => {
+      setSendBackOpen(false);
+      refreshAfterAction(updated, true);
+      qc.invalidateQueries({ queryKey: ["approvals"], refetchType: "all" });
+      toast.success({
+        title: "Sent further back",
+        message: `${updated.indent_no} has gone back for correction.`,
       });
     },
     onError: onErr,
@@ -255,7 +290,8 @@ export function IndentDetailPage() {
     && indent.can_resubmit_correction;
   // Approve/Reject live in the Approvals module only — this page is read-only for approvers.
   const showActions = !decisionView && !isReturnedForCorrection && indent.can_submit;
-  const actionPending = submit.isPending || deleteDraft.isPending || resubmitCorrection.isPending;
+  const actionPending = submit.isPending || deleteDraft.isPending || resubmitCorrection.isPending
+    || sendCorrectionBack.isPending;
   const delivery = splitDeliveryOffice(indent.office_name, indent.vehicle_number);
   const officeSac = nonEmptyText(indent.office_sac)
     ?? (indent.office_id === me?.active_position?.office_id
@@ -267,6 +303,12 @@ export function IndentDetailPage() {
     // it, and this is the last of four fallbacks: an SAC nobody can find is a blank
     // field, never a blank screen.
     ?? nonEmptyText(me?.positions?.find((position) => position.office_id === indent.office_id)?.office_sac);
+  // A warehouse or an MDP takes neither a vehicle nor an SAC (2026-11-04) — the
+  // delivery point's tier is served; unknown keeps both rows, as before. Only an LIP
+  // shows them (2026-11-09): a vehicle saved on an older warehouse / MDP request is
+  // not the delivery point's and is no longer drawn.
+  const showVehicleAndSac = indent.needs_vehicle_and_sac !== false;
+  const isStrDoc = isStrType(indent.indent_type);
   const returnedBy = returnedByFromJourney(journey);
   const correctionOwner = nonEmptyText(indent.correction_owner?.employee_name)
     ?? (indent.correction_owner?.employee_id ? `Employee #${indent.correction_owner.employee_id}` : null);
@@ -342,6 +384,8 @@ export function IndentDetailPage() {
           </div>
         )}
       />
+      {/* Whose paper it is on; says nothing on an indent older than organisations. */}
+      <DocumentScopeStrip doc={indent} className="mb-4" />
 
       {isReturnedForCorrection && (
         <Card className="mb-5 border-warn/40 bg-warn-bg">
@@ -400,6 +444,16 @@ export function IndentDetailPage() {
 
       {isRaiser && <TripDeliveryCard indentId={indent.id} shipments={shipments} />}
 
+      {isStrDoc && (
+        <StrRouteCard
+          source={indent.str_source ?? (indent.source_warehouse_name
+            ? { warehouse_name: indent.source_warehouse_name, warehouse_code: indent.source_warehouse_code }
+            : null)}
+          destination={indent.str_destination}
+          changes={indent.str_source_changes}
+        />
+      )}
+
       <div className="grid gap-5 lg:grid-cols-3">
         <Card className="lg:col-span-2">
           <CardBody className="p-5">
@@ -417,8 +471,38 @@ export function IndentDetailPage() {
                     <TableCell>
                       <div className="font-medium text-body">{it.item_name}</div>
                       <div className="mono text-xs text-muted">{it.item_code}</div>
+                      {it.combination_any
+                        ? <div className="mt-1 text-[11px] font-semibold text-muted">Any brand</div>
+                        : <CombinationTag value={it} className="mt-1" />}
+                      {(it.brand_changes ?? []).map((change, n) => (
+                        <div key={n} className="mt-1.5 flex max-w-md items-start gap-1.5 rounded-lg border border-warning/30 bg-warning/5 px-2.5 py-1.5 text-[11px]">
+                          <Repeat2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" aria-hidden />
+                          <span className="text-ink-700">
+                            <b className="font-semibold text-warning">
+                              Allocated as {change.given} instead of {change.asked_for}
+                            </b>
+                            {" "}· {change.quantity} {displayUom(it.uom_code)}
+                            {change.reason && <> — {change.reason}</>}
+                            {change.allocation_no && (
+                              <span className="block text-muted">{change.allocation_no}</span>
+                            )}
+                          </span>
+                        </div>
+                      ))}
                     </TableCell>
-                    <TableCell className="text-right tabular font-semibold">{it.quantity}</TableCell>
+                    <TableCell className="text-right tabular font-semibold">
+                      {it.quantity}
+                      {(() => {
+                        const packs = packsIn(packOptions.data?.[it.item_id], Number(it.quantity),
+                                              "INDENT", it.brand_id);
+                        return packs ? (
+                          <div className="mt-1 flex justify-end">
+                            <PackChips entries={packs} uom={it.uom_code} showHierarchy={false}
+                                       showTotal={false} muted />
+                          </div>
+                        ) : null;
+                      })()}
+                    </TableCell>
                     <TableCell className="text-right text-muted">{displayUom(it.uom_code) || "—"}</TableCell>
                   </TableRow>
                 )}
@@ -435,10 +519,15 @@ export function IndentDetailPage() {
               <Detail label="Position" value={indent.position_name} />
               <Detail label="Department" value={indent.department_name} />
               <Detail label="Deliver to" value={delivery.officeName} />
-              <Detail label="Vehicle" value={delivery.vehicleNumber} />
-              {/* The delivery office's code, not the viewer's: an approver reading
-                  someone else's indent sees the SAC it will be delivered against. */}
-              <Detail label="Service area code (SAC)" value={officeSac} />
+              {isStrDoc && (
+                <Detail label="Source" value={indent.source_warehouse_name} />
+              )}
+              {showVehicleAndSac && <>
+                <Detail label="Vehicle" value={delivery.vehicleNumber} />
+                {/* The delivery office's code, not the viewer's: an approver reading
+                    someone else's indent sees the SAC it will be delivered against. */}
+                <Detail label="Service area code (SAC)" value={officeSac} />
+              </>}
               <Detail label="Priority" value={indent.priority} />
               {indent.current_approver_name && (
                 <Detail label="With" value={indent.current_approver_name} />
@@ -464,6 +553,21 @@ export function IndentDetailPage() {
 
       {showCorrectionActions && (
         <div className="fixed inset-x-0 bottom-0 z-10 flex gap-3 border-t border-line bg-content1 p-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] md:static md:mt-6 md:justify-end md:border-0 md:bg-transparent md:p-0">
+          {indent.can_send_correction_back && (
+            <Button
+              variant="ghost"
+              className="flex-1 md:flex-none"
+              disabled={actionPending}
+              onClick={() => {
+                setError(null);
+                setSendBackReason("");
+                setSendBackTarget(null);
+                setSendBackOpen(true);
+              }}
+            >
+              <Undo2 className="h-4 w-4" /> Send further back
+            </Button>
+          )}
           {indent.can_resubmit_correction && (
             <Button
               className="flex-1 md:flex-none"
@@ -480,6 +584,40 @@ export function IndentDetailPage() {
           )}
         </div>
       )}
+
+      <ConfirmModal
+        isOpen={sendBackOpen}
+        title="Send further back?"
+        message={sendBackOption
+          ? `It goes back to ${targetLabel(sendBackOption)}, who corrects it and resubmits. `
+            + "Every approval after that step is asked again, yours included."
+          : "Say what must be corrected. It is recorded in approval history."}
+        confirmLabel="Send further back"
+        busy={sendCorrectionBack.isPending || sendBackTargets.isLoading || !sendBackReason.trim()}
+        error={sendCorrectionBack.error}
+        onClose={() => !sendCorrectionBack.isPending && setSendBackOpen(false)}
+        onConfirm={() => {
+          if (sendCorrectionBack.isPending || sendBackTargets.isLoading || !sendBackReason.trim()) return;
+          sendCorrectionBack.mutate();
+        }}
+      >
+        <ReturnTargetSelect
+          targets={sendBackOptions}
+          value={sendBackChosen}
+          onChange={setSendBackTarget}
+        />
+        <label className="block text-sm font-semibold text-ink">
+          What must be corrected?
+          <textarea
+            autoFocus
+            value={sendBackReason}
+            onChange={(event) => setSendBackReason(event.target.value)}
+            className="mt-2 min-h-24 w-full rounded-xl border border-line bg-content1 p-3 text-sm font-normal text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/25"
+            placeholder="Required"
+          />
+          {!sendBackReason.trim() && <p className="mt-1 text-xs font-normal text-danger">A reason is required.</p>}
+        </label>
+      </ConfirmModal>
 
     </>
   );

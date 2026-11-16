@@ -5,8 +5,8 @@ import type {
   ConsolidationApprovalInput, ConsolidationApprovalResult,
   IndentAvailability, IssueFromStockLine, IssueFromStockResult,
   ConsolidationFilterOptions, ConsolidationQuery, ConsolidationWorkspace,
-  CorrectionIndent, PendingApproval,
-  PendingSummary, AllocationCycleRow, DecisionLedger, CycleLedger,
+  CorrectionIndent, PendingApproval, ReturnTarget,
+  PendingSummary, AllocationCycleRow, DecisionLedger, CycleLedger, StrSourceReview,
 } from "./types";
 import type { Paginated } from "@/shared/types";
 
@@ -136,12 +136,16 @@ export interface PendingApprovalQuery {
   raised_from?: string;
   raised_to?: string;
   sort?: string;
+  scope?: "mine" | "company";
 }
 
 export const approvalsApi = {
   pending: (page = 1, size = 20, filters: PendingApprovalQuery = {}) =>
     api.get<Paginated<PendingApproval>>("/api/approvals/pending", { params: { page, size, ...filters } }).then((r) => r.data),
-  pendingAll: () => allPages<PendingApproval>("/api/approvals/pending"),
+  pendingAll: (scope?: "mine" | "company") =>
+    allPages<PendingApproval>(`/api/approvals/pending?scope=${scope === "company" ? "company" : "mine"}`),
+  summary: (scope: "mine" | "company" = "mine") =>
+    api.get<PendingSummary>("/api/approvals/pending/summary", { params: { scope } }).then((r) => r.data),
   decisions: (page = 1, size = 20, filters: { search?: string; decision?: string; doc_type?: string } = {}) =>
     api.get<Paginated<ApprovalDecisionRow>>("/api/approvals/my-decisions", { params: { page, size, ...filters } }).then((r) => r.data),
   decisionsAll: () => allPages<ApprovalDecisionRow>("/api/approvals/my-decisions"),
@@ -170,6 +174,31 @@ export const approvalsApi = {
     api.post<ConsolidationApprovalResult>("/api/approvals/consolidation/approve", body)
       .then((r) => r.data),
   /** What is still owed on each line, and what this approver holds against it. */
+  /** An STR's source, and whether it sits in this approver's scope (2026-11-04). */
+  strSource: (indentId: number) =>
+    api.get<StrSourceReview>(`/api/approvals/indents/${indentId}/str-source`).then((r) => r.data),
+  /** Approve this rung AND allocate the STR from a point in the approver's scope —
+   *  its own source, or (with a reason) one of the approver's points it is moved to. */
+  strAllocate: (
+    indentId: number,
+    body: {
+      source_warehouse_id?: number | null;
+      reason?: string;
+      items: { line_id: number; approved_quantity: number }[];
+    },
+  ) =>
+    api.post<IssueFromStockResult>(`/api/approvals/indents/${indentId}/str-allocate`, body)
+      .then((r) => r.data),
+  /** Move the STR's source to one of the approver's points and forward it, allocating nothing. */
+  strForward: (
+    indentId: number,
+    body: {
+      source_warehouse_id: number;
+      reason: string;
+      items: { line_id: number; approved_quantity: number }[];
+    },
+  ) =>
+    api.post(`/api/approvals/indents/${indentId}/str-forward`, body).then((r) => r.data),
   indentAvailability: (indentId: number) =>
     api.get<IndentAvailability>(`/api/approvals/indents/${indentId}/availability`)
       .then((r) => r.data),
@@ -191,9 +220,14 @@ export const approvalsApi = {
   rejectIndent: (id: number, comments = "") =>
     api.post<ApprovalIndent>(`/api/approvals/indents/${id}/reject`, { comments })
       .then((r) => r.data),
-  returnIndent: (id: number, comments: string) =>
-    api.post<ApprovalIndent>(`/api/indents/${id}/return-for-correction`, { comments })
-      .then((r) => r.data),
+  returnIndent: (id: number, comments: string, targetSequence?: number) =>
+    api.post<ApprovalIndent>(`/api/indents/${id}/return-for-correction`, {
+      comments,
+      // 0 is the requester, so "not chosen" has to be undefined, never falsy.
+      ...(targetSequence === undefined ? {} : { target_sequence: targetSequence }),
+    }).then((r) => r.data),
+  returnTargets: (id: number) =>
+    api.get<ReturnTarget[]>(`/api/indents/${id}/return-targets`).then((r) => r.data),
   approveDocument: (docType: string, id: number, comments = "") =>
     api.post(`/api/approvals/documents/${docType}/${id}/approve`, { comments })
       .then((r) => r.data),
@@ -217,8 +251,8 @@ export const approvalsApi = {
   /** The inbox counted server-side. Scoped to the caller by the endpoint — the same
    *  approver_id + other-hat rule `pending` itself applies, so the tiles can never
    *  report work the list will not show. */
-  pendingSummary: () =>
-    api.get<PendingSummary>("/api/approvals/pending/summary").then((r) => r.data),
+  pendingSummary: (scope: "mine" | "company" = "mine") =>
+    api.get<PendingSummary>("/api/approvals/pending/summary", { params: { scope } }).then((r) => r.data),
   /** Monthly cycles waiting on me. Gated on `allocation.view` server-side, so a
    *  caller without it gets a 403 and the card stays off the page. */
   allocationCycles: () =>

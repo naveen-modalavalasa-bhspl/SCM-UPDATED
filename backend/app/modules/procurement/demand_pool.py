@@ -26,8 +26,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.pagination import PageParams
 from app.modules.indents.models import Indent, IndentItem
+from app.modules.inventory.allocations import UNAPPROVED_ALLOCATION_STATUSES
 from app.modules.inventory.models import (
-    MaterialRequest, MaterialRequestItem,
+    Allocation, AllocationItem, MaterialRequest, MaterialRequestItem,
 )
 from app.modules.procurement.models import (
     POItem, PurchaseOrder, Requisition, RequisitionItem,
@@ -102,6 +103,7 @@ def _net_stages(
     po_qty: Decimal,
     req_qty_by_status: dict[str, Decimal],   # {req_status: total_qty} for this line
     mr_net_qty: Decimal,
+    served_from_stock: Decimal = Decimal("0"),
 ) -> dict[str, Decimal]:
     """Return {stage: qty} for one indent item line, netting latest stages first.
 
@@ -109,6 +111,12 @@ def _net_stages(
     first and work backwards.  Every number is >= 0 and sums ≤ (owed − received).
     """
     outstanding = max(_d(0), owed - received)
+    # 0. What the WAREHOUSE is serving from stock is not procurement's demand: an
+    #    allocation (signed or awaiting approval) whose goods sit in a material-issue
+    #    draft, an issue or a consignment. It lives in the warehouse pool; counting it
+    #    here as well put the same quantity in both pools and read as "To Source" —
+    #    the double-count the module invariant forbids, and how somebody buys twice.
+    outstanding = max(_d(0), outstanding - max(_d(0), served_from_stock))
     if outstanding <= 0:
         return {}
 
@@ -194,6 +202,7 @@ async def demand_pool(
             received_expr.label("received_qty"),
             IndentItem.quantity.label("requested_qty"),
             IndentItem.approved_quantity.label("approved_qty"),
+            IndentItem.allocated_quantity.label("allocated_qty"),
             Indent.required_date.label("required_date"),
             Indent.priority.label("priority"),
             Indent.requested_by_name.label("requested_by_name"),
@@ -224,7 +233,7 @@ async def demand_pool(
     base = base.group_by(
         IndentItem.id, IndentItem.indent_id, Indent.indent_no,
         IndentItem.item_id, owed_expr, received_expr,
-        IndentItem.quantity, IndentItem.approved_quantity,
+        IndentItem.quantity, IndentItem.approved_quantity, IndentItem.allocated_quantity,
         Indent.required_date, Indent.priority,
         Indent.requested_by_name, Indent.department_name, Indent.project_name,
     )
@@ -240,6 +249,9 @@ async def demand_pool(
     po_stmt = (
         select(
             POItem.indent_item_id.label("indent_item_id"),
+            PurchaseOrder.id.label("po_id"),
+            PurchaseOrder.po_no.label("po_no"),
+            PurchaseOrder.status.label("po_status"),
             func.sum(POItem.quantity - POItem.received_quantity).label("po_qty"),
         )
         .join(PurchaseOrder, PurchaseOrder.id == POItem.po_id)
@@ -248,10 +260,29 @@ async def demand_pool(
             PurchaseOrder.status.in_(PO_OPEN),
             POItem.quantity > POItem.received_quantity,
         )
-        .group_by(POItem.indent_item_id)
+        .group_by(POItem.indent_item_id, PurchaseOrder.id, PurchaseOrder.po_no,
+                  PurchaseOrder.status)
     )
-    po_rows = (await db.execute(po_stmt)).all()
-    po_by_line: dict[int, Decimal] = {r.indent_item_id: _d(r.po_qty) for r in po_rows}
+    po_by_line: dict[int, Decimal] = {}
+    po_docs_by_line: dict[int, list[dict]] = {}
+    for r in (await db.execute(po_stmt)).all():
+        po_by_line[r.indent_item_id] = po_by_line.get(r.indent_item_id, _d(0)) + _d(r.po_qty)
+        po_docs_by_line.setdefault(r.indent_item_id, []).append({
+            "kind": "PO", "id": r.po_id, "no": r.po_no, "status": r.po_status,
+            "qty": float(_d(r.po_qty)),
+        })
+
+    # ── Allocations still awaiting approval (the desk's, not procurement's) ──
+    committed_by_line: dict[int, Decimal] = {
+        r.indent_item_id: _d(r.qty) for r in (await db.execute(
+            select(AllocationItem.indent_item_id.label("indent_item_id"),
+                   func.sum(AllocationItem.quantity).label("qty"))
+            .join(Allocation, Allocation.id == AllocationItem.allocation_id)
+            .where(AllocationItem.indent_item_id.in_(line_ids),
+                   Allocation.status.in_(UNAPPROVED_ALLOCATION_STATUSES))
+            .group_by(AllocationItem.indent_item_id)
+        )).all()
+    }
 
     # ── Requisition quantities per indent_item × status ────────────────────
     req_stmt = (
@@ -259,6 +290,7 @@ async def demand_pool(
             RequisitionItem.indent_item_id.label("indent_item_id"),
             Requisition.id.label("requisition_id"),
             Requisition.status.label("req_status"),
+            Requisition.req_no.label("req_no"),
             RequisitionItem.requisition_id.label("req_id"),
             func.sum(
                 RequisitionItem.quantity - func.coalesce(RequisitionItem.ordered_qty, 0)
@@ -274,6 +306,7 @@ async def demand_pool(
             RequisitionItem.indent_item_id,
             Requisition.id,
             Requisition.status,
+            Requisition.req_no,
             RequisitionItem.requisition_id,
         )
     )
@@ -295,7 +328,7 @@ async def demand_pool(
         req_docs_by_line[iid].append({
             "kind": _req_status_to_stage(r.req_status),
             "id": r.requisition_id,
-            "no": None,
+            "no": r.req_no,
             "status": r.req_status,
             "qty": float(_d(r.rem_qty)),
         })
@@ -357,6 +390,11 @@ async def demand_pool(
             po_qty=po_by_line.get(iid, _d(0)),
             req_qty_by_status=req_by_line.get(iid, {}),
             mr_net_qty=mr_net,
+            # Allocated and not yet received, plus allocations awaiting approval: the
+            # warehouse pool's share. Every unit reaches an indent through a warehouse
+            # issue, so `received` is already inside `allocated`.
+            served_from_stock=max(_d(0), _d(r.allocated_qty) - received)
+            + committed_by_line.get(iid, _d(0)),
         )
 
         if not stages:
@@ -366,6 +404,7 @@ async def demand_pool(
         docs: list[dict] = []
         docs.extend(mr_docs_by_line.get(iid, []))
         docs.extend(req_docs_by_line.get(iid, []))
+        docs.extend(po_docs_by_line.get(iid, []))
 
         line_data.append({
             "indent_id": r.indent_id,

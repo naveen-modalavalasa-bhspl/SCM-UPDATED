@@ -1,4 +1,17 @@
+import type { CombinationValue } from "@/shared/combination";
+import type { PackEntry } from "@/shared/packing";
 export interface IndentItem {
+  /** Allocations that gave another brand than this line asked for (2026-10-24). */
+  brand_changes?: { asked_for?: string | null; given?: string | null; quantity: number;
+                    reason?: string | null; allocation_no?: string | null }[];
+  /** Brand / variant / model, or Any (2026-10-23). 0 / absent when none. */
+  brand_id?: number;
+  variant_id?: number;
+  model_id?: number;
+  brand_name?: string | null;
+  variant_name?: string | null;
+  model_name?: string | null;
+  combination_any?: boolean;
   id: number;
   item_id: number;
   item_code?: string | null;
@@ -22,6 +35,12 @@ export type IndentType = "REGULAR" | "MONTHLY" | "STR";
 export interface Indent {
   id: number;
   indent_no: string;
+  /** Null on an indent raised before organisations. */
+  organization_id?: number | null;
+  organization_name?: string | null;
+  org_department_id?: number | null;
+  org_department_name?: string | null;
+  fiscal_year?: string | null;
   /**
    * Optional for the same reason ActivityRow carries its compatibility aliases: a
    * deployed backend that predates the field omits it, and the screens must render
@@ -32,6 +51,17 @@ export interface Indent {
   required_date?: string | null;
   vehicle_id?: number | null;
   vehicle_number?: string | null;
+  /** A Stock Transfer Request's source point (2026-11-04). */
+  source_warehouse_id?: number | null;
+  source_warehouse_name?: string | null;
+  source_warehouse_code?: string | null;
+  /** The STR's route, decorated on single-document reads. */
+  str_source?: StrPoint | null;
+  str_destination?: StrPoint | null;
+  str_source_changes?: StrSourceChange[];
+  /** False when the delivery point is not the bottom rung (a warehouse or an MDP) —
+   *  no vehicle and no SAC belong on it. Null/undefined = unknown, shown as before. */
+  needs_vehicle_and_sac?: boolean | null;
   requested_by_id?: number | null;
   requested_by_name?: string | null;
   position_id?: number | null;
@@ -67,6 +97,7 @@ export interface Indent {
   can_return_for_correction?: boolean;
   can_edit_correction?: boolean;
   can_resubmit_correction?: boolean;
+  can_send_correction_back?: boolean;
   correction_owner?: {
     employee_id: number;
     employee_name?: string | null;
@@ -79,6 +110,41 @@ export interface Indent {
   items: IndentItem[];
 }
 
+/** One end of an STR's route. */
+export interface StrPoint {
+  warehouse_id?: number | null;
+  warehouse_code?: string | null;
+  warehouse_name?: string | null;
+  warehouse_type?: string | null;
+  tier_label?: string | null;
+  held_by?: string[];
+}
+
+/** An approver moved an STR's source onto a point of theirs. */
+export interface StrSourceChange {
+  id: number;
+  from_warehouse_id?: number | null;
+  from_warehouse_name?: string | null;
+  to_warehouse_id: number;
+  to_warehouse_name?: string | null;
+  stage_name?: string | null;
+  reason?: string | null;
+  changed_by_name?: string | null;
+  position_name?: string | null;
+  created_at: string;
+}
+
+/** A point an STR may name as its source: held at the raiser's own rank. */
+export interface StrSourceOption {
+  warehouse_id: number;
+  warehouse_code?: string | null;
+  warehouse_name?: string | null;
+  warehouse_type?: string | null;
+  tier?: number | null;
+  tier_label?: string | null;
+  held_by?: string[];
+}
+
 export interface IndentListRow {
   id: number;
   indent_no: string;
@@ -87,6 +153,8 @@ export interface IndentListRow {
   department_name?: string | null;
   region_id?: number | null;
   region_name?: string | null;
+  source_warehouse_id?: number | null;
+  source_warehouse_name?: string | null;
   status: string;
   priority: string;
   total_items: number;
@@ -125,21 +193,21 @@ export interface ActivityRow {
   indent_id: number;
   indent_no: string;
   event_type?:
-    | "REQUEST_CREATED"
-    | "REQUEST_SUBMITTED"
-    | "APPROVAL_COMPLETED"
-    | "REQUEST_REJECTED"
-    | "REQUEST_RETURNED"
-    | "APPROVAL_ROUTED_AUTOMATICALLY"
-    | "STOCK_ALLOCATED"
-    | "PROCUREMENT_REQUEST_CREATED"
-    | "MATERIAL_ISSUED"
-    | "MATERIAL_DISPATCHED"
-    | "RECEIPT_ACKNOWLEDGED"
-    | "BOOKMARK_ADDED"
-    | "BOOKMARK_REMOVED"
-    | string
-    | null;
+  | "REQUEST_CREATED"
+  | "REQUEST_SUBMITTED"
+  | "APPROVAL_COMPLETED"
+  | "REQUEST_REJECTED"
+  | "REQUEST_RETURNED"
+  | "APPROVAL_ROUTED_AUTOMATICALLY"
+  | "STOCK_ALLOCATED"
+  | "PROCUREMENT_REQUEST_CREATED"
+  | "MATERIAL_ISSUED"
+  | "MATERIAL_DISPATCHED"
+  | "RECEIPT_ACKNOWLEDGED"
+  | "BOOKMARK_ADDED"
+  | "BOOKMARK_REMOVED"
+  | string
+  | null;
   event_label?: string | null;
   result?: string | null;
   result_label?: string | null;
@@ -188,7 +256,20 @@ export interface FulfilmentStep {
 }
 
 /** One line of an indent on the "what am I still owed" screen. */
-export interface AcknowledgementLine {
+export interface AcknowledgementLine extends CombinationValue {
+  item_id?: number | null;
+  /** What was actually ISSUED, per brand / variant / model (2026-10-26) — a
+   *  substituted brand, or stock with no brand recorded. */
+  issued_combinations?: (CombinationValue & { no_brand?: boolean; quantity: number })[];
+  /** Issued in BOXES (2026-10-26): the boxes the line went out in. Counted by
+   *  quantity; no code per piece is asked for. */
+  box_codes?: { code: string; pack_name?: string | null; quantity: number;
+    /** Carton › box, and the strips inside (2026-10-28). */
+    name?: string | null; path?: { code: string; name?: string | null }[] | null;
+    inner?: { code: string; name?: string | null; carries: number; part?: boolean }[] | null }[];
+  /** The packs it was sent in, merged over its issue lines (2026-10-22). */
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
   indent_item_id: number;
   item_code?: string | null;
   item_name?: string | null;
@@ -197,6 +278,9 @@ export interface AcknowledgementLine {
   issued_quantity: number;
   dispatched_quantity: number;
   received_quantity: number;
+  /** Reached the requester and was not accepted (2026-11-06): counted as arrived, so not
+   *  offered again, but not received — the line is still owed. Absent on an older backend. */
+  rejected_quantity?: number;
   is_serial_tracked?: boolean;
   /**
    * Which KIND of identifier `serial_numbers` holds — SERIAL, IMEI, ASSET,
@@ -229,6 +313,14 @@ export interface AcknowledgementLine {
  * package weighing zero.
  */
 export interface AcknowledgementPackageQuantity {
+  /** The PACKAGES this carton holds of a line issued in packages (2026-10-26). */
+  box_codes?: { code: string; quantity: number; received?: number | null;
+    /** Carton › box, and the strips inside (2026-10-28). */
+    name?: string | null; path?: { code: string; name?: string | null }[] | null;
+    inner?: { code: string; name?: string | null; carries: number; part?: boolean }[] | null }[];
+  /** The packs THIS package holds of the line, as packed (2026-10-22). */
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
   dispatch_id?: number | null;
   dispatch_no?: string | null;
   package_id?: number | null;
@@ -256,6 +348,7 @@ export interface AcknowledgementPackageQuantity {
  */
 export interface ShipmentTrack {
   dispatch_id?: number | null;
+  consignment_no?: string | null;
   tr_id: number;
   tr_no: string;
   mode: string;
@@ -341,6 +434,12 @@ export interface RaiserTracking {
 export interface Acknowledgement {
   indent_id: number;
   indent_no: string;
+  /** STR rows are received on Inventory > Stock Transfer, never under Indents. */
+  indent_type?: string | null;
+  /** An STR's route, off the orders serving it (2026-10-29). */
+  sto_nos?: string[];
+  from_warehouse_names?: string[];
+  to_warehouse_name?: string | null;
   indent_date?: string | null;
   required_date?: string | null;
   status: string;
@@ -351,10 +450,22 @@ export interface Acknowledgement {
   shipments: ShipmentTrack[];
 }
 
-/** What arrived in THIS delivery, not the running total. */
+/** What arrived in THIS delivery and was ACCEPTED, not the running total; and, apart from
+ *  it, what arrived and was turned away, by reason (2026-11-06). */
 export interface AcknowledgeLine {
   indent_item_id: number;
   received_quantity: number;
+  /** What goes back. The reason is NOT given here (2026-11-07): the Returns page asks. */
+  rejections?: { reason?: string; quantity: number; comment?: string; serial_numbers?: string[] }[];
+  package_receipts?: Record<string, number>;
+}
+
+/** A return an acknowledgement raised for goods it did not accept. */
+export interface ReceiptReturn {
+  id: number;
+  return_no: string;
+  reason: string;
+  quantity: number;
 }
 
 export interface ReceiptAttachment {
@@ -382,12 +493,23 @@ export interface IndentNotification {
 // Delegation is no longer exposed at all — see modules/approvals/__init__.py.
 
 export interface IndentCreate {
+  /** Whose paper it is on (2026-11-09); HCM's project / department win on the server. */
+  organization_id?: number | null;
+  org_department_id?: number | null;
+  project_id?: number | null;
+  fiscal_year?: string | null;
   required_date?: string | null;
   priority: string;
   indent_type?: IndentType;
   vehicle_id?: number | null;
+  /** Required on an STR: where the stock should come from. */
+  source_warehouse_id?: number | null;
   remarks?: string | null;
-  items: { item_id: number; quantity: number; remarks?: string }[];
+  items: {
+    item_id: number; quantity: number; remarks?: string;
+    brand_id?: number | null; variant_id?: number | null; model_id?: number | null;
+    combination_any?: boolean;
+  }[];
 }
 
 export interface IndentUpdate extends IndentCreate {
@@ -472,6 +594,11 @@ export interface IndentJourney {
   phases: IndentJourneyStage[];
   history: IndentJourneyHistoryEvent[];
   missing_sources: string[];
+  qc_status?: string | null;
+  qc_inspection_no?: string | null;
+  qc_complete?: boolean;
+  consignment_no?: string | null;
+  consignment_status?: string | null;
 }
 
 /** A material issue raised against no indent, as the person it was issued to sees it. */
@@ -488,6 +615,23 @@ export interface DirectIssueAck {
   acknowledged_by_name: string | null;
   acknowledged_at: string | null;
   can_acknowledge: boolean;
-  lines: { item_code: string | null; item_name: string | null; uom_code: string | null;
-           batch_no: string | null; issued_qty: number | string }[];
+  lines: {
+    item_code: string | null; item_name: string | null; uom_code: string | null;
+    batch_no: string | null; issued_qty: number | string
+  }[];
+  /** The consignments carrying this issue, each with its package count. */
+  consignments?: {
+    dispatch_id: number; dispatch_no: string; status: string | null;
+    package_count: number
+  }[];
+}
+
+/** A direct STO arriving at the caller's point — Stock Transfer > Acknowledgements
+ *  (`/api/warehouse/acknowledgements/stock-transfers`). Received through the
+ *  direct-issue receipt journey, which credits it onto the destination shelf. */
+export interface StockTransferAck extends DirectIssueAck {
+  sto_id?: number | null;
+  sto_no?: string | null;
+  from_warehouse_name?: string | null;
+  to_warehouse_name?: string | null;
 }

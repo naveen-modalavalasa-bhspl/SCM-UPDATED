@@ -203,17 +203,99 @@ export function installGlobalErrorLogging() {
     const error = event.reason instanceof Error
       ? event.reason
       : new Error("Unhandled promise rejection");
+    // A chunk prefetch can reject outside any <Suspense> tree, so no boundary
+    // ever sees it. Same once-per-cooldown recovery as the boundary path.
+    const chunkLoad = isChunkLoadError(error);
+    const autoReloaded = chunkLoad ? attemptChunkReload() : false;
     reportFrontendError({
       message: error.message,
       error_type: error.name || "UnhandledRejection",
       stack_trace: error.stack,
-      context: { kind: "unhandledrejection" },
+      context: {
+        kind: "unhandledrejection",
+        chunk_load: chunkLoad || undefined,
+        chunk_auto_reload: autoReloaded || undefined,
+      },
     });
   });
 }
 
 interface BoundaryState {
   error: Error | null;
+}
+
+// ---------------------------------------------------------------------------
+// Stale-chunk recovery (2026-10-10)
+//
+// Every route chunk is content-hashed (HomePage-CHm2YYNA.js), and each deploy
+// replaces the nginx image, so the previous build's files vanish with it. A
+// tab opened BEFORE the release still points at the old filenames: opening a
+// screen it has not visited yet fetches a file that no longer exists, and
+// React's error boundary shows the full-page "Something went wrong" panel for
+// what is really a stale file list. The log signature is unmistakable —
+// TypeError "Failed to fetch dynamically imported module", no endpoint, no
+// status code, reported from the boundary before any API call runs.
+//
+// The fix is client-side: recognise that one failure, reload ONCE (which
+// fetches the new index.html and its file list), and show a friendly notice
+// instead of the scary panel. The guard is timestamped rather than a plain
+// flag so a much later deploy in the same tab can still recover once, while a
+// genuinely broken file cannot spin the tab in a reload loop.
+// ---------------------------------------------------------------------------
+
+const CHUNK_ERROR_PATTERN =
+  /failed to fetch dynamically imported module|loading chunk [\w-]+ failed|importing a module script failed|chunkloaderror/i;
+
+/** True when the error is a route-chunk download failure, not a data bug. */
+export function isChunkLoadError(error: unknown): boolean {
+  const name =
+    error instanceof Error
+      ? error.name
+      : typeof error === "object" && error !== null && "name" in error
+        ? String((error as { name: unknown }).name)
+        : "";
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : "";
+  return CHUNK_ERROR_PATTERN.test(`${name} ${message}`);
+}
+
+const CHUNK_RELOAD_KEY = "scm-chunk-reload-at";
+/** A later deploy in the same long-lived tab may recover again after this. */
+const CHUNK_RELOAD_COOLDOWN_MS = 10 * 60 * 1000;
+
+/**
+ * Returns true exactly when an automatic reload is allowed, and records it.
+ * Safe default on any storage failure: false, so a restricted browser shows
+ * the friendly notice with a manual Refresh button instead of looping.
+ */
+export function shouldAutoReloadChunk(now: number = Date.now()): boolean {
+  try {
+    const raw = sessionStorage.getItem(CHUNK_RELOAD_KEY);
+    const last = raw == null ? NaN : Number(raw);
+    if (Number.isFinite(last) && now - last < CHUNK_RELOAD_COOLDOWN_MS) {
+      return false;
+    }
+    sessionStorage.setItem(CHUNK_RELOAD_KEY, String(now));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Guard + reload in one step. Returns whether the reload was attempted. */
+function attemptChunkReload(): boolean {
+  if (!shouldAutoReloadChunk()) return false;
+  try {
+    window.location.reload();
+  } catch {
+    // jsdom and locked-down webviews may not implement reload; the friendly
+    // notice the boundary renders covers those cases with a manual button.
+  }
+  return true;
 }
 
 export class AppErrorBoundary extends Component<
@@ -227,6 +309,10 @@ export class AppErrorBoundary extends Component<
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
+    // A stale chunk reloads the tab (once per cooldown); every other crash
+    // keeps the existing behaviour of report-and-show-the-panel.
+    const chunkLoad = isChunkLoadError(error);
+    const autoReloaded = chunkLoad ? attemptChunkReload() : false;
     reportFrontendError({
       message: error.message,
       error_type: error.name || "ReactRenderError",
@@ -234,12 +320,51 @@ export class AppErrorBoundary extends Component<
       context: {
         kind: "react.error-boundary",
         component_stack: info.componentStack,
+        chunk_load: chunkLoad || undefined,
+        chunk_auto_reload: autoReloaded || undefined,
       },
     });
   }
 
+  private retryWithoutReload = () => {
+    // Re-attempt the failed import against the CURRENT file list: covers the
+    // transient network blip, where a full page reload would throw away state
+    // for nothing. A redeploy-stale chunk fails again here and lands back on
+    // the friendly notice (the auto-reload guard is already spent).
+    this.setState({ error: null });
+  };
+
   render() {
     if (!this.state.error) return this.props.children;
+    if (isChunkLoadError(this.state.error)) {
+      return (
+        <div className="grid min-h-screen place-items-center bg-content2 p-6 text-center">
+          <div className="max-w-md rounded-2xl border border-line bg-content1 p-6 shadow-sm">
+            <h1 className="font-display text-xl font-bold text-ink">
+              A new version is available
+            </h1>
+            <p className="mt-2 text-sm text-muted">
+              This page was updated while your tab was open. Refresh to load
+              the latest version — nothing you submitted was lost.
+            </p>
+            <div className="mt-5 flex items-center justify-center gap-3">
+              <button
+                className="h-11 rounded-xl bg-brand px-5 text-sm font-semibold text-white"
+                onClick={() => window.location.reload()}
+              >
+                Refresh now
+              </button>
+              <button
+                className="h-11 rounded-xl border border-line px-5 text-sm font-semibold text-ink"
+                onClick={this.retryWithoutReload}
+              >
+                Try again
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="grid min-h-screen place-items-center bg-content2 p-6 text-center">
         <div className="max-w-md rounded-2xl border border-line bg-content1 p-6 shadow-sm">

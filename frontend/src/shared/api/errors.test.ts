@@ -102,6 +102,27 @@ describe("describeError", () => {
     expect(notice.title).toBeUndefined();
   });
 
+  it("shows human-readable 503/500 detailed messages instead of generic fallback", () => {
+    const notice = describeError(failure(503, {
+      detail: "Unable to connect to the database server. Please verify network connectivity.",
+      title: "Database server unavailable",
+    }));
+
+    expect(notice.message).toBe("Unable to connect to the database server. Please verify network connectivity.");
+    expect(notice.title).toBe("Database server unavailable");
+  });
+
+  it("extracts and formats array of validation issues from backend detail", () => {
+    const notice = describeError(failure(422, {
+      detail: [
+        { loc: ["body", "quantity"], msg: "Quantity must be greater than zero" },
+        { loc: ["body", "warehouse_id"], msg: "Warehouse is required" },
+      ],
+    }));
+
+    expect(notice.message).toBe("quantity: Quantity must be greater than zero. warehouse_id: Warehouse is required");
+  });
+
   it("treats a cancelled request as no news at all", () => {
     expect(describeError(new axios.CanceledError("canceled")).message).toBe("");
   });

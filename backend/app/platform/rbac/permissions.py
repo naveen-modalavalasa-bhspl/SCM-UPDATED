@@ -44,6 +44,10 @@ PO_SUBMIT = "po.submit"
 PO_APPROVE = "po.approve"
 PO_REJECT = "po.reject"
 PO_SEND_VENDOR = "po.send_vendor"
+# Accepting or declining a supplier's change of pack hierarchy on a despatch note
+# ("you ordered strips of 10, we are sending strips of 15"). It amends what the order
+# says about packing, so the buyers who may edit an order may answer it.
+PO_PACK_CHANGE = "po.pack_change"
 
 # --- GRN ---
 GRN_VIEW = "grn.view"
@@ -100,8 +104,6 @@ STOCK_TRANSFER_VIEW = "stock.transfer.view"
 STOCK_TRANSFER_STR_APPROVE = "stock.transfer.str_approve"
 STOCK_TRANSFER_SERVE = "stock.transfer.serve"
 STOCK_TRANSFER_SERVE_APPROVE = "stock.transfer.serve_approve"
-STOCK_TRANSFER_ISSUE = "stock.transfer.issue"
-STOCK_TRANSFER_ISSUE_POST = "stock.transfer.issue_post"
 STOCK_TRANSFER_QC = "stock.transfer.qc"
 STOCK_TRANSFER_QC_APPROVE = "stock.transfer.qc_approve"
 STOCK_TRANSFER_RECEIVE = "stock.transfer.receive"
@@ -130,6 +132,11 @@ MR_REJECT = "mr.reject"
 # --- Issues ---
 ISSUE_VIEW = "issue.view"
 ISSUE_CREATE = "issue.create"
+# Sending a draft material issue into approval (2026-11-03). Was part of ISSUE_CREATE —
+# one button, one code — so whoever could write a draft could also put it in front of
+# an approver. Carved out so the two can be given separately; it inherits every grant
+# of ISSUE_CREATE (INHERITS_GRANTS_FROM), so nobody loses the button on the deploy.
+ISSUE_SUBMIT = "issue.submit"
 ISSUE_ISSUE = "issue.issue"
 # Passing an arrived consignment on to a point below (WH -> MDP -> LIP). Separate from
 # ISSUE_CREATE because the people who forward are not the people who decide what leaves
@@ -140,6 +147,13 @@ ISSUE_FORWARD = "issue.forward"
 # one who may hand pieces of it out, so this inherits ISSUE_ISSUE rather than landing
 # on nobody — see INHERITS_GRANTS_FROM.
 ISSUE_SPLIT = "issue.split"
+# Opening a coded pack at the issue desk to give out less than the whole of it
+# (2026-10-08, packing hierarchies). A pack coded at putaway carries ONE code for
+# everything inside it, and a code cannot be split — so taking 4 strips out of a coded
+# box retires the box's code and mints new codes for what is left. That changes the
+# identity of stock other people have already quoted, so it is its own grant and
+# deliberately inherits from nothing: an admin hands it to the people who may do it.
+ISSUE_BREAK_BULK = "issue.break_bulk"
 
 # --- Warehouse ---
 # The warehouse module runs the physical dock-to-stock cycle: receipt -> inspection
@@ -157,6 +171,11 @@ QC_OUTWARD_APPROVE = "qc_outward.approve"
 QC_OUTWARD_EXPORT = "qc_outward.export"
 PUTAWAY_VIEW = "putaway.view"
 PUTAWAY_EXECUTE = "putaway.execute"
+# Changing the PACK LEVEL of stock already on the shelf (Stock Segregation > Lots):
+# twelve boxes become one carton, or a carton is opened back into its boxes. The
+# quantity never changes, so it is not an adjustment; it is the putaway desk's own
+# re-bagging, and it inherits from PUTAWAY_EXECUTE.
+STOCK_REPACK = "stock.repack"
 PICKING_VIEW = "picking.view"
 PICKING_PICK = "picking.pick"
 DISPATCH_VIEW = "dispatch.view"
@@ -353,6 +372,8 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(PO_APPROVE, "procurement", "po", "approve", "Approve purchase orders"),
     Perm(PO_REJECT, "procurement", "po", "reject", "Reject purchase orders"),
     Perm(PO_SEND_VENDOR, "procurement", "po", "send_vendor", "Send PO to vendor"),
+    Perm(PO_PACK_CHANGE, "procurement", "po", "pack_change",
+         "Accept or decline a supplier's change of packing"),
     # module is "warehouse", not "logistics": the endpoints still live in
     # modules/logistics, but its GRN and issue screens are gone — no route in App.tsx,
     # no rbac_pages row — and the surviving screens are /warehouse/grn and
@@ -394,10 +415,6 @@ ALL_PERMISSIONS: list[Perm] = [
          "Serve a stock transfer request — decide which point gives what"),
     Perm(STOCK_TRANSFER_SERVE_APPROVE, "inventory", "stock", "transfer_serve_approve",
          "Approve or reject how a stock transfer request is served"),
-    Perm(STOCK_TRANSFER_ISSUE, "inventory", "stock", "transfer_issue",
-         "Work a stock transfer's material issue — picks, batches, bays, submit"),
-    Perm(STOCK_TRANSFER_ISSUE_POST, "inventory", "stock", "transfer_issue_post",
-         "Approve and post a stock transfer's material issue (stock leaves the point)"),
     Perm(STOCK_TRANSFER_QC, "inventory", "stock", "transfer_qc",
          "Run the outward QC of a stock transfer"),
     Perm(STOCK_TRANSFER_QC_APPROVE, "inventory", "stock", "transfer_qc_approve",
@@ -431,9 +448,13 @@ ALL_PERMISSIONS: list[Perm] = [
     # See the GRN block above: the screen is /warehouse/material-issues.
     Perm(ISSUE_VIEW, "warehouse", "issue", "view", "View issues"),
     Perm(ISSUE_CREATE, "warehouse", "issue", "create", "Create issues"),
+    Perm(ISSUE_SUBMIT, "warehouse", "issue", "submit",
+         "Submit a material issue for approval"),
     Perm(ISSUE_ISSUE, "warehouse", "issue", "issue", "Issue stock to a department"),
     Perm(ISSUE_SPLIT, "warehouse", "issue", "split",
          "Split an issue across the floors that hold the stock"),
+    Perm(ISSUE_BREAK_BULK, "warehouse", "issue", "break_bulk",
+         "Open a coded pack to issue part of it (break bulk)"),
     Perm(ISSUE_FORWARD, "warehouse", "issue", "forward",
          "Forward an arrived consignment on to a point below"),
     Perm(RECEIPT_VIEW, "warehouse", "receipt", "view", "View goods receipts"),
@@ -449,6 +470,10 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(QC_OUTWARD_EXPORT, "warehouse", "qc_outward", "export", "Export Outward QC"),
     Perm(PUTAWAY_VIEW, "warehouse", "putaway", "view", "View put-away tasks"),
     Perm(PUTAWAY_EXECUTE, "warehouse", "putaway", "execute", "Put stock away into bins"),
+    # Module "inventory": the `stock` resource is inventory's, and one resource never
+    # spans two modules (test_no_new_resource_is_split_across_two_modules).
+    Perm(STOCK_REPACK, "inventory", "stock", "repack",
+         "Change the pack level of stock on the shelf (repack)"),
     Perm(PICKING_VIEW, "warehouse", "picking", "view", "View material fulfilments"),
     Perm(PICKING_PICK, "warehouse", "picking", "pick", "Pick stock for material fulfilment"),
     Perm(DISPATCH_VIEW, "warehouse", "dispatch", "view", "View dispatches"),
@@ -632,8 +657,8 @@ INHERITS_GRANTS_FROM: dict[str, str] = {
     STOCK_TRANSFER_STR_APPROVE: INDENT_APPROVE,
     STOCK_TRANSFER_SERVE: ALLOCATION_CREATE,
     STOCK_TRANSFER_SERVE_APPROVE: ALLOCATION_APPROVE,
-    STOCK_TRANSFER_ISSUE: ISSUE_CREATE,
-    STOCK_TRANSFER_ISSUE_POST: ISSUE_ISSUE,
+    # Submitting was part of creating until 2026-11-03.
+    ISSUE_SUBMIT: ISSUE_CREATE,
     STOCK_TRANSFER_QC: QC_OUTWARD_CREATE,
     STOCK_TRANSFER_QC_APPROVE: QC_OUTWARD_APPROVE,
     STOCK_TRANSFER_RECEIVE: INDENT_ACKNOWLEDGE,
@@ -644,6 +669,11 @@ INHERITS_GRANTS_FROM: dict[str, str] = {
     # Fail-closed would leave the button on nobody's profile and the feature unused.
     ISSUE_SPLIT: ISSUE_ISSUE,
     STOCK_ADJUST_APPROVE: STOCK_ADJUST,
+    # Re-bagging stock on the shelf is the putaway desk's own work.
+    STOCK_REPACK: PUTAWAY_EXECUTE,
+    # Answering a supplier's packing change is an edit of what the order says.
+    PO_PACK_CHANGE: PO_EDIT,
+    # ISSUE_BREAK_BULK deliberately has no entry: it is granted, never inherited.
 }
 
 
@@ -1008,3 +1038,19 @@ INHERITS_GRANTS_FROM.update({
     page_view_code("rep_transport"): TRANSPORT_VIEW,
     page_view_code("rep_returns"): RETURN_VIEW,
 })
+
+
+# Permissions taken OUT of the catalogue. Leaving a code off `ALL_PERMISSIONS` is not
+# enough: `sync_permission_labels` never deletes a row it does not know, so the code
+# would stay on the Job Profiles screen and stay granted. `page_registry.
+# retire_permissions` deletes each one's grants and row on every start, idempotently.
+#
+# 2026-11-03 — the two Stock Transfer material-issue codes. The screens read holding
+# one as holding issue.view/create/issue (shared/auth/scopedGrants.ts), so a login with
+# no "Create issues" was shown Warehouse > Material Issues' New issue button. A
+# transfer's material issue is now worked under the Warehouse issue codes alone.
+RETIRED_PERMISSIONS: dict[str, str] = {
+    # retired code -> the Warehouse code that now covers what it did
+    "stock.transfer.issue": ISSUE_CREATE,
+    "stock.transfer.issue_post": ISSUE_ISSUE,
+}

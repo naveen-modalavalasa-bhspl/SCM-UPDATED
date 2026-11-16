@@ -1,7 +1,15 @@
 import { api } from "@/shared/api/client";
+import type { PackEntryIn } from "@/shared/packing";
 import type {
+  BoxLabel,
+  BoxSource,
+  DocLabels,
   UnlocatedStockStatus,
+  IssueDestinationOption,
+  IssueEmployeeOption,
   AcknowledgeWrite,
+  LotPacks,
+  PackSummaryRow,
   ApprovalEvent,
   Attachment,
   Batch,
@@ -128,6 +136,14 @@ export const getUnlocatedStock = (id: number) =>
 /** Move everything held with no location into the Unlocated location, now. */
 export const placeUnlocatedStock = (id: number) =>
   post<UnlocatedStockStatus>(`${BASE}/warehouses/${id}/unlocated/place`);
+
+/** Stranded units + stale picks standing in the way of the next issue. */
+export const auditUnlocatedStock = (id: number) =>
+  get<UnlocatedStockStatus>(`${BASE}/warehouses/${id}/unlocated/audit`);
+
+/** Place, sweep stranded units and repoint stale picks in one press. */
+export const repairUnlocatedStock = (id: number, repoint_issues = true) =>
+  post<UnlocatedStockStatus>(`${BASE}/warehouses/${id}/unlocated/repair?repoint_issues=${repoint_issues}`);
 
 /**
  * How much of a storage location's cube the locations inside it already claim.
@@ -267,6 +283,21 @@ export const despatchNoteOptions = (poId: number) =>
 
 /** The vendor's paperwork and per-line batch/expiry, in the shape this form needs.
  *  Header and lines in one call — at the gate they are one act. */
+/** The organisation a receipt copies from the document before it — its despatch note,
+ *  PO or transfer — or null when that carries none and the receipt selects its own. */
+export interface ReceiptScopeSource {
+  organization_id: number; organization_code?: string | null; organization_name: string;
+  org_department_id?: number | null; org_department_name?: string | null;
+  project_id?: number | null; project_name?: string | null; source_no?: string | null;
+}
+export const receiptScope = (params: {
+  po_id?: number | null; despatch_note_id?: number | null; dispatch_id?: number | null;
+}) => get<ReceiptScopeSource | null>(`${BASE}/options/receipt-scope`, {
+  po_id: params.po_id || undefined,
+  despatch_note_id: params.despatch_note_id || undefined,
+  dispatch_id: params.dispatch_id || undefined,
+});
+
 export const getDespatchPrefill = (noteId: number, receiptId?: number | null) =>
   get<DespatchPrefill>(`${BASE}/options/despatch-prefill`, {
     note_id: noteId, receipt_id: receiptId ?? undefined,
@@ -437,12 +468,16 @@ export const issueStockSources = (
   indent_id?: number | null,
   // Lots held for this project (Stock Segregation > Project Lots) are offered too.
   project_id?: number | null,
+  // The issue being edited: a direct issue reserves its own picks, and that hold is
+  // stock it may still draw; its own picks are not "pinned by another issue".
+  issue_id?: number | null,
 ) =>
   post<IssueStockSource[]>(`${BASE}/issues/stock-sources/fetch`, {
     warehouse_id,
     item_ids,
     indent_id,
     project_id,
+    issue_id: issue_id ?? undefined,
   });
 
 /**
@@ -462,6 +497,38 @@ export const issueUnitSupply = (
   post<UnitSupply[]>(`${BASE}/issues/unit-supply`, {
     warehouse_id, picks, issue_id, direction,
   });
+
+/** Every box of an item an issue line could name at one batch and location
+ *  (2026-10-26) — fullest first, and who holds each. */
+export const issueBoxSources = (params: {
+  warehouse_id: number; item_id: number; batch_id?: number | null;
+  bin_id?: number | null; issue_id?: number | null;
+  /** Also the serials / IMEIs / codes inside each box (2026-10-27). */
+  with_units?: boolean;
+}) => get<BoxSource[]>(`${BASE}/issues/box-sources`, params);
+
+/** The print queue of new box codes (Labels & Printing > Box labels). */
+export const listBoxLabels = (params: {
+  status?: string; warehouse_id?: number | string; search?: string; page?: number; size?: number;
+}) => get<Page<BoxLabel>>(`${BASE}/box-labels`, params);
+
+export const markBoxLabelsPrinted = (ids: number[]) =>
+  post<{ printed: number }>(`${BASE}/box-labels/printed`, { ids });
+
+/** Every label a POSTED issue's goods carry, item by item (2026-10-28). */
+export const issueLabels = (issueId: number) =>
+  get<DocLabels>(`${BASE}/issues/${issueId}/labels`);
+
+/** Labels for what a site ACKNOWLEDGED on one consignment — never what was sent. */
+export const receivedLabels = (dispatchId: number) =>
+  get<DocLabels>(`${BASE}/dispatches/${dispatchId}/received-labels`);
+
+export const docLabelsPrinted = (
+  doc: { type: "ISSUE" | "RECEIPT"; id: number },
+  body: { label_ids: number[]; printed: number; reprint?: boolean },
+) => post<{ printed: number; queue_ticked: number }>(doc.type === "ISSUE"
+  ? `${BASE}/issues/${doc.id}/labels/printed`
+  : `${BASE}/dispatches/${doc.id}/received-labels/printed`, body);
 
 export interface UnitSupplyPick {
   item_id: number;
@@ -525,6 +592,8 @@ export const rejectIssue = (id: number, comments = "") =>
 
 /** Posts the movement — this is the point stock actually leaves the shelf. */
 export const postIssue = (id: number) => post<Issue>(`${BASE}/issues/${id}/issue`);
+/** Issue every floor piece of a SPLIT issue at once — all or nothing (2026-11-10). */
+export const postSplitIssue = (id: number) => post<Issue>(`${BASE}/issues/${id}/issue-split`);
 
 /** One child issue per warehouse floor holding stock for the parent's items. */
 export interface IssueSplitResult {
@@ -545,6 +614,26 @@ export interface IssueSplitResult {
 /** Hand an approved issue down to the floors that are actually holding the stock. */
 export const splitIssue = (id: number) =>
   post<IssueSplitResult>(`${BASE}/issues/${id}/split`);
+
+/** Where a split WOULD send the work, per floor — nothing is written (2026-11-10). */
+export interface IssueSplitPreview {
+  issue_id: number;
+  issue_no: string;
+  can_split: boolean;
+  floors: {
+    floor_location_id: number;
+    floor_location_name: string;
+    total_qty: string;
+    in_charge_names: string[];
+    lines: { item_code?: string | null; item_name?: string | null; uom_code?: string | null;
+             batch_no?: string | null; expiry_date?: string | null; bin_code?: string | null;
+             qty: string }[];
+  }[];
+  shortfall: { item_code?: string | null; item_name?: string | null; qty: string; reason?: string }[];
+}
+
+export const previewIssueSplit = (id: number) =>
+  get<IssueSplitPreview>(`${BASE}/issues/${id}/split-preview`);
 
 /** Names the physical units after approval — the rest of the issue stays frozen. */
 export const setIssueSerials = (
@@ -743,9 +832,26 @@ export const listSerials = (
     unbatched?: boolean;
     // Only units no document is holding — a stock movement's picker.
     claim_free?: boolean;
+    // Widen the circle when the bay is empty: batch keeps the batch, point lists
+    // the whole point. The save still validates the line's own bay and batch.
+    scope?: "exact" | "batch" | "point";
   } = {},
 ) =>
   get<Page<SerialNumber>>(`${BASE}/serials`, params);
+
+/** Bay vs batch vs point code counts behind the picker's scope switch. */
+export const serialScopeCounts = (params: {
+  item_id: number; warehouse_id: number; batch_id?: number | null;
+  bin_id?: number | null; issue_id?: number | null; issue_line_id?: number | null;
+}) =>
+  get<import("./types").SerialScopeCounts>(`${BASE}/serials/scope-counts`, {
+    item_id: params.item_id,
+    warehouse_id: params.warehouse_id,
+    batch_id: params.batch_id || undefined,
+    bin_id: params.bin_id || undefined,
+    issue_id: params.issue_id || undefined,
+    issue_line_id: params.issue_line_id || undefined,
+  });
 
 export const listBatches = (params: ListParams & { item_id?: number; expiring_days?: number } = {}) =>
   get<Page<Batch>>(`${BASE}/batches`, params);
@@ -1024,6 +1130,18 @@ export const gateEntryOptions = (search?: string) =>
 export const indentOptions = (search?: string, warehouse_id?: number) =>
   get<Option[]>(`${BASE}/options/indents`, { search, warehouse_id });
 
+/** What a consignment inherits from the issue behind it (2026-10-29). */
+export const issueTransferContext = (issueId: number) =>
+  get<import("./types").TransferContext>(`${BASE}/issues/${issueId}/transfer-context`);
+
+export const consignmentTransferContext = (consignmentId: number) =>
+  get<import("./types").TransferContext | null>(
+    `${BASE}/consignments/${consignmentId}/transfer-context`);
+
+/** Approved STOs leaving this point, each with the issue that executes it. */
+export const stoIssueOptions = (search?: string, warehouse_id?: number) =>
+  get<import("./types").StoIssueOption[]>(`${BASE}/options/stos`, { search, warehouse_id });
+
 export const getIndentIssueSource = (indent_id: number, warehouse_id: number) =>
   get<{
     indent_id: number;
@@ -1039,6 +1157,12 @@ export const getIndentIssueSource = (indent_id: number, warehouse_id: number) =>
     destination_office_id?: number | null;
     destination_office_name?: string | null;
     destination_office_sac?: string | null;
+    destination_needs_vehicle_and_sac?: boolean | null;
+    project_name?: string | null;
+    organization_id?: number | null;
+    organization_name?: string | null;
+    org_department_id?: number | null;
+    org_department_name?: string | null;
     items: IssueWrite["items"];
   }>(`${BASE}/options/indent-issue-source`, { indent_id, warehouse_id });
 
@@ -1087,6 +1211,24 @@ export const consignmentRecommendations = (limit = 8) =>
   get<ConsignmentRecommendation[]>(`${BASE}/options/consignment-recommendations`, { limit });
 
 export const employeeOptions = (search?: string) => get<Option[]>(`${BASE}/options/employees`, { search });
+
+/** Every active employee, searched on the server; `office_id` narrows to one office. */
+export const searchIssueEmployees = (search: string, officeId?: number | null) =>
+  get<{ items: IssueEmployeeOption[]; total: number }>(`${BASE}/options/issue-employees`, {
+    search: search || undefined, office_id: officeId ?? undefined,
+  });
+
+/** Every warehouse / MDP / LIP a direct issue can go to — never the user's own. */
+export const searchIssueDestinations = (
+  search: string,
+  opts: { fromWarehouseId?: number | null; officeId?: number | null; withSac?: boolean } = {},
+) =>
+  get<{ items: IssueDestinationOption[]; total: number }>(`${BASE}/options/issue-destinations`, {
+    search: search || undefined,
+    from_warehouse_id: opts.fromWarehouseId || undefined,
+    office_id: opts.officeId ?? undefined,
+    with_sac: opts.withSac || undefined,
+  });
 
 export const getEmployeeDestination = (employee_id: number) =>
   get<{
@@ -1194,3 +1336,29 @@ export const releaseProjectHold = (id: number, body: import("./types").ProjectHo
 /** Another project's urgent need — the lot is released TO it, with a reason. */
 export const lendProjectHold = (id: number, body: import("./types").ProjectHoldRelease) =>
   post<import("./types").ProjectHoldReleaseResult>(`${BASE}/project-holds/${id}/lend`, body);
+
+
+// --- Packs on the shelf (2026-10-08) ------------------------------------------------
+
+/** How each of these stock rows is packed: "2 Carton + 3 Box + 14 loose TAB". */
+export const packSummary = (stockIds: number[]) =>
+  api.post<{ items: PackSummaryRow[] }>("/api/warehouse/packs/summary",
+    { stock_ids: stockIds }).then((r) => r.data.items);
+
+/** One stock row pack by pack, with each hierarchy's levels and coded floor. */
+export const lotPacks = (stockId: number) =>
+  api.get<LotPacks>(`/api/warehouse/packs/lots/${stockId}`).then((r) => r.data);
+
+/** Change the pack levels of stock on the shelf — never the quantity. */
+export const repackLot = (stockId: number, body: {
+  pack_hierarchy_id: number; target: PackEntryIn[]; reason?: string | null;
+}) => api.post<LotPacks>(`/api/warehouse/packs/lots/${stockId}/repack`, body)
+  .then((r) => r.data);
+
+/** A scanned pack code and every unit inside it, at any depth. */
+export const packByCode = (code: string) =>
+  api.get<{ id: number; hu_code: string; level: number; pack_name?: string | null;
+            pack_size: number; is_atom: boolean; item_id: number; bin_id: number;
+            batch_id: number; units: { serial_number: string; imei?: string | null;
+                                       code: string }[] }>(
+    `/api/warehouse/packs/code/${encodeURIComponent(code)}`).then((r) => r.data);

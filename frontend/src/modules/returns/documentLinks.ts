@@ -110,14 +110,9 @@ export function relatedDocumentLinks(doc: RelatedDocument): DocumentLinks {
     case "PUTAWAY":
       return { ...NONE, open: `/warehouse/putaway/${id}`, print: `/warehouse/putaway/${id}/print` };
     case "PICKLIST":
-      // The screen is `picklist`, the print sheet is `picklists`. Both are the live
-      // routes; the inconsistency is theirs and copying it here is what makes the
-      // links work.
-      return {
-        ...NONE,
-        open: `/warehouse/picklist/${id}`,
-        print: `/warehouse/picklists/${id}/print`,
-      };
+      // Picklists are retired from the UI (2026-11-04): an old trail row names
+      // the document as text, with nowhere to open it.
+      return NONE;
     case "MATERIAL_ISSUE":
       return {
         ...NONE,

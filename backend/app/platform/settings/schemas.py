@@ -89,6 +89,7 @@ class LogisticsSettings(BaseModel):
     counter and only need to record the name written on the receipt.
     """
     manual_courier_dispatch: bool = False
+    send_third_party_to_vendor: bool = False
 
 
 class SecuritySettings(BaseModel):

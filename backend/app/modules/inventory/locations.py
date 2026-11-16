@@ -212,6 +212,171 @@ async def held_location_ids(db: AsyncSession, position_id: int | None, *,
     return points
 
 
+def _holds_shelf(warehouse_type: str | None, section: str | None) -> bool:
+    """`held_location_ids`' rule for one link: at an LIP or an MDP only the post in the
+    stocking section keeps the shelf; every post linked to a main warehouse does."""
+    stocking_types = {WarehouseType.LIP.value, WarehouseType.MDP.value}
+    return (warehouse_type not in stocking_types
+            or SECTION_TIER.get(_letters(section)) is not None)
+
+
+async def own_linked_points(db: AsyncSession, user) -> set[int]:
+    """Every point this PERSON's live posts are linked to — never their reportees'.
+
+    Any link, whatever its section. The shelf rule (`held_location_ids`) answers "whose
+    stock is it" and keeps only the storekeeper; this answers "which point is mine",
+    and an OE, a DM and an RM are linked to their branch MDP under a non-stocking
+    section, so the shelf rule would say they have no point at all."""
+    positions = await active_positions_of(db, user)
+    if not positions:
+        return set()
+    return set((await db.execute(
+        select(PositionLocation.warehouse_id).where(
+            PositionLocation.position_id.in_(positions),
+            PositionLocation.is_active == 1)
+    )).scalars().all())
+
+
+async def same_rank_points(db: AsyncSession, user,
+                           destination_id: int | None = None) -> list[dict]:
+    """Every stocking point an STR raised by this login may name as its SOURCE
+    (2026-11-04): the points of the posts at the SAME HCM RANK as the post the login
+    is acting as, on the SAME TIER as the raiser's own point, across the whole
+    network — less the raiser's own.
+
+    Read off the org, never written down: the rank is `hcm_positions.role_id` and the
+    tier is the point's own type, so a storekeeper at an LIP is offered the other LIPs,
+    an OE the other OEs' MDPs, a DM the other DMs', an RM the other RMs' — and a rank
+    HCM adds tomorrow works the same day. No role NAME appears here. The tier is needed
+    beside the rank because one rank serves several rungs (a Store Keeper sits at LIPs,
+    at MDPs and at the main warehouse). A post with no rank on record is offered every
+    point on its own tier, so a gap in HCM narrows the list instead of emptying it.
+
+    WAREHOUSES go by TYPE, not by rank (2026-11-09). A warehouse rank usually has one
+    post — one SCM HEAD, at Central Warehouse-1 — so "the same rank elsewhere" was
+    nobody and the list was empty. When the STR is delivered into a warehouse, every
+    other active warehouse is offered, whoever holds it. LIPs and MDPs keep the rank
+    rule. `destination_id` (the point the STR is delivered into) is never offered, and
+    decides the tier when the login's own posts are linked to no point.
+    """
+    position_id = getattr(user, "active_position_id", None)
+    own = await own_linked_points(db, user)
+    excluded = own | ({destination_id} if destination_id else set())
+    # The tier of the point the post in hand is linked to; any post's when it has none;
+    # the delivery point's when no post of theirs is linked to a point at all.
+    mine_now = set((await db.execute(
+        select(PositionLocation.warehouse_id).where(
+            PositionLocation.position_id == position_id,
+            PositionLocation.is_active == 1)
+    )).scalars().all()) if position_id else set()
+    anchor = mine_now or own or ({destination_id} if destination_id else set())
+    tiers = {tier_of(t) for t in (await db.execute(
+        select(Warehouse.warehouse_type).where(Warehouse.id.in_(anchor or {0}))
+    )).scalars().all()}
+    if not tiers:
+        return []
+    if destination_id:
+        # The STR is going INTO this point, so its tier decides — a login holding posts
+        # on two tiers must not be offered the other tier's points.
+        dest_type = await db.scalar(
+            select(Warehouse.warehouse_type).where(Warehouse.id == destination_id))
+        if dest_type is not None:
+            tiers = {tier_of(dest_type)}
+    if tiers == {LocationTier.WAREHOUSE}:
+        return await _other_warehouses(db, excluded)
+    wanted_types = [t.value for t in WarehouseType if tier_of(t.value) in tiers]
+    role_id = (await db.scalar(select(HcmPosition.role_id).where(
+        HcmPosition.id == position_id))) if position_id else None
+
+    stmt = (
+        select(PositionLocation.warehouse_id, PositionLocation.position_id,
+               Warehouse.code, Warehouse.name, Warehouse.warehouse_type)
+        .join(Warehouse, Warehouse.id == PositionLocation.warehouse_id)
+        .join(HcmPosition, HcmPosition.id == PositionLocation.position_id)
+        .where(PositionLocation.is_active == 1,
+               HcmPosition.is_active.is_(True),
+               Warehouse.is_active.is_(True),
+               Warehouse.warehouse_type.in_(wanted_types))
+    )
+    if role_id is not None:
+        stmt = stmt.where(HcmPosition.role_id == role_id)
+
+    points: dict[int, dict] = {}
+    rank_posts: dict[int, set[int]] = {}
+    for wid, pos_id, code, name, wh_type in (await db.execute(stmt)).all():
+        if wid in excluded:
+            continue
+        tier = tier_of(wh_type)
+        points.setdefault(wid, {
+            "warehouse_id": wid, "warehouse_code": code, "warehouse_name": name,
+            "warehouse_type": wh_type, "tier": tier.value, "tier_label": tier_label(tier),
+        })
+        rank_posts.setdefault(wid, set()).add(pos_id)
+    # "Held by" here is the people of that rank at the point — the OE whose MDP it is,
+    # not the storekeeper who keeps its shelf.
+    names = await point_holder_names(db, set(points), rank_posts)
+    out = [{**row, "held_by": names.get(wid, [])} for wid, row in points.items()]
+    return sorted(out, key=lambda r: ((r["warehouse_name"] or "").lower(), r["warehouse_id"]))
+
+
+async def _other_warehouses(db: AsyncSession, excluded: set[int]) -> list[dict]:
+    """Every active WAREHOUSE-tier point less `excluded`: the STR source list of a
+    warehouse, by type and never by who holds it (`same_rank_points`)."""
+    rows = (await db.execute(
+        select(Warehouse.id, Warehouse.code, Warehouse.name, Warehouse.warehouse_type)
+        .where(Warehouse.is_active.is_(True))
+    )).all()
+    points = {
+        wid: {"warehouse_id": wid, "warehouse_code": code, "warehouse_name": name,
+              "warehouse_type": wh_type, "tier": LocationTier.WAREHOUSE.value,
+              "tier_label": tier_label(LocationTier.WAREHOUSE)}
+        for wid, code, name, wh_type in rows
+        if wid not in excluded and tier_of(wh_type) == LocationTier.WAREHOUSE
+    }
+    names = await point_holder_names(db, set(points))
+    out = [{**row, "held_by": names.get(wid, [])} for wid, row in points.items()]
+    return sorted(out, key=lambda r: ((r["warehouse_name"] or "").lower(), r["warehouse_id"]))
+
+
+async def point_holder_names(db: AsyncSession, warehouse_ids: set[int],
+                             posts: dict[int, set[int]] | None = None) -> dict[int, list[str]]:
+    """Who holds each point's shelf, by name — the people an STR's source is held by.
+
+    `posts` short-cuts the lookup when the caller already read the links; otherwise the
+    holding posts are read here under the same section rule."""
+    if not warehouse_ids:
+        return {}
+    if posts is None:
+        posts = {}
+        for wid, pos_id, section, wh_type in (await db.execute(
+            select(PositionLocation.warehouse_id, PositionLocation.position_id,
+                   PositionLocation.section_name, Warehouse.warehouse_type)
+            .join(Warehouse, Warehouse.id == PositionLocation.warehouse_id)
+            .where(PositionLocation.warehouse_id.in_(warehouse_ids),
+                   PositionLocation.is_active == 1)
+        )).all():
+            if _holds_shelf(wh_type, section):
+                posts.setdefault(wid, set()).add(pos_id)
+    all_posts = {p for ps in posts.values() for p in ps}
+    if not all_posts:
+        return {}
+    by_post: dict[int, list[str]] = {}
+    for pos_id, full_name in (await db.execute(
+        select(HcmPositionAssignment.position_id, HcmEmployee.full_name)
+        .join(HcmEmployee, HcmEmployee.id == HcmPositionAssignment.employee_id)
+        .where(HcmPositionAssignment.position_id.in_(all_posts),
+               HcmPositionAssignment.is_active.is_(True))
+    )).all():
+        if full_name:
+            by_post.setdefault(pos_id, []).append(full_name)
+    out: dict[int, list[str]] = {}
+    for wid, ps in posts.items():
+        names = sorted({n for p in ps for n in by_post.get(p, [])})
+        if names:
+            out[wid] = names
+    return out
+
+
 async def active_positions_of(db: AsyncSession, user) -> set[int]:
     """Every LIVE post this login holds — not just the hat they happen to be wearing.
 
@@ -263,6 +428,13 @@ async def floor_ids_for_user(db: AsyncSession, user) -> set[int] | None:
     positions = await active_positions_of(db, user)
     if not positions:
         return None
+    # The post in hand decides (2026-11-10). One person holding the in-charge post of
+    # three floors saw all three floors' pieces whichever post they were working as;
+    # the floor is a fact about the POST, so switching "Working as" switches the floor.
+    # No post selected keeps every post's floors, as before.
+    active = getattr(user, "active_position_id", None)
+    if active is not None and active in positions:
+        positions = [active]
     floor_posts = set((await db.execute(
         select(HcmPosition.id).where(
             HcmPosition.id.in_(positions),
@@ -558,6 +730,57 @@ POINT_LABEL = {
 }
 
 
+async def parent_points(db: AsyncSession, warehouse_ids: set[int]) -> dict[int, int | None]:
+    """The point each stocking point sits UNDER, read off the reporting tree.
+
+    `whs_warehouses` carries no parent: the chain is the org's. A point's parent is
+    the nearest point of a HIGHER tier held by an ancestor (`parent_position_id`) of
+    any position tagged to it — an LIP's MDP is the one its holder's OE holds. None
+    when the climb finds nothing (a top-level warehouse, or a holder HCM gives no
+    manager), which callers read as "parent unknown", never as "no siblings".
+    """
+    if not warehouse_ids:
+        return {}
+    tags = (await db.execute(
+        select(PositionLocation.position_id, PositionLocation.warehouse_id)
+        .where(PositionLocation.is_active == 1)
+    )).all()
+    held_by: dict[int, list[int]] = {}
+    points_of: dict[int, list[int]] = {}
+    for position_id, warehouse_id in tags:
+        held_by.setdefault(warehouse_id, []).append(position_id)
+        points_of.setdefault(position_id, []).append(warehouse_id)
+    types = {row.id: row.warehouse_type for row in (await db.execute(
+        select(Warehouse.id, Warehouse.warehouse_type)
+        .where(Warehouse.id.in_({w for ws in points_of.values() for w in ws} | warehouse_ids))
+    )).all()}
+    parent_of = dict((await db.execute(
+        select(HcmPosition.id, HcmPosition.parent_position_id)
+        .where(HcmPosition.is_active.is_(True))
+    )).all())
+
+    out: dict[int, int | None] = {}
+    for warehouse_id in warehouse_ids:
+        tier = tier_of(types.get(warehouse_id))
+        found: int | None = None
+        for holder in sorted(held_by.get(warehouse_id, [])):
+            seen: set[int] = set()
+            position = parent_of.get(holder)
+            while position is not None and position not in seen and found is None:
+                seen.add(position)
+                above = sorted(w for w in points_of.get(position, [])
+                               if tier_of(types.get(w)) < tier)
+                if above:
+                    # The rung directly above first: an LIP's parent is its MDP even
+                    # when the same manager also holds a main warehouse.
+                    found = max(above, key=lambda w: (tier_of(types.get(w)), -w))
+                position = parent_of.get(position)
+            if found is not None:
+                break
+        out[warehouse_id] = found
+    return out
+
+
 async def describe_point(db: AsyncSession, warehouse_id: int | None) -> dict:
     """Name and screen label for one stocking point. Falls back to "Warehouse"."""
     if warehouse_id is None:
@@ -572,6 +795,9 @@ async def describe_point(db: AsyncSession, warehouse_id: int | None) -> dict:
         "point_type": warehouse_type or None,
         "point_name": row.name,
         "point_label": POINT_LABEL.get(warehouse_type, "Warehouse"),
+        # Only the bottom rung of the chain runs a vehicle and carries a service area
+        # code (2026-11-04) — read off the tier, so no screen compares a type by name.
+        "needs_vehicle_and_sac": tier_of(warehouse_type) == max(LocationTier),
     }
 
 
@@ -1104,8 +1330,12 @@ async def rebuild_stocking_points(db: AsyncSession) -> dict:
                HcmPosition.project_id, HcmPosition.project_name)
         .where(HcmPosition.is_active.is_(True), HcmPosition.office_id.isnot(None))
     )).all()
-    offices = {o.id: (o.name, o.office_mode) for o in (await db.execute(
-        select(HcmOffice.id, HcmOffice.name, HcmOffice.office_mode)
+    # SCM_0053: HCM already sends an address for every office (`map_office`, both the
+    # poll sync and the webhook); carried onto the warehouse here, the same snapshot
+    # rule office_name already follows, so a DC/DOD gate pass has a "From" address to
+    # print without inventing a second address source.
+    offices = {o.id: (o.name, o.office_mode, o.address) for o in (await db.execute(
+        select(HcmOffice.id, HcmOffice.name, HcmOffice.office_mode, HcmOffice.address)
     )).all()}
 
     # office -> what kind of stocking point it is. Section first, warehouse second: a
@@ -1115,7 +1345,7 @@ async def rebuild_stocking_points(db: AsyncSession) -> dict:
         tier = SECTION_TIER.get(_letters(row.section_name))
         if tier:
             kinds.setdefault(row.office_id, (tier, tier))
-    for office_id, (_name, mode) in offices.items():
+    for office_id, (_name, mode, _address) in offices.items():
         if _letters(mode) == WAREHOUSE_OFFICE_TYPE:
             # MAIN, not a rung: a store is where stock arrives from outside, which is
             # what tier_of() already reads the top of the chain as.
@@ -1140,18 +1370,24 @@ async def rebuild_stocking_points(db: AsyncSession) -> dict:
 
     warehouses: dict[int, Warehouse] = {}
     for code, (office_id, kind) in wanted.items():
-        name = offices.get(office_id, (str(office_id), None))[0]
+        name, _mode, address = offices.get(office_id, (str(office_id), None, None))
         warehouse = existing.get(code)
         if warehouse is None:
             warehouse = Warehouse(
                 code=code, name=f"{name} - {kind}", office_id=office_id,
-                office_name=name, warehouse_type=kind,
+                office_name=name, address=address, warehouse_type=kind,
                 is_bin_managed=False, is_active=True,
             )
             db.add(warehouse)
         else:
             warehouse.name, warehouse.office_name = f"{name} - {kind}", name
             warehouse.warehouse_type, warehouse.is_active = kind, True
+            # Backfill only — never overwrite. `address` is also a field
+            # `WarehouseWrite` lets an admin hand-correct (unlike name/office_name,
+            # which this function already always overwrites), so a sync must not
+            # silently replace a correction nobody asked it to touch.
+            if not (warehouse.address or "").strip() and address:
+                warehouse.address = address
         warehouses[office_id] = warehouse
 
     # HCM's own GPS, where it has any, is the most exact position a stocking point

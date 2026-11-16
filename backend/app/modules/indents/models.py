@@ -24,6 +24,8 @@ from app.shared.enums import IndentItemStatus
 from app.shared.models.base import (
     BigIntPortable, created_at_col, pk, soft_fk, updated_at_col,
 )
+from app.shared.models.combination import CombinationMixin
+from app.shared.models.master import OrgScopeColumns
 
 
 class Consolidation(Base):
@@ -66,7 +68,7 @@ class Consolidation(Base):
 Index("ix_ind_cons_cycle_status", Consolidation.cycle, Consolidation.status)
 
 
-class Indent(Base):
+class Indent(OrgScopeColumns, Base):
     __tablename__ = "ind_indents"
     id = pk()
     indent_no = Column(String(50), unique=True, nullable=False)
@@ -109,6 +111,15 @@ class Indent(Base):
     # every cross-team reference gets, and the number survives a vehicle being retired.
     vehicle_id = Column(BigIntPortable, nullable=True)
     vehicle_number = Column(String(50), nullable=True)
+
+    # Where a Stock Transfer Request asks the stock to come FROM (2026-11-04). Chosen
+    # by the raiser among the points held at their own rank (OE -> OE, DM -> DM, ...),
+    # and moved by an approver only through `change_str_source`, which records the move
+    # in `ind_str_source_changes`. Soft FK + snapshot: the point's name survives a
+    # re-sync. NULL on every ordinary indent and on STRs raised before the field.
+    source_warehouse_id = soft_fk()
+    source_warehouse_name = Column(String(200), nullable=True)
+    source_warehouse_code = Column(String(50), nullable=True)
 
     bom_id = Column(BigIntPortable, nullable=True)            # not written yet
     bom_name = Column(String(200), nullable=True)
@@ -168,7 +179,32 @@ Index("ix_ind_bom", Indent.bom_id)
 Index("ix_ind_region_status", Indent.region_id, Indent.status)
 
 
-class IndentItem(Base):
+class StrSourceChange(Base):
+    """Every time an approver moved an STR's source point (2026-11-04). Append-only.
+
+    An approver whose scope does not hold the chosen source may pull the request onto
+    one of their own points and allocate it there; the raiser asked for X and is served
+    from Y, so who moved it, from where, to where, at which rung and why is recorded
+    here and shown on the STR beside its route.
+    """
+
+    __tablename__ = "ind_str_source_changes"
+    id = pk()
+    indent_id = Column(ForeignKey("ind_indents.id", ondelete="CASCADE"), index=True,
+                       nullable=False)
+    from_warehouse_id = Column(BigIntPortable, nullable=True)
+    from_warehouse_name = Column(String(200), nullable=True)
+    to_warehouse_id = Column(BigIntPortable, nullable=False)
+    to_warehouse_name = Column(String(200), nullable=True)
+    stage_name = Column(String(200), nullable=True)
+    reason = Column(String(500), nullable=True)
+    changed_by_id = soft_fk()
+    changed_by_name = Column(String(200), nullable=True)
+    position_name = Column(String(200), nullable=True)
+    created_at = created_at_col()
+
+
+class IndentItem(CombinationMixin, Base):
     __tablename__ = "ind_indent_items"
     id = pk()
     indent_id = Column(ForeignKey("ind_indents.id", ondelete="CASCADE"), index=True, nullable=False)
@@ -181,6 +217,12 @@ class IndentItem(Base):
     approved_quantity = Column("approved_qty", Numeric(16, 3), nullable=False, default=0)
     ordered_quantity = Column("ordered_qty", Numeric(16, 3), nullable=False, default=0)
     received_quantity = Column("received_qty", Numeric(16, 3), nullable=False, default=0)
+    # Goods that reached the requester and were NOT accepted: damaged, expired, near
+    # expiry, leaked, a broken package, other (2026-11-06). They are on the receiving
+    # shelf, and are raised as returns from it, but they are not "received": the line is
+    # still owed, so `received_quantity` and every "what is still owed" reader are
+    # untouched. Only the two "has it ARRIVED" checks in the warehouse add this in.
+    rejected_quantity = Column("rejected_qty", Numeric(16, 3), nullable=False, default=0)
     # Set by inventory allocation after approval: how much of this line came out of
     # stock. The remainder becomes an MR line. Flow doc §3 steps 3-5.
     allocated_quantity = Column("allocated_qty", Numeric(16, 3), nullable=False, default=0)

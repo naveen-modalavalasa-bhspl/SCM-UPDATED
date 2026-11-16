@@ -3,18 +3,29 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.shared.packing import PACK_ENTRIES, PackEntryIn, describe as describe_packs
 from app.shared.time import not_in_past
 from app.shared.limits import (  # request-size guards, see the module
     Annotated, BatchIds, DocumentLines, MAX_BATCH_IDS, MAX_DOCUMENT_LINES,
 )
+from app.shared.masters.combinations import CombinationIn, CombinationOut
 
 
-class POLineIn(BaseModel):
+class POLineIn(CombinationIn):
     item_id: int
     indent_item_id: int | None = None
     quantity: float = Field(gt=0)
     rate: float = Field(ge=0)
     tax_percent: float = Field(ge=0, default=0)
+    # How the quantity is packed (2026-10-08): one of the item's pack hierarchies and
+    # a breakdown in it. Optional; the server checks it adds up to `quantity`, and
+    # describes a line that names none in the item's default hierarchy.
+    pack_hierarchy_id: int | None = None
+    pack_breakdown: Annotated[list[PackEntryIn], PACK_ENTRIES] | None = None
+
+
+# Whose paper a document is on: shared with indents, STOs and material issues.
+from app.shared.org_scope_schemas import OrgScopeOut  # noqa: E402
 
 
 class POHeaderIn(BaseModel):
@@ -28,6 +39,12 @@ class POHeaderIn(BaseModel):
     spread across lines, because spreading them would rewrite rates a vendor quoted.
     """
     project_id: int | None = None
+    # The alternative to a project (2026-11-04): an order is booked to ONE of the two.
+    # `department_id` is HCM's, read only for an order raised before organisations.
+    department_id: int | None = None
+    organization_id: int | None = None
+    org_department_id: int | None = None
+    fiscal_year: str | None = None
     remarks: str | None = None
     payment_terms: str | None = None
     # The payment-term master (2026-10-06). Picking one copies its milestones onto the
@@ -50,6 +67,9 @@ class POCreate(POHeaderIn):
     vendor_id: int
     expected_date: date | None = None
     lines: Annotated[list[POLineIn], DocumentLines]
+    # "Copy as new PO": the order the form was pre-filled from. Recorded for the
+    # reader only; see PurchaseOrder.copied_from_po_id.
+    copied_from_po_id: int | None = None
 
     _no_past_expected_date = field_validator("expected_date")(
         lambda cls, v: not_in_past(v, "Expected date"))
@@ -66,7 +86,7 @@ class POHeaderUpdate(POHeaderIn):
     expected_date: date | None = None
 
 
-class POAmendLineIn(BaseModel):
+class POAmendLineIn(CombinationIn):
     """One line of an amended order.
 
     `id` is the EXISTING line being changed. Omit it and the line is new; leave an
@@ -78,6 +98,11 @@ class POAmendLineIn(BaseModel):
     quantity: float = Field(gt=0)
     rate: float = Field(ge=0)
     tax_percent: float = Field(ge=0, default=0)
+    # How the quantity is packed (2026-10-08): one of the item's pack hierarchies and
+    # a breakdown in it. Optional; the server checks it adds up to `quantity`, and
+    # describes a line that names none in the item's default hierarchy.
+    pack_hierarchy_id: int | None = None
+    pack_breakdown: Annotated[list[PackEntryIn], PACK_ENTRIES] | None = None
 
 
 class POAmendIn(POHeaderIn):
@@ -92,6 +117,19 @@ class POAmendIn(POHeaderIn):
     reason: str
     expected_date: date | None = None
     lines: Annotated[list[POAmendLineIn], DocumentLines] | None = None
+
+
+class POCorrectionIn(POHeaderIn):
+    """The raiser's full edit of a PO sent back to them — every field the create form
+    asks for. `lines` replaces the whole list (an existing `id` keeps that line and its
+    link to the indent/quotation; no `id` adds one; an id left out is removed).
+    `vendor_id` is ignored on an order written off a quotation: the vendor IS the quote."""
+    vendor_id: int | None = None
+    expected_date: date | None = None
+    lines: Annotated[list[POAmendLineIn], DocumentLines]
+
+    _no_past_expected_date = field_validator("expected_date")(
+        lambda cls, v: not_in_past(v, "Expected date"))
 
 
 class POVendorResponseIn(BaseModel):
@@ -205,10 +243,12 @@ class ApprovalTrailOut(BaseModel):
     history: list[ApprovalEventRow] = []
 
 
-class POItemOut(BaseModel):
+class POItemOut(CombinationOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     item_id: int
+    # Set when an indent stands behind the line — its quantity is then the indent's.
+    indent_item_id: int | None = None
     item_code: str | None = None
     item_name: str | None = None
     uom_code: str | None = None
@@ -219,6 +259,31 @@ class POItemOut(BaseModel):
     # Days the vendor quoted for this line; None on a PO with no quotation behind it.
     delivery_days: int | None = None
     received_quantity: float
+    # Which half of `tax_percent` is law, not a choice — see service.tax_region.
+    # Derived at read time off the order's own `tax_region`, never stored: only one
+    # pair is ever non-zero on a given order, decided by the company's and vendor's
+    # GSTIN state codes, not by the line.
+    cgst_percent: float = 0
+    sgst_percent: float = 0
+    igst_percent: float = 0
+    cgst_amount: float = 0
+    sgst_amount: float = 0
+    igst_amount: float = 0
+    # Packing, served with its sentence so no screen composes it (2026-10-08).
+    pack_hierarchy_id: int | None = None
+    pack_breakdown: list[dict] | None = None
+    pack_text: str | None = None
+    pack_hierarchy_name: str | None = None
+
+    @model_validator(mode="after")
+    def _describe_packing(self):
+        if self.pack_breakdown and not self.pack_text:
+            self.pack_text = describe_packs(self.pack_breakdown, self.uom_code)
+        if self.pack_breakdown and not self.pack_hierarchy_name:
+            self.pack_hierarchy_name = next(
+                (e.get("hierarchy") for e in self.pack_breakdown if e.get("hierarchy")),
+                None)
+        return self
 
 
 class PODocumentOut(BaseModel):
@@ -243,7 +308,7 @@ class POMilestoneOut(BaseModel):
     due_days: int = 0
 
 
-class POOut(BaseModel):
+class POOut(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     po_no: str
@@ -259,12 +324,24 @@ class POOut(BaseModel):
     rfq_no: str | None = None
     quotation_id: int | None = None
     quotation_no: str | None = None
+    copied_from_po_id: int | None = None
+    copied_from_po_no: str | None = None
     vendor_id: int
     vendor_name: str | None = None
+    # Stored snapshot (vendor_gstin) plus the two facts it decides, derived at read
+    # time — never stored, see service.tax_region. The company's own GSTIN can change
+    # (e.g. a correction on Settings > Company) without rewriting what an existing
+    # order already read it as at the time; re-reading this field always answers for
+    # the company's CURRENT GSTIN, same as the quotation this order may have come from.
+    vendor_gstin: str | None = None
+    tax_region: str | None = None
+    company_gstin: str | None = None
     facility_id: int | None = None
     facility_name: str | None = None
     project_id: int | None = None
     project_name: str | None = None
+    department_id: int | None = None
+    department_name: str | None = None
     status: str
     sub_total: float
     discount_amount: float = 0
@@ -292,12 +369,23 @@ class POOut(BaseModel):
     # because a screen can only see the document's status and its own permission
     # codes, and neither answers "is it with me". See service._attach_pending_one.
     awaiting_me: bool = False
+    # Set while the order is RETURNED_FOR_CORRECTION: who it went back to, who sent it
+    # and the (compulsory) reason. See service.get_po_detail.
+    correction: dict | None = None
+    can_resubmit_correction: bool = False
+    # Only the RAISER may edit a sent-back PO; an approver holding it may resubmit or
+    # pass it further down (while there is a rung below them).
+    can_edit_correction: bool = False
+    can_pass_correction_down: bool = False
     # What the vendor said, and which revision they said it about. Both null on an
     # order that has never been sent, which is how a reader tells "not asked yet" from
     # "asked and waiting".
     vendor_status: str | None = None
     vendor_responded_at: datetime | None = None
     vendor_response_note: str | None = None
+    # enums.DespatchStatus, DERIVED from the vendor's submitted despatch notes (null =
+    # nothing sent yet). See service._despatch_status_by_po.
+    despatch_status: str | None = None
     # Calculated at read time from the accepted/dispatch state.
     amendment_allowed: bool = False
     revision_no: int = 0
@@ -307,7 +395,7 @@ class POOut(BaseModel):
     items: list[POItemOut] = []
 
 
-class POListRow(BaseModel):
+class POListRow(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     po_no: str
@@ -317,6 +405,8 @@ class POListRow(BaseModel):
     # Two orders can both read SENT_TO_VENDOR while one is agreed and the other has
     # been sitting unanswered for a week. The register has to be able to say which.
     vendor_status: str | None = None
+    # enums.DespatchStatus, derived — see POOut.despatch_status.
+    despatch_status: str | None = None
     revision_no: int = 0
     total_amount: float
     # Who the approval engine is ACTUALLY waiting on right now, read live at request
@@ -333,11 +423,39 @@ class POListRow(BaseModel):
     created_at: datetime
 
 
+class POCopyLineOut(CombinationOut):
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    quantity: float
+    rate: float
+    tax_percent: float
+
+
+class POCopyOut(POHeaderIn):
+    """A New PO form pre-filled from an existing order — nothing is saved.
+
+    Cleaned against today's masters, so what the form opens with is something
+    `create_po` will accept: an inactive vendor, term or project is left blank, an
+    inactive item's line is dropped, and each is said in `warnings`. The indent and
+    quotation links are never carried — the copy is a hand-raised order.
+    """
+    source_po_id: int
+    source_po_no: str
+    source_po_date: date | None = None
+    vendor_id: int | None = None
+    vendor_name: str | None = None
+    expected_date: date | None = None
+    lines: list[POCopyLineOut] = []
+    warnings: list[str] = []
+
+
 # --------------------------------------------------------------------------- #
 #  Requisition
 # --------------------------------------------------------------------------- #
 
-class ReqLineIn(BaseModel):
+class ReqLineIn(CombinationIn):
     item_id: int
     quantity: float = Field(gt=0)
     uom_code: str | None = None
@@ -354,6 +472,9 @@ class ReqCreate(BaseModel):
     # which is only right until somebody raises on another department's behalf.
     department_id: int | None = None
     company_name: str | None = None
+    organization_id: int | None = None
+    org_department_id: int | None = None
+    fiscal_year: str | None = None
     # One date for the document. A line may still override it (`ReqLineIn`), but the
     # form no longer asks for the same date once per item.
     required_date: date | None = None
@@ -373,6 +494,9 @@ class ReqFromMRsIn(BaseModel):
     project_id: int | None = None
     department_id: int | None = None
     company_name: str | None = None
+    organization_id: int | None = None
+    org_department_id: int | None = None
+    fiscal_year: str | None = None
     required_date: date | None = None
     priority: str | None = None
     remarks: str | None = None
@@ -391,7 +515,7 @@ class MRCandidateRow(BaseModel):
     created_at: datetime
 
 
-class ReqItemOut(BaseModel):
+class ReqItemOut(CombinationOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     line_no: int
@@ -400,6 +524,8 @@ class ReqItemOut(BaseModel):
     item_name: str | None = None
     uom_code: str | None = None
     quantity: float
+    # The ceiling (2026-11-03): NULL on a hand-made draft its author may still change.
+    requested_quantity: float | None = None
     ordered_qty: float
     estimated_rate: float
     estimated_amount: float
@@ -408,7 +534,7 @@ class ReqItemOut(BaseModel):
     indent_no: str | None = None
 
 
-class ReqListRow(BaseModel):
+class ReqListRow(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     req_no: str
@@ -464,7 +590,7 @@ class ReqOut(ReqListRow):
 #  RFQ
 # --------------------------------------------------------------------------- #
 
-class RFQLineIn(BaseModel):
+class RFQLineIn(CombinationIn):
     item_id: int
     quantity: float = Field(gt=0)
     uom_code: str | None = None
@@ -488,11 +614,16 @@ class RFQCreate(BaseModel):
     # document's own values win and these are left empty.
     department_id: int | None = None
     company_name: str | None = None
+    organization_id: int | None = None
+    org_department_id: int | None = None
+    fiscal_year: str | None = None
     due_date: date | None = None
     terms: str | None = None
     # None means "use the default" — see shared/evaluation.method_of. Validated in the
     # service against the shared catalogue, never against a list kept here.
     evaluation_method: str | None = None
+    # Ask the suppliers to quote freight. Off, the portal shows no Freight field.
+    freight_required: bool = False
     vendor_ids: Annotated[list[int], BatchIds] = []
     vendor_allocations: list[RFQVendorAllocationIn] = Field(
         default_factory=list, max_length=MAX_DOCUMENT_LINES * 20)
@@ -529,13 +660,17 @@ class RFQUpdate(BaseModel):
     project_id: int | None = None
     department_id: int | None = None
     company_name: str | None = None
+    organization_id: int | None = None
+    org_department_id: int | None = None
+    fiscal_year: str | None = None
     evaluation_method: str | None = None
+    freight_required: bool | None = None
     vendor_ids: Annotated[list[int], BatchIds] | None = None
     vendor_allocations: list[RFQVendorAllocationIn] | None = None
     lines: Annotated[list[RFQLineIn], DocumentLines] | None = None
 
 
-class RFQItemOut(BaseModel):
+class RFQItemOut(CombinationOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     line_no: int
@@ -573,7 +708,7 @@ class RFQVendorOut(BaseModel):
     live_allocated_quantities: dict[str, float] | None = None
 
 
-class RFQListRow(BaseModel):
+class RFQListRow(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     rfq_no: str
@@ -619,6 +754,11 @@ class RFQPurchaseOrderRef(BaseModel):
 
 
 class RFQOut(RFQListRow):
+    # Set while RETURNED_FOR_CORRECTION — see service._attach_correction.
+    correction: dict | None = None
+    can_resubmit_correction: bool = False
+    can_edit_correction: bool = False
+    can_pass_correction_down: bool = False
     requisition_id: int | None = None
     requisition_no: str | None = None
     consolidation_id: int | None = None
@@ -629,6 +769,7 @@ class RFQOut(RFQListRow):
     project_name: str | None = None
     terms: str | None = None
     evaluation_method: str | None = None
+    freight_required: bool = False
     awarded_vendor_id: int | None = None
     created_by_name: str | None = None
     # The purchase order this award became. Not stored on pro_rfqs — the PO points
@@ -662,6 +803,10 @@ class RFQOut(RFQListRow):
 # --------------------------------------------------------------------------- #
 
 class ConsolidationCreate(BaseModel):
+    # Only asked for when the requisitions on the sheet predate organisations.
+    organization_id: int | None = None
+    org_department_id: int | None = None
+    fiscal_year: str | None = None
     requisition_ids: list[int] = Field(min_length=1, max_length=MAX_BATCH_IDS)
     title: str | None = None
     period_label: str | None = None
@@ -683,7 +828,7 @@ class ConsolidationLinesIn(BaseModel):
     lines: list[ConsolidationLineEdit] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
 
 
-class ConsolidationItemOut(BaseModel):
+class ConsolidationItemOut(CombinationOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     line_no: int
@@ -718,7 +863,7 @@ class ConsolidationSourceOut(BaseModel):
     estimated_value: float
 
 
-class ConsolidationListRow(BaseModel):
+class ConsolidationListRow(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     cons_no: str
@@ -769,7 +914,7 @@ class VendorInviteOut(BaseModel):
 #  Quotation
 # --------------------------------------------------------------------------- #
 
-class QuoteLineIn(BaseModel):
+class QuoteLineIn(CombinationIn):
     rfq_item_id: int
     # What the vendor can actually supply. Optional: say nothing and the quantity asked
     # for stands. It may never be MORE than was asked — a quotation is an answer to a
@@ -811,7 +956,7 @@ class QuoteSubmit(BaseModel):
     lines: list[QuoteLineIn] = Field(min_length=1)
 
 
-class QuoteItemOut(BaseModel):
+class QuoteItemOut(CombinationOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     line_no: int
@@ -838,10 +983,21 @@ class QuoteItemOut(BaseModel):
     # what was requested.
     requested_quantity: float | None = None
     required_date: date | None = None
+    # What the BUYER asked for on the RFQ (2026-10-26), and whether this offer is
+    # another brand / variant / model.
+    requested_brand_id: int = 0
+    requested_brand_name: str | None = None
+    requested_variant_id: int = 0
+    requested_variant_name: str | None = None
+    requested_model_id: int = 0
+    requested_model_name: str | None = None
+    requested_any: bool = False
+    brand_changed: bool = False
 
 
-class QuoteListRow(BaseModel):
+class QuoteListRow(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
+    project_name: str | None = None
     id: int
     quotation_no: str
     rfq_id: int
@@ -894,6 +1050,10 @@ class QuoteChangeLineIn(BaseModel):
     proposed_rate: float = Field(ge=0)
     proposed_discount_percent: float = Field(ge=0, le=100, default=0)
     note: str | None = None
+    #: Another brand / variant / model asked for (2026-10-26); unset = keep it.
+    brand_id: int | None = None
+    variant_id: int | None = None
+    model_id: int | None = None
 
 
 class QuoteChangeRequestIn(BaseModel):
@@ -934,10 +1094,20 @@ class QuoteChangeLineOut(BaseModel):
     proposed_rate: float
     proposed_discount_percent: float
     note: str | None = None
+    # The brand as quoted and as proposed (2026-10-26).
+    current_brand_id: int = 0
+    current_variant_id: int = 0
+    current_model_id: int = 0
+    current_combination: str | None = None
+    proposed_brand_id: int | None = None
+    proposed_variant_id: int | None = None
+    proposed_model_id: int | None = None
+    proposed_combination: str | None = None
 
 
-class QuoteChangeRequestOut(BaseModel):
+class QuoteChangeRequestOut(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
+    project_name: str | None = None
     id: int
     quotation_id: int
     rfq_id: int
@@ -972,6 +1142,9 @@ class QuoteCommentOut(BaseModel):
 class RFQAwardAllocationIn(BaseModel):
     """One supplier's share of one RFQ item, decided against submitted prices."""
     item_id: int
+    #: The RFQ LINE (2026-10-26) — one item asked in two brands is two lines, each
+    #: awarded on its own. Absent from older clients: then the item's only line.
+    rfq_item_id: int | None = None
     vendor_id: int
     quantity: float = Field(gt=0)
 
@@ -1049,7 +1222,7 @@ class VendorAccountIn(BaseModel):
 #  Despatch note — the vendor's statement of what they sent
 # --------------------------------------------------------------------------- #
 
-class DespatchLineIn(BaseModel):
+class DespatchLineIn(CombinationIn):
     """One line the vendor says is on the vehicle.
 
     `po_item_id` rather than a free item choice: a despatch note answers an order, and
@@ -1062,6 +1235,12 @@ class DespatchLineIn(BaseModel):
     mfg_date: date | None = None
     expiry_date: date | None = None
     remarks: str | None = None
+    # How it is packed. A breakdown REPLACES `despatched_qty` with its own total —
+    # the vendor states packs, the server counts units. A hierarchy other than the
+    # order's is allowed, goes to the buyer, and must carry `pack_change_reason`.
+    pack_hierarchy_id: int | None = None
+    pack_breakdown: Annotated[list[PackEntryIn], PACK_ENTRIES] | None = None
+    pack_change_reason: str | None = Field(default=None, max_length=500)
 
 
 class DespatchNoteIn(BaseModel):
@@ -1079,8 +1258,15 @@ class DespatchNoteIn(BaseModel):
     remarks: str | None = None
     lines: list[DespatchLineIn] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
 
+    @field_validator("invoice_amount")
+    @classmethod
+    def _validate_invoice_amount(cls, v: float | None) -> float | None:
+        if v is not None and v < 0:
+            raise ValueError("Invoice amount cannot be negative")
+        return v
 
-class DespatchItemOut(BaseModel):
+
+class DespatchItemOut(CombinationOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     line_no: int
@@ -1094,10 +1280,31 @@ class DespatchItemOut(BaseModel):
     mfg_date: date | None = None
     expiry_date: date | None = None
     remarks: str | None = None
+    # Packing, served with its sentence so no screen composes it (2026-10-08).
+    pack_hierarchy_id: int | None = None
+    pack_breakdown: list[dict] | None = None
+    pack_text: str | None = None
+    pack_hierarchy_name: str | None = None
+
+    @model_validator(mode="after")
+    def _describe_packing(self):
+        if self.pack_breakdown and not self.pack_text:
+            self.pack_text = describe_packs(self.pack_breakdown, self.uom_code)
+        if self.pack_breakdown and not self.pack_hierarchy_name:
+            self.pack_hierarchy_name = next(
+                (e.get("hierarchy") for e in self.pack_breakdown if e.get("hierarchy")),
+                None)
+        return self
+    pack_change_status: str | None = None
+    ordered_pack_hierarchy_name: str | None = None
+    pack_change_reason: str | None = None
+    pack_change_note: str | None = None
+    pack_change_by_name: str | None = None
 
 
-class DespatchNoteOut(BaseModel):
+class DespatchNoteOut(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
+    project_name: str | None = None
     id: int
     dn_no: str
     dn_date: date | None = None
@@ -1117,10 +1324,14 @@ class DespatchNoteOut(BaseModel):
     remarks: str | None = None
     submitted_at: datetime | None = None
     created_at: datetime
+    # SCM_0162: when the note last changed — the only time a CANCELLED note carries,
+    # and the "last saved" stamp on a draft. Served so the status line under each
+    # note can say WHEN, not just what.
+    updated_at: datetime | None = None
     items: list[DespatchItemOut] = []
 
 
-class VendorPOLineOut(BaseModel):
+class VendorPOLineOut(CombinationOut):
     """A PO line as the VENDOR sees it. `pending_qty` is what is still owed, so a
     second delivery opens with the remainder rather than the whole order."""
     model_config = ConfigDict(from_attributes=True)
@@ -1134,9 +1345,28 @@ class VendorPOLineOut(BaseModel):
     pending_qty: float
     rate: float | None = None
     amount: float | None = None
+    # Packing, served with its sentence so no screen composes it (2026-10-08).
+    pack_hierarchy_id: int | None = None
+    pack_breakdown: list[dict] | None = None
+    pack_text: str | None = None
+    pack_hierarchy_name: str | None = None
+
+    @model_validator(mode="after")
+    def _describe_packing(self):
+        if self.pack_breakdown and not self.pack_text:
+            self.pack_text = describe_packs(self.pack_breakdown, self.uom_code)
+        if self.pack_breakdown and not self.pack_hierarchy_name:
+            self.pack_hierarchy_name = next(
+                (e.get("hierarchy") for e in self.pack_breakdown if e.get("hierarchy")),
+                None)
+        return self
+    # The item's pack hierarchies, so the portal can offer the order's packing first
+    # and the others behind a "different packing" switch. Served here because the
+    # vendor's token cannot read the employee-side masters.
+    pack_options: list[dict] = []
 
 
-class VendorPOOut(BaseModel):
+class VendorPOOut(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     po_no: str
@@ -1150,6 +1380,8 @@ class VendorPOOut(BaseModel):
     vendor_status: str | None = None
     vendor_responded_at: datetime | None = None
     vendor_response_note: str | None = None
+    # enums.DespatchStatus, derived — see POOut.despatch_status.
+    despatch_status: str | None = None
     revision_no: int = 0
     amendment_reason: str | None = None
     # Derived, never stored: the order was issued to this vendor once and has since
@@ -1166,7 +1398,7 @@ class VendorPOOut(BaseModel):
     despatch_notes: list[DespatchNoteOut] = []
 
 
-class VendorPOListRow(BaseModel):
+class VendorPOListRow(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     po_no: str
@@ -1177,6 +1409,8 @@ class VendorPOListRow(BaseModel):
     status: str
     total_amount: float
     despatch_note_count: int = 0
+    # enums.DespatchStatus, derived — see POOut.despatch_status.
+    despatch_status: str | None = None
     under_revision: bool = False
 
 
@@ -1405,3 +1639,16 @@ class SupplierOut(BaseModel):
     must_change_password: bool | None = None
     last_login_at: datetime | None = None
     quotable: bool
+
+
+class PackChangeDecisionIn(BaseModel):
+    """The buyer's answer to a supplier's change of packing. A decline must say why;
+    the supplier reads it."""
+    note: str | None = Field(default=None, max_length=500)
+
+
+class POLinePackingIn(BaseModel):
+    """How one PO line is to be packed. The packs must add up to the line's ordered
+    quantity, which a re-pack never changes — see `procurement/packing.repack_po_line`."""
+    pack_hierarchy_id: int
+    pack_breakdown: Annotated[list[PackEntryIn], Field(min_length=1, max_length=12)]

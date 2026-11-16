@@ -7,6 +7,7 @@ import { PageHeader, Card, ResponsiveList, StatusPill, Button, type Column } fro
 import { FilterBar, FilterSelect } from "../components/FilterBar";
 import { getFulfilmentBatches, getFulfillmentQueue, listAllocations } from "../api";
 import { fmtDate } from "@/shared/datetime";
+import { INDENT_TYPE, INDENT_TYPE_OPTIONS } from "@/modules/indents/constants";
 
 /**
  * Everything that still owes something — and the place to do something about it.
@@ -33,6 +34,12 @@ interface QueueRow {
   status: string;
   total_items: number;
   created_at: string;
+  /** The newest indent's created_at in this row's cycle. Undefined on a single
+   *  indent, where `created_at` already names it exactly — set only on a cycle
+   *  row, where `created_at` is the OLDEST of several and reading it alone as
+   *  "raised" understated every later indent folded into the same row
+   *  (SCM_0082: a cycle spanning 21-22 Oct read as "raised 21 Oct"). */
+  raised_until?: string | null;
   /** Set on the one row that stands for a whole monthly cycle. A cycle of 900 indents
    *  is one decision, so it is one row here; clicking it opens the item-first split
    *  rather than 900 separate allocation screens. */
@@ -73,6 +80,14 @@ const hashCycle = (cycle: string) =>
 const ageInDays = (s?: string | null) =>
   s ? Math.floor((Date.now() - new Date(s).getTime()) / 86_400_000) : 0;
 
+/** "raised 21 Oct" for one date, "raised 21-22 Oct" for a cycle spanning several —
+ *  never the oldest date alone with nothing saying it is one of several (SCM_0082). */
+const raisedLabel = (row: QueueRow): string => {
+  const from = fmtDate(row.created_at);
+  const to = row.raised_until ? fmtDate(row.raised_until) : from;
+  return from === to ? `raised ${from}` : `raised ${from} – ${to}`;
+};
+
 /** `embedded` drops this page's own header and intro, because the Fulfilment Desk
  *  wraps it as a tab and a screen must not print two headings. Everything else — the
  *  filters, the cycle rows, where a click leads — is identical either way, so the desk
@@ -86,6 +101,10 @@ export function FulfillmentQueuePage({ embedded = false, indentType }: {
   const [priorityFilter, setPriorityFilter] = useState("");
   const [deptFilter, setDeptFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
+  // SCM_0054: a caller that already fixes indentType (e.g. Stock Transfer's "STR"
+  // only) has nothing to narrow — the type filter only makes sense on the general
+  // desk, where Regular and Monthly sit side by side.
+  const [typeFilter, setTypeFilter] = useState("");
   const [page, setPage] = useState(1);
   const [showDoneCycles, setShowDoneCycles] = useState(false);
   const nav = useNavigate();
@@ -149,6 +168,11 @@ export function FulfillmentQueuePage({ embedded = false, indentType }: {
       indent_no: b.consolidation_no
         ? `${b.month_label} — ${b.consolidation_no}`
         : `${b.month_label} — consolidated`,
+      // Every monthly indent is folded into this one cycle row (see the filter below
+      // this comes from) — so the row's own type is MONTHLY, same as the single rows
+      // it stands in for, for the Indent Type filter and column to agree with what
+      // they describe.
+      indent_type: INDENT_TYPE.MONTHLY,
       cycle: b.cycle,
       month_label: b.month_label,
       consolidation_no: b.consolidation_no,
@@ -161,6 +185,7 @@ export function FulfillmentQueuePage({ embedded = false, indentType }: {
       status: "AWAITING_ALLOCATION",
       total_items: b.item_count,
       created_at: b.oldest_raised_at ?? new Date().toISOString(),
+      raised_until: b.newest_raised_at ?? null,
     }));
     return [...cycleRows, ...singles];
   }, [queue.data, batches.data]);
@@ -176,6 +201,7 @@ export function FulfillmentQueuePage({ embedded = false, indentType }: {
     if (statusFilter) out = out.filter((r) => r.status === statusFilter);
     if (priorityFilter) out = out.filter((r) => r.priority === priorityFilter);
     if (deptFilter) out = out.filter((r) => r.department_name === deptFilter);
+    if (typeFilter) out = out.filter((r) => r.indent_type === typeFilter);
     const q = search.trim().toLowerCase();
     if (q) {
       out = out.filter((r) =>
@@ -185,16 +211,24 @@ export function FulfillmentQueuePage({ embedded = false, indentType }: {
       );
     }
     return out;
-  }, [all, statusFilter, priorityFilter, deptFilter, search]);
+  }, [all, statusFilter, priorityFilter, deptFilter, typeFilter, search]);
 
   const awaitingAllocation = rows.filter((r) => !pendingIndentIds.has(r.id)).length;
 
   const columns: Column<QueueRow>[] = [
     {
       key: "no",
-      header: indentType === "STR" ? "STR" : "Indent",
+      header: indentType === "STR" ? "STR" : "Indent / Cycle",
       render: (r) => (
         <div>
+          {/* SCM_0054: a cycle row's own number (CYC/…) is not the number any single
+              indent inside it was raised with — labelling it plainly stops a search
+              for "my indent's number" reading as a mismatch. */}
+          {r.cycle && (
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-muted">
+              Monthly cycle
+            </div>
+          )}
           <div className={r.cycle
             ? "text-xs font-semibold text-ink"
             : "font-mono text-xs font-semibold text-ink"}>
@@ -227,6 +261,18 @@ export function FulfillmentQueuePage({ embedded = false, indentType }: {
         </div>
       ),
     },
+    // SCM_0054: only on the general desk — a caller that already fixes indentType
+    // (Stock Transfer's "STR" queue) would show the same value on every row.
+    ...(indentType ? [] : [{
+      key: "type",
+      header: "Indent Type",
+      hideOnNarrow: true,
+      render: (r: QueueRow) => (
+        <span className="text-xs text-body">
+          {INDENT_TYPE_OPTIONS.find((o) => o.value === r.indent_type)?.label ?? r.indent_type ?? "—"}
+        </span>
+      ),
+    }]),
     {
       key: "priority",
       header: "Priority",
@@ -316,11 +362,12 @@ export function FulfillmentQueuePage({ embedded = false, indentType }: {
           setPriorityFilter("");
           setDeptFilter("");
           setStatusFilter("");
+          setTypeFilter("");
           setView("OWED");
           setPage(1);
         }}
         active={(search ? 1 : 0) + (priorityFilter ? 1 : 0) + (deptFilter ? 1 : 0)
-          + (statusFilter ? 1 : 0) + (showDoneCycles ? 1 : 0)
+          + (statusFilter ? 1 : 0) + (typeFilter ? 1 : 0) + (showDoneCycles ? 1 : 0)
           + (view === "OWED" ? 0 : 1)}
       >
         <FilterSelect
@@ -332,6 +379,17 @@ export function FulfillmentQueuePage({ embedded = false, indentType }: {
           ]}
           placeholder="Everything"
         />
+        {/* SCM_0051/SCM_0054: lets the desk tell a Monthly (Fixed) cycle row apart
+            from an Adapt/Regular indent. Only on the general desk — a caller that
+            already fixes indentType has nothing left to narrow. */}
+        {!indentType && (
+          <FilterSelect
+            value={typeFilter}
+            onChange={(v) => { setTypeFilter(v); setPage(1); }}
+            options={INDENT_TYPE_OPTIONS}
+            placeholder="All indent types"
+          />
+        )}
         <FilterSelect
           value={statusFilter}
           onChange={(v) => { setStatusFilter(v); setPage(1); }}
@@ -385,12 +443,18 @@ export function FulfillmentQueuePage({ embedded = false, indentType }: {
             renderCard={(r) => (
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="font-mono text-sm font-semibold text-ink">{r.indent_no}</span>
+                  <span className="font-mono text-sm font-semibold text-ink">
+                    {r.cycle && <span className="mr-1.5 font-sans text-[10px] font-semibold uppercase tracking-wide text-muted">Cycle</span>}
+                    {r.indent_no}
+                  </span>
                   <StatusPill status={r.status} />
                 </div>
                 <p className="text-sm text-body">{r.requested_by_name ?? "—"} · {r.department_name ?? "—"}</p>
                 <p className="text-xs text-muted">
-                  {r.total_items} lines · raised {fmtDate(r.created_at)} · waiting {ageInDays(r.created_at)}d
+                  {!indentType && r.indent_type && (
+                    <>{INDENT_TYPE_OPTIONS.find((o) => o.value === r.indent_type)?.label ?? r.indent_type} · </>
+                  )}
+                  {r.total_items} lines · {raisedLabel(r)} · waiting {ageInDays(r.created_at)}d
                 </p>
               </div>
             )}
