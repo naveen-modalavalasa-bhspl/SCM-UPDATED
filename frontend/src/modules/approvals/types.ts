@@ -300,6 +300,8 @@ export interface ApprovalIndent {
   created_at: string;
   items: ApprovalIndentLine[];
   excluded_items?: ApprovalIndentLine[];
+  /** A level below has signed: each line's ceiling is what it APPROVED (SCM_0143). */
+  has_previous_approval?: boolean;
 }
 
 export interface ApprovalQuantityInput {

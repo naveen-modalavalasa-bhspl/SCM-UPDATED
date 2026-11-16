@@ -10,6 +10,7 @@ import { isChainPoint, orderPoints } from "../warehouseTiers";
 import { ClaimsPanel } from "../components/ClaimsPanel";
 import { LoadingRows } from "../components/PageStates";
 import { alerts } from "@/modules/alerts";
+import { errorMessage, isAnnouncedGlobally } from "@/shared/api/errors";
 import type { AllocationDecision, AllocationProposalLine } from "../types";
 import { TONE_SUBMIT } from "@/shared/components/tones";
 import { TONE_MINT } from "@/shared/components/tones";
@@ -245,6 +246,13 @@ export function AllocationPage() {
       void alerts.success("material_request.raised", { number: mr.mr_no });
       void qc.invalidateQueries({ queryKey: ["material-requests"] });
       void qc.invalidateQueries({ queryKey: ["allocation-proposal", id] });
+    },
+    // SCM_0157: a refused request used to vanish — the button looked dead. Say why.
+    onError: (error) => {
+      if (isAnnouncedGlobally(error)) return;
+      void alerts.error("material_request.raise_failed", {
+        reason: errorMessage(error) || "The server did not accept this request.",
+      });
     },
   });
 
@@ -677,7 +685,10 @@ export function AllocationPage() {
                         disabled={raise.isPending}
                         onClick={() => raise.mutate({ line, quantity: short })}
                       >
-                        <ShoppingCart size={14} /> Raise MR for {short} {line.uom_code}
+                        <ShoppingCart size={14} />
+                        {raise.isPending && raise.variables?.line.indent_item_id === line.indent_item_id
+                          ? "Raising…"
+                          : `Raise MR for ${short} ${line.uom_code ?? ""}`.trim()}
                       </Button>
                     )}
                   </div>

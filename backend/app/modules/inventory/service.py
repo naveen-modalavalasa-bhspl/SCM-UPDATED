@@ -1993,7 +1993,13 @@ async def create_mr_manual(db: AsyncSession, data: dict, user) -> MaterialReques
             .join(MaterialRequestItem,
                   MaterialRequestItem.mr_id == MaterialRequest.id)
             .where(MaterialRequest.indent_id == indent_id,
-                   MaterialRequest.status != MRStatus.REJECTED.value)
+                   # SCM_0157: a request whose goods have ARRIVED (or that was
+                   # refused or withdrawn) no longer claims the item. An indent served
+                   # in rounds meets a second shortage of the same item after the
+                   # first delivery; refusing it left "Raise MR" unable to do anything.
+                   MaterialRequest.status.notin_((MRStatus.REJECTED.value,
+                                                  MRStatus.RECEIVED.value,
+                                                  MRStatus.CANCELLED.value)))
         )).all()
         already = {item_id: mr_no for mr_no, item_id in claimed}
         clash = [already[line["item_id"]] for line in lines

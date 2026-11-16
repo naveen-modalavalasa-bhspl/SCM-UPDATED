@@ -205,6 +205,9 @@ class ApprovalIndentOut(BaseModel):
     created_at: datetime
     items: list[ApprovalIndentLineOut]
     excluded_items: list[ApprovalIndentLineOut] = []
+    # True once a level below has signed: each line's ceiling is then what that
+    # level APPROVED, not what was first asked for (SCM_0143).
+    has_previous_approval: bool = False
 
     @field_serializer("created_at", when_used="json")
     def serialize_datetime(self, value: datetime):

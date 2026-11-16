@@ -313,23 +313,23 @@ const DEFINITIONS: AlertDef[] = [
     "putaway.completed", "success", "Put-away complete",
     "{item} is now stored in {bin}.",
   ),
+  // The stock IS in the bin — nothing was refused. Sticky because it is the only
+  // record the storekeeper sees of a shelf now past what it is rated for, and a
+  // message that vanishes after three seconds is a message nobody read.
+  //
+  // `{reason}` is the sentence the server wrote for the gate that failed: a putaway
+  // can breach the cube, the payload, the unit limit or the doorway, and naming the
+  // gate here would mean writing those four sentences a second time.
   alert(
-    // The stock IS in the bin — nothing was refused. Sticky because it is the only
-    // record the storekeeper sees of a shelf now past what it is rated for, and a
-    // message that vanishes after three seconds is a message nobody read.
-    //
-    // `{reason}` is the sentence the server wrote for the gate that failed: a putaway
-    // can breach the cube, the payload, the unit limit or the doorway, and naming the
-    // gate here would mean writing those four sentences a second time.
     "putaway.over_capacity", "warning", "Stored, but {bin} is past what it is rated for",
     "{item} is in {bin}. {reason} The placement is recorded on the task either " +
       "way, so restack it or raise the location's limits when you get a moment.",
     undefined,
     true,
   ),
+  // A different problem with a different fix: the load is not too much for the shelf,
+  // it does not physically enter it. Free space elsewhere in the bin does not help.
   alert(
-    // A different problem with a different fix: the load is not too much for the shelf,
-    // it does not physically enter it. Free space elsewhere in the bin does not help.
     "putaway.wont_fit", "warning", "Stored, but it does not fit {bin}",
     "{item} is recorded in {bin}. {reason} Move it to a location that takes this " +
       "pack, or break the load down — the placement stands until you do.",
@@ -382,6 +382,11 @@ const DEFINITIONS: AlertDef[] = [
   alert(
     "material_request.raised", "success", "Material request raised",
     "{number} is with its approver. Procurement can buy against it once it is signed.",
+  ),
+  // SCM_0157: "Raise MR" used to fail in silence — the refusal is the answer.
+  alert(
+    "material_request.raise_failed", "error", "Material request not raised",
+    "{reason} Nothing was sent to procurement.",
   ),
   alert(
     "material_request.approved", "success", "Request approved",

@@ -1995,7 +1995,9 @@ def _approval_out(
         required_date=indent.required_date,
         created_at=indent.created_at,
         items=items,
-        excluded_items=excluded_items,
+        excluded_items=excluded_items,        # SCM_0143: from the second level on, the ceiling is what the level below
+        # APPROVED, and the screen names it so ("Approved request").
+        has_previous_approval=bool(has_previous_approval),
     )
 
 

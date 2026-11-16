@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { RefreshCw, Clock, Check, AlertTriangle } from "lucide-react";
+import { RefreshCw, Clock, Check, AlertTriangle, CheckCircle2, Info, XCircle } from "lucide-react";
 import { Spinner, Switch } from "@heroui/react";
 import { PageHeader, Card, Button, Field, Input } from "@/shared/components";
 import { fmtDateTime, fmtRelative } from "@/shared/datetime";
 import { adminApi } from "../api";
 import type { SyncFollowUp, SyncResult } from "../types";
+import { syncOutcome } from "../syncOutcome";
+import type { SyncOutcome, SyncTone } from "../syncOutcome";
 
 const PRESETS = [
   { label: "Hourly", minutes: 60 },
@@ -91,11 +93,43 @@ function FollowUpRow({ f }: { f: SyncFollowUp }) {
   );
 }
 
+const TONE_STYLE: Record<SyncTone, { box: string; icon: typeof Check }> = {
+  success: { box: "border-ok/30 bg-ok-bg text-ok", icon: CheckCircle2 },
+  warning: { box: "border-warn/30 bg-warn-bg text-warn", icon: AlertTriangle },
+  error: { box: "border-bad/30 bg-bad-bg text-bad", icon: XCircle },
+  info: { box: "border-brand/20 bg-brand-050 text-brand", icon: Info },
+};
+
+/** One sentence, one colour: green worked, amber worked with a follow-up to check,
+ *  red failed (SCM_0197). `role="status"` so a screen reader hears the result too. */
+function OutcomeBanner({ outcome, onClose }: { outcome: SyncOutcome; onClose: () => void }) {
+  const { box, icon: Icon } = TONE_STYLE[outcome.tone];
+  return (
+    <div role={outcome.tone === "error" ? "alert" : "status"}
+         className={`mb-5 flex items-start gap-3 rounded-xl border px-4 py-3 ${box}`}>
+      <Icon className="mt-0.5 h-5 w-5 shrink-0" aria-hidden />
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-semibold">{outcome.title}</p>
+        {outcome.detail && <p className="mt-0.5 break-words text-xs text-body">{outcome.detail}</p>}
+      </div>
+      <button type="button" onClick={onClose} aria-label="Dismiss"
+              className="-m-1 rounded-lg p-1 text-xs font-medium opacity-70 hover:opacity-100">
+        ✕
+      </button>
+    </div>
+  );
+}
+
+const ENTITY_LABELS: Record<string, string> = Object.fromEntries(ENTITIES);
+
 export function AdminPage() {
   const qc = useQueryClient();
   const [enabled, setEnabled] = useState(false);
   const [interval, setIntervalMinutes] = useState(1440);
-  const [msg, setMsg] = useState<string | null>(null);
+  const [msg, setMsg] = useState<SyncOutcome | null>(null);
+  // When THIS screen's press started a run: its result is judged on the rows written
+  // from then on, and only once the run has finished.
+  const [pressedAt, setPressedAt] = useState<number | null>(null);
 
   const schedule = useQuery({ queryKey: ["hcm-schedule"], queryFn: adminApi.getSchedule });
 
@@ -111,6 +145,15 @@ export function AdminPage() {
   const followUp = status.data?.follow_up ?? [];
 
   useEffect(() => {
+    if (pressedAt === null || running) return;
+    const outcome = syncOutcome(status.data?.items ?? [], pressedAt, ENTITY_LABELS);
+    if (outcome) {
+      setMsg(outcome);
+      setPressedAt(null);
+    }
+  }, [pressedAt, running, status.data]);
+
+  useEffect(() => {
     if (schedule.data) {
       setEnabled(schedule.data.enabled);
       setIntervalMinutes(schedule.data.interval_minutes);
@@ -120,26 +163,32 @@ export function AdminPage() {
   const syncNow = useMutation({
     mutationFn: adminApi.syncNow,
     onSuccess: (r) => {
-      setMsg(r.started ? "Sync started — tracking progress below." : "A sync is already running.");
+      setMsg(r.started
+        ? { tone: "info", title: "Sync started", detail: "Tracking progress below — you can leave this page." }
+        : { tone: "info", title: "A sync is already running", detail: "Its result appears here when it finishes." });
       qc.invalidateQueries({ queryKey: ["hcm-sync-status"] });
     },
-    onError: (e: Error) => setMsg(e.message),
+    onError: (e: Error) => {
+      setPressedAt(null);
+      setMsg({ tone: "error", title: "Sync could not start", detail: e.message });
+    },
   });
 
   const saveSchedule = useMutation({
     mutationFn: () => adminApi.setSchedule({ enabled, interval_minutes: interval }),
     onSuccess: (s) => {
-      setMsg(s.enabled ? `Auto-sync on, every ${s.interval_minutes} min.` : "Auto-sync off.");
+      setMsg({ tone: "success", title: s.enabled
+        ? `Auto-sync on, every ${s.interval_minutes} min.` : "Auto-sync off." });
       qc.setQueryData(["hcm-schedule"], s);
     },
-    onError: (e: Error) => setMsg(e.message),
+    onError: (e: Error) => setMsg({ tone: "error", title: "Schedule not saved", detail: e.message }),
   });
 
   return (
     <>
       <PageHeader eyebrow="Admin" title="HCM data sync" />
 
-      {msg && <div className="mb-5 rounded-xl bg-brand-050 px-4 py-3 text-sm font-medium text-brand">{msg}</div>}
+      {msg && <OutcomeBanner outcome={msg} onClose={() => setMsg(null)} />}
 
       <div className="grid gap-5 lg:grid-cols-2">
         {/* Manual sync + live progress */}
@@ -156,7 +205,7 @@ export function AdminPage() {
             Pull employees, positions, departments and offices into the local mirror. Runs in the
             background — you can leave or refresh this page.
           </p>
-          <Button onClick={() => { setMsg(null); syncNow.mutate(); }} disabled={running || syncNow.isPending}>
+          <Button onClick={() => { setMsg(null); setPressedAt(Date.now()); syncNow.mutate(); }} disabled={running || syncNow.isPending}>
             <RefreshCw className={`h-4 w-4 ${running ? "animate-spin" : ""}`} />
             {running ? "Syncing…" : "Sync now"}
           </Button>

@@ -310,6 +310,13 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
     enabled: Number.isFinite(indentId) && indentId > 0,
   });
 
+  // SCM_0143: from the second level on, the ceiling is what the level below APPROVED.
+  const hasPreviousApproval = !!indent.data?.has_previous_approval;
+  const ceilingLabel = hasPreviousApproval ? "Approved request" : "Current request";
+  const ceilingHint = hasPreviousApproval
+    ? "What the level below approved — the most you can approve here"
+    : "What was asked for — the most you can approve here";
+
   // Active items to review: lines already cut to zero or excluded by an earlier
   // approver are dropped and not forwarded to this level for approval.
   const reviewItems = useMemo(() => {
@@ -638,7 +645,7 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
                 <tr className="text-[11px] uppercase tracking-wider text-muted">
                   <th className="px-4 py-3 text-left font-semibold">Item</th>
                   <th className="px-4 py-3 text-right font-semibold">Requested</th>
-                  <th className="px-4 py-3 text-right font-semibold">Current request</th>
+                  <th className="px-4 py-3 text-right font-semibold" title={ceilingHint}>{ceilingLabel}</th>
                   <th className="px-4 py-3 text-right font-semibold">Approved at this level</th>
                   <th className="px-4 py-3 text-right font-semibold">Difference</th>
                 </tr>
@@ -757,7 +764,7 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
                       </span>
                     </div>
                     <div className="rounded-xl bg-content2 px-3 py-2">
-                      <span className="block text-[10px] font-semibold uppercase tracking-wider text-muted">Current request</span>
+                      <span className="block text-[10px] font-semibold uppercase tracking-wider text-muted" title={ceilingHint}>{ceilingLabel}</span>
                       <span className={`block text-sm font-semibold tabular-nums ${reduced ? "text-warn" : "text-ink"}`}>
                         {formatQuantity(ceiling)} {unit}
                       </span>

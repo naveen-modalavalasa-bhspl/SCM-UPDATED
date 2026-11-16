@@ -282,7 +282,8 @@ function ExclusionList({ lines }: { lines: ApprovalDecisionExclusion[] }) {
  *  a glyph. An empty one is a dash: "No note left" on two rows in three is a
  *  sentence the eye has to read before it can skip it. */
 function NoteCell({ row }: { row: ApprovalDecisionRow }) {
-  if (!row.comments) return <span className="text-muted">—</span>;
+  // SCM_0134: an empty note says so in words — a dash reads as missing data.
+  if (!row.comments?.trim()) return <span className="text-xs italic text-muted">No note</span>;
   return (
     <p
       className="line-clamp-2 border-l-2 border-line pl-2.5 text-sm italic text-body"
