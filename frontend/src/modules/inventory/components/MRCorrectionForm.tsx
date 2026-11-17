@@ -33,7 +33,8 @@ export function MRCorrectionForm({ mr, onSaved }: { mr: MaterialRequest; onSaved
   const [requiredBy, setRequiredBy] = useState(mr.required_by ?? "");
   const [remarks, setRemarks] = useState(mr.remarks ?? "");
 
-  const askedFor = (row: MaterialRequestItem) => row.requested_quantity ?? row.quantity;
+  const askedFor = (row: MaterialRequestItem) =>
+    Number(row.requested_quantity) > 0 ? Number(row.requested_quantity) : Number(row.quantity);
   const patch = (i: number, change: Partial<Line>) =>
     setLines(lines.map((l, j) => (j === i ? { ...l, ...change } : l)));
   const problemOf = (l: Line): string | null => {

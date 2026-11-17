@@ -173,6 +173,8 @@ interface Props<T extends { id: number }> {
   onDeactivate?: (id: number) => Promise<unknown>;
   searchable?: boolean;
   readOnly?: boolean;
+  /** What an empty list says, when "No x yet." would mislead (SCM_0194). */
+  emptyText?: string;
   /** The master's own api object. Supplying it turns on Template/Export/Import;
    *  omit it for the two HCM mirrors, which are read-only upstream. */
   bulk?: BulkApi;
@@ -592,7 +594,7 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
           columns={columnsWithSno}
           renderCard={p.renderCard}
           onRowClick={canEdit ? openEdit : undefined}
-          empty={`No ${p.title.toLowerCase()} yet.`}
+          empty={p.emptyText ?? `No ${p.title.toLowerCase()} yet.`}
         />
       )}
 

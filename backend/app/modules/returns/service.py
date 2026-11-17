@@ -258,6 +258,18 @@ PHASE_DECISION = "DECISION"
 PHASE_ENDORSE = "ENDORSE"
 PHASE_LOGISTICS = "LOGISTICS"
 
+# SCM_0199: where a return IS, in words, while somebody still has to act on it. The
+# status alone said "Pending approval" for all four steps, and the decision desk is
+# usually the Inventory Manager — so a return the Inventory Manager and the SCM Head
+# had both approved read "Pending approval · with … (Inventory Manager)" and looked
+# stuck at the first rung, when it had moved on to the desk deciding where it goes.
+PHASE_LABELS = {
+    PHASE_FIELD: "Awaiting approval",
+    PHASE_DECISION: "Approved — awaiting decision on where it goes",
+    PHASE_ENDORSE: "Decision made — awaiting sign-off",
+    PHASE_LOGISTICS: "Awaiting logistics approval",
+}
+
 # Payload keys the decision writes. Named once so `_decision_of` and `decide` cannot
 # disagree about the spelling.
 DECISION_KEY = "disposition"
@@ -1155,6 +1167,8 @@ async def _out(db: AsyncSession, doc: StockTransferOrder, user=None,
         "project_name": doc.project_name,
         "status": doc.status,
         "phase": phase,
+        # Only while a step is owed: past that the status says it all (SCM_0199).
+        "stage_label": PHASE_LABELS.get(phase) if awaiting_signature else None,
         "kind": _kind(doc),
         "kind_label": KIND_LABELS.get(_kind(doc), _kind(doc)),
         "intent": _intent(doc),

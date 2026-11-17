@@ -387,7 +387,8 @@ ALL_PERMISSIONS: list[Perm] = [
     # file a button under, so it has to name where the screen is, not which module
     # first served the endpoint.
     Perm(GRN_VIEW, "warehouse", "grn", "view", "View GRNs"),
-    Perm(GRN_CREATE, "warehouse", "grn", "create", "Create GRNs"),
+    # SCM_0168: "Create GRNs" retired — it is the same act as "Create goods receipts"
+    # (receipt.create) and Job Profiles listed both. See RETIRED_PERMISSIONS.
     Perm(GRN_QC, "warehouse", "grn", "qc", "QC pass/fail a GRN"),
     # module is "inventory": stk_* moved there when Inventory became the base module.
     Perm(STOCK_VIEW, "inventory", "stock", "view", "View stock"),
@@ -1063,4 +1064,12 @@ RETIRED_PERMISSIONS: dict[str, str] = {
     # retired code -> the Warehouse code that now covers what it did
     "stock.transfer.issue": ISSUE_CREATE,
     "stock.transfer.issue_post": ISSUE_ISSUE,
+    # SCM_0168 (2026-11-16): one act, two boxes on Job Profiles.
+    GRN_CREATE: RECEIPT_CREATE,
 }
+
+# Retired codes whose holders are GIVEN the covering code before the old one goes.
+# Not the default: the two transfer codes were retired precisely so their holders did
+# NOT keep the Warehouse buttons. "Create GRNs" is the same act as "Create goods
+# receipts", so whoever could do it keeps doing it.
+CARRY_GRANTS_ON_RETIRE: set[str] = {GRN_CREATE}

@@ -54,6 +54,10 @@ export interface ResolvedLine {
   rounded: boolean;
   /** What will be sent for this line: 0 when excluded. */
   value: number;
+  /** SCM_0153: part of the line excluded by this approver; `cut` is how much. */
+  partial: boolean;
+  cut: number;
+  reason?: string;
 }
 
 export function resolveLine(
@@ -75,7 +79,12 @@ export function resolveLine(
     : parsed === null || invalid
       ? stepDown(cap, places)
       : stepDown(Math.min(parsed, cap), places);
-  return { allocation, cap, excluded, excludedBelow, typed, invalid, over, rounded, value };
+  const partial = !excluded && draft?.partial === true && value < cap;
+  const cut = partial ? round3(cap - value) : 0;
+  return {
+    allocation, cap, excluded, excludedBelow, typed, invalid, over, rounded, value,
+    partial, cut, reason: draft?.reason,
+  };
 }
 
 /** One item, every indent's line resolved, with the totals the screens print. */
@@ -84,6 +93,15 @@ export function resolveItem(item: ConsolidatedItem, decisions: CycleDecisions) {
   const lines = (item.allocations ?? []).map((a) => resolveLine(a, decisions, places));
   const included = lines.filter((line) => !line.excluded);
   const droppedCount = lines.length - included.length;
+  // SCM_0150: who took them out. A rung below's exclusion is a fact this approver
+  // inherits; their own is a draft they can still undo — the column says which.
+  const excludedBelowCount = lines.filter((line) => line.excludedBelow).length;
+  const partCount = lines.filter((line) => line.partial).length;
+  // Whole or part, by this approver.
+  const excludedByYouCount = droppedCount - excludedBelowCount + partCount;
+  const excludedQuantity = round3(lines
+    .filter((line) => !line.excludedBelow)
+    .reduce((sum, line) => sum + (line.excluded ? line.cap : line.cut), 0));
   // Excluding an indent takes its ceiling out with it: offering the item's full total
   // afterwards proposed quantities nobody was entitled to receive.
   const ceiling = droppedCount === 0 && Number.isFinite(item.total_ceiling_quantity)
@@ -94,6 +112,9 @@ export function resolveItem(item: ConsolidatedItem, decisions: CycleDecisions) {
     lines,
     included,
     droppedCount,
+    excludedBelowCount,
+    excludedByYouCount,
+    excludedQuantity,
     ceiling,
     total,
     invalid: included.some((line) => line.invalid),

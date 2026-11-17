@@ -29,7 +29,7 @@ describe("logistics api", () => {
   it("reads consignments but never writes them", () => {
     // The consignment is the warehouse's document. This module plans transport for
     // it; it must not be able to create, edit or delete one.
-    expect(Object.keys(consignmentApi).sort()).toEqual(["get", "list"]);
+    expect(Object.keys(consignmentApi).sort()).toEqual(["get", "list", "transferContext"]);
   });
 
   it("gives the carrier what they can do to a job, and nothing more", () => {

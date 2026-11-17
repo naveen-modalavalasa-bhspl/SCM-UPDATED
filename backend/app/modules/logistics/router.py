@@ -43,7 +43,7 @@ async def list_grn(params: PageParams = Depends(), status: str | None = None,
 
 @grn_router.post("/from-po/{po_id}", response_model=GRNOut)
 async def create_from_po(po_id: int, data: GRNCreate, db: AsyncSession = Depends(get_db),
-                         user=Depends(require_permission(perms.GRN_CREATE))):
+                         user=Depends(require_permission(perms.RECEIPT_CREATE))):
     return await service.create_grn_from_po(db, po_id, data, user)
 
 

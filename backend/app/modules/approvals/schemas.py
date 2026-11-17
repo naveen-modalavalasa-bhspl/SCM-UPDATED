@@ -25,6 +25,11 @@ class ApprovalQuantityIn(BaseModel):
     # and only this tells them apart — see `IndentItem.is_excluded`. Defaulted, so a
     # caller that predates the flag keeps behaving exactly as it did.
     excluded: bool = False
+    # SCM_0153: PART of the line excluded ("take 20 of these 50 out"). The quantity
+    # approved is what is left; this says the cut is an exclusion, and why. The server
+    # works the excluded amount out from the ceiling, never trusts this number for it.
+    excluded_qty: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    exclusion_reason: str | None = Field(default=None, max_length=255)
 
 
 class IndentApprovalActionIn(BaseModel):
@@ -186,6 +191,9 @@ class ApprovalIndentLineOut(BaseModel):
     # instead of a quantity and offers no second Exclude button for it.
     is_excluded: bool = False
     excluded_by_name: str | None = None
+    # SCM_0153: excluded so far across the rungs below (whole or part), and why.
+    excluded_quantity: float = 0
+    exclusion_reason: str | None = None
 
 
 class ApprovalIndentOut(BaseModel):
@@ -205,6 +213,9 @@ class ApprovalIndentOut(BaseModel):
     created_at: datetime
     items: list[ApprovalIndentLineOut]
     excluded_items: list[ApprovalIndentLineOut] = []
+    # True once a level below has signed: each line's ceiling is then what that
+    # level APPROVED, not what was first asked for (SCM_0143).
+    has_previous_approval: bool = False
 
     @field_serializer("created_at", when_used="json")
     def serialize_datetime(self, value: datetime):
@@ -230,6 +241,9 @@ class ConsolidatedItemAllocationOut(BaseModel):
     # (BUG_SCM_0008), and the zero it carried read as an ordinary nil (BUG_SCM_0007).
     is_excluded: bool = False
     excluded_by_name: str | None = None
+    # SCM_0153: excluded so far across the rungs below (whole or part), and why.
+    excluded_quantity: float = 0
+    exclusion_reason: str | None = None
 
 
 class ConsolidatedItemOut(BaseModel):

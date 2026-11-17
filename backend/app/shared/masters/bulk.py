@@ -177,12 +177,18 @@ async def lookup_choices(defn, db: AsyncSession) -> dict[str, list[dict]]:
         else:
             stmt = stmt.order_by(order).limit(lk.max_options + 1)
             rows = (await db.execute(stmt)).scalars().all()
+        # A nested master is offered by its PATH (SCM_0026): "Gloves" twice in a
+        # dropdown is a coin toss; "Medical > Consumables > Gloves" is not.
+        paths = (_paths((await db.execute(select(lk.model))).scalars().all())
+                 if _is_tree(lk.model) else {})
         out[lk.field] = [
             {"id": row.id,
-             "label": _display(row, lk),
+             "label": paths.get(row.id) or _display(row, lk),
              "code": (getattr(row, "code", None) or "").strip()}
             for row in rows if _display(row, lk)
         ]
+        if paths:
+            out[lk.field].sort(key=lambda option: option["label"].casefold())
     return out
 
 
@@ -197,6 +203,37 @@ def _display(row: Any, lk: Any) -> str:
         if text:
             return text
     return ""
+
+
+PATH_SEPARATOR = " > "
+
+
+def _is_tree(model: type) -> bool:
+    """A master whose rows nest (an item category's Level 1 > Level 2 > Level 3)."""
+    return hasattr(model, "parent_id") and hasattr(model, "name")
+
+
+def _path_text(raw: str) -> str:
+    """"Medical/ Consumables › Gloves" and "Medical > Consumables > Gloves" are one path."""
+    import re
+    parts = [part.strip() for part in re.split(r"\s*(?:>|›|»|/|\\)\s*", raw) if part.strip()]
+    return PATH_SEPARATOR.join(parts)
+
+
+def _paths(rows: list) -> dict[int, str]:
+    """Every row's full path from its top level, by id (SCM_0026). A Level 3 name may
+    repeat under two Level 2 parents; its path never does, so the sheet names
+    categories by path and an import can always tell them apart."""
+    by_id = {row.id: row for row in rows}
+    out: dict[int, str] = {}
+    for row in rows:
+        names, seen, node = [], set(), row
+        while node is not None and node.id not in seen:
+            seen.add(node.id)
+            names.append(str(getattr(node, "name", "") or "").strip())
+            node = by_id.get(getattr(node, "parent_id", None))
+        out[row.id] = PATH_SEPARATOR.join(reversed([n for n in names if n]))
+    return out
 
 
 def _one_of_a_name(rows: list) -> Any:
@@ -249,6 +286,10 @@ async def resolve_lookups(defn, db: AsyncSession,
                 key = _norm(getattr(row, column, None))
                 if key:
                     table.setdefault(f"{column}:{key}", []).append(row)
+        if _is_tree(lk.model):
+            for row_id, path in _paths(rows).items():
+                table.setdefault(f"path:{_norm(path)}", []).extend(
+                    row for row in rows if row.id == row_id)
         index[field] = table
         ids[field] = {row.id for row in rows if _eligible(row, lk)}
 
@@ -273,7 +314,13 @@ async def resolve_lookups(defn, db: AsyncSession,
                 alt = normalize(text)
                 if alt and alt != text:
                     keys.append(alt)       # e.g. an HSN code that lost its leading zero
-            for key in keys:
+            # A path ("Medical > Consumables > Gloves") names exactly one row of a
+            # nested master; a bare name may name several (SCM_0026).
+            # A name that itself holds a "/" simply finds no path and falls back to
+            # the name match below.
+            if _is_tree(lk.model) and any(sep in text for sep in (">", "›", "»", "/", "\\")):
+                hits = index[field].get(f"path:{_norm(_path_text(text))}", [])
+            for key in ([] if hits else keys):
                 for column in lk.match:
                     hits = index[field].get(f"{column}:{_norm(key)}", [])
                     if hits:
@@ -316,7 +363,9 @@ async def resolve_lookups(defn, db: AsyncSession,
                     "raw": text,
                     "message": (
                         f"“{text}” matches {len(hits)} different "
-                        f"{lk.label.lower()} entries. Pick the right one from the list."
+                        f"{lk.label.lower()} entries. Pick the right one from the list"
+                        + (" — or write the full path (Level 1 > Level 2 > Level 3)."
+                           if _is_tree(lk.model) else ".")
                         if hits else
                         f"There is no {lk.label.lower()} called “{text}”. Pick one "
                         f"from the list, or add it on the {lk.label} master first."),
@@ -657,7 +706,8 @@ async def lookup_labels(defn, db: AsyncSession) -> dict[str, dict[int, str]]:
     out: dict[str, dict[int, str]] = {}
     for lk in getattr(defn, "lookups", ()):
         rows = (await db.execute(select(lk.model))).scalars().all()
-        out[lk.field] = {row.id: _display(row, lk) for row in rows
+        paths = _paths(rows) if _is_tree(lk.model) else {}
+        out[lk.field] = {row.id: paths.get(row.id) or _display(row, lk) for row in rows
                          if _display(row, lk)}
     return out
 

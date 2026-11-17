@@ -9776,6 +9776,134 @@ async def _decorate_issue_serials(
 _CODED_PROBE_ROWS = 400
 
 
+def _qty_text(value: Decimal, uom: str | None) -> str:
+    plain = f"{_d(value).normalize():f}"
+    return f"{plain} {uom}".strip() if uom else plain
+
+
+async def issue_source_gaps(
+    db: AsyncSession, *, warehouse_id: int, item_ids: list[int],
+    indent_id: int | None = None, user=None,
+) -> list[dict]:
+    """WHY `issue_stock_sources` offers nothing for an item here (SCM_0188).
+
+    "This point holds none of this item" was the screen's only answer, and it was
+    wrong as often as it was right: an indent allocated and approved, its line on the
+    issue, and the picker empty because the stock was expired, held by other
+    documents, on a floor this login does not run — or reserved for THIS indent at a
+    different point than the one issuing it. Each of those has a different fix, so
+    each is said, in one sentence served from here (never composed in the screen).
+
+    Read off `stk_balance` and `stk_reservation` alone: bounded per item, no unit rows.
+    """
+    from app.modules.inventory.models import Reservation, Stock
+    from app.shared.models.master import Item
+
+    ids = [int(value) for value in dict.fromkeys(item_ids) if value]
+    if not warehouse_id or not ids:
+        return []
+    today = ist_today()
+    expiry = func.coalesce(m.Batch.expiry_date, Stock.expiry_date)
+    rows = (await db.execute(
+        select(Stock.item_id,
+               func.sum(Stock.total_qty),
+               func.sum(case((and_(expiry.is_not(None), expiry < today), Stock.total_qty),
+                             else_=0)),
+               func.sum(Stock.reserved_qty),
+               func.min(case((and_(expiry.is_not(None), expiry < today), expiry), else_=None)))
+        .outerjoin(m.Batch, m.Batch.id == Stock.batch_id)
+        .where(Stock.warehouse_id == warehouse_id, Stock.item_id.in_(ids))
+        .group_by(Stock.item_id)
+    )).all()
+    here = {int(r[0]): (_d(r[1]), _d(r[2]), _d(r[3]), r[4]) for r in rows}
+
+    mine_here: dict[int, Decimal] = defaultdict(Decimal)
+    elsewhere: dict[int, list[tuple[int, Decimal]]] = defaultdict(list)
+    if indent_id:
+        for item_id, wh_id, qty in (await db.execute(
+            select(Reservation.item_id, Reservation.warehouse_id, func.sum(Reservation.quantity))
+            .where(Reservation.ref_type == InventoryRefType.RESERVATION.value,
+                   Reservation.ref_id == indent_id,
+                   Reservation.status == ReservationStatus.ACTIVE.value,
+                   Reservation.item_id.in_(ids))
+            .group_by(Reservation.item_id, Reservation.warehouse_id)
+        )).all():
+            if int(wh_id or 0) == int(warehouse_id):
+                mine_here[int(item_id)] += _d(qty)
+            else:
+                elsewhere[int(item_id)].append((int(wh_id or 0), _d(qty)))
+
+    off_floor: dict[int, Decimal] = {}
+    if user is not None:
+        allowed = await floor_scope_ids(db, user)
+        if allowed is not None:
+            for item_id, qty in (await db.execute(
+                select(Stock.item_id, func.sum(Stock.total_qty))
+                .where(Stock.warehouse_id == warehouse_id, Stock.item_id.in_(ids),
+                       Stock.total_qty > ZERO,
+                       ~Stock.bin_id.in_(allowed or {-1}))
+                .group_by(Stock.item_id)
+            )).all():
+                off_floor[int(item_id)] = _d(qty)
+
+    names = {wid: name for wid, name in (await db.execute(
+        select(Warehouse.id, Warehouse.name).where(
+            Warehouse.id.in_({w for rows_ in elsewhere.values() for w, _q in rows_} | {warehouse_id}))
+    )).all()}
+    items = {row.id: row for row in (await db.execute(
+        select(Item.id, Item.code, Item.name, Item.uom_code).where(Item.id.in_(ids)))).all()}
+    point = names.get(warehouse_id) or "this point"
+
+    out = []
+    for item_id in ids:
+        item = items.get(item_id)
+        uom = getattr(item, "uom_code", None)
+        label = getattr(item, "code", None) or f"item {item_id}"
+        total, expired, reserved, first_expired = here.get(
+            item_id, (Decimal("0"), Decimal("0"), Decimal("0"), None))
+        others = max(reserved - mine_here.get(item_id, Decimal("0")), Decimal("0"))
+        away = sum((q for _w, q in elsewhere.get(item_id, [])), Decimal("0"))
+        floor_qty = off_floor.get(item_id, Decimal("0"))
+        reason, headline, detail = "NONE_HERE", f"{point} holds none of {label}.", (
+            "Not in another batch, not in another bay — nothing has been received here.")
+        if away > 0 and mine_here.get(item_id, Decimal("0")) <= 0:
+            where = ", ".join(f"{_qty_text(q, uom)} at {names.get(w) or f'point {w}'}"
+                              for w, q in elsewhere[item_id])
+            reason = "RESERVED_ELSEWHERE"
+            headline = f"This indent's stock of {label} is reserved at another point."
+            detail = (f"{where}. Issue it from there, or transfer it to {point} first — "
+                      f"{point} itself holds {_qty_text(total, uom)}.")
+        elif total > 0 and expired >= total:
+            reason = "EXPIRED"
+            headline = f"All {_qty_text(total, uom)} of {label} here has expired."
+            detail = (f"The earliest lot expired on {first_expired:%d %b %Y}. Expired stock "
+                      "is never offered for issue — write it off with a stock audit.")
+        elif total > 0 and floor_qty >= total:
+            reason = "OUTSIDE_YOUR_FLOORS"
+            headline = f"{label} is here, but not on a floor you run."
+            detail = (f"{_qty_text(floor_qty, uom)} sits on floors outside your post. "
+                      "The in-charge of that floor can issue it, or an admin can add the floor to your post.")
+        elif total > 0 and others > 0:
+            reason = "RESERVED_BY_OTHERS"
+            headline = f"Every unit of {label} here is reserved for other documents."
+            detail = (f"{_qty_text(total, uom)} on hand, {_qty_text(others, uom)} held by other "
+                      "indents or issues. It frees up when those are issued or released.")
+        elif total > 0:
+            reason = "NOT_OFFERABLE"
+            headline = f"{label} is here but none of it can be issued right now."
+            detail = (f"{_qty_text(total, uom)} on hand"
+                      + (f", {_qty_text(expired, uom)} of it expired" if expired > 0 else "")
+                      + ". Check the stock balance for its lots.")
+        out.append({
+            "item_id": item_id, "reason": reason, "headline": headline, "detail": detail,
+            "on_hand_qty": float(total), "expired_qty": float(expired),
+            "reserved_by_others_qty": float(others),
+            "outside_your_floors_qty": float(floor_qty),
+            "reserved_for_indent_elsewhere_qty": float(away),
+        })
+    return out
+
+
 async def issue_stock_sources(
     db: AsyncSession,
     *,

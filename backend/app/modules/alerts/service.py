@@ -273,6 +273,14 @@ _DEFINITIONS: list[AlertDef] = [
         confirm="Issue",
     ),
     _confirm(
+        "allocation.give_nothing", AlertVariant.WARNING,
+        "Approve without giving anything?",
+        "{free} is free on the shelf and you are giving 0 of the {requested} asked "
+        "for. The request stays open and nothing is reserved — nobody is buying this, "
+        "so it will come back to you unchanged.",
+        confirm="Approve anyway",
+    ),
+    _confirm(
         "allocation.override", AlertVariant.WARNING, "Override allocation?",
         "You are allocating more than the system suggested for {item}. The override "
         "and your reason are logged against the request.",
@@ -465,6 +473,16 @@ _DEFINITIONS: list[AlertDef] = [
         "It goes back to the store to be allocated again. Nothing was reserved.",
     ),
     _alert(
+        "material_request.raised", AlertVariant.SUCCESS, "Material request raised",
+        "{number} is with its approver. Procurement can buy against it once it is "
+        "signed.",
+    ),
+    # SCM_0157: "Raise MR" used to fail in silence — the refusal is the answer.
+    _alert(
+        "material_request.raise_failed", AlertVariant.ERROR, "Material request not raised",
+        "{reason} Nothing was sent to procurement.",
+    ),
+    _alert(
         "material_request.approved", AlertVariant.SUCCESS, "Request approved",
         "{number} is cleared for purchase. Raise a requisition from it to start "
         "buying.",
@@ -561,6 +579,11 @@ _DEFINITIONS: list[AlertDef] = [
     _alert(
         "issue.acknowledged", AlertVariant.SUCCESS, "Receipt acknowledged",
         "{number} has been confirmed.",
+    ),
+    _alert(
+        "issue.acknowledged_rejected", AlertVariant.SUCCESS, "Receipt acknowledged",
+        "{number} has been confirmed. Return {returns} was raised for the goods you "
+        "sent back. Open it in Returns and say why.",
     ),
     _alert(
         "reminder.sent", AlertVariant.SUCCESS, "Reminder sent",

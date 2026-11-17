@@ -62,7 +62,7 @@ CREATE_PERMISSION = {
     DocType.CONSOLIDATION.value: "consolidation.create",
     DocType.RFQ.value: "rfq.create",
     DocType.PO.value: "po.create",
-    DocType.GRN.value: "grn.create",
+    DocType.GRN.value: "receipt.create",  # SCM_0168: grn.create retired
     DocType.DISPATCH.value: "dispatch.create",
     DocType.STOCK_TRANSFER.value: "stock.transfer",
     DocType.STOCK_TRANSFER_REQUEST.value: "stock.transfer.request",

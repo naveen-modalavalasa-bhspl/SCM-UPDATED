@@ -29,6 +29,7 @@ import type {
   IssueDispatchSource,
   ConsignmentRecommendation,
   IssueStockSource,
+  IssueSourceGap,
   UnitSupply,
   IssueWrite,
   ItemOption,
@@ -481,6 +482,14 @@ export const issueStockSources = (
     indent_id,
     project_id,
     issue_id: issue_id ?? undefined,
+  });
+
+/** SCM_0188: why an item has nothing to pick at this point, in one served sentence. */
+export const getIssueSourceGaps = (
+  warehouse_id: number, item_ids: number[], indent_id?: number | null,
+) =>
+  post<IssueSourceGap[]>(`${BASE}/issues/stock-sources/gaps`, {
+    warehouse_id, item_ids, indent_id: indent_id ?? undefined,
   });
 
 /**

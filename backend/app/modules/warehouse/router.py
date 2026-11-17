@@ -718,6 +718,16 @@ async def issue_stock_sources_post(body: s.IssueStockSourceFetchIn,
     )
 
 
+@router.post("/issues/stock-sources/gaps", response_model=list[s.IssueSourceGapRead])
+async def issue_source_gaps(body: s.IssueStockSourceFetchIn,
+                            db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(ISSUE_VIEW))):
+    """Why an item has nothing to pick here, in one sentence each (SCM_0188)."""
+    return await service.issue_source_gaps(
+        db, warehouse_id=body.warehouse_id, item_ids=body.item_ids,
+        indent_id=body.indent_id, user=user)
+
+
 @router.post("/issues/unit-supply", response_model=list[s.UnitSupplyRead])
 async def issue_unit_supply(body: s.UnitSupplyQuery,
                             db: AsyncSession = Depends(get_db),

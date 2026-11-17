@@ -269,6 +269,8 @@ class ReturnOut(OrgScopeOut):
     # The first three are all PENDING_APPROVAL so the status alone cannot separate them,
     # and LOGISTICS spans APPROVED and DISPATCHED for the same reason.
     phase: str = "FIELD"
+    #: Which step a return still in approval is waiting on, in words (SCM_0199).
+    stage_label: str | None = None
     kind: str | None = None
     kind_label: str | None = None
     intent: str | None = None

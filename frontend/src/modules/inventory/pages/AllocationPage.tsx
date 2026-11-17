@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowRightLeft, Plus, Repeat2, ShoppingCart, Trash2 } from "lucide-react";
+import { ArrowRightLeft, Check, Plus, Repeat2, ShoppingCart, Trash2 } from "lucide-react";
 import { Can, PageHeader, Button, Card, Field, Input, Select } from "@/shared/components";
 import { createAllocation, createMaterialRequest, getAllocationProposal } from "../api";
 // A LIP or an MDP is a distribution rung, never the default shelf — see
@@ -10,6 +10,7 @@ import { isChainPoint, orderPoints } from "../warehouseTiers";
 import { ClaimsPanel } from "../components/ClaimsPanel";
 import { LoadingRows } from "../components/PageStates";
 import { alerts } from "@/modules/alerts";
+import { errorMessage, isAnnouncedGlobally } from "@/shared/api/errors";
 import type { AllocationDecision, AllocationProposalLine } from "../types";
 import { TONE_SUBMIT } from "@/shared/components/tones";
 import { TONE_MINT } from "@/shared/components/tones";
@@ -218,6 +219,11 @@ export function AllocationPage() {
 
   /** Anything still promising stock that is not there. The backend refuses these, so
    *  the submit button has no business being live while one is on screen. */
+  // SCM_0141: only lines still owed something are decisions. A line fully covered by
+  // earlier allocations or procurement is named in one sentence above the grid.
+  const openLines = (data?.lines ?? []).filter((line) => line.requested_qty > 0);
+  const coveredLines = (data?.lines ?? []).filter((line) => line.requested_qty <= 0);
+
   const overSplits = (data?.lines ?? []).filter((line: AllocationProposalLine) =>
     splitsOf(line.indent_item_id).some((s) => Number(s.qty || 0) > shelfAt(line, s.wh, s.combo)));
 
@@ -245,6 +251,13 @@ export function AllocationPage() {
       void alerts.success("material_request.raised", { number: mr.mr_no });
       void qc.invalidateQueries({ queryKey: ["material-requests"] });
       void qc.invalidateQueries({ queryKey: ["allocation-proposal", id] });
+    },
+    // SCM_0157: a refused request used to vanish — the button looked dead. Say why.
+    onError: (error) => {
+      if (isAnnouncedGlobally(error)) return;
+      void alerts.error("material_request.raise_failed", {
+        reason: errorMessage(error) || "The server did not accept this request.",
+      });
     },
   });
 
@@ -398,8 +411,32 @@ export function AllocationPage() {
         </Card>
       )}
 
+      {/* SCM_0141: a line with nothing left to give is not a decision. It is said once,
+          by name, instead of standing in the grid as "Requested 0". */}
+      {coveredLines.length > 0 && (
+        <div className="mb-4 flex items-start gap-3 rounded-2xl border border-line bg-content2/60 p-3.5">
+          <span className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-ok-bg text-ok">
+            <Check size={16} aria-hidden />
+          </span>
+          <div className="min-w-0 text-sm">
+            <p className="font-semibold text-ink">
+              {coveredLines.length === 1 ? "1 item needs nothing more" : `${coveredLines.length} items need nothing more`}
+            </p>
+            <p className="mt-0.5 text-muted">
+              {coveredLines.map((line) => {
+                const parts = [
+                  line.already_allocated > 0 ? `${line.already_allocated} allocated` : null,
+                  (line.on_order_qty ?? 0) > 0 ? `${line.on_order_qty} on order` : null,
+                ].filter(Boolean).join(", ");
+                return `${line.item_name}${parts ? ` (${parts})` : ""}`;
+              }).join(" · ")}
+            </p>
+          </div>
+        </div>
+      )}
+
       <fieldset disabled={!data.allocatable || save.isPending || raise.isPending} className="space-y-4">
-        {data.lines.map((line: AllocationProposalLine) => {
+        {openLines.map((line: AllocationProposalLine) => {
           const splits = splitsOf(line.indent_item_id);
           const giving = givenOn(line.indent_item_id);
           const short = Math.max(0, line.requested_qty - giving);
@@ -677,7 +714,10 @@ export function AllocationPage() {
                         disabled={raise.isPending}
                         onClick={() => raise.mutate({ line, quantity: short })}
                       >
-                        <ShoppingCart size={14} /> Raise MR for {short} {line.uom_code}
+                        <ShoppingCart size={14} />
+                        {raise.isPending && raise.variables?.line.indent_item_id === line.indent_item_id
+                          ? "Raising…"
+                          : `Raise MR for ${short} ${line.uom_code ?? ""}`.trim()}
                       </Button>
                     )}
                   </div>

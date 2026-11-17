@@ -239,6 +239,13 @@ class IndentItem(CombinationMixin, Base):
     excluded_by_id = Column(BigInteger, nullable=True)
     excluded_by_name = Column(String(200), nullable=True)
     excluded_at = Column(DateTime, nullable=True)
+    # SCM_0153: how much approvers have EXCLUDED from this line, across every rung —
+    # the whole line (is_excluded) or part of it ("20 of 50 out") — and why, last said.
+    # A part-exclusion lowers approved_qty like any cut; this is what tells an
+    # exclusion apart from a plain reduction, and what the Excluded column reads.
+    excluded_quantity = Column("excluded_qty", Numeric(16, 3), nullable=False,
+                               default=0, server_default="0")
+    exclusion_reason = Column(String(255), nullable=True)
 
     indent = relationship("Indent", back_populates="items")
 

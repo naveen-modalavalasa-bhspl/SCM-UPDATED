@@ -346,12 +346,19 @@ async def resolve_fixed_chain(db: AsyncSession, stages: list[Stage],
     # below it: the document goes to the next rung up. A raiser whose rank is not in the
     # ladder at all follows every rung, in the order the admin built it.
     skip_through: int | None = None
-    if requester_position_id is not None:
-        raiser_post = await db.get(HcmPosition, requester_position_id)
+    if requester_position_id is not None or requester_id is not None:
+        raiser_post = (await db.get(HcmPosition, requester_position_id)
+                       if requester_position_id is not None else None)
+        # SCM_0128: a LOCAL chair (CPO, Director…) the raiser is seated in counts as
+        # a rung he holds, exactly like an HCM post or rank — or a CPO raising a PO
+        # was sent to the Manager rung below him.
+        seated = await ladder.seated_post_ids(
+            db, requester_id, {s.post_id for s in stages if s.is_enabled and s.post_id})
         held = [s.sequence for s in stages if s.is_enabled and (
-            s.position_id == requester_position_id
+            (requester_position_id is not None and s.position_id == requester_position_id)
             or (raiser_post is not None and raiser_post.role_id is not None
-                and s.position_role_id == raiser_post.role_id))]
+                and s.position_role_id == raiser_post.role_id)
+            or (s.post_id is not None and s.post_id in seated))]
         skip_through = min(held) if held else None
 
     # A company-wide ladder saved with a desk rank as ROLE (older saves, and any save

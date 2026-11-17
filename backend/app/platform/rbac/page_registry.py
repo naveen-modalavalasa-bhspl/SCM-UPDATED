@@ -587,6 +587,13 @@ async def retire_permissions(db: AsyncSession) -> list[str]:
             .where(RolePermission.permission_id == replacement.id)
         )).scalars().all())
         short = sorted(holders - covered)
+        if short and replacement is not None and code in perms.CARRY_GRANTS_ON_RETIRE:
+            # The same act under its surviving name: carried, not lost (SCM_0168).
+            for role_id in short:
+                db.add(RolePermission(role_id=role_id, permission_id=replacement.id))
+            await db.flush()
+            changed.append(f"{code}: {len(short)} role(s) given {covered_by} in its place")
+            short = []
         if short:
             names = (await db.execute(
                 select(Role.code).where(Role.id.in_(short)))).scalars().all()

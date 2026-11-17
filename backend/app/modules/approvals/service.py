@@ -1971,6 +1971,8 @@ def _approval_out(
             remarks=line.remarks,
             is_excluded=bool(line.is_excluded),
             excluded_by_name=line.excluded_by_name,
+            excluded_quantity=float(line.excluded_quantity or 0),
+            exclusion_reason=line.exclusion_reason,
         )
         # If an earlier approver turned this item to zero or marked it excluded,
         # it is dropped from the approval and not forwarded to subsequent approvers.
@@ -1995,7 +1997,9 @@ def _approval_out(
         required_date=indent.required_date,
         created_at=indent.created_at,
         items=items,
-        excluded_items=excluded_items,
+        excluded_items=excluded_items,        # SCM_0143: from the second level on, the ceiling is what the level below
+        # APPROVED, and the screen names it so ("Approved request").
+        has_previous_approval=bool(has_previous_approval),
     )
 
 
@@ -2279,6 +2283,8 @@ def _build_batch(
                 ceiling_quantity=float(ceiling),
                 is_excluded=bool(line.is_excluded),
                 excluded_by_name=line.excluded_by_name,
+                excluded_quantity=float(line.excluded_quantity or 0),
+                exclusion_reason=line.exclusion_reason,
             ))
 
     indent_summaries = []
@@ -2433,6 +2439,13 @@ async def consolidation_workspace(
     )
 
 
+def _line_label(indent: Indent, line_id: int) -> str:
+    for line in indent.items:
+        if line.id == line_id:
+            return line.item_name or line.item_code or f"line {line_id}"
+    return f"line {line_id}"
+
+
 def _validated_quantities(
     indent: Indent, submitted: list[ApprovalQuantityIn],
     has_previous_approval: bool = False,
@@ -2443,18 +2456,26 @@ def _validated_quantities(
     excluded_set: set[int] = {
         item.line_id for item in submitted if getattr(item, "excluded", False)
     }
+    # Only lines that are still active (not excluded/turned to zero at an earlier rung)
+    # are expected to be submitted.
+    settled_below = {
+        line.id for line in indent.items
+        if has_previous_approval and (getattr(line, "is_excluded", False)
+                                      or _approval_ceiling(line, has_previous_approval) <= 0)
+    }
+    expected = {line.id for line in indent.items} - settled_below
     for item in submitted:
         if item.line_id in by_id:
             raise ValidationError(f"Quantity for line {item.line_id} was submitted twice")
+        # SCM_0154 / SCM_0127: a line a level below already excluded is not this
+        # approver's to decide. A screen (or Approve All, sending the indent untouched)
+        # that names it at 0 is restating that, and used to be refused as an "unknown
+        # line" — one excluded item failed its whole indent out of the batch. Nothing
+        # may RAISE it back, so anything above 0 is still refused below.
+        if item.line_id in settled_below and Decimal(str(item.approved_quantity)) <= 0:
+            continue
         by_id[item.line_id] = _quantize(Decimal(str(item.approved_quantity)))
         raw_by_id[item.line_id] = Decimal(str(item.approved_quantity))
-
-    # Only lines that are still active (not excluded/turned to zero at an earlier rung)
-    # are expected to be submitted.
-    expected = {
-        line.id for line in indent.items
-        if not (has_previous_approval and (getattr(line, "is_excluded", False) or _approval_ceiling(line, has_previous_approval) <= 0))
-    }
     received = set(by_id)
     if received != expected:
         missing = sorted(expected - received)
@@ -2464,6 +2485,10 @@ def _validated_quantities(
             details.append(f"missing lines: {missing}")
         if unknown:
             details.append(f"unknown lines: {unknown}")
+        if unknown and set(unknown) <= settled_below:
+            raise ValidationError(
+                "An item a previous approver excluded cannot be approved again: "
+                + ", ".join(_line_label(indent, line_id) for line_id in unknown) + ".")
         raise ValidationError("Submit one quantity for every indent line (" + "; ".join(details) + ")")
 
     for line in indent.items:
@@ -2544,6 +2569,13 @@ async def approve_indent(
     # screen actually sent can be excluded; a line it never mentioned keeps whatever it
     # already carried, so approving without touching anything never excludes.
     excluded_lines = {q.line_id for q in quantities if getattr(q, "excluded", False)}
+    # SCM_0153: lines this approver excluded PART of, with the reason (if any) for
+    # every exclusion, whole or part.
+    part_excluded = {q.line_id for q in quantities
+                     if not getattr(q, "excluded", False)
+                     and (getattr(q, "excluded_qty", None) or 0) > 0}
+    reasons = {q.line_id: (q.exclusion_reason or "").strip() or None
+               for q in quantities if getattr(q, "exclusion_reason", None)}
 
     before: dict[str, float] = {}
     after: dict[str, float] = {}
@@ -2551,18 +2583,30 @@ async def approve_indent(
         if line.id not in approved_by_line:
             # Line was already excluded / zeroed below; stays excluded
             continue
-        before[f"line_{line.id}_approved_qty"] = float(
-            _approval_ceiling(line, has_previous)
-        )
+        ceiling = _approval_ceiling(line, has_previous)
+        before[f"line_{line.id}_approved_qty"] = float(ceiling)
         line.approved_quantity = approved_by_line[line.id]
         after[f"line_{line.id}_approved_qty"] = float(line.approved_quantity)
+        # What this rung cut, worked out here and never taken from the client.
+        cut = max(ceiling - _d(line.approved_quantity), Decimal("0"))
         # Setting quantity to 0 or dropping a line permanently marks it excluded/rejected.
         if (line.id in excluded_lines or line.approved_quantity == 0) and not line.is_excluded:
             line.is_excluded = True
             line.excluded_by_id = getattr(user, "id", None)
             line.excluded_by_name = getattr(user, "full_name", None)
             line.excluded_at = ist_now()
+            line.excluded_quantity = _d(line.excluded_quantity) + cut
             after[f"line_{line.id}_excluded"] = 1.0
+        elif line.id in part_excluded and cut > 0:
+            # SCM_0153: part of it taken out. The line stays on and goes on with what
+            # is left; the exclusion is recorded, by whom and why.
+            line.excluded_quantity = _d(line.excluded_quantity) + cut
+            line.excluded_by_id = getattr(user, "id", None)
+            line.excluded_by_name = getattr(user, "full_name", None)
+            line.excluded_at = ist_now()
+            after[f"line_{line.id}_excluded_qty"] = float(cut)
+        if line.id in reasons and (line.id in excluded_lines or line.id in part_excluded):
+            line.exclusion_reason = reasons[line.id][:255]
 
     await write_audit(
         db,
@@ -2624,7 +2668,9 @@ async def approve_consolidation(
         quantities_by_indent[line.indent_id].append(
             ApprovalQuantityIn(line_id=line.line_id,
                                approved_quantity=line.approved_quantity,
-                               excluded=line.excluded),
+                               excluded=line.excluded,
+                               excluded_qty=line.excluded_qty,
+                               exclusion_reason=line.exclusion_reason),
         )
 
     approved: list[int] = []
@@ -2657,12 +2703,16 @@ async def approve_consolidation(
             if not quantities:
                 # Nothing edited for this indent: hand on what it is already entitled
                 # to rather than sending an empty list, which approve_indent rejects.
+                # Only the lines still open at this rung (SCM_0154): an item a level
+                # below excluded is not handed on, at 0 or at anything else.
                 quantities = [
                     ApprovalQuantityIn(
                         line_id=line.id,
                         approved_quantity=float(_approval_ceiling(line, has_previous)),
                     )
                     for line in indent.items
+                    if not (has_previous and (line.is_excluded
+                                              or _approval_ceiling(line, has_previous) <= 0))
                 ]
             await approve_indent(db, indent_id, quantities, body.comments, user, task=task)
             approved.append(indent_id)

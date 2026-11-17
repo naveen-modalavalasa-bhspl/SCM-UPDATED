@@ -4,6 +4,8 @@ export interface SyncResult {
   records_fetched: number;
   records_upserted: number;
   error_message?: string | null;
+  /** "HCM" for a pulled entity, "HOOK" for follow-up work run after it. */
+  source?: string | null;
   /** When this entity last ran. The card shows the newest row per entity, and a row
    *  from an older run looks identical to one from this one without it. */
   started_at?: string | null;

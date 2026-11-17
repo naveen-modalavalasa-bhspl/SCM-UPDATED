@@ -54,6 +54,15 @@ export const CARRYING_LABEL: Record<CarryingField, string> = {
  *  fields because a fetch has not landed is worse than one that shows too many. */
 const ALL = Object.keys(CARRYING_LABEL) as CarryingField[];
 
+/** SCM_0052: the six trace numbers the DOD no longer prints as separate boxes — the
+ *  one "Tracking Number / Reference Number" slot (`tracking_url`) carries whichever was
+ *  given. A mode with no layout of its own prints everything ELSE. */
+const FOLDED_INTO_TRACKING: readonly CarryingField[] = [
+  "vehicle_number", "driver_licence_no", "eway_bill_no", "carrier_reference",
+  "lr_no", "docket_no",
+];
+const GENERAL = ALL.filter((field) => !FOLDED_INTO_TRACKING.includes(field));
+
 /** The two numbers that pin a person down, and only ever one of them is filled: an
  *  employee by their employee id, anybody else by an Aadhaar. Whichever was NOT used
  *  is dropped rather than printed blank — a dash beside "Aadhaar" on an employee's
@@ -97,7 +106,7 @@ export function carryingFields(
 }
 
 function allocated(rule: ModeRule | undefined | null): CarryingField[] {
-  if (!rule) return ALL;
+  if (!rule) return GENERAL;
   const requires = (field: string) => rule.required_fields.includes(field);
 
   // An outside provider carries it: who they are, what it costs, and ONE number to
@@ -133,5 +142,5 @@ function allocated(rule: ModeRule | undefined | null): CarryingField[] {
     ];
   }
 
-  return ALL;
+  return GENERAL;
 }

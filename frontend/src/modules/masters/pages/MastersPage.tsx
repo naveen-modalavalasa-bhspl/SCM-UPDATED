@@ -356,6 +356,8 @@ export function MastersShell({
       {tab === "facilities" && (
         <ReadOnlyTab<RefRow>
           title="Facilities" fetchList={mastersApi.facilities}
+          // SCM_0194: an empty list here is HCM's, not a broken screen — say so.
+          emptyText="HCM has not sent any facilities yet. They appear here after the HCM sync once HCM fills its facility list in. Warehouses and stocking points do not need one."
           columns={[
             { key: "name", header: "Name", render: (r) => r.name },
             { key: "stock", header: "", render: (r) => r.is_stock_location

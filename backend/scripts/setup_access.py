@@ -91,7 +91,7 @@ WAREHOUSE_PERMS = VIEW_ONLY + [
     "stock.view.all", "stock.adjust", "stock.transfer", "stock.reserve",
     "stock.valuation.view", "stock.points.manage",
     "receipt.view", "receipt.create", "receipt.post",
-    "grn.view", "grn.create", "grn.qc",
+    "grn.view", "receipt.create", "grn.qc",
     "inspection.view", "inspection.execute",
     "putaway.view", "putaway.execute",
     "picking.view", "picking.pick",

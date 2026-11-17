@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { getIssueSourceGaps } from "../api";
 import { baseOf, packable, type PackHierarchy } from "@/shared/packing";
 import { IssuePickPacking } from "./IssuePickPacking";
 import { ItemStockCard } from "./ItemStockCard";
@@ -422,6 +424,7 @@ function ItemRow(props: ItemProps) {
   const {
     group, sources, locked, unitMeta, sourcesReady, onAddPick, onRestore, onSetAsk,
     onRemoveGroup, renderItemPicker, hasSources, allSources, onSetCombination,
+    warehouseId, indentId,
   } = props;
   // The brand / variant / model: an indent's is carried and fixed (it is what was
   // reserved); a direct issue picks one off what this point holds.
@@ -648,20 +651,13 @@ function ItemRow(props: ItemProps) {
         {/* ---- every batch and storage location it is picked from ---------- */}
         <div className="min-w-0">
           {barren && (
-            <div className="mb-2 flex items-start gap-2 rounded-lg border border-warn/40 bg-warn-bg/40 px-2.5 py-2 text-[11px] leading-5 text-ink">
-              <PackageX className="mt-0.5 h-4 w-4 shrink-0 text-warn" />
-              <div className="min-w-0 flex-1">
-                <span className="font-semibold">
-                  This point holds none of this item.
-                </span>{" "}
-                Not in another batch, not in another bay — there is no stock of{" "}
-                <span className="font-mono">{group.itemCode ?? "it"}</span> here at
-                all, so there is nothing to pick a batch or a location from.
-                {group.splits[0]?.line.indent_item_id
-                  ? " The indent line stays short until stock arrives."
-                  : " Choose an item the shelf actually has, or remove this row."}
-              </div>
-            </div>
+            <SourceGapNote
+              warehouseId={warehouseId}
+              indentId={indentId}
+              itemId={group.itemId}
+              itemCode={group.itemCode}
+              fromIndent={Boolean(group.splits[0]?.line.indent_item_id)}
+            />
           )}
           {/* The FEFO plan: only the batches this ask needs, earliest expiry first, and
             * how much from each. An earlier step must be used up before a later one —
@@ -1331,6 +1327,55 @@ function PickRow(props: PickProps) {
           {problem.message}
         </p>
       )}
+    </div>
+  );
+}
+
+
+/**
+ * SCM_0188: WHY there is nothing to pick. "This point holds none of this item" was the
+ * only sentence, and on an approved indent it was usually not true — the stock was
+ * expired, held by other documents, on another floor, or reserved for this indent at a
+ * different point. The reason is asked of the server (one call, only when the shelf
+ * came back empty) and said as served; the old sentence is what shows until it answers.
+ */
+function SourceGapNote({ warehouseId, indentId, itemId, itemCode, fromIndent }: {
+  warehouseId: number;
+  indentId?: number | null;
+  itemId?: number | null;
+  itemCode?: string | null;
+  fromIndent: boolean;
+}) {
+  const gap = useQuery({
+    queryKey: ["issue-source-gap", warehouseId, indentId ?? 0, itemId ?? 0],
+    queryFn: () => getIssueSourceGaps(warehouseId, [itemId as number], indentId),
+    enabled: Boolean(warehouseId && itemId),
+    staleTime: 30_000,
+    retry: false,
+  });
+  const answer = gap.data?.find((row) => row.item_id === itemId);
+  const noneHere = !answer || answer.reason === "NONE_HERE";
+  return (
+    <div role="status"
+         className={`mb-2 flex items-start gap-2 rounded-lg border px-2.5 py-2 text-[11px] leading-5 text-ink ${
+           noneHere ? "border-warn/40 bg-warn-bg/40" : "border-bad/30 bg-bad-bg/40"}`}>
+      <PackageX className={`mt-0.5 h-4 w-4 shrink-0 ${noneHere ? "text-warn" : "text-bad"}`} />
+      <div className="min-w-0 flex-1">
+        {answer ? (
+          <>
+            <span className="font-semibold">{answer.headline}</span>{" "}
+            {answer.detail}
+          </>
+        ) : (
+          <>
+            <span className="font-semibold">Nothing to pick here for {itemCode ?? "this item"}.</span>{" "}
+            {gap.isLoading ? "Checking why…" : "There is no batch or location to draw it from at this point."}
+          </>
+        )}
+        {noneHere && (fromIndent
+          ? " The indent line stays short until stock arrives."
+          : " Choose an item the shelf actually has, or remove this row.")}
+      </div>
     </div>
   );
 }

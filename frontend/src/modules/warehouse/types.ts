@@ -1491,6 +1491,20 @@ export interface TrackingTypeMeta {
 
 /** One (batch, bin) an issue line can draw from, and what it holds. The unit of a
  *  split: a quantity larger than any single source becomes several of these. */
+/** Why an item has no source to pick at this point (SCM_0188). Wording is served. */
+export interface IssueSourceGap {
+  item_id: number;
+  reason: "NONE_HERE" | "RESERVED_ELSEWHERE" | "EXPIRED" | "OUTSIDE_YOUR_FLOORS"
+    | "RESERVED_BY_OTHERS" | "NOT_OFFERABLE";
+  headline: string;
+  detail: string;
+  on_hand_qty: number;
+  expired_qty: number;
+  reserved_by_others_qty: number;
+  outside_your_floors_qty: number;
+  reserved_for_indent_elsewhere_qty: number;
+}
+
 export interface IssueStockSource extends CombinationValue {
   item_id: number;
   bin_id?: number | null;

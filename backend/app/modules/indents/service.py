@@ -6850,14 +6850,14 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
     unapproved = [row for row in live
                   if row.status in allocations.UNAPPROVED_ALLOCATION_STATUSES]
 
+    # SCM_0141: a line an approver cut to 0 is owed nothing and is not a decision
+    # anybody at the desk has to make. It used to stay on the screen, reading
+    # "Requested 0", whenever something had been allocated against it before the cut.
+    # What it was given is still on the indent's history and its allocations.
     eligible_items = [
         line for line in indent.items
         if not getattr(line, "is_excluded", False)
-        and not (
-            recorded
-            and _owed_quantity(line, recorded) <= Decimal("0")
-            and Decimal(str(line.allocated_quantity or 0)) <= Decimal("0")
-        )
+        and not (recorded and _owed_quantity(line, recorded) <= Decimal("0"))
     ]
 
     blocked_reason = None
@@ -7294,6 +7294,13 @@ async def create_allocation_for_indent(db: AsyncSession, indent: Indent,
     # something — that IS the cascade, each rung allocating what it holds. Only
     # inventory knows about allocations and only indents knows the remainder, so the
     # answer is worked out here and handed over.
+    #
+    # SCM_0142: the indent row is LOCKED first. Two presses of Submit (a double click,
+    # two tabs, two storekeepers) each read "no live allocation" before either had
+    # written one, and the indent ended up with two allocation numbers. Holding the
+    # row until this transaction ends makes the second press wait, then read the
+    # first one's allocation and be refused by `ensure_no_active` in words.
+    await db.execute(select(Indent.id).where(Indent.id == indent.id).with_for_update())
     await db.refresh(indent, attribute_names=["items"])
     # `owed_quantity`, not the raw approved column: 69 of the live lines predate the
     # approval flow and carry approved_quantity 0, which read literally says "owes
@@ -8307,10 +8314,12 @@ async def fulfilment_batches(db: AsyncSession, user,
             # 7 — true figures, different questions, printed under one word.
             "owed_item_count": len({
                 line.item_id for ind in owed for line in ind.items
-                if _line_pending(line, committed, on_order) > 0}),
+                if _line_pending(line, committed, on_order,
+                                 _quantities_recorded(ind)) > 0}),
             "owed_line_count": len([
                 line for ind in owed for line in ind.items
-                if _line_pending(line, committed, on_order) > 0]),
+                if _line_pending(line, committed, on_order,
+                                 _quantities_recorded(ind)) > 0]),
             "requester_count": len({ind.requested_by_id for ind in group}),
             "urgent_count": sum(1 for ind in owed
                                 if ind.priority == Priority.URGENT.value),
@@ -8414,20 +8423,30 @@ def _has_demand(indent: Indent, committed: dict[int, Decimal],
     allocation may be raised against a second time.
     """
     on_order = on_order or {}
+    recorded = _quantities_recorded(indent)
     return any(
-        _line_pending(line, committed, on_order) > 0
+        _line_pending(line, committed, on_order, recorded) > 0
         for line in indent.items
     )
 
 
 def _line_pending(line, committed: dict[int, Decimal],
-                  on_order: dict[int, Decimal]) -> Decimal:
+                  on_order: dict[int, Decimal],
+                  recorded: bool | None = None) -> Decimal:
     """What one indent line is still owed off the shelf.
 
     The single definition the cycle row, the cycle screen and the item-first demand
     list all read, so they cannot drift apart again.
+
+    `recorded` is `_quantities_recorded(indent)` (SCM_0141). Without it a line an
+    approver cut to 0 read through `owed_quantity`'s "0 means nothing was recorded"
+    fallback and reached the Fulfilment Desk asking for its full original quantity.
+    With it, a zero on an indent whose chain wrote quantities is a deliberate zero.
     """
-    return (owed_quantity(line)
+    owed = (_owed_quantity(line, True)
+            if recorded and not getattr(line, "is_excluded", False)
+            else owed_quantity(line))
+    return (owed
             - _d(line.allocated_quantity)
             - committed.get(line.id, Decimal("0"))
             - on_order.get(line.id, Decimal("0")))
@@ -8545,8 +8564,9 @@ async def fulfilment_batch(db: AsyncSession, user,
     for indent in indents:
         if indent.id in in_approval:
             continue
+        recorded = _quantities_recorded(indent)
         for line in indent.items:
-            pending = _line_pending(line, committed, on_order)
+            pending = _line_pending(line, committed, on_order, recorded)
             if pending <= 0:
                 continue
             by_item[line.item_id].append({

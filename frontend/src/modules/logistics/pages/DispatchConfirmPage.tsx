@@ -13,6 +13,7 @@ import {
   TONE_YELLOW, useAction,
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
+import { docNumberApi } from "@/shared/documentNumber";
 import { consignmentApi, transportApi } from "../api";
 import {
   headerFromConsignment, linesFromConsignment,
@@ -692,6 +693,26 @@ export function DispatchConfirmPage() {
     enabled: id > 0 && !isLeg,
     retry: false,
   });
+  // SCM_0201: the gate pass number is the dispatch's own DSP number, issued at the
+  // press. Until then the box showed nothing, which read as "not fetched". Read the
+  // number it WILL take (a preview: nothing is reserved) and show it in the box.
+  const consignmentGatePass = (doc as { gate_pass_no?: string | null } | undefined)
+    ?.gate_pass_no?.trim() || "";
+  const { data: nextGatePass } = useQuery({
+    queryKey: ["dispatch-gate-pass-preview", doc?.project_name ?? ""],
+    queryFn: () => docNumberApi.preview("DISPATCH", {
+      organizationId: "", projectId: "", orgDepartmentId: "", fiscalYear: "",
+      projectName: doc?.project_name ?? undefined,
+    }),
+    enabled: id > 0 && !isLeg && !consignmentGatePass,
+    staleTime: 30_000,
+    retry: false,
+  });
+  // A number the consignment already carries is the pass's, and fills the box once.
+  useEffect(() => {
+    if (consignmentGatePass) setGatePass((current) => current || consignmentGatePass);
+  }, [consignmentGatePass]);
+
   // Dispatching the same consignment twice raises a second transport request for one
   // physical load. Ask first, and offer the one that exists.
   const { data: links } = useQuery({
@@ -1433,8 +1454,19 @@ export function DispatchConfirmPage() {
                 />
               </Field>
               )}
-              <Field label="Gate pass no" hint="Leave blank to issue the next dispatch number (DSP).">
-                <Input value={gatePass} onChange={(e) => setGatePass(e.target.value)} />
+              <Field
+                label="Gate pass no"
+                hint={gatePass.trim()
+                  ? "Printed on the gate pass exactly as written."
+                  : nextGatePass?.number
+                    ? `Leave as shown to issue ${nextGatePass.number} when you dispatch.`
+                    : "Leave blank to issue the next dispatch number (DSP)."}
+              >
+                <Input
+                  value={gatePass}
+                  placeholder={nextGatePass?.number ?? "Next DSP number"}
+                  onChange={(e) => setGatePass(e.target.value)}
+                />
               </Field>
             </div>
             {/* Every drop on the truck, in one line: the desk choosing a mode and a

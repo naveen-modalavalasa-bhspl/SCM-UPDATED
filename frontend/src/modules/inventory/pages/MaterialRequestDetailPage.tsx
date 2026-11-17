@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { CombinationTag } from "@/shared/combination";
-import { ArrowDown, Check, Lock, ShieldAlert, ShoppingCart } from "lucide-react";
+import { AlertCircle, ArrowDown, Check, Lock, ShieldAlert, ShoppingCart } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -241,7 +241,10 @@ export function MaterialRequestDetailPage() {
    *  giving away stock you do not have is a different mistake. */
   /** The ceiling: what the line asked for when raised (2026-11-03). A quantity may
    *  come down or stay; more is new demand — a new request with its own approval. */
-  const askedFor = (row: MaterialRequestItem) => row.requested_quantity ?? row.quantity;
+  // Numbers, whatever the wire sent: a NUMERIC column can arrive as "10.000", and a
+  // requested quantity never recorded (0 / null on an old row) falls back to the line.
+  const askedFor = (row: MaterialRequestItem) =>
+    Number(row.requested_quantity) > 0 ? Number(row.requested_quantity) : Number(row.quantity);
 
   const problem = (row: MaterialRequestItem): string | null => {
     const raw = edits[row.id];
@@ -267,6 +270,13 @@ export function MaterialRequestDetailPage() {
 
   const items = data.items ?? [];
   const problems = items.map(problem).filter(Boolean);
+  const approveBlockedBy = items
+    .map((row) => {
+      const issue = problem(row);
+      return issue ? `${row.item_name ?? row.item_code ?? `line ${row.line_no}`}: ${issue}` : null;
+    })
+    .filter(Boolean)
+    .join(" · ");
   const dirty = items.some(isChanged);
 
   const quantityCell = (row: MaterialRequestItem) => {
@@ -279,7 +289,13 @@ export function MaterialRequestDetailPage() {
     }
     const issue = problem(row);
     return (
-      <div className="min-w-[11rem]">
+      // SCM_0202: this box sits in a table that is a keyboard grid — arrow keys, Space
+      // and type-ahead move between rows. Keystrokes stop here so every one of them
+      // edits the quantity, and none of them moves the grid.
+      <div className="min-w-[11rem]"
+           onKeyDown={(event) => event.stopPropagation()}
+           onPointerDown={(event) => event.stopPropagation()}
+           onClick={(event) => event.stopPropagation()}>
         <div className="flex items-center gap-1.5">
           {/* Deliberately not type="number". The spinner arrows eat the right-hand end
               of a narrow box, which hid the digits being typed, and the scroll-wheel
@@ -588,6 +604,18 @@ export function MaterialRequestDetailPage() {
             />
           </Field>
           {reasonError && <p className="text-danger">{reasonError}</p>}
+          {/* SCM_0202: Approve is never off without saying why, next to the button. */}
+          {problems.length > 0 && (
+            <p role="status" className="flex items-start gap-1.5 rounded-lg bg-bad-bg/60 px-3 py-2 text-xs text-bad">
+              <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+              <span>Approve is off until this is fixed — {approveBlockedBy}</span>
+            </p>
+          )}
+          {dirty && problems.length === 0 && (
+            <p className="text-xs text-muted">
+              Approve saves the new quantities and approves in one step.
+            </p>
+          )}
           {act.error && <p className="text-danger">{(act.error as Error).message}</p>}
           {save.error && <p className="text-danger">{(save.error as Error).message}</p>}
           {sendBack.error && <p className="text-danger">{(sendBack.error as Error).message}</p>}
@@ -602,6 +630,7 @@ export function MaterialRequestDetailPage() {
               <Button className={TONE_APPROVE}
                 onClick={() => void decide(true)}
                 disabled={act.isPending || save.isPending || problems.length > 0}
+                title={problems.length > 0 ? approveBlockedBy : undefined}
               >
                 <Check className="h-4 w-4" />
                 {save.isPending ? "Saving…" : (!data.can_act && isAdmin ? "Approve (Admin Override)" : "Approve")}

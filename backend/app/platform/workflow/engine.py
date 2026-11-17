@@ -706,7 +706,8 @@ async def _resolve_ladder_chain(db, wf, stages, context: dict, user,
     # Rule 4: a raiser who is at the end of the chain (or the top of the hierarchy) has
     # no one above them — the document is theirs, so it is NOT sent to a stand-in.
     if (not chain and policy == ladder.POLICY_INDEPENDENT
-            and await ladder.raiser_is_final(db, stages, requester_position_id)):
+            and await ladder.raiser_is_final(db, stages, requester_position_id,
+                                             getattr(user, "id", None))):
         return chain, independent_fallback
     if not chain and policy == ladder.POLICY_INDEPENDENT:
         chain = await ladder.fallback_chain(db, fallback_position_id, user.id)

@@ -25,6 +25,10 @@ class ScheduleIn(BaseModel):
 def _log_out(log: HcmSyncLog) -> dict:
     return {
         "entity": log.entity, "status": log.status,
+        # HCM for a pulled entity, HOOK for follow-up work after it (stocking points,
+        # the organisation feed). The screen tells "the sync failed" from "the sync
+        # worked and a follow-up needs a look" by this (SCM_0197).
+        "source": log.source,
         "records_fetched": log.records_fetched, "records_upserted": log.records_upserted,
         "error_message": log.error_message,
         # WHEN each entity last ran. The screen shows the newest row per entity, so

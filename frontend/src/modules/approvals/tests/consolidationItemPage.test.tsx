@@ -82,6 +82,13 @@ const rowOf = (indentNo: string) => {
   return within(cell!.closest("tr") as HTMLElement);
 };
 
+/** Exclude opens a dialog now (SCM_0153): all of the line, or part of it. */
+async function excludeAll(indentNo: string) {
+  fireEvent.click(rowOf(indentNo).getByRole("button", { name: /^Exclude$/ }));
+  const dialog = await screen.findByRole("dialog");
+  fireEvent.click(within(dialog).getByRole("button", { name: /^Exclude all$/ }));
+}
+
 describe("ConsolidationItemPage", () => {
   beforeEach(() => {
     window.sessionStorage.clear();
@@ -111,12 +118,38 @@ describe("ConsolidationItemPage", () => {
     await waitFor(() => expect(screen.getByText(/going out of/).textContent).toContain("14"));
   });
 
-  it("excludes one row, then offers to remove the indent from all items", async () => {
+  it("excludes only PART of a row, with a reason (SCM_0153)", async () => {
     const cycle = renderItemPage();
     const table = await tableOf();
     await table.findByLabelText("Quantity for IND-2");
 
     fireEvent.click(rowOf("IND-2").getByRole("button", { name: /^Exclude$/ }));
+    const dialog = within(await screen.findByRole("dialog"));
+    fireEvent.click(dialog.getByRole("radio", { name: /Only part of it/ }));
+    // All of it is not "part": the dialog says so and will not confirm.
+    fireEvent.change(dialog.getByLabelText("Quantity to exclude"), { target: { value: "10" } });
+    expect(dialog.getByText(/That is all of it/)).toBeTruthy();
+    expect((dialog.getByRole("button", { name: /^Exclude part$/ }) as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.change(dialog.getByLabelText("Quantity to exclude"), { target: { value: "4" } });
+    expect(dialog.getByText(/still goes to IND-2/).textContent).toContain("6");
+    fireEvent.change(dialog.getByPlaceholderText(/Old stock/), { target: { value: "Branch has stock" } });
+    fireEvent.click(dialog.getByRole("button", { name: /^Exclude part$/ }));
+
+    expect(draftOf(cycle)).toEqual({
+      72: { approved: "6", excluded: false, partial: true, reason: "Branch has stock" },
+    });
+    // The row keeps its box at what is left and says what was taken out, and why.
+    expect(rowOf("IND-2").getByText(/4 excluded · Branch has stock/)).toBeTruthy();
+    await waitFor(() => expect(screen.getByText(/going out of/).textContent).toContain("16"));
+  });
+
+  it("excludes one row, then offers to remove the indent from all items", async () => {
+    const cycle = renderItemPage();
+    const table = await tableOf();
+    await table.findByLabelText("Quantity for IND-2");
+
+    await excludeAll("IND-2");
 
     expect(draftOf(cycle)).toEqual({ 72: { approved: "", excluded: true } });
     // The same slot now offers the wider action, plus a way back.
@@ -130,7 +163,7 @@ describe("ConsolidationItemPage", () => {
     const cycle = renderItemPage();
     const table = await tableOf();
     await table.findByLabelText("Quantity for IND-2");
-    fireEvent.click(rowOf("IND-2").getByRole("button", { name: /^Exclude$/ }));
+    await excludeAll("IND-2");
 
     fireEvent.click(rowOf("IND-2").getByRole("button", { name: /Remove from all items/ }));
     const dialog = await screen.findByRole("dialog");
@@ -155,7 +188,7 @@ describe("ConsolidationItemPage", () => {
     const cycle = renderItemPage();
     const table = await tableOf();
     await table.findByLabelText("Quantity for IND-2");
-    fireEvent.click(rowOf("IND-2").getByRole("button", { name: /^Exclude$/ }));
+    await excludeAll("IND-2");
 
     fireEvent.click(rowOf("IND-2").getByRole("button", { name: /^Include$/ }));
 
@@ -163,15 +196,17 @@ describe("ConsolidationItemPage", () => {
     expect(rowOf("IND-2").getByLabelText("Quantity for IND-2")).toBeTruthy();
   });
 
-  it("leaves a row dropped by a lower approver read-only", async () => {
+  it("moves a row dropped by a lower approver out of the table (SCM_0151)", async () => {
     renderItemPage();
     const table = await tableOf();
     await table.findByLabelText("Quantity for IND-1");
 
-    const row = rowOf("IND-3");
-    expect(row.getByText(/Excluded by Lower Approver/)).toBeTruthy();
-    expect(row.queryByRole("button")).toBeNull();
-    expect(row.queryByLabelText("Quantity for IND-3")).toBeNull();
+    // Not a row with a 0 in it any more: no box, no button, not in the table at all…
+    expect(table.queryByText("IND-3")).toBeNull();
+    expect(screen.queryByLabelText("Quantity for IND-3")).toBeNull();
+    // …but named, read-only, in the "Excluded earlier" strip with who took it out.
+    expect(screen.getByText(/Excluded earlier · 1/)).toBeTruthy();
+    expect(screen.getByText(/by Lower Approver/)).toBeTruthy();
   });
 
   it("reduces every included indent by the same percentage of its own ceiling", async () => {
@@ -202,7 +237,7 @@ describe("ConsolidationItemPage", () => {
     const cycle = renderItemPage();
     const table = await tableOf();
     await table.findByLabelText("Quantity for IND-2");
-    fireEvent.click(rowOf("IND-2").getByRole("button", { name: /^Exclude$/ }));
+    await excludeAll("IND-2");
 
     fireEvent.click(screen.getByRole("button", { name: /Reduce %/ }));
     const dialog = await screen.findByRole("dialog");

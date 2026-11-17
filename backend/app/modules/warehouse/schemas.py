@@ -1988,6 +1988,21 @@ class IssueStockSourceFetchIn(BaseModel):
     issue_id: int | None = None
 
 
+class IssueSourceGapRead(BaseModel):
+    """Why an item has no source to pick at this point (SCM_0188). Served wording."""
+    item_id: int
+    #: NONE_HERE | RESERVED_ELSEWHERE | EXPIRED | OUTSIDE_YOUR_FLOORS |
+    #: RESERVED_BY_OTHERS | NOT_OFFERABLE
+    reason: str
+    headline: str
+    detail: str
+    on_hand_qty: float = 0
+    expired_qty: float = 0
+    reserved_by_others_qty: float = 0
+    outside_your_floors_qty: float = 0
+    reserved_for_indent_elsewhere_qty: float = 0
+
+
 class BoxSourceRead(BaseModel):
     """One box an issue line could name (2026-10-26): its code, what it holds, and
     who holds it — this issue, another one, or nobody."""
