@@ -26273,7 +26273,7 @@ async def run_report(db: AsyncSession, key: str, *, warehouse_id: int | None = N
 # Options (lookups the forms need)
 # ---------------------------------------------------------------------------
 
-LOOKUP_LIMIT = 200
+LOOKUP_LIMIT = 1000
 # One grouped consignment is one lorry-load of issues, not a batch job. Well past any
 # real delivery, and small enough that a save stays one short request.
 MAX_ISSUES_PER_CONSIGNMENT = 50
