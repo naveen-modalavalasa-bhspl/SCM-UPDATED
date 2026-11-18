@@ -30,6 +30,12 @@ x-backend-env: &backend-env
   CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS is required}
   CORS_ALLOW_PRIVATE_NETWORK: ${CORS_ALLOW_PRIVATE_NETWORK:-false}
   ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-480}
+  # Bavya SSO (the Director signs in from bhsdb.in). Off while the key is empty.
+  # The PUBLIC key as one .env line, its newlines written as \n; see
+  # backend/app/platform/auth/bavya_sso.py.
+  BAVYA_SSO_PUBLIC_KEY: ${BAVYA_SSO_PUBLIC_KEY:-}
+  BAVYA_SSO_APP_ID: ${BAVYA_SSO_APP_ID:-scm}
+  BAVYA_SSO_ISSUER: ${BAVYA_SSO_ISSUER:-https://bhsdb.in}
   HCM_BASE_URL: ${HCM_BASE_URL:?HCM_BASE_URL is required}
   HCM_API_KEY: ${HCM_API_KEY:?HCM_API_KEY is required}
   HCM_TIMEOUT_SECONDS: ${HCM_TIMEOUT_SECONDS:-5}

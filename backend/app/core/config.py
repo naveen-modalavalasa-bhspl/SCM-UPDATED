@@ -81,6 +81,15 @@ class Settings(BaseSettings):
     SECRET_KEY: str
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 480
+
+    # --- Bavya SSO (the Director signs in from bhsdb.in) — OPTIONAL ---
+    # Off while the key is empty: POST /api/auth/bavya-sso then answers 404, so the code
+    # can ship before the config. The PUBLIC key only (bhsdb.in keeps the private one):
+    # the PEM text itself — newlines may be written as \n on one line — or the path of
+    # a PEM file. During a key rotation it holds both keys. See platform/auth/bavya_sso.py.
+    BAVYA_SSO_PUBLIC_KEY: str = ""
+    BAVYA_SSO_APP_ID: str = "scm"
+    BAVYA_SSO_ISSUER: str = "https://bhsdb.in"
     # Demo seeds create mock HCM identities and local credentials. Production must
     # opt in explicitly rather than accepting demo access by accident.
     ALLOW_DEMO_DATA: bool = False

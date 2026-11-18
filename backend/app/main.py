@@ -120,6 +120,16 @@ async def lifespan(app: FastAPI):
             log.info("rbac_permissions relabelled: %s", relabelled)
     except Exception as exc:
         log.warning("Page registry sync skipped: %s", exc)
+
+    # Bavya SSO's used-pass table, when SSO is switched on. In every process, because
+    # CREATE TABLE IF NOT EXISTS is idempotent; it never stops start-up (a pass is
+    # refused until the table exists). See platform/auth/bavya_sso.py.
+    try:
+        from app.platform.auth import bavya_sso
+
+        await bavya_sso.prepare(SessionLocal)
+    except Exception as exc:
+        log.warning("Bavya SSO not prepared at startup: %s", exc)
     yield
     if settings.RUN_SCHEDULERS:
         scheduler.shutdown()
