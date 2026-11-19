@@ -10,6 +10,8 @@ import {
   type Column, type KpiTileSpec,
 } from "@/shared/components";
 import { fmtDate, fmtTime } from "@/shared/datetime";
+import { ScheduleDate } from "@/modules/warehouse";
+import { schedulePending } from "@/modules/warehouse/components/deliveryWindow";
 import { consignmentApi, transportApi, tripApi } from "../api";
 import {
   carriageLabel, carriageTint, load, modeLabel, modeTint, money, nextMove,
@@ -322,6 +324,19 @@ export function DispatchPage() {
           </div>
         </div>
       ),
+    },
+    {
+      key: "dispatch_on",
+      header: "Dispatch date",
+      hideOnNarrow: true,
+      render: (row) => <ScheduleDate date={row.expected_delivery_from}
+                                     pending={schedulePending(row.status).dispatch} />,
+    },
+    {
+      key: "deliver_by",
+      header: "Expected delivery",
+      render: (row) => <ScheduleDate date={row.expected_delivery}
+                                     pending={schedulePending(row.status).delivery} />,
     },
     {
       key: "load",

@@ -1761,7 +1761,7 @@ export interface Dispatch {
   total_packages: number;
   total_weight_kg: number;
   total_value: number;
-  /** Start of the expected delivery window; `expected_delivery` is its end. */
+  /** The planned DISPATCH DATE (2026-11-20); `expected_delivery` is when it should arrive. */
   expected_delivery_from?: string | null;
   expected_delivery?: string | null;
   delivered_at?: string | null;
@@ -1923,7 +1923,7 @@ export interface DispatchWrite {
   lr_no?: string | null;
   eway_bill_no?: string | null;
   freight_amount?: number | null;
-  /** Start of the expected delivery window; `expected_delivery` is its end. */
+  /** The planned DISPATCH DATE (2026-11-20); `expected_delivery` is when it should arrive. */
   expected_delivery_from?: string | null;
   expected_delivery?: string | null;
   remarks?: string | null;
@@ -2009,7 +2009,7 @@ export interface ConsignmentWrite {
   lr_no?: string | null;
   eway_bill_no?: string | null;
   freight_amount?: number | null;
-  /** Start of the expected delivery window; `expected_delivery` is its end. */
+  /** The planned DISPATCH DATE (2026-11-20); `expected_delivery` is when it should arrive. */
   expected_delivery_from?: string | null;
   expected_delivery?: string | null;
   remarks?: string | null;

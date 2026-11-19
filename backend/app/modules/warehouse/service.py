@@ -16720,26 +16720,26 @@ async def get_dispatch(db: AsyncSession, dispatch_id: int, user=None) -> m.Dispa
 
 
 def _guard_delivery_window(dispatch_date, start, end, *, required: bool) -> None:
-    """The expected delivery WINDOW (2026-11-19): a start and an end date.
+    """The consignment's two dates (2026-11-20): `start` is the planned DISPATCH DATE
+    (`expected_delivery_from`), `end` the EXPECTED DELIVERY (`expected_delivery`).
 
-    `end` is the old `expected_delivery`. A consignment states both (`required`); the
-    other write paths may state either or neither, and whatever IS stated must make
-    sense: neither date before the goods leave, and the window not running backwards.
+    A consignment a person saves states both (`required`); the other write paths may
+    state either or neither, and whatever IS stated must make sense: neither before the
+    consignment date, and delivery never before dispatch.
     """
     if required and (start is None or end is None):
         missing = " and ".join(name for name, value in
-                               (("the start", start), ("the end", end)) if value is None)
-        raise ValidationError(
-            f"Give the expected delivery window — {missing} date "
-            f"{'is' if ' and ' not in missing else 'are'} missing.")
+                               (("the dispatch date", start),
+                                ("the expected delivery date", end)) if value is None)
+        raise ValidationError(f"Enter {missing}.")
     if start is not None and dispatch_date is not None and start < dispatch_date:
         raise ValidationError(
-            f"Delivery cannot start on {start:%d %b %Y} — the consignment only leaves on "
-            f"{dispatch_date:%d %b %Y}. Pick a start on or after it.")
+            f"The dispatch date ({start:%d %b %Y}) cannot be before the consignment date "
+            f"({dispatch_date:%d %b %Y}).")
     if start is not None and end is not None and end < start:
         raise ValidationError(
-            f"The delivery window ends ({end:%d %b %Y}) before it starts "
-            f"({start:%d %b %Y}). Pick an end date on or after the start.")
+            f"Expected delivery ({end:%d %b %Y}) cannot be before the dispatch date "
+            f"({start:%d %b %Y}).")
     _guard_expected_delivery(dispatch_date, end)
 
 

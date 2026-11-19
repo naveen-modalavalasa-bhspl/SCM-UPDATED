@@ -10,6 +10,8 @@ import {
   Select, StatusPill, type Column, type Tone,
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
+import { ScheduleDate } from "@/modules/warehouse";
+import { schedulePending } from "@/modules/warehouse/components/deliveryWindow";
 import { transportApi } from "../api";
 import {
   load, modeLabel, modeTint, money, nextMove, TR_STATUSES,
@@ -198,6 +200,20 @@ export function TransportRequestsPage() {
           </div>
         ) : <span className="text-muted">Not set</span>
       ),
+    },
+    {
+      key: "dispatch_on",
+      header: "Dispatch date",
+      hideOnNarrow: true,
+      // The day it actually left once it has; until then the planned date.
+      render: (r) => <ScheduleDate date={r.dispatched_at ?? r.expected_delivery_from}
+                                   pending={!r.dispatched_at && schedulePending(r.status).dispatch} />,
+    },
+    {
+      key: "deliver_by",
+      header: "Expected delivery",
+      render: (r) => <ScheduleDate date={r.expected_delivery}
+                                   pending={!r.delivered_at && schedulePending(r.status).delivery} />,
     },
     {
       key: "load",

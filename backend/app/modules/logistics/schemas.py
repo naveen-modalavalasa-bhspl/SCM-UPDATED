@@ -6,6 +6,26 @@ from app.shared.limits import (  # request-size guards, see the module
 )
 
 
+class CrewIn(BaseModel):
+    """One person travelling with an own-vehicle load (2026-11-20)."""
+    role: str = Field(default="HELPER", max_length=20)       # CrewRole
+    name: str = Field(default="", max_length=200)
+    phone: str = Field(default="", max_length=20)
+    id_number: str | None = Field(default=None, max_length=50)
+    employee_id: int | None = None
+
+
+class CrewOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    sequence: int
+    role: str
+    name: str
+    phone: str
+    id_number: str | None = None
+    employee_id: int | None = None
+
+
 class GRNLineIn(BaseModel):
     po_item_id: int | None = None
     item_id: int
@@ -165,6 +185,11 @@ class TRCreate(BaseModel):
     manual_courier_name: str | None = Field(default=None, max_length=200)
     carrier_reference: str | None = None
     vehicle_number: str | None = None
+    # Own vehicle (2026-11-20): what kind of vehicle, and who travels with it —
+    # the desk says how many first, then names each (`own_vehicle.crew_problems`).
+    vehicle_type_id: int | None = None
+    crew_count: int | None = Field(default=None, ge=0, le=20)
+    crew: list[CrewIn] | None = Field(default=None, max_length=20)
     driver_name: str | None = None
     driver_phone: str | None = None
     driver_licence_no: str | None = None
@@ -365,6 +390,20 @@ class TROut(BaseModel):
     carrier_reference: str | None = None
     carrier_confirmed_by_name: str | None = None
     vehicle_number: str | None = None
+    vehicle_type_id: int | None = None
+    vehicle_type_name: str | None = None
+    crew_count: int | None = None
+    crew: list[CrewOut] = []
+    odometer_start: float | None = None
+    odometer_start_at: datetime | None = None
+    odometer_start_by_name: str | None = None
+    odometer_end: float | None = None
+    odometer_end_at: datetime | None = None
+    odometer_end_by_name: str | None = None
+    #: END − START, derived (`own_vehicle.distance_km`).
+    distance_travelled_km: float | None = None
+    #: The dial photos per reading: {"ODOMETER_START": [...], "ODOMETER_END": [...]}.
+    odometer_photos: dict | None = None
     driver_name: str | None = None
     driver_phone: str | None = None
     driver_licence_no: str | None = None

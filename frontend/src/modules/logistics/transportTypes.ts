@@ -80,7 +80,7 @@ export interface RaiserTracking {
   driver_name?: string | null;
   driver_phone?: string | null;
   handed_over_by_name?: string | null;
-  /** Start of the expected delivery window; `expected_delivery` is its end. */
+  /** The planned DISPATCH DATE (2026-11-20); `expected_delivery` is when it should arrive. */
   expected_delivery_from?: string | null;
   expected_delivery?: string | null;
   dispatched_at?: string | null;
@@ -192,7 +192,7 @@ export interface Consignment {
   driver_phone?: string | null;
   lr_no?: string | null;
   eway_bill_no?: string | null;
-  /** Start of the expected delivery window; `expected_delivery` is its end. */
+  /** The planned DISPATCH DATE (2026-11-20); `expected_delivery` is when it should arrive. */
   expected_delivery_from?: string | null;
   expected_delivery?: string | null;
   total_items: number;
@@ -865,6 +865,19 @@ export interface TransportRequest {
   carrier_reference?: string | null;
   carrier_confirmed_by_name?: string | null;
   vehicle_number?: string | null;
+  /** Own vehicle (2026-11-20): the kind of vehicle and who travels with it. */
+  vehicle_type_id?: number | null;
+  vehicle_type_name?: string | null;
+  crew_count?: number | null;
+  crew?: CrewMember[];
+  odometer_start?: number | null;
+  odometer_start_at?: string | null;
+  odometer_start_by_name?: string | null;
+  odometer_end?: number | null;
+  odometer_end_at?: string | null;
+  odometer_end_by_name?: string | null;
+  distance_travelled_km?: number | null;
+  odometer_photos?: Record<"ODOMETER_START" | "ODOMETER_END", OdometerPhoto[]> | null;
   driver_name?: string | null;
   driver_phone?: string | null;
   driver_licence_no?: string | null;
@@ -879,7 +892,7 @@ export interface TransportRequest {
   tracking_url?: string | null;
   eway_bill_no?: string | null;
   gate_pass_no?: string | null;
-  /** Start of the expected delivery window; `expected_delivery` is its end. */
+  /** The planned DISPATCH DATE (2026-11-20); `expected_delivery` is when it should arrive. */
   expected_delivery_from?: string | null;
   expected_delivery?: string | null;
   dispatched_at?: string | null;
@@ -936,7 +949,7 @@ export interface TRListRow {
   lr_no?: string | null;
   docket_no?: string | null;
   tracking_url?: string | null;
-  /** Start of the expected delivery window; `expected_delivery` is its end. */
+  /** The planned DISPATCH DATE (2026-11-20); `expected_delivery` is when it should arrive. */
   expected_delivery_from?: string | null;
   expected_delivery?: string | null;
   dispatched_at?: string | null;
@@ -1098,7 +1111,7 @@ export interface TRInput {
   distance_km?: number | null;
   project_id?: number | null;
   project_name?: string | null;
-  /** Start of the expected delivery window; `expected_delivery` is its end. */
+  /** The planned DISPATCH DATE (2026-11-20); `expected_delivery` is when it should arrive. */
   expected_delivery_from?: string | null;
   expected_delivery?: string | null;
   remarks?: string | null;
@@ -1117,6 +1130,9 @@ export interface TRInput {
   manual_courier_name?: string | null;
   carrier_reference?: string | null;
   vehicle_number?: string | null;
+  vehicle_type_id?: number | null;
+  crew_count?: number | null;
+  crew?: CrewMemberInput[] | null;
   driver_name?: string | null;
   driver_phone?: string | null;
   driver_licence_no?: string | null;
@@ -1332,6 +1348,11 @@ export interface DeliveryChallan {
   project_name?: string | null;
   remarks?: string | null;
   consignments: ChallanConsignment[];
+  /** What the challan prints: the whole load in one table, no codes (2026-11-20). */
+  lines?: ChallanLine[];
+  /** The day it left (or, before it has, the planned dispatch date). */
+  dispatch_date?: string | null;
+  vehicle_type_name?: string | null;
   totals: {
     consignments: number;
     packages: number;
@@ -1340,4 +1361,37 @@ export interface DeliveryChallan {
     weight_kg?: string | number | null;
     volume_cbm?: string | number | null;
   };
+}
+
+
+// ---------------------------------------------------------------------------
+// Own vehicle (2026-11-20): vehicle types, crew and odometer.
+// ---------------------------------------------------------------------------
+export type CrewRole = "DRIVER" | "HELPER";
+
+export interface CrewMemberInput {
+  role: CrewRole;
+  name: string;
+  phone: string;
+  id_number?: string | null;
+  employee_id?: number | null;
+}
+
+export interface CrewMember extends CrewMemberInput {
+  id: number;
+  sequence: number;
+}
+
+export interface OdometerPhoto {
+  id: number;
+  file_name: string;
+  uploaded_at?: string | null;
+}
+
+export interface VehicleTypeOption {
+  id: number;
+  code: string;
+  name: string;
+  capacity_kg?: number | null;
+  capacity_cbm?: number | null;
 }

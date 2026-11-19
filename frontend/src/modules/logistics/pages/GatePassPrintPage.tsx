@@ -1,7 +1,7 @@
 import { useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { PrintTemplate, type PrintColumn, type PrintField } from "@/shared/components";
-import { fmtDate, fmtDateRange } from "@/shared/datetime";
+import { fmtDate } from "@/shared/datetime";
 import { displayUom } from "@/modules/indents/displayFormat";
 import { transportApi } from "../api";
 import { carriageLabel, modeLabel } from "../components/modeCopy";
@@ -111,7 +111,8 @@ export function GatePassPrintPage() {
         { label: "Consignment", value: dash(doc.consignment_no), mono: true },
         { label: "Carriage", value: carriageLabel(doc.carriage_mode) },
         { label: "Arrangement", value: modeLabel(doc.mode) },
-        { label: "Expected delivery", value: fmtDateRange(doc.expected_delivery_from, doc.expected_delivery) },
+        { label: "Dispatch date", value: doc.expected_delivery_from ? fmtDate(doc.expected_delivery_from) : "—" },
+        { label: "Expected delivery", value: doc.expected_delivery ? fmtDate(doc.expected_delivery) : "—" },
       ]}
       blocks={[
         {
@@ -141,6 +142,21 @@ export function GatePassPrintPage() {
            a courier or third-party leg, the desk on the two we drive ourselves. WHICH
            boxes appear belongs to the mode, not to this page. */
         { title: "Who is carrying it", fields: carrying },
+        // Own vehicle (2026-11-20): the type, and everyone on board — the gate checks
+        // each face against this list before the vehicle leaves.
+        ...(doc.mode === "OWN_VEHICLE" && (doc.crew?.length || doc.vehicle_type_name) ? [{
+          title: `On board${doc.crew?.length ? ` · ${doc.crew.length}` : ""}`,
+          columns: 2 as const,
+          fields: [
+            ...(doc.vehicle_type_name ? [{ label: "Vehicle type", value: doc.vehicle_type_name }] : []),
+            ...(doc.odometer_start != null
+              ? [{ label: "Odometer at start", value: `${doc.odometer_start.toLocaleString("en-IN")} km` }] : []),
+            ...(doc.crew ?? []).map((person) => ({
+              label: person.role === "DRIVER" ? "Driver" : `Helper ${person.sequence}`,
+              value: [person.name, person.phone, person.id_number].filter(Boolean).join(" · "),
+            })),
+          ],
+        }] : []),
       ]}
       columns={columns}
       items={items.map((line) => {

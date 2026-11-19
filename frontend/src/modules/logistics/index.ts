@@ -55,6 +55,7 @@ export { LogisticsActivityPage } from "./pages/LogisticsActivityPage";
  *  whichever menu it hangs from. The old `/settings/logistics-vendors` path still
  *  resolves to this same screen. */
 export { LogisticsVendorsPage } from "./pages/LogisticsVendorsPage";
+export { LogisticsMastersPage } from "./pages/LogisticsMastersPage";
 
 export { CarrierLayout } from "./portal/CarrierLayout";
 export { CarrierLoginPage } from "./portal/CarrierLoginPage";

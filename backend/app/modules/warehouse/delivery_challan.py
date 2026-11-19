@@ -1,4 +1,4 @@
-"""The Delivery Challan (2026-11-19) — the paper that travels with a DISPATCH.
+"""The Delivery Challan (2026-11-19, reshaped 2026-11-20) — the paper that travels with a DISPATCH.
 
 One challan per dispatch, numbered with the DISPATCH number (the gate pass, the DSP
 series), never a consignment's: one truck can carry several consignments — a
@@ -95,7 +95,8 @@ def _line_key(row: m.DispatchItem, price: Decimal) -> tuple:
             row.model_id or 0, str(price))
 
 
-def _summarise_lines(rows: list[m.DispatchItem], facts: dict[int, dict]) -> list[dict]:
+def _summarise_lines(rows: list[m.DispatchItem], facts: dict[int, dict], *,
+                     with_codes: bool = True) -> list[dict]:
     lines: OrderedDict[tuple, dict] = OrderedDict()
     for row in rows:
         qty = _d(row.quantity)
@@ -124,7 +125,7 @@ def _summarise_lines(rows: list[m.DispatchItem], facts: dict[int, dict]) -> list
             }
         line["quantity"] += qty
         code = row.box_code or row.serial_no or row.imei_no
-        if code:
+        if code and with_codes:
             line["codes"].append(code)
     for line in lines.values():
         line["amount"] = (line["quantity"] * line["unit_price"]).quantize(Decimal("0.01"))
@@ -232,6 +233,13 @@ async def delivery_challan(db: AsyncSession, tr_id: int) -> dict:
     item_ids = {row.item_id for d in dispatches for row in d.items}
     facts = await _item_facts(db, item_ids)
     blocks = [await _consignment_block(db, d, facts) for d in dispatches]
+    # What the challan PRINTS (2026-11-20): one table for the whole load, the same item
+    # and batch at the same price added up across every consignment and package, and
+    # NO codes — no asset, consumable, serial or IMEI, no box or package numbers. The
+    # per-consignment blocks above stay in the payload for any reader that wants them.
+    every_row = sorted((row for d in dispatches for row in d.items),
+                       key=lambda r: (r.dispatch_id, r.line_no or 0, r.id))
+    lines = _summarise_lines(every_row, facts, with_codes=False)
 
     # The godown is the dispatch's own source: the shipment's, else the first
     # consignment's. One truck leaves one gate.
@@ -265,9 +273,14 @@ async def delivery_challan(db: AsyncSession, tr_id: int) -> dict:
         "eway_bill_no": tr.eway_bill_no,
         "expected_delivery_from": tr.expected_delivery_from,
         "expected_delivery": tr.expected_delivery,
+        # The day the load left; before it has, the planned dispatch date.
+        "dispatch_date": (tr.dispatched_at.date() if tr.dispatched_at
+                          else tr.expected_delivery_from),
+        "vehicle_type_name": getattr(tr, "vehicle_type_name", None),
         "project_name": tr.project_name,
         "remarks": tr.remarks,
         "consignments": blocks,
+        "lines": lines,
         "totals": {
             "consignments": len(blocks),
             "packages": sum(b["package_count"] or 0 for b in blocks),

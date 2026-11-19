@@ -1125,27 +1125,35 @@ on Stock Segregation > Lots carries Repack (amber when a pack is under its floor
 supplier portal's Profile > Packing tab (`GET /api/supplier/items/packing`) lists the
 hierarchies of the vendor's own mapped items only, scoped on the token.
 
-### Delivery Challan, delivery window, gate pass preview (2026-11-19)
+### Delivery Challan, dispatch dates, own vehicle, gate pass preview (2026-11-19/20)
 
 - **Delivery Challan** (`warehouse/delivery_challan.py`, `GET /api/warehouse/delivery-challan/
   {tr_id}`, `transport.view`; screen `DeliveryChallanPrintPage`, button on the shipment).
-  ONE per DISPATCH, numbered with the dispatch (gate pass, DSP) number — never a
-  consignment's, since a trip carries several. One block per consignment, one table per
-  package: Product name, Qty, HSN, Unit price, Amount. Every line priced: the line's
-  rate, else the item master's purchase price (`price_source`, "†" on paper). Godown
-  address = the SOURCE warehouse's master address. Read, never stored. Lives in
-  warehouse because it reads consignments (rule 5).
-- **Expected delivery is a window**: `expected_delivery_from` (start) beside
-  `expected_delivery` (end, unchanged meaning) on `out_dispatches` and
-  `lgs_transport_requests` (`e2a4c6b8d0f3`). Both required on a consignment a person
-  saves (`_guard_delivery_window(required=True)`); the automatic one cut at picking states
-  none. `fmtDateRange` writes it.
-- **Transfer card** (`TransferContextStrip`, rules in `transferFacts.ts`): source →
-  destination; project OR department, never both (project wins); SAC and vehicle only
-  for an LIP (`destination_needs_vehicle_and_sac` on the transfer context).
-- **Gate pass number shown before the press**: `numbering.peek_next_number` (read only,
-  mirrors `next_number`) behind `GET /api/transport/dispatch-number/preview`. A preview —
-  the press still draws with `next_number`.
+  ONE per DISPATCH, numbered with the dispatch (gate pass, DSP) number. Prints ONE table
+  (`lines`): Product name, Qty, HSN, Unit price, Amount — item + batch + price added up
+  across every consignment and package, with NO consignment, package or box numbers and
+  NO codes (asset, consumable, serial, IMEI) (decided 2026-11-20). Every line priced:
+  the line's rate, else the item master's purchase price ("†"). The note "Not for sale,
+  only for own consumption" is a faint SVG tile on the table's background, repeated
+  down it. Godown address = the SOURCE warehouse's master address. Read, never stored.
+- **Dispatch date and Expected delivery** are two named, required dates on a consignment
+  a person saves (`DispatchScheduleField`): `expected_delivery_from` = the planned
+  DISPATCH DATE, `expected_delivery` = when it should arrive (`e2a4c6b8d0f3`). The form's
+  own date is "Consignment date". Lists show both as columns (`ScheduleDate`, "2 days
+  late" only while still owed — `schedulePending`).
+- **Own vehicle** (`logistics/own_vehicle.py`, `f3b5d7c9e1a2`): a vehicle type from
+  Logistics › Masters › Vehicle Types (`mst_vehicle_types`, shared masters CRUD,
+  `master.vehicle_type.manage`, inherits `transport.create`); a crew — the count first,
+  then one card per person in `lgs_shipment_crew`, names + 10-digit mobiles, exactly one
+  driver (copied to `driver_name`/`driver_phone`), `crew_problems` = `crew.ts`; and the
+  odometer — START (before it leaves) and END (≥ START, after) via
+  `POST /api/transport/{id}/odometer`, each with a dial photo (`ODOMETER_START/END`
+  attachments). Release refuses without type, crew and START; the desk's "delivered"
+  refuses without END. Shipment page: `OwnVehicleTrip`; gate pass: "On board".
+- **Transfer card** (`TransferContextStrip`, `transferFacts.ts`): source → destination;
+  project OR department; SAC and vehicle only for an LIP.
+- **Gate pass number shown before the press**: `numbering.peek_next_number` behind
+  `GET /api/transport/dispatch-number/preview` — a preview; the press still draws.
 
 ### The outward leg (doc Phase D+E), under Logistics
 

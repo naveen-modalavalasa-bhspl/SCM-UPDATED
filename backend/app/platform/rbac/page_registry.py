@@ -364,6 +364,9 @@ PAGES: list[PageDef] = [
     # show events that were actually recorded.
     PageDef("logistics_activity", "/logistics/activity", "Activity Ledger",
             parent="grp_logistics", module="logistics", icon="history", sort_order=6),
+    # The logistics desk's own masters (2026-11-20): Vehicle Types to begin with.
+    PageDef("logistics_masters", "/logistics/masters", "Masters",
+            parent="grp_logistics", module="logistics", icon="database", sort_order=7),
     # Shipment Tracking, Acknowledgements and Exceptions are NOT listed here any more,
     # and that is deliberate rather than an omission.
     #

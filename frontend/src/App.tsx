@@ -109,6 +109,7 @@ const LiveTrackingPage = lazy(() => import("@/modules/reports/pages/LiveTracking
 const LogisticsActivityPage = lazy(() => import("@/modules/logistics").then((m) => ({ default: m.LogisticsActivityPage })));
 const LogisticsOverviewPage = lazy(() => import("@/modules/logistics").then((m) => ({ default: m.LogisticsOverviewPage })));
 const LogisticsVendorsPage = lazy(() => import("@/modules/logistics").then((m) => ({ default: m.LogisticsVendorsPage })));
+const LogisticsMastersPage = lazy(() => import("@/modules/logistics").then((m) => ({ default: m.LogisticsMastersPage })));
 const MRConsolidationPage = lazy(() => import("@/modules/procurement/pages/MRConsolidationPage").then((m) => ({ default: m.MRConsolidationPage })));
 const MailPage = lazy(() => import("@/modules/admin/pages/MailPage").then((m) => ({ default: m.MailPage })));
 const MastersPage = lazy(() => import("@/modules/masters/pages/MastersPage").then((m) => ({ default: m.MastersPage })));
@@ -568,6 +569,7 @@ function AppRoutes() {
             /settings/logistics-vendors path below still resolves, so existing links
             and bookmarks keep working. */}
         <Route path="logistics/vendors" element={<LogisticsVendorsPage />} />
+        <Route path="logistics/masters" element={<LogisticsMastersPage />} />
         <Route path="grn/*" element={<WarehouseModule />} />
         <Route path="stock/*" element={<WarehouseModule />} />
         <Route path="issues/*" element={<WarehouseModule />} />

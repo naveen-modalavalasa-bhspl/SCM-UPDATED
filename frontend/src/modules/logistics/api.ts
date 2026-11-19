@@ -11,7 +11,7 @@ import type {
   TransportSummary, TRInput, TRListRow, ConsolidatedTrip, PlannerPolicyResponse,
   PolicyOverrides, TripEvaluation, TripMapNetwork, TripMapPoint, TripPage,
   TripRecommendations, VehicleProfile, PointCandidates, ConsignmentPackages,
-  DeliveryChallan,
+  DeliveryChallan, VehicleTypeOption,
 } from "./transportTypes";
 
 export const grnApi = {
@@ -75,7 +75,18 @@ export const transportApi = {
    * back for. Both come from the backend for the same reason `modes` does. */
   dispatchPolicy: () =>
     api.get<DispatchPolicy>("/api/transport/dispatch-policy").then((r) => r.data),
-  /** The Delivery Challan of one dispatch: every consignment, package by package. */
+  /** Own vehicle: the active vehicle types (Logistics › Masters). */
+  vehicleTypes: () =>
+    api.get<VehicleTypeOption[]>("/api/transport/vehicle-types").then((r) => r.data),
+  /** One odometer reading (START or END) with its photo; returns the shipment. */
+  recordOdometer: (trId: number, reading: "START" | "END", value: number, file?: File | null) => {
+    const body = new FormData();
+    body.append("reading", reading);
+    body.append("value", String(value));
+    if (file) body.append("file", file);
+    return api.post<TransportRequest>(`/api/transport/${trId}/odometer`, body).then((r) => r.data);
+  },
+  /** The Delivery Challan of one dispatch: the whole load in one table. */
   deliveryChallan: (trId: number) =>
     api.get<DeliveryChallan>(`/api/warehouse/delivery-challan/${trId}`).then((r) => r.data),
   /** The gate pass (DSP) number the Dispatch press will issue — a preview, nothing is
