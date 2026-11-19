@@ -59,6 +59,7 @@ const PRINT_CSS = `
     /* @page already pays for the sheet's margin — the on-screen padding would
        otherwise be charged a second time and push the table off the page. */
     .sheet-body { padding: 0 0 13mm 0 !important; }
+    .print-watermark { position: fixed !important; }
     .print-footer { position: fixed; bottom: 0; left: 0; right: 0;
                     padding-left: 0 !important; padding-right: 0 !important; }
     thead { display: table-header-group; }
@@ -124,6 +125,10 @@ export interface PrintTemplateProps {
   autoPrint?: boolean;
   /** The line under the footer rule. The system-generated note unless replaced. */
   footerNote?: ReactNode;
+  /** A line under the letterhead address — a godown or dispatch address. */
+  letterheadExtra?: ReactNode;
+  /** Faint diagonal text across the sheet — "not for sale" and the like. */
+  watermark?: string;
 }
 
 function Field({ label, value, fullWidth, mono }: PrintField) {
@@ -176,7 +181,7 @@ export function PrintPanel({ title, tone = "plain", children }: {
   );
 }
 
-function Th({ children, align = "left", width }: {
+export function Th({ children, align = "left", width }: {
   children?: ReactNode; align?: "left" | "right" | "center"; width?: string;
 }) {
   return (
@@ -184,6 +189,25 @@ function Th({ children, align = "left", width }: {
         className="px-2 py-[6px] text-[8.5px] font-bold uppercase tracking-[0.08em]">
       {children}
     </th>
+  );
+}
+
+/** The sheet's own colours and gradient, for a document drawing tables of its own. */
+export const PRINT_TONE = { ...BRAND, sweep: SWEEP } as const;
+
+/**
+ * Faint diagonal text across the paper, under the content — the way the printed
+ * challan books carry "not for sale". `position: fixed` in print so it lands on
+ * every page, absolute on screen so it sits on the sheet.
+ */
+function Watermark({ text }: { text: string }) {
+  return (
+    <div aria-hidden className="print-watermark pointer-events-none absolute inset-0 flex items-center justify-center overflow-hidden">
+      <div className="whitespace-nowrap text-[30px] font-black uppercase tracking-[0.08em]"
+           style={{ color: BRAND.brand, opacity: 0.06, transform: "rotate(-32deg)" }}>
+        {text}
+      </div>
+    </div>
   );
 }
 
@@ -209,6 +233,8 @@ export function PrintTemplate({
   signatures = DEFAULT_SIGNATURES,
   autoPrint = true,
   footerNote,
+  letterheadExtra,
+  watermark,
 }: PrintTemplateProps) {
   const { me } = useAuth();
   // Only fetch when the caller has not already got the settings row in hand.
@@ -274,8 +300,9 @@ export function PrintTemplate({
       {/* A print sheet is laid out for A4, not for a 375px viewport — its only
           consumer is window.print(). */}
       {/* mobile-ok: print sheet, fixed A4 width by design */}
-      <div className="sheet mx-auto my-6 bg-white shadow-md" style={{ width: "210mm", color: BRAND.ink }}>
-        <div className="sheet-body px-[11mm] py-[10mm]">
+      <div className="sheet relative mx-auto my-6 bg-white shadow-md" style={{ width: "210mm", color: BRAND.ink }}>
+        {watermark && <Watermark text={watermark} />}
+        <div className="sheet-body relative px-[11mm] py-[10mm]">
 
           {/* ── Letterhead ─────────────────────────────────────────────── */}
           <header className="avoid-break flex items-start justify-between gap-6">
@@ -298,6 +325,11 @@ export function PrintTemplate({
               {(company.phone || company.email) && (
                 <div className="mt-0.5 text-[9px]" style={{ color: BRAND.muted }}>
                   {[company.phone, company.email].filter(Boolean).join("  ·  ")}
+                </div>
+              )}
+              {letterheadExtra && (
+                <div className="ml-auto mt-1 max-w-[92mm] text-[9px] leading-[1.45]" style={{ color: BRAND.muted }}>
+                  {letterheadExtra}
                 </div>
               )}
             </div>
@@ -354,6 +386,9 @@ export function PrintTemplate({
           ))}
 
           {/* ── Line items ─────────────────────────────────────────────── */}
+          {/* A document with tables of its own (one per package, say) passes no
+              columns and draws them as children instead. */}
+          {columns.length > 0 && (
           <section className="mt-5">
             <SectionTitle note={`${items.length} line${items.length === 1 ? "" : "s"}`}>
               {itemsTitle}
@@ -414,6 +449,7 @@ export function PrintTemplate({
               )}
             </table>
           </section>
+          )}
 
           {/* ── Whatever this document adds of its own ─────────────────── */}
           {children}

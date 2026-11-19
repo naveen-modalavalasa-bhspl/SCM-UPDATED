@@ -16719,6 +16719,30 @@ async def get_dispatch(db: AsyncSession, dispatch_id: int, user=None) -> m.Dispa
     return await _decorate_dispatch_destination(db, dispatch)
 
 
+def _guard_delivery_window(dispatch_date, start, end, *, required: bool) -> None:
+    """The expected delivery WINDOW (2026-11-19): a start and an end date.
+
+    `end` is the old `expected_delivery`. A consignment states both (`required`); the
+    other write paths may state either or neither, and whatever IS stated must make
+    sense: neither date before the goods leave, and the window not running backwards.
+    """
+    if required and (start is None or end is None):
+        missing = " and ".join(name for name, value in
+                               (("the start", start), ("the end", end)) if value is None)
+        raise ValidationError(
+            f"Give the expected delivery window — {missing} date "
+            f"{'is' if ' and ' not in missing else 'are'} missing.")
+    if start is not None and dispatch_date is not None and start < dispatch_date:
+        raise ValidationError(
+            f"Delivery cannot start on {start:%d %b %Y} — the consignment only leaves on "
+            f"{dispatch_date:%d %b %Y}. Pick a start on or after it.")
+    if start is not None and end is not None and end < start:
+        raise ValidationError(
+            f"The delivery window ends ({end:%d %b %Y}) before it starts "
+            f"({start:%d %b %Y}). Pick an end date on or after the start.")
+    _guard_expected_delivery(dispatch_date, end)
+
+
 def _guard_expected_delivery(dispatch_date, expected_delivery) -> None:
     """Goods cannot arrive before they leave.
 
@@ -17037,7 +17061,8 @@ async def _build_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -
                 "indent — the goods are already there. Acknowledge the issue instead "
                 "of raising a consignment, or pick a destination to forward it on."
             )
-    _guard_expected_delivery(data.dispatch_date, data.expected_delivery)
+    _guard_delivery_window(data.dispatch_date, data.expected_delivery_from,
+                           data.expected_delivery, required=False)
     vendor = await db.get(Vendor, data.vendor_id) if data.vendor_id else None
     _, destination_office_name = await _issue_destination(db, issue)
     project_id, project_name = await _consignment_project(db, issue, data.project_id)
@@ -17083,6 +17108,7 @@ async def _build_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -
         lr_no=data.lr_no,
         eway_bill_no=data.eway_bill_no,
         freight_amount=data.freight_amount,
+        expected_delivery_from=data.expected_delivery_from,
         expected_delivery=data.expected_delivery,
         status=DispatchStatus.PACKED.value,
         remarks=data.remarks,
@@ -17103,6 +17129,10 @@ async def _build_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -
 
 
 async def create_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -> m.Dispatch:
+    # A person raising a consignment states the whole delivery window; the automatic
+    # one cut at picking (`_build_consignment` direct) has nobody to ask and states none.
+    _guard_delivery_window(data.dispatch_date, data.expected_delivery_from,
+                           data.expected_delivery, required=True)
     dispatch = await _build_consignment(db, data, user)
     await db.commit()
     return await get_dispatch(db, dispatch.id)
@@ -17126,7 +17156,8 @@ async def update_consignment(db: AsyncSession, dispatch_id: int, data: s.Consign
     wh = await _warehouse(db, issue.warehouse_id)
     to_wh = await _consignment_destination(db, issues, data, wh)
     mr_by_issue = {row.id: _single_mr(await _issue_mr_sources(db, row)) for row in issues}
-    _guard_expected_delivery(data.dispatch_date, data.expected_delivery)
+    _guard_delivery_window(data.dispatch_date, data.expected_delivery_from,
+                           data.expected_delivery, required=True)
     vendor = await db.get(Vendor, data.vendor_id) if data.vendor_id else None
     _, destination_office_name = await _issue_destination(db, issue)
 
@@ -17161,6 +17192,7 @@ async def update_consignment(db: AsyncSession, dispatch_id: int, data: s.Consign
     dispatch.lr_no = data.lr_no
     dispatch.eway_bill_no = data.eway_bill_no
     dispatch.freight_amount = data.freight_amount
+    dispatch.expected_delivery_from = data.expected_delivery_from
     dispatch.expected_delivery = data.expected_delivery
     dispatch.remarks = data.remarks
 
@@ -17184,7 +17216,8 @@ async def create_dispatch(db: AsyncSession, data: s.DispatchWrite, user) -> m.Di
         raise ValidationError("A dispatch with no lines has nothing to send")
 
     to_wh = await db.get(Warehouse, data.to_warehouse_id) if data.to_warehouse_id else None
-    _guard_expected_delivery(data.dispatch_date, data.expected_delivery)
+    _guard_delivery_window(data.dispatch_date, data.expected_delivery_from,
+                           data.expected_delivery, required=False)
 
     vendor = await db.get(Vendor, data.vendor_id) if data.vendor_id else None
     ref_issue = None
@@ -17246,6 +17279,7 @@ async def create_dispatch(db: AsyncSession, data: s.DispatchWrite, user) -> m.Di
         driver_name=data.driver_name, driver_phone=data.driver_phone,
         lr_no=data.lr_no, eway_bill_no=data.eway_bill_no,
         freight_amount=data.freight_amount,
+        expected_delivery_from=data.expected_delivery_from,
         expected_delivery=data.expected_delivery,
         status=DispatchStatus.DRAFT.value,
         remarks=data.remarks,
@@ -17311,6 +17345,7 @@ async def update_dispatch(db: AsyncSession, dispatch_id: int, data: s.DispatchWr
     dispatch.lr_no = data.lr_no
     dispatch.eway_bill_no = data.eway_bill_no
     dispatch.freight_amount = data.freight_amount
+    dispatch.expected_delivery_from = data.expected_delivery_from
     dispatch.expected_delivery = data.expected_delivery
     dispatch.remarks = data.remarks
 
@@ -27147,6 +27182,19 @@ async def issue_transfer_context(db: AsyncSession, issue_id: int) -> dict:
     point = await _requesting_point(db, issue)
     sto_no = getattr(issue, "sto_no", None)
     indent_type = getattr(issue, "indent_type", None)
+    # Where it goes, as a ROW, for its tier: only an LIP (the bottom rung) runs a
+    # vehicle and carries an SAC, so the card leaves both out for an MDP or a
+    # warehouse (2026-11-19). The same rule `_decorate_issue_destination` serves on
+    # the issue itself; None when no point resolves, which keeps both, as before.
+    target = point
+    sto_target_id = getattr(issue, "sto_to_warehouse_id", None)
+    if target is None and sto_target_id:
+        target = await db.get(Warehouse, sto_target_id)
+    needs_vehicle_and_sac = (
+        None if target is None
+        else stock_locations.tier_of(target.warehouse_type) == max(stock_locations.LocationTier))
+    # And where it comes FROM, so the card names both ends of the journey.
+    source = await db.get(Warehouse, issue.warehouse_id) if issue.warehouse_id else None
     kind = ("STR" if indent_type == _STR_INDENT_TYPE else "INDENT") if issue.indent_id         else ("STO" if sto_no else "DIRECT")
     return {
         "issue_id": issue.id, "issue_no": issue.issue_no,
@@ -27155,7 +27203,12 @@ async def issue_transfer_context(db: AsyncSession, issue_id: int) -> dict:
         "str_no": issue.indent_no if kind == "STR" else getattr(issue, "sto_str_no", None),
         "sto_no": sto_no,
         "indent_no": issue.indent_no if kind == "INDENT" else None,
-        "from_warehouse_name": issue.warehouse_name,
+        "from_warehouse_id": issue.warehouse_id,
+        "from_warehouse_name": issue.warehouse_name or getattr(source, "name", None),
+        "from_warehouse_code": getattr(source, "code", None),
+        "from_warehouse_type": getattr(source, "warehouse_type", None),
+        "destination_warehouse_type": getattr(target, "warehouse_type", None),
+        "destination_needs_vehicle_and_sac": needs_vehicle_and_sac,
         "destination_warehouse_id": getattr(point, "id", None)
             or getattr(issue, "sto_to_warehouse_id", None),
         "destination_warehouse_name": getattr(point, "name", None)

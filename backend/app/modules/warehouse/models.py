@@ -613,6 +613,10 @@ class Dispatch(Base):
     total_weight_kg = Column(QTY, nullable=False, default=0)
     total_value = Column(MONEY, nullable=False, default=0)
 
+    # The delivery WINDOW (2026-11-19): `expected_delivery_from` is its start and
+    # `expected_delivery` its end — the end keeps the old column so every reader that
+    # sorts or compares on it keeps its meaning. A row written before this has no start.
+    expected_delivery_from = Column(Date, nullable=True)
     expected_delivery = Column(Date, nullable=True)
     delivered_at = Column(DateTime, nullable=True)
     acknowledged_by_name = Column(String(200), nullable=True)

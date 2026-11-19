@@ -1125,6 +1125,28 @@ on Stock Segregation > Lots carries Repack (amber when a pack is under its floor
 supplier portal's Profile > Packing tab (`GET /api/supplier/items/packing`) lists the
 hierarchies of the vendor's own mapped items only, scoped on the token.
 
+### Delivery Challan, delivery window, gate pass preview (2026-11-19)
+
+- **Delivery Challan** (`warehouse/delivery_challan.py`, `GET /api/warehouse/delivery-challan/
+  {tr_id}`, `transport.view`; screen `DeliveryChallanPrintPage`, button on the shipment).
+  ONE per DISPATCH, numbered with the dispatch (gate pass, DSP) number — never a
+  consignment's, since a trip carries several. One block per consignment, one table per
+  package: Product name, Qty, HSN, Unit price, Amount. Every line priced: the line's
+  rate, else the item master's purchase price (`price_source`, "†" on paper). Godown
+  address = the SOURCE warehouse's master address. Read, never stored. Lives in
+  warehouse because it reads consignments (rule 5).
+- **Expected delivery is a window**: `expected_delivery_from` (start) beside
+  `expected_delivery` (end, unchanged meaning) on `out_dispatches` and
+  `lgs_transport_requests` (`e2a4c6b8d0f3`). Both required on a consignment a person
+  saves (`_guard_delivery_window(required=True)`); the automatic one cut at picking states
+  none. `fmtDateRange` writes it.
+- **Transfer card** (`TransferContextStrip`, rules in `transferFacts.ts`): source →
+  destination; project OR department, never both (project wins); SAC and vehicle only
+  for an LIP (`destination_needs_vehicle_and_sac` on the transfer context).
+- **Gate pass number shown before the press**: `numbering.peek_next_number` (read only,
+  mirrors `next_number`) behind `GET /api/transport/dispatch-number/preview`. A preview —
+  the press still draws with `next_number`.
+
 ### The outward leg (doc Phase D+E), under Logistics
 
 Logistics runs the whole outward leg, in the order it happens:

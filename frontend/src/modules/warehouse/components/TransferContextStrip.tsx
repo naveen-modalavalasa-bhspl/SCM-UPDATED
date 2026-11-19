@@ -1,9 +1,10 @@
 import {
-  ArrowLeftRight, Building2, Car, ClipboardList, FolderKanban, Lock, MapPin, PackageOpen,
-  Phone, Truck, UserRound,
+  ArrowLeftRight, ArrowRight, Building2, Car, ClipboardList, FolderKanban, Lock, MapPin,
+  PackageOpen, Phone, Truck, UserRound, Warehouse,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { TransferContext } from "../types";
+import { scopeFact, smallFacts, tierLabel, type SmallFact } from "./transferFacts";
 
 /**
  * What a consignment, a dispatch and an in-person handover inherit from the material
@@ -11,6 +12,12 @@ import type { TransferContext } from "../types";
  * and project, who it is issued to, the SAC and the vehicle. Served by
  * `GET /issues/{id}/transfer-context` (or the consignment's), never retyped — each fact
  * was decided once, on the issue, and is shown here locked.
+ *
+ * Laid out as the journey (2026-11-19): source → destination on one band, who it is
+ * issued to beside it, and underneath only the facts that APPLY — project or
+ * department (never both), and SAC and vehicle for an LIP only. Which ones is
+ * `transferFacts.ts`; the row stretches over whatever is left, so nothing reads as a
+ * gap or a box somebody forgot to fill in.
  */
 const KIND: Record<TransferContext["kind"], { label: string; icon: LucideIcon; tone: string }> = {
   STR: { label: "STR", icon: ArrowLeftRight, tone: "bg-info-bg text-info" },
@@ -44,6 +51,31 @@ export function TransferContextStrip({ context, title = "Carried from the materi
   const kind = KIND[context.kind] ?? KIND.DIRECT;
   const KindIcon = kind.icon;
   const person = [context.issued_to_code, context.issued_to_phone].filter(Boolean).join(" · ");
+  const destinationName = context.destination_warehouse_name ?? context.destination_office_name;
+  const destinationSub = [
+    tierLabel(context.destination_warehouse_type),
+    context.destination_warehouse_name && context.destination_office_name
+      && context.destination_office_name !== context.destination_warehouse_name
+      ? context.destination_office_name : null,
+  ].filter(Boolean).join(" · ");
+  const sourceSub = [tierLabel(context.from_warehouse_type), context.from_warehouse_code]
+    .filter(Boolean).join(" · ");
+  const scope = scopeFact(context);
+  const facts = smallFacts(context);
+  // One column per fact that applies, so one fact spans the row and three share it.
+  const factCols: Record<number, string> = { 2: "sm:grid-cols-2", 3: "sm:grid-cols-3" };
+
+  const renderFact = (fact: SmallFact) => {
+    if (fact === "scope" && scope) {
+      return scope.kind === "project"
+        ? <Fact key="scope" icon={FolderKanban} label="Project" value={scope.value} />
+        : <Fact key="scope" icon={Building2} label="Department" value={scope.value} />;
+    }
+    if (fact === "sac") return <Fact key="sac" icon={Phone} label="Service area code" value={context.sac} />;
+    if (fact === "vehicle") return <Fact key="vehicle" icon={Car} label="Vehicle" value={context.vehicle_number} />;
+    return null;
+  };
+
   return (
     <section className="mb-5 overflow-hidden rounded-2xl border border-line bg-gradient-to-br from-content2/70 via-content1 to-content1 shadow-sm"
              aria-label="Transfer details">
@@ -67,19 +99,58 @@ export function TransferContextStrip({ context, title = "Carried from the materi
           {title} <span className="font-mono font-semibold text-ink-700">{context.issue_no}</span>
         </span>
       </header>
-      <div className="grid grid-cols-1 gap-2 p-3 sm:grid-cols-2 lg:grid-cols-4">
-        <Fact icon={MapPin} label="Destination" wide
-              value={context.destination_warehouse_name ?? context.destination_office_name}
-              sub={context.destination_warehouse_name && context.destination_office_name
-                && context.destination_office_name !== context.destination_warehouse_name
-                ? context.destination_office_name : null} />
-        <Fact icon={UserRound} label="Issued to" wide value={context.issued_to_name}
-              sub={person || null} />
-        <Fact icon={Building2} label="Department" value={context.department_name} />
-        <Fact icon={FolderKanban} label="Project" value={context.project_name} />
-        <Fact icon={Phone} label="Service area code" value={context.sac} />
-        <Fact icon={Car} label="Vehicle" value={context.vehicle_number} />
+      <div className="space-y-2 p-3">
+        <div className="grid grid-cols-1 gap-2 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+          {/* The journey, both ends on one band: where it leaves from and where it
+              is going. The source used to be missing from the card altogether. */}
+          <div className="grid grid-cols-1 items-stretch gap-2 rounded-xl border border-line/70 bg-content1 p-1.5 sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]">
+            <RouteEnd icon={Warehouse} label="Source" value={context.from_warehouse_name}
+                      sub={sourceSub || null} />
+            <div className="hidden items-center justify-center sm:flex" aria-hidden>
+              <span className="grid h-7 w-7 place-items-center rounded-full bg-brand/10 text-brand">
+                <ArrowRight className="h-4 w-4" />
+              </span>
+            </div>
+            <RouteEnd icon={MapPin} label="Destination" value={destinationName}
+                      sub={destinationSub || null} accent />
+          </div>
+          {/* One fact left (a project, say) sits under "Issued to" rather than
+              stretching alone across a row of its own. */}
+          {facts.length === 1 ? (
+            <div className="grid grid-cols-1 gap-2">
+              <Fact icon={UserRound} label="Issued to" value={context.issued_to_name}
+                    sub={person || null} />
+              {renderFact(facts[0])}
+            </div>
+          ) : (
+            <Fact icon={UserRound} label="Issued to" value={context.issued_to_name}
+                  sub={person || null} />
+          )}
+        </div>
+        {facts.length > 1 && (
+          <div className={`grid grid-cols-1 gap-2 ${factCols[facts.length] ?? "sm:grid-cols-3"}`}>
+            {facts.map(renderFact)}
+          </div>
+        )}
       </div>
     </section>
+  );
+}
+
+function RouteEnd({ icon: Icon, label, value, sub, accent }: {
+  icon: LucideIcon; label: string; value?: string | null; sub?: string | null; accent?: boolean;
+}) {
+  return (
+    <div className={`flex min-w-0 items-start gap-2.5 rounded-lg px-2.5 py-2 ${accent ? "bg-brand/[0.04]" : ""}`}>
+      <Icon className={`mt-0.5 h-4 w-4 shrink-0 ${accent ? "text-brand" : "text-muted"}`} aria-hidden />
+      <div className="min-w-0">
+        <p className="text-[11px] font-semibold uppercase tracking-wider text-muted">{label}</p>
+        <p className={`truncate text-sm font-semibold ${value ? "text-ink" : "text-muted"}`}
+           title={value ?? undefined}>
+          {value || "—"}
+        </p>
+        {sub && <p className="truncate text-xs text-muted" title={sub}>{sub}</p>}
+      </div>
+    </div>
   );
 }

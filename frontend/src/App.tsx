@@ -85,6 +85,7 @@ const FulfilmentBatchPage = lazy(() => import("@/modules/inventory/pages/Fulfilm
 const FulfilmentDeskPage = lazy(() => import("@/modules/inventory/pages/FulfilmentDeskPage").then((m) => ({ default: m.FulfilmentDeskPage })));
 const GRNPrintPage = lazy(() => import("@/modules/warehouse/pages/GRNPrintPage").then((m) => ({ default: m.GRNPrintPage })));
 const GatePassPrintPage = lazy(() => import("@/modules/logistics/pages/GatePassPrintPage").then((m) => ({ default: m.GatePassPrintPage })));
+const DeliveryChallanPrintPage = lazy(() => import("@/modules/logistics/pages/DeliveryChallanPrintPage").then((m) => ({ default: m.DeliveryChallanPrintPage })));
 const GroupsPage = lazy(() => import("@/modules/rbac/pages/GroupsPage").then((m) => ({ default: m.GroupsPage })));
 const HomePage = lazy(() => import("@/modules/home/pages/HomePage").then((m) => ({ default: m.HomePage })));
 const IndentBoardPage = lazy(() => import("@/modules/indents/pages/BoardPage").then((m) => ({ default: m.IndentBoardPage })));
@@ -380,6 +381,12 @@ function AppRoutes() {
       <Route
         path="/logistics/shipments/:id/gate-pass"
         element={me ? <GatePassPrintPage /> : <Navigate to="/login" replace />}
+      />
+      {/* The Delivery Challan of the same dispatch: every consignment on the truck,
+          package by package, priced. Outside the shell, like the gate pass. */}
+      <Route
+        path="/logistics/shipments/:id/delivery-challan"
+        element={me ? <DeliveryChallanPrintPage /> : <Navigate to="/login" replace />}
       />
 
         <Route element={me ? <AppLayout /> : (

@@ -241,6 +241,7 @@ async def issue_stock(db: AsyncSession, issue_id: int, user) -> Issue:
 # but keeping the import here makes it obvious that these names belong to the other
 # surface and are only passing through.
 from app.modules.logistics.transport import (  # noqa: E402
+    preview_dispatch_no,
     accept_award,
     accept_quote,
     acknowledge_tr,

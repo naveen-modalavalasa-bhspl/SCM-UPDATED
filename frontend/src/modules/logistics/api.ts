@@ -11,6 +11,7 @@ import type {
   TransportSummary, TRInput, TRListRow, ConsolidatedTrip, PlannerPolicyResponse,
   PolicyOverrides, TripEvaluation, TripMapNetwork, TripMapPoint, TripPage,
   TripRecommendations, VehicleProfile, PointCandidates, ConsignmentPackages,
+  DeliveryChallan,
 } from "./transportTypes";
 
 export const grnApi = {
@@ -74,6 +75,18 @@ export const transportApi = {
    * back for. Both come from the backend for the same reason `modes` does. */
   dispatchPolicy: () =>
     api.get<DispatchPolicy>("/api/transport/dispatch-policy").then((r) => r.data),
+  /** The Delivery Challan of one dispatch: every consignment, package by package. */
+  deliveryChallan: (trId: number) =>
+    api.get<DeliveryChallan>(`/api/warehouse/delivery-challan/${trId}`).then((r) => r.data),
+  /** The gate pass (DSP) number the Dispatch press will issue — a preview, nothing is
+   * drawn. `final` when the shipment already carries one. */
+  previewDispatchNo: (params: { project_name?: string | null; tr_id?: number | null }) =>
+    api.get<{ number: string; final: boolean }>("/api/transport/dispatch-number/preview", {
+      params: {
+        ...(params.project_name ? { project_name: params.project_name } : {}),
+        ...(params.tr_id ? { tr_id: params.tr_id } : {}),
+      },
+    }).then((r) => r.data),
 
   /** Which of these warehouse consignments already have a transport leg. One call
    * for a whole page of consignments rather than one lookup per row. */

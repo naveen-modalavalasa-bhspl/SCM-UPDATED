@@ -2283,6 +2283,7 @@ class DispatchWrite(BaseModel):
     lr_no: str | None = None
     eway_bill_no: str | None = None
     freight_amount: Decimal | None = None
+    expected_delivery_from: date | None = None
     expected_delivery: date | None = None
     remarks: str | None = None
     items: Annotated[list[DispatchItemWrite], DocumentLines] = []
@@ -2371,6 +2372,7 @@ class ConsignmentWrite(BaseModel):
     lr_no: str | None = None
     eway_bill_no: str | None = None
     freight_amount: Decimal | None = None
+    expected_delivery_from: date | None = None
     expected_delivery: date | None = None
     remarks: str | None = None
     packages: Annotated[list[ConsignmentPackageWrite], DocumentLines] = []
@@ -2549,6 +2551,7 @@ class DispatchRead(_Read):
     total_packages: int
     total_weight_kg: Decimal
     total_value: Decimal
+    expected_delivery_from: date | None = None
     expected_delivery: date | None = None
     delivered_at: datetime | None = None
     acknowledged_by_name: str | None = None

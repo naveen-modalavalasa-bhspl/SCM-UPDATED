@@ -1644,9 +1644,16 @@ export interface TransferContext {
   str_no?: string | null;
   sto_no?: string | null;
   indent_no?: string | null;
+  from_warehouse_id?: number | null;
   from_warehouse_name?: string | null;
+  from_warehouse_code?: string | null;
+  from_warehouse_type?: string | null;
   destination_warehouse_id?: number | null;
   destination_warehouse_name?: string | null;
+  destination_warehouse_type?: string | null;
+  /** True only for an LIP: the one rung that runs a vehicle and carries an SAC.
+   *  Null when no point resolves — both are then shown, as before. */
+  destination_needs_vehicle_and_sac?: boolean | null;
   destination_office_name?: string | null;
   sac?: string | null;
   department_name?: string | null;
@@ -1754,6 +1761,8 @@ export interface Dispatch {
   total_packages: number;
   total_weight_kg: number;
   total_value: number;
+  /** Start of the expected delivery window; `expected_delivery` is its end. */
+  expected_delivery_from?: string | null;
   expected_delivery?: string | null;
   delivered_at?: string | null;
   acknowledged_by_name?: string | null;
@@ -1914,6 +1923,8 @@ export interface DispatchWrite {
   lr_no?: string | null;
   eway_bill_no?: string | null;
   freight_amount?: number | null;
+  /** Start of the expected delivery window; `expected_delivery` is its end. */
+  expected_delivery_from?: string | null;
   expected_delivery?: string | null;
   remarks?: string | null;
   items: DispatchItemWrite[];
@@ -1998,6 +2009,8 @@ export interface ConsignmentWrite {
   lr_no?: string | null;
   eway_bill_no?: string | null;
   freight_amount?: number | null;
+  /** Start of the expected delivery window; `expected_delivery` is its end. */
+  expected_delivery_from?: string | null;
   expected_delivery?: string | null;
   remarks?: string | null;
   packages: ConsignmentPackageWrite[];

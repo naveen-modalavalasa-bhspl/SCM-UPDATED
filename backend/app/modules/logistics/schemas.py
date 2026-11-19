@@ -143,6 +143,7 @@ class TRCreate(BaseModel):
     distance_km: float | None = Field(ge=0, default=None)
     project_id: int | None = None
     project_name: str | None = None
+    expected_delivery_from: date | None = None
     expected_delivery: date | None = None
     remarks: str | None = None
     #: Written at the moment the desk decides the leg, when the gate pass is already
@@ -378,6 +379,7 @@ class TROut(BaseModel):
     tracking_url: str | None = None
     eway_bill_no: str | None = None
     gate_pass_no: str | None = None
+    expected_delivery_from: date | None = None
     expected_delivery: date | None = None
     dispatched_at: datetime | None = None
     dispatched_by_name: str | None = None
@@ -426,6 +428,7 @@ class TRListRow(BaseModel):
     lr_no: str | None = None
     docket_no: str | None = None
     tracking_url: str | None = None
+    expected_delivery_from: date | None = None
     expected_delivery: date | None = None
     dispatched_at: datetime | None = None
     delivered_at: datetime | None = None
@@ -521,6 +524,7 @@ class DispatchIn(BaseModel):
     tracking_url: str | None = None
     eway_bill_no: str | None = None
     gate_pass_no: str | None = None
+    expected_delivery_from: date | None = None
     expected_delivery: date | None = None
     remarks: str | None = None
     handed_over_by_name: str | None = None

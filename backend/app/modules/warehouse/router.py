@@ -36,6 +36,7 @@ from app.modules.warehouse import project_holds
 from app.modules.warehouse import stock_edits
 from app.modules.warehouse import stock_report
 from app.modules.warehouse import trips
+from app.modules.warehouse import delivery_challan
 from app.modules.warehouse import box_codes
 from app.modules.warehouse import issue_labels as doc_labels
 from app.modules.warehouse import packing as wh_packing
@@ -962,6 +963,14 @@ async def list_consolidated_trips(
 async def create_consolidated_trip(data: s.TripCreateIn, db: AsyncSession = Depends(get_db),
                                    user=Depends(require_permission(TRANSPORT_CREATE))):
     return await trips.create_trip(db, data, user)
+
+
+# The Delivery Challan of one dispatch (2026-11-19): every consignment on the truck,
+# package by package, priced and HSN-coded. Read under the shipment's own permission.
+@router.get("/delivery-challan/{tr_id}", response_model=dict)
+async def get_delivery_challan(tr_id: int, db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission(TRANSPORT_VIEW))):
+    return await delivery_challan.delivery_challan(db, tr_id)
 
 
 @router.get("/consolidated-trips/{trip_id}", response_model=dict)

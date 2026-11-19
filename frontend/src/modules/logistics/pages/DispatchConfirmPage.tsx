@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
-  AlertTriangle, ArrowLeft, ArrowRight, Boxes, CalendarDays, CheckCircle2,
+  AlertTriangle, ArrowLeft, ArrowRight, Boxes, CalendarDays, CalendarRange, CheckCircle2,
   FileText, Handshake, IdCard, MapPin, Package, Paperclip, Sparkles, Truck,
   Upload, Warehouse, X,
 } from "lucide-react";
@@ -12,7 +12,7 @@ import {
   Button, Can, Card, ErrorBanner, Field, Input, PageHeader, Select, StatusPill,
   TONE_YELLOW, useAction,
 } from "@/shared/components";
-import { fmtDate } from "@/shared/datetime";
+import { fmtDate, fmtDateRange } from "@/shared/datetime";
 import { consignmentApi, transportApi } from "../api";
 import {
   headerFromConsignment, linesFromConsignment,
@@ -24,6 +24,7 @@ import {
   CARRYING_LABEL, carryingFields, carryingValue,
 } from "../components/gatePassFields";
 import type { CarryingField } from "../components/gatePassFields";
+import { GatePassNumberField, type GatePassMode } from "../components/GatePassNumberField";
 import { aadhaarError, HANDOVER_PERSONS } from "../components/HandoverCustody";
 import { OptionTiles } from "../components/OptionTiles";
 import { CARRIAGE_ICON, MODE_ICON } from "../components/transportIcons";
@@ -623,6 +624,8 @@ export function DispatchConfirmPage() {
   const [consignmentId, setConsignmentId] = useState(
     preselected > 0 ? String(preselected) : "");
   const [gatePass, setGatePass] = useState("");
+  // Auto shows the DSP number the press will issue; own is a number security wrote.
+  const [gatePassMode, setGatePassMode] = useState<GatePassMode>("auto");
   const [carriage, setCarriage] = useState<CarriageMode>("ROAD");
   // Road, handed over: the plainest leg there is, and the one the desk changes
   // FROM rather than the one it lands on by accident.
@@ -796,6 +799,8 @@ export function DispatchConfirmPage() {
         weight_kg: leg.total_weight_kg,
         dateLabel: "Drafted",
         date: leg.tr_date ?? leg.created_at,
+        expectedFrom: leg.expected_delivery_from ?? null,
+        expectedTo: leg.expected_delivery ?? null,
       } : null;
     }
     return chosen ? {
@@ -806,6 +811,8 @@ export function DispatchConfirmPage() {
       weight_kg: chosen.total_weight_kg,
       dateLabel: "Packed",
       date: chosen.dispatch_date,
+      expectedFrom: chosen.expected_delivery_from ?? null,
+      expectedTo: chosen.expected_delivery ?? null,
     } : null;
   }, [isLeg, leg, chosen]);
 
@@ -866,6 +873,20 @@ export function DispatchConfirmPage() {
    *  next reload, where the picker is back on its default and the shipment is
    *  whatever it was dispatched as. Which fields a pass carries is a fact about the
    *  shipment. */
+  // The number the press will put on the pass, shown before it is pressed. Keyed on
+  // the project because the DSP series may print it; refetched on focus so a number
+  // another desk took meanwhile is not the one on screen.
+  const passProject = (isLeg ? leg?.project_name : (doc ?? chosen)?.project_name) ?? null;
+  const passPreview = useQuery({
+    queryKey: ["dispatch-number-preview", passProject, outcome?.tr_id ?? null],
+    queryFn: () => transportApi.previewDispatchNo({
+      project_name: passProject, tr_id: outcome?.tr_id ?? null,
+    }),
+    enabled: !!(isLeg ? legId : id),
+    refetchOnWindowFocus: true,
+    staleTime: 15_000,
+  });
+
   const outcomeRule: ModeRule | undefined = useMemo(
     () => modes?.find((m) => m.value === (outcome?.mode ?? mode)),
     [modes, outcome, mode],
@@ -905,6 +926,7 @@ export function DispatchConfirmPage() {
     setMode(shipment.mode);
     setCarriage((shipment.carriage_mode ?? "ROAD") as CarriageMode);
     setGatePass(shipment.gate_pass_no ?? "");
+    setGatePassMode("auto");
     setCarrierIds(shipment.quotes.length
       ? shipment.quotes.map((quote) => quote.carrier_id)
       : shipment.carrier_id ? [shipment.carrier_id] : []);
@@ -1131,7 +1153,7 @@ export function DispatchConfirmPage() {
           ...arrangement,
           // Only when the desk typed one. Sent blank it would erase the pass the leg
           // already carries.
-          ...(gatePass.trim() ? { gate_pass_no: gatePass.trim() } : {}),
+          ...(gatePassMode === "own" && gatePass.trim() ? { gate_pass_no: gatePass.trim() } : {}),
         })
         : await (async () => {
           const detail = doc ?? await consignmentApi.get(id);
@@ -1141,7 +1163,7 @@ export function DispatchConfirmPage() {
             lines: linesFromConsignment(detail),
             // Only when the desk typed one: left blank, the server issues the
             // dispatch its own number off the DSP series.
-            ...(gatePass.trim() ? { gate_pass_no: gatePass.trim() } : {}),
+            ...(gatePassMode === "own" && gatePass.trim() ? { gate_pass_no: gatePass.trim() } : {}),
             // A settled mode leaves on this press. Everything the release checks is
             // on this form, so sending it to READY and asking for a second "it has
             // left" only delayed the moment the receiving site can sign for it — and
@@ -1425,9 +1447,15 @@ export function DispatchConfirmPage() {
                 />
               </Field>
               )}
-              <Field label="Gate pass no" hint="Leave blank to issue the next dispatch number (DSP).">
-                <Input value={gatePass} onChange={(e) => setGatePass(e.target.value)} />
-              </Field>
+              <GatePassNumberField
+                mode={gatePassMode}
+                value={gatePass}
+                preview={passPreview.data?.number}
+                final={passPreview.data?.final}
+                loading={passPreview.isLoading}
+                onModeChange={setGatePassMode}
+                onChange={setGatePass}
+              />
             </div>
             {/* Every drop on the truck, in one line: the desk choosing a mode and a
                 provider is choosing them for all of these at once. */}
@@ -1920,6 +1948,13 @@ export function DispatchConfirmPage() {
                     value={load(subject.packages, subject.weight_kg)} />
                   <Fact icon={<CalendarDays className="h-4 w-4" />}
                     label={subject.dateLabel} value={fmtDate(subject.date)} />
+                  {/* The window the destination was promised (2026-11-19), so the
+                      mode is chosen against the date it has to be there by. */}
+                  {(subject.expectedFrom || subject.expectedTo) && (
+                    <Fact icon={<CalendarRange className="h-4 w-4" />}
+                      label="Expected delivery"
+                      value={fmtDateRange(subject.expectedFrom, subject.expectedTo)} />
+                  )}
                   {/* The packs on the vehicle, per item (2026-10-22). */}
                   {!!doc?.line_packs?.length && (
                     <div className="space-y-2 border-t border-line/70 pt-3.5">
