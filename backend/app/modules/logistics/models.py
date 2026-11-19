@@ -253,6 +253,8 @@ class TransportRequest(Base):
     tracking_url = Column(String(500), nullable=True)
     eway_bill_no = Column(String(50), nullable=True)
 
+    # The delivery window, copied from the consignment: start and end (2026-11-19).
+    expected_delivery_from = Column(Date, nullable=True)
     expected_delivery = Column(Date, nullable=True)
     # The dispatch leg, merged into this document rather than kept on a second one.
     # The warehouse consignment says what was packed; from the moment it is handed to

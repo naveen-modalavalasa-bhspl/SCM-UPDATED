@@ -81,7 +81,7 @@ from app.shared.enums import ApprovalAction, AuditAction, DocType, InstanceStatu
 from app.shared.models.base import utcnow
 from app.shared.models.master import Vendor
 from app.shared.money import round_money
-from app.shared.numbering import next_number
+from app.shared.numbering import next_number, peek_next_number
 from app.shared.scope import scope_condition
 
 logger = logging.getLogger(__name__)
@@ -784,6 +784,7 @@ def _raiser_view(doc: TransportRequest) -> dict:
         "vehicle_number": doc.vehicle_number,
         "driver_name": doc.driver_name, "driver_phone": doc.driver_phone,
         "handed_over_by_name": doc.handed_over_by_name,
+        "expected_delivery_from": doc.expected_delivery_from,
         "expected_delivery": doc.expected_delivery,
         "dispatched_at": doc.dispatched_at,
         "delivered_at": doc.delivered_at,
@@ -1739,6 +1740,7 @@ async def create_tr(db: AsyncSession, data, user) -> TransportRequest:
         contact_person=contact_p, contact_phone=contact_ph,
         distance_km=data.distance_km,
         project_id=data.project_id, project_name=data.project_name,
+        expected_delivery_from=data.expected_delivery_from,
         expected_delivery=data.expected_delivery, remarks=data.remarks,
         gate_pass_no=data.gate_pass_no,
         # The tracking handles, when the desk already holds them. A courier docket is
@@ -2259,7 +2261,8 @@ async def update_tr(db: AsyncSession, tr_id: int, data, user) -> TransportReques
                   "from_warehouse_name", "from_warehouse_address",
                   "to_location_name", "delivery_address",
                   "contact_person", "contact_phone", "distance_km", "project_id",
-                  "project_name", "expected_delivery", "remarks", "vehicle_number",
+                  "project_name", "expected_delivery_from", "expected_delivery", "remarks",
+                  "vehicle_number",
                   "driver_name", "driver_phone",
                   "driver_licence_no", "trip_reference",
                   "handed_over_by_name", "handed_over_employee_id",
@@ -3125,6 +3128,25 @@ def _text(value) -> str | None:
     return text or None
 
 
+async def preview_dispatch_no(db: AsyncSession, project_name: str | None = None,
+                              tr_id: int | None = None) -> dict:
+    """The gate pass number the Dispatch press WILL issue, before it is pressed
+    (2026-11-19) — the DSP number `_assign_dispatch_no` draws, read without drawing it.
+
+    A shipment that already carries a number answers with that number, `final`. Every
+    other answer is a preview: another desk dispatching first takes it and this one
+    gets the next, which is why it is labelled and never stored.
+    """
+    if tr_id:
+        doc = await db.get(TransportRequest, tr_id)
+        if doc is not None and (doc.gate_pass_no or "").strip():
+            return {"number": doc.gate_pass_no, "final": True}
+        if doc is not None and not project_name:
+            project_name = doc.project_name
+    number = await peek_next_number(db, DocType.DISPATCH.value, project=project_name)
+    return {"number": number, "final": False}
+
+
 async def _assign_dispatch_no(db: AsyncSession, doc: TransportRequest) -> None:
     """Give the dispatch its own document number — the gate pass — off the DISPATCH
     series (`BHS/104/2026-27/DSP0001`), unless the desk wrote one of its own.
@@ -3197,7 +3219,7 @@ async def _release(db: AsyncSession, doc: TransportRequest, data, user, *,
         if objection:
             raise ValidationError(objection)
     for field in ("lr_no", "docket_no", "tracking_url", "eway_bill_no",
-                  "gate_pass_no", "expected_delivery"):
+                  "gate_pass_no", "expected_delivery_from", "expected_delivery"):
         value = getattr(data, field, None)
         if value is not None:
             setattr(doc, field, value)

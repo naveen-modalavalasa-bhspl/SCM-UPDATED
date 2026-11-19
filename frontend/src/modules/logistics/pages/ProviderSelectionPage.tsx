@@ -6,7 +6,7 @@ import {
   Button, Card, ErrorBanner, Input, KpiTiles, PageHeader, ResponsiveList, StatusPill,
   type Column, type KpiTileSpec,
 } from "@/shared/components";
-import { fmtDate } from "@/shared/datetime";
+import { fmtDate, fmtDateRange } from "@/shared/datetime";
 import { transportApi } from "../api";
 import { CarrierComparison } from "../components/CarrierComparison";
 import { load, modeLabel, modeTint, money } from "../components/modeCopy";
@@ -413,8 +413,8 @@ function ProviderSheet({ trId, autoInvite = false, onBack }: {
             <dd className="mt-1 truncate text-body" title={doc.to_location_name ?? undefined}>{legDestination(doc)}</dd>
           </div>
           <div>
-            <dt className="text-xs text-muted">Needed by</dt>
-            <dd className="mt-1 text-body">{fmtDate(doc.expected_delivery)}</dd>
+            <dt className="text-xs text-muted">Expected delivery</dt>
+            <dd className="mt-1 text-body">{fmtDateRange(doc.expected_delivery_from, doc.expected_delivery)}</dd>
           </div>
           <div>
             <dt className="text-xs text-muted">Load</dt>

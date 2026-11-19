@@ -296,11 +296,14 @@ export function PODetailPage() {
     onError: (e: any) => toast.error(e?.message ?? "Quantities not saved. Check the numbers and try again."),
   });
 
+  // Above the early returns: a hook called only once the order has loaded changes
+  // the hook order between renders, which React refuses (Rules of Hooks).
+  const { can, me } = useAuth();
+
   if (po.isLoading) return <p className="p-6 text-sm text-muted">Loading purchase order…</p>;
   if (po.error) return <p className="rounded-lg bg-danger/10 p-4 text-danger">{(po.error as Error).message}</p>;
   if (!po.data) return <p className="p-6 text-muted">Purchase order not found.</p>;
 
-  const { can, me } = useAuth();
   const isAdmin = can("admin.workflow.manage") || Boolean(me?.roles.includes("ADMIN")) || Boolean(me?.roles.includes("SUPERUSER"));
   const canDecide = po.data.status === "PENDING_APPROVAL" && (Boolean(po.data.awaiting_me) || isAdmin);
   const isApprovalPending = po.data.status === "PENDING_APPROVAL" && !!canDecide;

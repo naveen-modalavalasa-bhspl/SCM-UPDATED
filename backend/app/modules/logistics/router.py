@@ -257,6 +257,15 @@ async def dispatch_consignment(body: QuickDispatchIn,
     return await service.dispatch_consignment(db, body, user)
 
 
+# The gate pass number the Dispatch press will issue, shown before it is pressed.
+# A preview: nothing is drawn, and the number given on the press may be later.
+@transport_router.get("/dispatch-number/preview")
+async def preview_dispatch_number(project_name: str | None = None, tr_id: int | None = None,
+                                  db: AsyncSession = Depends(get_db),
+                                  user=Depends(require_permission(perms.TRANSPORT_CREATE))):
+    return await service.preview_dispatch_no(db, project_name, tr_id)
+
+
 @transport_router.get("/dispatch-policy")
 async def dispatch_policy(db: AsyncSession = Depends(get_db),
                           user=Depends(require_permission(perms.TRANSPORT_VIEW))):

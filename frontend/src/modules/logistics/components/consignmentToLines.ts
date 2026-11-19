@@ -116,6 +116,7 @@ export function headerFromConsignment(doc: ConsignmentDetail): Partial<TRInput> 
     contact_phone: doc.contact_phone ?? null,
     project_id: doc.project_id ?? null,
     project_name: doc.project_name ?? null,
+    expected_delivery_from: doc.expected_delivery_from ?? null,
     expected_delivery: doc.expected_delivery ?? null,
   };
 }

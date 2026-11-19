@@ -1,7 +1,7 @@
 import { useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { PrintTemplate, type PrintColumn, type PrintField } from "@/shared/components";
-import { fmtDate } from "@/shared/datetime";
+import { fmtDate, fmtDateRange } from "@/shared/datetime";
 import { displayUom } from "@/modules/indents/displayFormat";
 import { transportApi } from "../api";
 import { carriageLabel, modeLabel } from "../components/modeCopy";
@@ -111,7 +111,7 @@ export function GatePassPrintPage() {
         { label: "Consignment", value: dash(doc.consignment_no), mono: true },
         { label: "Carriage", value: carriageLabel(doc.carriage_mode) },
         { label: "Arrangement", value: modeLabel(doc.mode) },
-        { label: "Expected delivery", value: doc.expected_delivery ? fmtDate(doc.expected_delivery) : "—" },
+        { label: "Expected delivery", value: fmtDateRange(doc.expected_delivery_from, doc.expected_delivery) },
       ]}
       blocks={[
         {

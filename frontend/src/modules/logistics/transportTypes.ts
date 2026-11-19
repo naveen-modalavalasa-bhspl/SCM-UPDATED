@@ -80,6 +80,8 @@ export interface RaiserTracking {
   driver_name?: string | null;
   driver_phone?: string | null;
   handed_over_by_name?: string | null;
+  /** Start of the expected delivery window; `expected_delivery` is its end. */
+  expected_delivery_from?: string | null;
   expected_delivery?: string | null;
   dispatched_at?: string | null;
   delivered_at?: string | null;
@@ -190,6 +192,8 @@ export interface Consignment {
   driver_phone?: string | null;
   lr_no?: string | null;
   eway_bill_no?: string | null;
+  /** Start of the expected delivery window; `expected_delivery` is its end. */
+  expected_delivery_from?: string | null;
   expected_delivery?: string | null;
   total_items: number;
   total_qty: number;
@@ -875,6 +879,8 @@ export interface TransportRequest {
   tracking_url?: string | null;
   eway_bill_no?: string | null;
   gate_pass_no?: string | null;
+  /** Start of the expected delivery window; `expected_delivery` is its end. */
+  expected_delivery_from?: string | null;
   expected_delivery?: string | null;
   dispatched_at?: string | null;
   dispatched_by_name?: string | null;
@@ -930,6 +936,8 @@ export interface TRListRow {
   lr_no?: string | null;
   docket_no?: string | null;
   tracking_url?: string | null;
+  /** Start of the expected delivery window; `expected_delivery` is its end. */
+  expected_delivery_from?: string | null;
   expected_delivery?: string | null;
   dispatched_at?: string | null;
   delivered_at?: string | null;
@@ -1090,6 +1098,8 @@ export interface TRInput {
   distance_km?: number | null;
   project_id?: number | null;
   project_name?: string | null;
+  /** Start of the expected delivery window; `expected_delivery` is its end. */
+  expected_delivery_from?: string | null;
   expected_delivery?: string | null;
   remarks?: string | null;
   /** Written on the dispatch screen, when the pass is already in hand. The dispatch
@@ -1232,4 +1242,102 @@ export interface ActivityType {
   value: string;
   label: string;
   is_exception: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Delivery Challan (2026-11-19) — `GET /api/warehouse/delivery-challan/{tr_id}`.
+// One per DISPATCH, numbered with the dispatch (gate pass) number; one block per
+// consignment on the truck, one per package inside it. Money and quantities arrive
+// as decimal strings.
+// ---------------------------------------------------------------------------
+export interface ChallanParty {
+  id?: number | null;
+  name?: string | null;
+  code?: string | null;
+  address?: string | null;
+  contact_person?: string | null;
+  contact_phone?: string | null;
+}
+
+export interface ChallanLine {
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  batch_no?: string | null;
+  expiry_date?: string | null;
+  hsn_code?: string | null;
+  quantity: string | number;
+  unit_price: string | number;
+  /** LINE: the consignment's own rate; ITEM_MASTER: the item's purchase price. */
+  price_source: "LINE" | "ITEM_MASTER" | "NONE";
+  amount: string | number;
+  codes: string[];
+}
+
+export interface ChallanPackage {
+  id: number | null;
+  sequence: number;
+  package_no?: string | null;
+  package_type?: string | null;
+  weight_kg?: string | number | null;
+  volume_cbm?: string | number | null;
+  dimensions_cm?: (string | number | null)[] | null;
+  is_fragile: boolean;
+  is_temp_controlled: boolean;
+  lines: ChallanLine[];
+  total_qty: string | number;
+  total_amount: string | number;
+}
+
+export interface ChallanConsignment {
+  dispatch_id: number;
+  consignment_no: string;
+  consignment_date?: string | null;
+  status: string;
+  source: ChallanParty;
+  destination: ChallanParty;
+  project_name?: string | null;
+  expected_delivery_from?: string | null;
+  expected_delivery?: string | null;
+  package_count: number;
+  weight_kg?: string | number | null;
+  volume_cbm?: string | number | null;
+  packages: ChallanPackage[];
+  total_qty: string | number;
+  total_amount: string | number;
+}
+
+export interface DeliveryChallan {
+  tr_id: number;
+  tr_no: string;
+  dc_no?: string | null;
+  dc_date?: string | null;
+  status: string;
+  mode: string;
+  carriage_mode?: string | null;
+  is_trip: boolean;
+  trip_no?: string | null;
+  godown: ChallanParty;
+  ship_to: ChallanParty[];
+  vehicle_number?: string | null;
+  driver_name?: string | null;
+  driver_phone?: string | null;
+  carrier_name?: string | null;
+  lr_no?: string | null;
+  docket_no?: string | null;
+  eway_bill_no?: string | null;
+  expected_delivery_from?: string | null;
+  expected_delivery?: string | null;
+  project_name?: string | null;
+  remarks?: string | null;
+  consignments: ChallanConsignment[];
+  totals: {
+    consignments: number;
+    packages: number;
+    quantity: string | number;
+    amount: string | number;
+    weight_kg?: string | number | null;
+    volume_cbm?: string | number | null;
+  };
 }

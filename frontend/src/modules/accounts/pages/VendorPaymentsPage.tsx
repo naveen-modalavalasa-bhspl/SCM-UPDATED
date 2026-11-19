@@ -262,7 +262,8 @@ function PoPaymentsDrawer({ poId, onClose }: { poId: number; onClose: () => void
         <div className="mb-4 flex items-start justify-between gap-3">
           <div>
             <h2 className="text-lg font-bold text-ink">{data?.po_no ?? "Loading…"}</h2>
-            {data && <p className="text-sm text-muted">{data.vendor_name}{data.project_name ? ` · ${data.project_name}` : ""} · <StatusPill status={data.po_status} /></p>}
+            {/* A div, not a p: StatusPill draws a div, and a div may not sit inside a p. */}
+            {data && <div className="flex flex-wrap items-center gap-1 text-sm text-muted">{data.vendor_name}{data.project_name ? ` · ${data.project_name}` : ""} · <StatusPill status={data.po_status} /></div>}
           </div>
           <button type="button" aria-label="Close" onClick={onClose}
             className="inline-flex h-11 w-11 items-center justify-center rounded-lg hover:bg-content2"><X className="h-5 w-5" /></button>

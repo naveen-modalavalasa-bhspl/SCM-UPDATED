@@ -332,6 +332,57 @@ async def preview_number(db: AsyncSession, doc_type: str, *, company: str | None
     return "".join(part["text"] or UNSET for part in parts)
 
 
+async def peek_next_number(db: AsyncSession, doc_type: str, *, project: str | None = None,
+                           company: str | None = None, company_code: str | None = None,
+                           project_id: int | None = None,
+                           org_department_id: int | None = None,
+                           **extra: str) -> str:
+    """The number `next_number` WOULD draw now, with the same arguments — read only.
+
+    Takes no lock, writes nothing and burns nothing, so a screen can show "this will be
+    DSP0042" before the press (2026-11-19). It is a PREVIEW: somebody else drawing
+    first moves it on, and the number the document is given is always `next_number`'s.
+    Mirrors `next_number` step for step — scope tokens, per-scope counter, period
+    reset — so the two cannot disagree when nobody else is drawing.
+    """
+    fy = _fiscal_year()
+    series = (await db.execute(
+        select(DocSeries).where(
+            DocSeries.doc_type == doc_type, DocSeries.is_active.is_(True),
+            DocSeries.scope_key.is_(None),
+        ).order_by(DocSeries.fiscal_year.desc())
+    )).scalars().first()
+    if series is None:
+        # `next_number` would create the series and draw its first number.
+        return render(default_pattern(doc_type), default_prefix(doc_type), fy, 1, **extra)
+
+    wanted = tokens_in(series.pattern) & set(_SCOPE_TOKENS)
+    if "project" in wanted:
+        extra["project"] = (await scope_codes(db, project_id=project_id,
+                                              org_department_id=org_department_id)
+                            or slug(project, SCOPE_SLUG_LEN))
+    if "company" in wanted:
+        extra["company"] = (code_token(company_code)
+                            or (slug(company, SCOPE_SLUG_LEN) if company
+                                else await _company(db)))
+
+    row = series
+    key = scope_key_for(series.pattern, fiscal_year=fy, **extra)
+    if key is not None:
+        row = (await db.execute(
+            select(DocSeries).where(
+                DocSeries.doc_type == doc_type, DocSeries.scope_key == key)
+        )).scalars().first()
+    last = row.last_number if row is not None else 0
+    if row is not None:
+        period = current_period(row.reset_policy)
+        yearly_by_key = (row.reset_policy == ResetPolicy.YEARLY.value
+                         and "fy" in tokens_in(series.pattern))
+        if period is not None and row.last_reset_period != period and not yearly_by_key:
+            last = 0
+    return render(series.pattern, series.prefix, fy, (last or 0) + 1, **extra)
+
+
 async def next_number(db: AsyncSession, doc_type: str, *, project: str | None = None,
                       company: str | None = None, fiscal_year: str | None = None,
                       company_code: str | None = None, project_id: int | None = None,

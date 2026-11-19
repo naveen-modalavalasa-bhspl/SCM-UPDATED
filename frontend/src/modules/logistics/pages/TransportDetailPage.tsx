@@ -2,14 +2,14 @@ import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
-  AlertTriangle, ArrowRight, Camera, CheckCircle2, Clock, Download, FileText,
+  AlertTriangle, ArrowRight, Camera, CheckCircle2, Clock, Download, FileText, ScrollText,
   MapPin, PhoneCall, Warehouse,
 } from "lucide-react";
 import {
   Button, Can, Card, ConfirmModal, ErrorBanner, Field, Input, PageHeader,
   StatCard, StatusPill, useAction,
 } from "@/shared/components";
-import { fmtDate, fmtDateTime } from "@/shared/datetime";
+import { fmtDateRange, fmtDateTime } from "@/shared/datetime";
 import { transportApi } from "../api";
 import { FlowStepper } from "../components/FlowStepper";
 import {
@@ -253,7 +253,17 @@ export function TransportDetailPage() {
               <Button variant="secondary" className={TONE_YELLOW}
                 onClick={() => window.open(
                   `/logistics/shipments/${doc.id}/gate-pass`, "_blank", "noopener")}>
-                <FileText className="h-4 w-4" /> PDF
+                <FileText className="h-4 w-4" /> Gate pass
+              </Button>
+            )}
+            {/* The Delivery Challan: the whole load, consignment by consignment and
+                package by package, numbered with this dispatch. Same pastel PDF tone
+                as the pass beside it — both are paper that leaves with the truck. */}
+            {doc.status !== "DRAFT" && (
+              <Button variant="secondary" className={TONE_YELLOW}
+                onClick={() => window.open(
+                  `/logistics/shipments/${doc.id}/delivery-challan`, "_blank", "noopener")}>
+                <ScrollText className="h-4 w-4" /> Delivery Challan
               </Button>
             )}
 
@@ -678,7 +688,7 @@ export function TransportDetailPage() {
           <div className="mt-1 divide-y divide-line/70">
             <Section title="Reference" rows={[
               ["Against indent", doc.indent_no],
-              ["Needed by", fmtDate(doc.expected_delivery, "")],
+              ["Expected delivery", fmtDateRange(doc.expected_delivery_from, doc.expected_delivery, "")],
             ]} />
             <Section title="Carrier & vehicle" rows={[
               ["Carrier", doc.carrier_name],
