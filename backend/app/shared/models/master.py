@@ -230,6 +230,20 @@ class Manufacturer(Base):
     is_active = Column(Boolean, nullable=False, default=True)
 
 
+class VehicleType(Base):
+    """A kind of vehicle the company runs its own loads in (2026-11-20) — Tata Ace,
+    Bolero Pickup, Eicher 14 ft. Picked on an own-vehicle dispatch. Capacity is
+    optional and informational: what one of these carries, by weight and by volume."""
+    __tablename__ = "mst_vehicle_types"
+    id = pk()
+    code = Column(String(10), unique=True, nullable=False)
+    name = Column(String(200), nullable=False)
+    description = Column(String(300), nullable=True)
+    capacity_kg = Column(Numeric(12, 2), nullable=True)
+    capacity_cbm = Column(Numeric(12, 3), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+
 class DosageForm(Base):
     __tablename__ = "mst_dosage_forms"
     id = pk()

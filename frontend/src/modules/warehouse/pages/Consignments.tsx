@@ -5,6 +5,8 @@ import { ConsignmentStatusPill, statusTone } from "../components/ConsignmentStat
 import { DocumentList } from "../components/DocumentList";
 import { listConsignments, deleteDispatch, DRAFT_DELETE_PERMISSION } from "../api";
 import { fmtDate, fmtQty, humanise, num } from "../format";
+import { ScheduleDate } from "../components/ScheduleDate";
+import { schedulePending } from "../components/deliveryWindow";
 import type { Dispatch } from "../types";
 
 /**
@@ -89,6 +91,19 @@ export default function Consignments() {
           <div className="truncate text-[11px] text-muted">{row.warehouse_name ?? "—"}</div>
         </div>
       ),
+    },
+    {
+      key: "dispatch_on",
+      header: "Dispatch date",
+      hideOnNarrow: true,
+      render: (row) => <ScheduleDate date={row.expected_delivery_from}
+                                     pending={schedulePending(row.status).dispatch} />,
+    },
+    {
+      key: "deliver_by",
+      header: "Expected delivery",
+      render: (row) => <ScheduleDate date={row.expected_delivery}
+                                     pending={schedulePending(row.status).delivery} />,
     },
     {
       key: "load",

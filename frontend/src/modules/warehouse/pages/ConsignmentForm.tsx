@@ -27,7 +27,7 @@ import {
   issueTransferContext,
 } from "../api";
 import { TransferContextStrip } from "../components/TransferContextStrip";
-import { DeliveryWindowField } from "../components/DeliveryWindowField";
+import { DispatchScheduleField } from "../components/DispatchScheduleField";
 import { deliveryWindowIssue, deliveryWindowMissing } from "../components/deliveryWindow";
 import { showsVehicleAndSac } from "../components/transferFacts";
 import { fmtMoney, fmtQty, num, today } from "../format";
@@ -1360,7 +1360,7 @@ export default function ConsignmentForm() {
             <Select value={form.dispatch_type} onChange={(value) => setForm((f) => ({ ...f, dispatch_type: value }))}
                     options={DISPATCH_TYPES} isDisabled={locked} />
           </Field>
-          <Field label="Date">
+          <Field label="Consignment date">
             {/* Read-only on the logistics door: the date the consignment goes out is
                 the warehouse's to set, and logistics only carries the leg after it. */}
             <Input type="date" value={form.dispatch_date} disabled={locked || inLogistics}
@@ -1419,18 +1419,17 @@ export default function ConsignmentForm() {
               />
             </Field>
           )}
-          {/* The delivery WINDOW (2026-11-19): when it can start arriving and the last
-              day it should. Floors are the consignment date, not today: a consignment
-              can be back-dated, and its window has to stay consistent with the day it
-              actually went out. Two columns wide, so the pair reads as one answer. */}
+          {/* Dispatch date and Expected delivery (2026-11-20): two named dates, both
+              required. Floors are the consignment date, not today: a consignment can be
+              back-dated. Two columns wide, so the pair reads as one plan. */}
           <div className="lg:col-span-2">
-            <DeliveryWindowField
-              from={form.expected_delivery_from}
-              to={form.expected_delivery}
-              leaves={form.dispatch_date}
+            <DispatchScheduleField
+              dispatch={form.expected_delivery_from}
+              delivery={form.expected_delivery}
+              consignmentDate={form.dispatch_date}
               disabled={locked}
-              onChange={({ from, to }) => setForm((f) => ({
-                ...f, expected_delivery_from: from, expected_delivery: to,
+              onChange={({ dispatch, delivery }) => setForm((f) => ({
+                ...f, expected_delivery_from: dispatch, expected_delivery: delivery,
               }))}
             />
           </div>

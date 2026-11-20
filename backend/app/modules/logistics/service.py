@@ -242,6 +242,8 @@ async def issue_stock(db: AsyncSession, issue_id: int, user) -> Issue:
 # surface and are only passing through.
 from app.modules.logistics.transport import (  # noqa: E402
     preview_dispatch_no,
+    record_odometer,
+    vehicle_types,
     accept_award,
     accept_quote,
     acknowledge_tr,

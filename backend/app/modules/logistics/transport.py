@@ -72,6 +72,7 @@ from app.modules.logistics.models import (
 from app.modules.logistics.schemas import TRListRow, TROut
 from app.platform.settings.service import get_setting, write_audit
 from app.platform.settings import attachments
+from app.modules.logistics import own_vehicle
 from app.platform.workflow import engine, ladder
 # Read-only, and only for the activity ledger: the trail of who decided what is
 # the engine's to WRITE (rule 8) and every module's to read.
@@ -234,7 +235,29 @@ async def get_tr(db: AsyncSession, tr_id: int, user=None) -> TransportRequest:
         raise NotFoundError(f"Transport request {tr_id} not found")
     await _attach_package_quantities(db, doc)
     await _decorate_tr_missing_fields(db, doc)
+    if own_vehicle.is_own_vehicle(doc):
+        setattr(doc, "distance_travelled_km", own_vehicle.distance_km(doc))
+        setattr(doc, "odometer_photos", await own_vehicle.odometer_photos(db, doc.id))
     return doc
+
+
+async def record_odometer(db: AsyncSession, tr_id: int, reading: str, value, upload,
+                          user) -> TransportRequest:
+    """One of an own vehicle's two odometer readings, with its photo (2026-11-20)."""
+    doc = await get_tr(db, tr_id, user)
+    await own_vehicle.record_odometer(db, doc, reading, value, upload, user)
+    await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.tr_no,
+                      action=AuditAction.UPDATE, actor=user,
+                      after={"odometer_start": str(doc.odometer_start or ""),
+                             "odometer_end": str(doc.odometer_end or "")},
+                      summary=f"Odometer {reading.lower()} reading on {doc.tr_no}: {value} km")
+    await db.commit()
+    return await get_tr(db, tr_id, user)
+
+
+async def vehicle_types(db: AsyncSession) -> list[dict]:
+    """The active vehicle types, for the own-vehicle dropdown."""
+    return await own_vehicle.active_vehicle_types(db)
 
 
 def _package_quantity_key(row) -> tuple[str, object] | None:
@@ -1908,6 +1931,9 @@ async def dispatch_consignment(db: AsyncSession, data, user) -> TransportRequest
     data.carrier_id = chosen[0] if chosen else None
     doc = await create_tr(db, data, user)
     doc.mode = mode
+    # Own vehicle: its type and its crew (2026-11-20). Refused here, before the press
+    # spends a dispatch number, when the count and the names do not agree.
+    await own_vehicle.apply_arrangement(db, doc, data)
     # The press IS the dispatch, so its document is numbered here, not at the gate:
     # the outcome panel and the pass print it the moment this returns.
     await _assign_dispatch_no(db, doc)
@@ -2368,6 +2394,9 @@ async def update_tr(db: AsyncSession, tr_id: int, data, user) -> TransportReques
 
     if "lines" in fields_set:
         _apply_lines(doc, data.lines)
+
+    # Own vehicle: its type and its crew (2026-11-20), checked by `own_vehicle`.
+    await own_vehicle.apply_arrangement(db, doc, data)
 
     await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.tr_no,
                       action=AuditAction.UPDATE, actor=user, before=before,
@@ -3197,6 +3226,9 @@ async def _release(db: AsyncSession, doc: TransportRequest, data, user, *,
         # blank at submit has been answered by this point, and a consignment must never
         # leave the yard with nobody named as taking it.
         _check_mode_fields(doc)
+        # An own vehicle also leaves with its type, its crew and the odometer's start
+        # reading and photo (2026-11-20).
+        await own_vehicle.assert_can_release(db, doc)
 
         if doc.mode == TransportMode.DIRECT.value:
             _check_custody(doc)
@@ -3369,6 +3401,9 @@ async def deliver_tr(db: AsyncSession, tr_id: int, data, user) -> TransportReque
     if doc.status not in (TransportStatus.IN_TRANSIT.value,
                           TransportStatus.READY.value):
         raise ValidationError(f"{doc.tr_no} is {doc.status.lower()}")
+
+    # An own vehicle is marked delivered with the odometer's end reading and photo.
+    await own_vehicle.assert_can_deliver(db, doc)
 
     # Arriving proves it left. Releasing first stamps the departure and hands the
     # warehouse its consignment back, which walking straight from READY to DELIVERED

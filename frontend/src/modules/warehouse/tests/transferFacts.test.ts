@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { deliveryWindowIssue, deliveryWindowMissing, windowDays } from "../components/deliveryWindow";
+import {
+  deliveryWindowIssue, deliveryWindowMissing, dueHint, schedulePending, windowDays,
+} from "../components/deliveryWindow";
 import { scopeFact, showsVehicleAndSac, smallFacts, tierLabel } from "../components/transferFacts";
 import type { TransferContext } from "../types";
 
@@ -39,23 +41,33 @@ describe("the transfer card shows only what applies", () => {
   });
 });
 
-describe("the delivery window", () => {
-  it("asks for both ends", () => {
-    expect(deliveryWindowMissing(null, null)).toMatch(/from and to/);
-    expect(deliveryWindowMissing("2026-11-22", null)).toMatch(/Arrives by/);
-    expect(deliveryWindowMissing(null, "2026-11-25")).toMatch(/Arrives from/);
+describe("dispatch date and expected delivery", () => {
+  it("asks for both dates", () => {
+    expect(deliveryWindowMissing(null, null)).toMatch(/dispatch date and the expected delivery/);
+    expect(deliveryWindowMissing("2026-11-22", null)).toMatch(/expected delivery date/);
+    expect(deliveryWindowMissing(null, "2026-11-25")).toMatch(/dispatch date/);
     expect(deliveryWindowMissing("2026-11-22", "2026-11-25")).toBeNull();
   });
 
-  it("refuses a window before the goods leave or running backwards", () => {
-    expect(deliveryWindowIssue("2026-11-18", "2026-11-25", "2026-11-19")).toMatch(/start before/);
-    expect(deliveryWindowIssue("2026-11-22", "2026-11-20", "2026-11-19")).toMatch(/ends before it starts/);
+  it("refuses dates before the consignment date, or delivery before dispatch", () => {
+    expect(deliveryWindowIssue("2026-11-18", "2026-11-25", "2026-11-19")).toMatch(/dispatch date cannot be before/);
+    expect(deliveryWindowIssue("2026-11-22", "2026-11-20", "2026-11-19")).toMatch(/before the dispatch date/);
     expect(deliveryWindowIssue("2026-11-22", "2026-11-25", "2026-11-19")).toBeNull();
   });
 
-  it("counts the days both ends included", () => {
-    expect(windowDays("2026-11-22", "2026-11-25")).toBe(4);
-    expect(windowDays("2026-11-22", "2026-11-22")).toBe(1);
+  it("counts the days on the road", () => {
+    expect(windowDays("2026-11-22", "2026-11-25")).toBe(3);
+    expect(windowDays("2026-11-22", "2026-11-22")).toBe(0);
     expect(windowDays("2026-11-25", "2026-11-22")).toBeNull();
+  });
+
+  it("reads a date against today, and calls it late only while it is still owed", () => {
+    expect(dueHint("2026-11-23", "2026-11-20")).toEqual({ text: "In 3 days", tone: "muted" });
+    expect(dueHint("2026-11-20", "2026-11-20", { pending: true })?.text).toBe("Today");
+    expect(dueHint("2026-11-18", "2026-11-20", { pending: true })).toEqual({ text: "2 days late", tone: "late" });
+    expect(dueHint("2026-11-18", "2026-11-20")).toEqual({ text: "2 days ago", tone: "muted" });
+    expect(schedulePending("PACKED")).toEqual({ dispatch: true, delivery: true });
+    expect(schedulePending("IN_TRANSIT")).toEqual({ dispatch: false, delivery: true });
+    expect(schedulePending("DELIVERED")).toEqual({ dispatch: false, delivery: false });
   });
 });

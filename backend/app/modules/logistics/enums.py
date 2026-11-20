@@ -767,3 +767,15 @@ class TripStopStatus(str, Enum):
     DELIVERED = "DELIVERED"
     ACKNOWLEDGED = "ACKNOWLEDGED"
     CANCELLED = "CANCELLED"
+
+
+class CrewRole(str, Enum):
+    """Who a person on an own-vehicle load is (2026-11-20)."""
+    DRIVER = "DRIVER"
+    HELPER = "HELPER"
+
+
+class OdometerReading(str, Enum):
+    """Which of the vehicle's two odometer readings (2026-11-20)."""
+    START = "START"
+    END = "END"

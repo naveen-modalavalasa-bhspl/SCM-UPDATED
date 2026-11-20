@@ -13,7 +13,7 @@ import type {
   MasterItemPackaging, MasterItemSpec, MasterPackHierarchy, MasterPackaging, MasterSpec,
   MasterUom, MasterUomConversion, MasterVendor, MasterVendorItem, PackagingBreakdown,
   MasterWarehouse, Project, RefRow, UomClass, UomSuggestion,
-  MasterBrandManufacturer, MasterGeneralName, MasterItemSubClass, NamedMaster,
+  MasterBrandManufacturer, MasterGeneralName, MasterItemSubClass, NamedMaster, VehicleTypeMaster,
   MasterBrandModel, MasterBrandVariant,
   MasterBrandItemMapping, BrandItemMappingSources, MasterItemCombination,
 } from "./types";
@@ -239,6 +239,8 @@ export const mastersApi = {
   manufacturers: crud<NamedMaster>("/api/manufacturers"),
   generalNames: crud<MasterGeneralName>("/api/general-names"),
   dosageForms: crud<NamedMaster>("/api/dosage-forms"),
+  /** Logistics › Masters › Vehicle Types (2026-11-20). */
+  vehicleTypes: crud<VehicleTypeMaster>("/api/vehicle-types"),
   /** What a unit measures (Count, Weight ...). A master since 2026-10-01. */
   /** How suppliers are grouped (Glassware, Reagents ...). */
   vendorCategories: crud<MasterVendorCategory>("/api/vendor-categories"),

@@ -12,7 +12,7 @@ import {
   Button, Can, Card, ErrorBanner, Field, Input, PageHeader, Select, StatusPill,
   TONE_YELLOW, useAction,
 } from "@/shared/components";
-import { fmtDate, fmtDateRange } from "@/shared/datetime";
+import { fmtDate } from "@/shared/datetime";
 import { consignmentApi, transportApi } from "../api";
 import {
   headerFromConsignment, linesFromConsignment,
@@ -25,6 +25,9 @@ import {
 } from "../components/gatePassFields";
 import type { CarryingField } from "../components/gatePassFields";
 import { GatePassNumberField, type GatePassMode } from "../components/GatePassNumberField";
+import { OwnVehicleCrew } from "../components/OwnVehicleCrew";
+import { crewProblemCount, resizeCrew } from "../components/crew";
+import type { CrewMemberInput } from "../transportTypes";
 import { aadhaarError, HANDOVER_PERSONS } from "../components/HandoverCustody";
 import { OptionTiles } from "../components/OptionTiles";
 import { CARRIAGE_ICON, MODE_ICON } from "../components/transportIcons";
@@ -115,6 +118,8 @@ const FIELD_LABELS: Record<string, string> = {
   // Not a field on the form — the service releases on EITHER paper, so the press is
   // held back for the pair rather than for whichever box happens to be empty.
   tracking_handle: "the LR or the docket number",
+  vehicle_type_id: "the vehicle type",
+  crew: "everyone travelling with the vehicle",
 };
 
 /** The same fields said the way a MANUAL courier desk knows them, and the mirror of
@@ -180,6 +185,9 @@ const destinationOf = (row?: Consignment | null) =>
 /** The transport leg this consignment travels on, flattened from whichever source
  *  knows about it: the live link the queue polls, or the answer to the press that
  *  raised it a second ago. One shape, so the panel below never has to ask which. */
+/** The driver's card on an own-vehicle crew. */
+const driverOf = (crew: CrewMemberInput[]) => crew.find((p) => p.role === "DRIVER");
+
 interface Outcome {
   tr_id: number;
   tr_no: string;
@@ -632,6 +640,11 @@ export function DispatchConfirmPage() {
   const [mode, setMode] = useState<TransportMode>("DIRECT");
   const [form, setForm] = useState({ ...BLANK });
   const [handoverPerson, setHandoverPerson] = useState("EMPLOYEE");
+  // Own vehicle (2026-11-20): its type, how many go, and who they are.
+  const [vehicleTypeId, setVehicleTypeId] = useState<number | null>(null);
+  const [crewCount, setCrewCount] = useState(1);
+  const [crew, setCrew] = useState<CrewMemberInput[]>(() => resizeCrew([], 1));
+  const [crewTouched, setCrewTouched] = useState(false);
   // One list for both cases. A booking names one provider and a tender names several,
   // but "who is this going to" is one answer either way, and keeping a separate
   // singular field beside it is how the two quietly disagree about who was chosen.
@@ -753,7 +766,11 @@ export function DispatchConfirmPage() {
   // A human takes the load on two modes: a direct hand-over, and an own vehicle whose
   // driver it travels with. The question is the same one both times — is this one of
   // ours, and what number identifies them — so it is asked once, here.
-  const asksPerson = needs("handed_over_by_name") || needs("vehicle_number");
+  // An own vehicle names its people on the crew cards instead (2026-11-20): each card
+  // carries its own employee code or ID number, so the single "who is driving" choice
+  // is asked of a hand-over only.
+  const asksPerson = needs("handed_over_by_name");
+  const ownVehicle = mode === "OWN_VEHICLE";
   // An in-person hand-over is usually collected by the person the goods are issued
   // to, so their name, employee code and phone come in from the issue (2026-10-29) —
   // only into EMPTY boxes, and only until somebody types: the person who actually
@@ -877,6 +894,12 @@ export function DispatchConfirmPage() {
   // the project because the DSP series may print it; refetched on focus so a number
   // another desk took meanwhile is not the one on screen.
   const passProject = (isLeg ? leg?.project_name : (doc ?? chosen)?.project_name) ?? null;
+  const { data: vehicleTypeOptions } = useQuery({
+    queryKey: ["transport-vehicle-types"],
+    queryFn: transportApi.vehicleTypes,
+    enabled: ownVehicle,
+    staleTime: 5 * 60_000,
+  });
   const passPreview = useQuery({
     queryKey: ["dispatch-number-preview", passProject, outcome?.tr_id ?? null],
     queryFn: () => transportApi.previewDispatchNo({
@@ -931,6 +954,12 @@ export function DispatchConfirmPage() {
       ? shipment.quotes.map((quote) => quote.carrier_id)
       : shipment.carrier_id ? [shipment.carrier_id] : []);
     setHandoverPerson(shipment.handed_over_aadhaar ? "OTHERS" : "EMPLOYEE");
+    setVehicleTypeId(shipment.vehicle_type_id ?? null);
+    if (shipment.crew?.length) {
+      setCrewCount(shipment.crew_count ?? shipment.crew.length);
+      setCrew(shipment.crew.map(({ role, name, phone, id_number, employee_id }) => (
+        { role, name, phone, id_number: id_number ?? "", employee_id })));
+    }
     setForm({
       vehicle_number: shipment.vehicle_number ?? "",
       driver_name: shipment.driver_name ?? "",
@@ -1071,8 +1100,18 @@ export function DispatchConfirmPage() {
         gaps.push("handed_over_phone");
       }
     }
-    if (needs("vehicle_number") && !form.driver_phone.trim()) {
+    if (needs("vehicle_number") && !ownVehicle && !form.driver_phone.trim()) {
       gaps.push("driver_phone");
+    }
+    // Own vehicle: the type, and a crew that agrees with its count (2026-11-20).
+    // The driver's name and phone come off the driver's card, so they are not asked twice.
+    if (ownVehicle) {
+      for (const field of ["driver_name", "driver_phone"]) {
+        const at = gaps.indexOf(field);
+        if (at >= 0) gaps.splice(at, 1);
+      }
+      if (!vehicleTypeId) gaps.push("vehicle_type_id");
+      if (crewProblemCount(crewCount, crew) > 0) gaps.push("crew");
     }
     // And what a MANUAL courier owes on top of its mode, read forward off the same
     // served policy the form marks its asterisks from — see `manualNeeds`.
@@ -1088,7 +1127,7 @@ export function DispatchConfirmPage() {
     }
     return gaps;
   }, [rule, form, carrierIds, handoverPerson, manualCourier, courierPolicy,
-      manualTracking, asksForPrice]);
+      manualTracking, asksForPrice, ownVehicle, vehicleTypeId, crewCount, crew]);
 
   // "Provider identified based on distance, weight, items" (doc E3). The backend owns
   // the thresholds and answers null when the consignment carried neither a distance
@@ -1122,8 +1161,13 @@ export function DispatchConfirmPage() {
         manual_courier_name: manualCourier ? form.manual_courier_name.trim() || null : null,
         evaluation_method: null,
         vehicle_number: form.vehicle_number || null,
-        driver_name: form.driver_name || null,
-        driver_phone: form.driver_phone || null,
+        driver_name: (ownVehicle ? driverOf(crew)?.name.trim() : form.driver_name) || null,
+        driver_phone: (ownVehicle ? driverOf(crew)?.phone : form.driver_phone) || null,
+        // Own vehicle: its type and who travels with it (2026-11-20). Sent as an
+        // empty crew on any other mode, which the service reads as "none".
+        ...(ownVehicle
+          ? { vehicle_type_id: vehicleTypeId, crew_count: crewCount, crew }
+          : { vehicle_type_id: null, crew_count: null, crew: [] }),
         driver_licence_no: form.driver_licence_no || null,
         trip_reference: form.trip_reference || null,
         handed_over_by_name: form.handed_over_by_name || null,
@@ -1256,7 +1300,7 @@ export function DispatchConfirmPage() {
    *  answered; this says what has been answered badly, and either one holds the press.
    *  The service checks all of it again — this only saves the round trip. */
   const badValues = problems(
-    phoneError(form.driver_phone, "Driver phone"),
+    ownVehicle ? null : phoneError(form.driver_phone, "Driver phone"),
     phoneError(form.handed_over_phone, "Phone"),
     aadhaarError(form.handed_over_aadhaar),
   );
@@ -1844,29 +1888,30 @@ export function DispatchConfirmPage() {
                         number identifies them is decided before it can be typed. The
                         choice and the box it decides sit side by side — a row apart, the
                         Aadhaar looks like it belongs to whatever is above it. */}
+                    {/* Own vehicle (2026-11-20): the vehicle — its number and its type
+                        from Logistics › Masters — then HOW MANY travel with it, then
+                        one card per person, the driver picked on a card. */}
                     <Group
                       first
-                      icon={<IdCard className="h-4 w-4" />}
-                      title="Who is driving"
-                      hint="Ours, or a driver on the day"
+                      icon={<Truck className="h-4 w-4" />}
+                      title="The vehicle and its crew"
+                      hint="Everyone going with the load is named"
                     />
-                    {personChoice("Who is driving")}
-                    {personId()}
                     <Field label="Vehicle number" required={needs("vehicle_number")}>
                       <Input value={form.vehicle_number}
-                        onChange={(e) => setForm({ ...form, vehicle_number: e.target.value })} />
+                        onChange={(e) => setForm({ ...form, vehicle_number: e.target.value.toUpperCase() })} />
                     </Field>
-                    <Field label="Driver name" required={needs("driver_name")}>
-                      <Input value={form.driver_name}
-                        onChange={(e) => setForm({ ...form, driver_name: e.target.value })} />
-                    </Field>
-                    <Field label="Driver phone" required
-                      hint={phoneError(form.driver_phone, "Driver phone") ?? PHONE_HINT}>
-                      <Input value={form.driver_phone} inputMode="numeric" maxLength={18}
-                        onChange={(e) => setForm({
-                          ...form, driver_phone: sanitizePhone(e.target.value),
-                        })} />
-                    </Field>
+                    <div className="col-span-full" onBlur={() => setCrewTouched(true)}>
+                      <OwnVehicleCrew
+                        vehicleTypes={vehicleTypeOptions}
+                        vehicleTypeId={vehicleTypeId}
+                        onVehicleType={setVehicleTypeId}
+                        count={crewCount}
+                        crew={crew}
+                        onCrew={(count, next) => { setCrewCount(count); setCrew(next); }}
+                        showErrors={crewTouched}
+                      />
+                    </div>
                     {/* The other job the vehicle was already doing — the whole reason
                         this mode costs the shipment nothing. Asked here as well as on
                         the manual form, so a one-press dispatch does not lose it. */}
@@ -1948,12 +1993,15 @@ export function DispatchConfirmPage() {
                     value={load(subject.packages, subject.weight_kg)} />
                   <Fact icon={<CalendarDays className="h-4 w-4" />}
                     label={subject.dateLabel} value={fmtDate(subject.date)} />
-                  {/* The window the destination was promised (2026-11-19), so the
-                      mode is chosen against the date it has to be there by. */}
-                  {(subject.expectedFrom || subject.expectedTo) && (
+                  {/* When it is meant to leave and when the destination was told to
+                      expect it (2026-11-20), so the mode is chosen against both. */}
+                  {subject.expectedFrom && (
+                    <Fact icon={<Truck className="h-4 w-4" />}
+                      label="Dispatch date" value={fmtDate(subject.expectedFrom)} />
+                  )}
+                  {subject.expectedTo && (
                     <Fact icon={<CalendarRange className="h-4 w-4" />}
-                      label="Expected delivery"
-                      value={fmtDateRange(subject.expectedFrom, subject.expectedTo)} />
+                      label="Expected delivery" value={fmtDate(subject.expectedTo)} />
                   )}
                   {/* The packs on the vehicle, per item (2026-10-22). */}
                   {!!doc?.line_packs?.length && (

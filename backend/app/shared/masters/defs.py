@@ -32,6 +32,7 @@ from app.shared.models.master import (
     CategoryTag, DosageForm, Feature, GeneralName, HsnCode, Item, ItemCategory,
     ItemClass, ItemComponent, ItemGroup, ItemPackaging, ItemSubClass, Manufacturer,
     PackHierarchy, Packaging, PaymentTerm, Project, Spec, Uom, UomConversion, Vendor, VendorItem,
+    VehicleType,
     VendorCategory, VendorCategoryMember,
 )
 from app.shared.models.warehouse import Bin, StorageType, Warehouse
@@ -1682,6 +1683,18 @@ async def save_brand_item_mapping(db: AsyncSession, data: BrandItemMappingIn,
             "brands": len(brand_rows), "items": len(items)}
 
 
+class VehicleTypeIn(NamedCodeIn):
+    """Logistics › Masters › Vehicle Types (2026-11-20)."""
+    capacity_kg: Decimal | None = Field(default=None, ge=0)
+    capacity_cbm: Decimal | None = Field(default=None, ge=0)
+
+
+def vehicle_type_out(row: VehicleType) -> dict:
+    return {**named_code_out(row),
+            "capacity_kg": float(row.capacity_kg) if row.capacity_kg is not None else None,
+            "capacity_cbm": float(row.capacity_cbm) if row.capacity_cbm is not None else None}
+
+
 def named_code_out(row) -> dict:
     return {"id": row.id, "code": row.code, "name": row.name,
             "description": getattr(row, "description", None),
@@ -3250,6 +3263,12 @@ MASTERS: list[MasterDef] = [
               serialize=named_code_out, search_cols=("name", "code"),
               apply=named_code_apply(Manufacturer, "A manufacturer"),
               usage=((*USED_BY_ITEMS, "manufacturer_id"), ("Brand mappings", "mst_brand_manufacturers", "manufacturer_id"),)),
+
+    MasterDef(path="vehicle-types", name="Vehicle type", model=VehicleType,
+              schema=VehicleTypeIn, manage_perm=perms.MASTER_VEHICLE_TYPE_MANAGE,
+              serialize=vehicle_type_out, search_cols=("name", "code"),
+              apply=named_code_apply(VehicleType, "A vehicle type"),
+              usage=(("Shipments", "lgs_transport_requests", "vehicle_type_id"),)),
 
     MasterDef(path="dosage-forms", name="Dosage form", model=DosageForm,
               schema=NamedCodeIn, manage_perm=perms.MASTER_ITEM_MANAGE,

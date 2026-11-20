@@ -9,7 +9,7 @@ import {
   Button, Can, Card, ConfirmModal, ErrorBanner, Field, Input, PageHeader,
   StatCard, StatusPill, useAction,
 } from "@/shared/components";
-import { fmtDateRange, fmtDateTime } from "@/shared/datetime";
+import { fmtDate, fmtDateTime } from "@/shared/datetime";
 import { transportApi } from "../api";
 import { FlowStepper } from "../components/FlowStepper";
 import {
@@ -20,6 +20,7 @@ import {
 } from "../components/HandoverCustody";
 import type { CustodyValue, PersonKind } from "../components/HandoverCustody";
 import { ShipmentTimeline } from "../components/ShipmentTimeline";
+import { OwnVehicleTrip } from "../components/OwnVehicleTrip";
 import { ManifestTable } from "../components/ManifestTable";
 import { TripRouteStrip, TripStopsPanel } from "../components/TripStops";
 import { TONE_APPROVE, TONE_REJECT, TONE_SUBMIT, TONE_YELLOW } from "@/shared/components/tones";
@@ -688,7 +689,10 @@ export function TransportDetailPage() {
           <div className="mt-1 divide-y divide-line/70">
             <Section title="Reference" rows={[
               ["Against indent", doc.indent_no],
-              ["Expected delivery", fmtDateRange(doc.expected_delivery_from, doc.expected_delivery, "")],
+              ["Dispatch date", doc.dispatched_at
+                ? fmtDateTime(doc.dispatched_at, "")
+                : fmtDate(doc.expected_delivery_from, "")],
+              ["Expected delivery", fmtDate(doc.expected_delivery, "")],
             ]} />
             <Section title="Carrier & vehicle" rows={[
               ["Carrier", doc.carrier_name],
@@ -696,6 +700,7 @@ export function TransportDetailPage() {
               ["Carrier accepted", fmtDateTime(doc.carrier_accepted_at, "")],
               ["Confirmed by the desk", doc.carrier_confirmed_by_name],
               ["Vehicle", doc.vehicle_number],
+              ["Vehicle type", doc.vehicle_type_name],
               ["Driver", doc.driver_name],
               // Filled by the carrier when they acknowledged the award on a tender,
               // and by the desk on a leg it settled itself. Same columns either way.
@@ -748,6 +753,8 @@ export function TransportDetailPage() {
         </Card>
 
         <div className="space-y-4">
+          {/* Own vehicle (2026-11-20): the crew and the odometer at both ends. */}
+          {doc.mode === "OWN_VEHICLE" && <OwnVehicleTrip doc={doc} />}
           <ShipmentTimeline trId={doc.id} events={doc.events} status={doc.status} />
         </div>
       </div>

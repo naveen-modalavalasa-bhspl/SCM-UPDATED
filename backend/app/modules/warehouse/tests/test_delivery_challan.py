@@ -23,17 +23,17 @@ LEAVES = date(2026, 11, 19)
 
 
 def test_a_consignment_must_state_both_ends_of_the_window():
-    with pytest.raises(ValidationError, match="start"):
+    with pytest.raises(ValidationError, match="dispatch date"):
         _guard_delivery_window(LEAVES, None, date(2026, 11, 25), required=True)
-    with pytest.raises(ValidationError, match="end"):
+    with pytest.raises(ValidationError, match="expected delivery date"):
         _guard_delivery_window(LEAVES, date(2026, 11, 22), None, required=True)
     _guard_delivery_window(LEAVES, date(2026, 11, 22), date(2026, 11, 25), required=True)
 
 
 def test_the_window_cannot_open_before_the_goods_leave_or_run_backwards():
-    with pytest.raises(ValidationError, match="only leaves"):
+    with pytest.raises(ValidationError, match="before the consignment date"):
         _guard_delivery_window(LEAVES, date(2026, 11, 18), date(2026, 11, 25), required=True)
-    with pytest.raises(ValidationError, match="before it starts"):
+    with pytest.raises(ValidationError, match="before the dispatch date"):
         _guard_delivery_window(LEAVES, date(2026, 11, 25), date(2026, 11, 22), required=True)
     with pytest.raises(ValidationError, match="before the consignment leaves"):
         _guard_delivery_window(LEAVES, None, date(2026, 11, 18), required=False)
@@ -85,3 +85,12 @@ def test_an_unmeasured_package_has_no_volume_not_zero():
                              height_cm=Decimal("25"))
     assert _volume_cbm(full) == Decimal("0.030")
     assert _volume_cbm(part) is None
+
+
+def test_the_printed_challan_carries_no_codes_and_adds_packages_up():
+    rows = [_row(1, "1", rate="250", serial="SN1"), _row(1, "1", rate="250", serial="SN2"),
+            _row(1, "3", rate="250")]
+    lines = _summarise_lines(rows, {}, with_codes=False)
+    assert len(lines) == 1
+    assert lines[0]["quantity"] == Decimal("5")
+    assert lines[0]["codes"] == []

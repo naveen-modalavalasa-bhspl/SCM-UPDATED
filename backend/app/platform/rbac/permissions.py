@@ -217,6 +217,8 @@ MASTER_PROJECT_MANAGE = "master.project.manage"
 MASTER_BRAND_MANAGE = "master.brand.manage"
 MASTER_CLASS_MANAGE = "master.class.manage"
 MASTER_PACKAGING_MANAGE = "master.packaging.manage"
+# Logistics › Masters › Vehicle Types (2026-11-20).
+MASTER_VEHICLE_TYPE_MANAGE = "master.vehicle_type.manage"
 MASTER_FEATURE_MANAGE = "master.feature.manage"
 MASTER_ATTRIBUTE_MANAGE = "master.attribute.manage"
 MASTER_PRICE_MANAGE = "master.price.manage"
@@ -520,6 +522,7 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(MASTER_BRAND_MANAGE, "masters", "brand", "manage", "Manage brands"),
     Perm(MASTER_CLASS_MANAGE, "masters", "class", "manage", "Manage item classes"),
     Perm(MASTER_PACKAGING_MANAGE, "masters", "packaging", "manage", "Manage packaging"),
+    Perm(MASTER_VEHICLE_TYPE_MANAGE, "masters", "vehicle_type", "manage", "Manage vehicle types"),
     Perm(MASTER_FEATURE_MANAGE, "masters", "feature", "manage", "Manage features"),
     Perm(MASTER_ATTRIBUTE_MANAGE, "masters", "attribute", "manage",
          "Manage attributes & attribute mapping"),
@@ -820,6 +823,7 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("logistics_transport", "logistics", "Logistics · Shipments"),
     ("logistics_providers", "logistics", "Logistics · Provider Selection"),
     ("logistics_activity", "logistics", "Logistics · Activity Ledger"),
+    ("logistics_masters", "logistics", "Logistics · Masters"),
     # Retired screens. The codes stay catalogued because the permission rows and every
     # grant on them are still in the database — `seed_permissions` never prunes — and
     # because the ledger's own grant is inherited from Tracking's below.
@@ -929,6 +933,10 @@ INHERITS_GRANTS_FROM.update({
     # locked door from.
     page_view_code("logistics_overview"): page_view_code("logistics_transport"),
     page_view_code("logistics_load_planner"): page_view_code("logistics_dispatch"),
+    # Logistics › Masters (2026-11-20) lands with the desk that dispatches: the vehicle
+    # types it holds are what that desk picks from. Managing them is its own code.
+    page_view_code("logistics_masters"): page_view_code("logistics_dispatch"),
+    MASTER_VEHICLE_TYPE_MANAGE: TRANSPORT_CREATE,
     # Not a split but a late catalogue entry, which needs the same treatment: the
     # screen has been reachable on these two codes for months, and minting its page
     # permission fail-closed would silently retire a screen people work every day.
