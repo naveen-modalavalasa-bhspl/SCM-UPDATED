@@ -213,6 +213,7 @@ export interface ConsignmentLine {
   package_id?: number | null;
   item_id: number;
   item_code?: string | null;
+  issue_item_id?: number | null;
   item_name?: string | null;
   uom_code?: string | null;
   batch_no?: string | null;
@@ -239,6 +240,8 @@ export interface ConsignmentDetail extends Consignment {
   packages: ConsignmentPackage[];
   /** Each issue line's packs, once per line (2026-10-22) — the rows are per unit. */
   line_packs?: ConsignmentLinePacks[];
+  /** {issue line id: its trays} (MoM point 14). */
+  line_trays?: Record<string, import("@/modules/indents/types").IssueTray[]>;
 }
 
 export interface ConsignmentLinePacks {

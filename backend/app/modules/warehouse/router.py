@@ -892,6 +892,15 @@ async def post_split_issue(issue_id: int, db: AsyncSession = Depends(get_db),
     return await service.post_split_issue(db, issue_id, user)
 
 
+# Trays on one pick (MoM point 14), on a draft or an approved, unposted issue —
+# serials are often scanned after approval, and the trays follow them.
+@router.put("/issues/{issue_id}/lines/{line_id}/trays", response_model=s.IssueDetail)
+async def set_issue_line_trays(issue_id: int, line_id: int, body: s.IssueTraysIn,
+                               db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission(ISSUE_CREATE))):
+    return await service.set_issue_line_trays(db, issue_id, line_id, body.trays, user)
+
+
 @router.put("/issues/{issue_id}/serials", response_model=s.IssueDetail)
 async def set_issue_serials(issue_id: int, body: s.IssueSerialsIn,
                             db: AsyncSession = Depends(get_db),

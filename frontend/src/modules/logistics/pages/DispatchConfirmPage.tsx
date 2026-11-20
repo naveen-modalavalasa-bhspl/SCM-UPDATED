@@ -41,6 +41,7 @@ import type {
 import { TripRouteStrip } from "../components/TripStops";
 import { TransferContextStrip } from "@/modules/warehouse";
 import { legDestination } from "../components/manifestView";
+import { TrayChips } from "@/modules/indents/components/TrayChips";
 
 const BLANK = {
   vehicle_number: "", driver_name: "",
@@ -2002,6 +2003,21 @@ export function DispatchConfirmPage() {
                   {subject.expectedTo && (
                     <Fact icon={<CalendarRange className="h-4 w-4" />}
                       label="Expected delivery" value={fmtDate(subject.expectedTo)} />
+                  )}
+                  {/* The trays each item was put into at the issue desk (MoM point 14). */}
+                  {Object.keys(doc?.line_trays ?? {}).length > 0 && (
+                    <div className="space-y-2 border-t border-line/70 pt-3.5">
+                      <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">Trays</span>
+                      {Object.entries(doc!.line_trays!).map(([lineId, trays]) => {
+                        const row = doc!.items.find((it) => String(it.issue_item_id) === lineId);
+                        return (
+                          <div key={lineId} className="rounded-xl border border-line/70 bg-content2/30 px-3 py-2">
+                            <div className="truncate text-xs font-semibold text-ink">{row?.item_name ?? row?.item_code ?? `Line ${lineId}`}</div>
+                            <TrayChips trays={trays} uom={row?.uom_code} className="mt-1" />
+                          </div>
+                        );
+                      })}
+                    </div>
                   )}
                   {/* The packs on the vehicle, per item (2026-10-22). */}
                   {!!doc?.line_packs?.length && (

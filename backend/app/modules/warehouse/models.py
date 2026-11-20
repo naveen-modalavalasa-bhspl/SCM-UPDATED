@@ -594,6 +594,11 @@ class MaterialIssueLine(CombinationMixin, Base):
     pack_hierarchy_id = Column(BigInteger, nullable=True)
     pack_breakdown = Column(JSON, nullable=True)
     break_bulk = Column(Boolean, nullable=False, default=False)
+    # Trays (MoM 2026-11-18, point 14): which tray each part of this pick goes into —
+    # [{"tray_no": "T-04", "quantity": 5, "codes": ["SN1", ...]}]. On the LINE, because
+    # lines are rewritten on every save and a tray means nothing without its pick.
+    # Rules in `issue_trays.py`; never printed on the Delivery Challan.
+    trays = Column(JSON, nullable=True)
 
     issue = relationship("MaterialIssue", back_populates="items")
 

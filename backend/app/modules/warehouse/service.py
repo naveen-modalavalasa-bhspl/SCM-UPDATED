@@ -96,6 +96,7 @@ from app.shared.models.combination import COMBINATION_COLUMNS
 from app.shared.masters import combinations
 from app.shared.masters import packs as master_packs
 from app.modules.warehouse import box_codes
+from app.modules.warehouse import issue_trays
 from app.modules.inventory.allocations import combo_dict, combo_key
 from app.shared.models.warehouse import Bin, Warehouse
 from app.shared.numbering import next_number
@@ -10968,6 +10969,9 @@ async def _apply_issue_lines(db: AsyncSession, issue: m.MaterialIssue,
             pack_hierarchy_id=line_packs[index - 1][0],
             pack_breakdown=line_packs[index - 1][1],
             break_bulk=bool(getattr(line, "break_bulk", False)),
+            trays=issue_trays.clean(
+                line.trays, issued=issued, label=f"Line {index} ({item.code})",
+                line_codes=[*(line.serial_numbers or []), *(line.imei_numbers or [])]),
             **line_combos[index - 1],
         ))
     _issue_totals(issue)
@@ -12877,6 +12881,7 @@ async def submit_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue
     _guard(issue.status, {IssueStatus.DRAFT.value}, "submit", "issue")
     if not issue.items:
         raise ValidationError("An issue with no lines has nothing to approve")
+    issue_trays.assert_complete(issue)
     # A stock transfer (an STO's issue, or one serving an STR) names who carries or
     # receives it, exactly as a direct issue does (2026-11-02). Checked at submit, not
     # on save: the STO's own draft is written by its approval hook with nobody named.
@@ -13689,6 +13694,36 @@ async def set_issue_serials(db: AsyncSession, issue_id: int,
     return await get_issue(db, issue.id)
 
 
+async def set_issue_line_trays(db: AsyncSession, issue_id: int, line_id: int,
+                               trays: list, user) -> m.MaterialIssue:
+    """Put one pick into trays (MoM point 14) without rewriting the document — on a
+    draft, or once approved by whoever issues it, until it is posted."""
+    issue = await get_issue(db, issue_id)
+    _guard(issue.status, {IssueStatus.DRAFT.value, IssueStatus.APPROVED.value},
+           "change the trays on", "issue")
+    if issue.is_stock_posted:
+        raise ValidationError(f"{issue.issue_no} has already been posted — its trays are fixed.")
+    if issue.status == IssueStatus.APPROVED.value:
+        await _assert_issue_holder(db, issue, user)
+    line = next((row for row in issue.items if row.id == line_id), None)
+    if line is None:
+        raise NotFoundError(f"That line is not on {issue.issue_no}")
+    codes = [*(getattr(line, "serial_numbers", None) or []),
+             *(getattr(line, "unit_keys", None) or []),
+             *(getattr(line, "imei_numbers", None) or [])]
+    before = line.trays
+    line.trays = issue_trays.clean(
+        trays, issued=line.issued_qty, label=f"Line {line.line_no} ({line.item_code})",
+        line_codes=codes)
+    await write_audit(db, entity="out_issues", entity_id=issue.id, entity_no=issue.issue_no,
+                      action=AuditAction.UPDATE, actor=user,
+                      summary=f"Trays set on line {line.line_no}: "
+                              + (", ".join(issue_trays.tray_numbers(line.trays)) or "none"),
+                      before={"trays": before}, after={"trays": line.trays})
+    await db.commit()
+    return await get_issue(db, issue.id)
+
+
 def _row_combo(row) -> dict:
     """A balance row's combination, in the shape `move_stock_out` takes."""
     return {"brand_id": int(row.brand_id or 0), "variant_id": int(row.variant_id or 0),
@@ -13875,6 +13910,7 @@ async def _post_issue_core(db: AsyncSession, issue_id: int, user) -> m.MaterialI
     if issue.is_stock_posted:
         raise ValidationError(f"{issue.issue_no} has already been posted")
     await _assert_issue_holder(db, issue, user)
+    issue_trays.assert_complete(issue)
     # Expiry and FEFO, re-read at the moment the goods LEAVE (2026-10-13). The save
     # checked them, but approval can take days: a picked batch may have expired since,
     # or a GRN may have brought in one that expires earlier. Same check as the save,
@@ -15497,7 +15533,7 @@ async def direct_issues_for_recipient(db: AsyncSession, user, *, search: str | N
         "can_acknowledge": issue.status in _DIRECT_ACK_OPEN,
         "lines": [{"item_code": line.item_code, "item_name": line.item_name,
                    "uom_code": line.uom_code, "batch_no": line.batch_no,
-                   "issued_qty": line.issued_qty}
+                   "issued_qty": line.issued_qty, "trays": line.trays or []}
                   for line in issue.items if _d(line.issued_qty) > 0],
     } for issue in issues]
 
@@ -15560,7 +15596,7 @@ async def stock_transfer_issues_for_receiver(
             "can_acknowledge": issue.status in _DIRECT_ACK_OPEN,
             "lines": [{"item_code": line.item_code, "item_name": line.item_name,
                        "uom_code": line.uom_code, "batch_no": line.batch_no,
-                       "issued_qty": line.issued_qty}
+                       "issued_qty": line.issued_qty, "trays": line.trays or []}
                       for line in issue.items if _d(line.issued_qty) > 0],
             "sto_id": order.id if order else None,
             "sto_no": order.sto_no if order else None,
@@ -15760,6 +15796,8 @@ async def direct_issue_receipt(db: AsyncSession, issue_id: int, user) -> dict:
             "item_id": line.item_id,
             "item_code": line.item_code, "item_name": line.item_name,
             "uom_code": line.uom_code,
+            # The trays it was put into at the issue desk (MoM point 14).
+            "trays": [{**tray, "issue_no": issue.issue_no} for tray in (line.trays or [])],
             **combinations.carry(line),
             "approved_quantity": float(sent),
             "issued_quantity": float(sent),
@@ -16713,6 +16751,8 @@ async def get_dispatch(db: AsyncSession, dispatch_id: int, user=None) -> m.Dispa
     # that travels with the truck says what the stickers say.
     ctx = await box_codes.pack_context(db, [row.box_code for row in dispatch.items if row.box_code])
     setattr(dispatch, "box_paths", {code: c["path"] for code, c in ctx.items()})
+    setattr(dispatch, "line_trays", await issue_trays.by_issue_line(
+        db, [row.issue_item_id for row in dispatch.items]))
     setattr(dispatch, "public_scan_token", public_label_token("d", dispatch.id))
     for package in dispatch.packages:
         setattr(package, "public_scan_token", public_label_token("p", package.id))
@@ -25528,6 +25568,21 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
     # Issued in BOXES (2026-10-26): the boxes each indent line went out in — the
     # receiving site checks boxes, never one code per piece.
     boxes_by_line: dict[int, list[dict]] = {}
+    # The trays each indent line was put into at the issue desk (MoM point 14), with
+    # the issue they came off — an indent served in rounds has trays from each.
+    trays_by_line: dict[int, list[dict]] = {}
+    if line_ids:
+        for issue_no, indent_line_id, trays in (await db.execute(
+                select(m.MaterialIssue.issue_no, m.MaterialIssueLine.indent_item_id,
+                       m.MaterialIssueLine.trays)
+                .join(m.MaterialIssue, m.MaterialIssue.id == m.MaterialIssueLine.issue_id)
+                .where(m.MaterialIssueLine.indent_item_id.in_(line_ids),
+                       m.MaterialIssueLine.trays.isnot(None),
+                       m.MaterialIssue.is_stock_posted.is_(True),
+                       m.MaterialIssue.direction == IssueDirection.OUT.value))).all():
+            for tray in trays or []:
+                trays_by_line.setdefault(int(indent_line_id), []).append(
+                    {**tray, "issue_no": issue_no})
     if line_ids:
         for issue_id, issue_line_id, indent_line_id in (await db.execute(
                 select(m.MaterialIssue.id, m.MaterialIssueLine.id,
@@ -25569,6 +25624,7 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
                 "issued_combinations": issued_combos.get(item.id, []),
                 # Issued in boxes: the box codes, each with what it carried.
                 "box_codes": line_boxes,
+                "trays": trays_by_line.get(item.id, []),
                 "approved_quantity": float(approved),
                 "issued_quantity": float(issued),
                 "dispatched_quantity": float(dispatched),
@@ -28096,6 +28152,8 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
                 "tracking_type": (TrackingType.NONE.value if line.id in box_lines
                                   else getattr(line, "tracking_type", None)),
                 "box_codes": box_lines.get(line.id, []),
+                # The trays the storekeeper put this pick into (MoM point 14).
+                "trays": line.trays or [],
                 "requires_qc": bool(getattr(line, "requires_qc", False)),
                 # Snapshotted on the issue line at creation, so the packer sees what
                 # is actually in the carton rather than a blank the receiving point

@@ -1,3 +1,5 @@
+import type { IssueTray } from "@/modules/indents/types";
+export type { IssueTray } from "@/modules/indents/types";
 import type { CombinationValue } from "@/shared/combination";
 /**
  * Warehouse module types.
@@ -1345,6 +1347,8 @@ export interface ApprovalEvent {
 
 /** `out_issue_items`. */
 export interface IssueItem extends CombinationValue {
+  /** The trays this pick went into (MoM point 14). */
+  trays?: IssueTray[] | null;
   /** On a SPLIT parent: the floor piece and line that carry this line now (2026-11-11). */
   piece_issue_id?: number | null;
   piece_issue_no?: string | null;
@@ -1519,6 +1523,8 @@ export interface SerialScopeCounts {
 export type CodeScopeLevel = "exact" | "batch" | "point";
 
 export interface IssueItemWrite extends CombinationValue {
+  /** The trays this pick goes into, in order (MoM point 14). */
+  trays?: IssueTray[] | null;
   id?: number;
   indent_item_id?: number | null;
   item_id: number;
@@ -1786,6 +1792,8 @@ export interface Dispatch {
   line_packs?: DispatchLinePacks[];
   /** Carton › box for each package code it carries (2026-10-28). */
   box_paths?: Record<string, PackPathRef[]>;
+  /** {issue line id: its trays} — once per line (MoM point 14). */
+  line_trays?: Record<string, IssueTray[]>;
 }
 
 export interface DispatchLinePacks {
@@ -2017,6 +2025,8 @@ export interface ConsignmentWrite {
 }
 
 export interface IssueDispatchSourceItem extends DispatchItemWrite {
+  /** The trays the storekeeper put this pick into (MoM point 14). */
+  trays?: IssueTray[];
   /** Issued in PACKAGES (2026-10-26): each package the line sends on and what it
    *  carries after outward QC. A carton names which of them it holds. */
   box_codes?: { code: string; quantity: number; name?: string | null; path?: PackPathRef[] | null }[];

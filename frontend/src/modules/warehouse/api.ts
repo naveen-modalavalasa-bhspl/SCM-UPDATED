@@ -641,6 +641,10 @@ export const setIssueSerials = (
   lines: { id: number; serial_numbers: string[] }[],
 ) => put<Issue>(`${BASE}/issues/${id}/serials`, { lines });
 
+/** One pick's trays on a draft or an approved, unposted issue (MoM point 14). */
+export const setIssueLineTrays = (id: number, lineId: number, trays: import("./types").IssueTray[]) =>
+  put<Issue>(`${BASE}/issues/${id}/lines/${lineId}/trays`, { trays });
+
 export const acknowledgeIssue = (id: number, remarks?: string) =>
   post<Issue>(`${BASE}/issues/${id}/acknowledge`, { remarks });
 

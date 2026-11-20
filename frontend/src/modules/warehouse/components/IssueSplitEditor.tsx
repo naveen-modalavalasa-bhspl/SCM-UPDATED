@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { baseOf, packable, type PackHierarchy } from "@/shared/packing";
 import { IssuePickPacking } from "./IssuePickPacking";
+import { IssuePickTrays } from "./IssuePickTrays";
 import { ItemStockCard } from "./ItemStockCard";
 import {
   AlertTriangle, Barcode, Check, MessageSquare, PackageX, Plus, ScanLine, Trash2, Undo2,
@@ -19,7 +20,7 @@ import type { BatchChoice, IssueGroup, IssueSplit } from "../issueSplits";
 import { sourcesFor } from "../issueSplits";
 import { heldMix } from "../packPick";
 import type {
-  IssueItemWrite, IssueStockSource, TrackingType, TrackingTypeMeta, UnitSupply,
+  IssueItemWrite, IssueStockSource, IssueTray, TrackingType, TrackingTypeMeta, UnitSupply,
 } from "../types";
 import { CombinationPicker, CombinationTag, inStockOptions, type CombinationValue } from "@/shared/combination";
 
@@ -172,12 +173,15 @@ interface Props {
   renderRate?: (split: IssueSplit) => React.ReactNode;
   /** Each item's pack hierarchies, so a pick can be issued in packs (2026-10-08). */
   packOptionsByItem?: Record<number, PackHierarchy[]>;
+  /** An approved issue: save one pick's trays on their own (MoM point 14). */
+  onSaveTrays?: (lineId: number, trays: IssueTray[]) => Promise<unknown>;
 }
 
 export function IssueSplitEditor({
   groups, lines, onChange, sourcesByItem, warehouseId, indentId, binManaged,
   locked, unitsLocked, codesLocked, unitsHidden = false, onPickUnits, onSourcePicked, meta, problemAt, unitSupply,
   sourcesReady, onAddItem, renderItemPicker, onRemoveGroup, renderRate, packOptionsByItem,
+  onSaveTrays,
 }: Props) {
   const patch = (index: number, change: Partial<IssueItemWrite>,
                  event?: { batchPicked?: boolean; locationPicked?: boolean }) => {
@@ -233,6 +237,7 @@ export function IssueSplitEditor({
     const fresh: IssueItemWrite = {
       ...template,
       id: undefined,
+      trays: null,
       batch_id: null,
       batch_no: null,
       bin_id: null,
@@ -360,6 +365,7 @@ export function IssueSplitEditor({
           renderItemPicker={renderItemPicker}
           renderRate={renderRate}
           packOptions={packable(packOptionsByItem?.[group.itemId])}
+          onSaveTrays={onSaveTrays}
           hasSources={sourcesFor(sourcesByItem, group.itemId, group.combo).length > 0}
         />
       ))}
@@ -413,6 +419,8 @@ interface ItemProps {
   renderRate?: (split: IssueSplit) => React.ReactNode;
   packOptions: PackHierarchy[];
   hasSources: boolean;
+  /** An approved issue: save one pick's trays on their own (MoM point 14). */
+  onSaveTrays?: (lineId: number, trays: IssueTray[]) => Promise<unknown>;
   /** Every source of the item, whatever its combination — the in-stock dropdown. */
   allSources: IssueStockSource[];
   onSetCombination: (combo: CombinationValue) => void;
@@ -848,7 +856,7 @@ function PickRow(props: PickProps) {
   const {
     group, split, position, sources, batches, fefoHint, binManaged, locked,
     unitsLocked, codesLocked, unitsHidden, unitMeta, unitSupply, onPatch, onPickUnits, onRemove, problem,
-    renderRate, packOptions,
+    renderRate, packOptions, onSaveTrays,
   } = props;
 
   const line = split.line;
@@ -1321,6 +1329,21 @@ function PickRow(props: PickProps) {
           locked={locked}
           uom={packOptions[0]?.base_uom}
           onChange={(change) => onPatch(split.index, change)}
+        />
+      )}
+
+      {/* Trays (MoM point 14): after the quantity and the lot, which tray each part
+        * of this pick goes into and which codes are in it. */}
+      {!!line.item_id && (
+        <IssuePickTrays
+          trays={line.trays}
+          issued={num(line.issued_qty)}
+          codes={line.serial_numbers ?? []}
+          uom={(line as { uom_code?: string | null }).uom_code ?? packOptions[0]?.base_uom}
+          codeWord={(unitMeta?.label ?? "code").toLowerCase()}
+          mode={!locked ? "draft" : onSaveTrays && line.id && !pickLocked ? "direct" : "view"}
+          onChange={(trays) => onPatch(split.index, { trays })}
+          onSave={(trays) => onSaveTrays!(line.id!, trays)}
         />
       )}
 
