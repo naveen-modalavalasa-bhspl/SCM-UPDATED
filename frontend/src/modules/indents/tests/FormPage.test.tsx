@@ -892,12 +892,12 @@ describe("IndentFormPage indent type and vehicle", () => {
     );
   });
 
-  it("offers every type, legacy Regular included", async () => {
+  it("offers every type, Interim (stored as REGULAR) included", async () => {
     renderForm();
 
     await openCombobox("Indent type");
 
-    expect(await screen.findByRole("option", { name: /Regular/ })).toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: /Interim indent/ })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /Monthly indent/ })).toBeInTheDocument();
   });
 

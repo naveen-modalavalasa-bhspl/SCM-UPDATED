@@ -261,6 +261,8 @@ export interface AcknowledgementLine extends CombinationValue {
   /** What was actually ISSUED, per brand / variant / model (2026-10-26) — a
    *  substituted brand, or stock with no brand recorded. */
   issued_combinations?: (CombinationValue & { no_brand?: boolean; quantity: number })[];
+  /** The trays it was put into at the issue desk (MoM point 14). */
+  trays?: IssueTray[];
   /** Issued in BOXES (2026-10-26): the boxes the line went out in. Counted by
    *  quantity; no code per piece is asked for. */
   box_codes?: { code: string; pack_name?: string | null; quantity: number;
@@ -355,6 +357,7 @@ export interface ShipmentTrack {
   status: string;
   carrier_name?: string | null;
   vehicle_number?: string | null;
+  destination_sac?: string | null;
   driver_name?: string | null;
   driver_phone?: string | null;
   lr_no?: string | null;
@@ -399,6 +402,7 @@ export interface RaiserTracking {
   docket_no?: string | null;
   tracking_url?: string | null;
   vehicle_number?: string | null;
+  destination_sac?: string | null;
   driver_name?: string | null;
   driver_phone?: string | null;
   handed_over_by_name?: string | null;
@@ -617,7 +621,9 @@ export interface DirectIssueAck {
   can_acknowledge: boolean;
   lines: {
     item_code: string | null; item_name: string | null; uom_code: string | null;
-    batch_no: string | null; issued_qty: number | string
+    batch_no: string | null; issued_qty: number | string;
+    /** The trays it was put into at the issue desk (MoM point 14). */
+    trays?: IssueTray[];
   }[];
   /** The consignments carrying this issue, each with its package count. */
   consignments?: {
@@ -634,4 +640,15 @@ export interface StockTransferAck extends DirectIssueAck {
   sto_no?: string | null;
   from_warehouse_name?: string | null;
   to_warehouse_name?: string | null;
+}
+
+
+/** One tray a pick went into at the issue desk (MoM 2026-11-18, point 14). Shown on
+ *  the consignment, the dispatch and the acknowledgement — never on the DC. */
+export interface IssueTray {
+  tray_no: string;
+  quantity: number;
+  codes: string[];
+  /** On an acknowledgement line: the issue the tray came off. */
+  issue_no?: string | null;
 }

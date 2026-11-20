@@ -314,6 +314,37 @@ export function TextInput({
   );
 }
 
+/**
+ * A reason written in a grid cell (2026-11-20, MoM point 9): a box that WRAPS and grows
+ * with what is typed, so a long rejection reason is read whole instead of cut off at
+ * the cell edge. Up to 5 lines on screen; the full text is also on hover.
+ */
+export function ReasonInput({
+  value, onChange, placeholder, disabled, ariaLabel,
+}: {
+  value?: string | null;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  disabled?: boolean;
+  ariaLabel: string;
+}) {
+  const text = value ?? "";
+  const rows = Math.min(5, Math.max(2, Math.ceil(text.length / 34) + (text.match(/\n/g)?.length ?? 0)));
+  return (
+    <textarea
+      value={text}
+      rows={rows}
+      disabled={disabled}
+      placeholder={placeholder}
+      aria-label={ariaLabel}
+      title={text || undefined}
+      maxLength={500}
+      onChange={(e) => onChange(e.target.value)}
+      className="min-h-11 w-full resize-y whitespace-pre-wrap break-words rounded-md border border-line bg-content1 px-2 py-1.5 text-sm leading-snug text-ink outline-none placeholder:text-muted focus:border-brand disabled:bg-content2 disabled:text-muted"
+    />
+  );
+}
+
 /** A compact date cell editor, sized for the grid. */
 export function DateInput({
   value,

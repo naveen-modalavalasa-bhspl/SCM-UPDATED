@@ -28,11 +28,12 @@ async def pending(params: PageParams = Depends(), db: AsyncSession = Depends(get
                   doc_type: str = "", overdue_only: bool = False,
                   raised_from: datetime | None = Query(None),
                   raised_to: datetime | None = Query(None),
-                  sort: str = "oldest", scope: str = Query("mine")):
+                  sort: str = "oldest", scope: str = Query("mine"),
+                  waiting: str = Query("", pattern="^(|attention|stuck)$")):
     return await service.pending_page(
         db, user, params.page, params.size, search=search, doc_type=doc_type,
         overdue_only=overdue_only, raised_from=raised_from, raised_to=raised_to,
-        sort=sort, scope=scope,
+        sort=sort, scope=scope, waiting=waiting,
     )
 
 
@@ -190,6 +191,13 @@ async def return_indent(indent_id: int, body: IndentReturnIn,
                         user=Depends(require_permission(perms.INDENT_APPROVE))):
     return await service.return_indent(
         db, indent_id, body.comments, user, target_sequence=body.target_sequence)
+
+
+@router.get("/indents/{indent_id}/office-stock")
+async def indent_office_stock(indent_id: int, db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(perms.INDENT_APPROVE))):
+    """Per line: what the raising office last received and what it holds now."""
+    return await fulfilment.office_stock_for_indent(db, indent_id, user)
 
 
 @router.get("/indents/{indent_id}/availability")

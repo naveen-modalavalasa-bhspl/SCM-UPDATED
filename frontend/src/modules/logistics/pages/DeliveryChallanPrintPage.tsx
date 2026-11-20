@@ -8,6 +8,7 @@ import { fmtDate } from "@/shared/datetime";
 import { displayUom } from "@/modules/indents/displayFormat";
 import { transportApi } from "../api";
 import { carriageLabel, modeLabel } from "../components/modeCopy";
+import { vehicleWithSac } from "../components/vehicleLabel";
 import { money, qty, rupeesInWords, volume, weight } from "../components/challanFormat";
 import type { ChallanLine, DeliveryChallan } from "../transportTypes";
 
@@ -136,7 +137,7 @@ function particulars(dc: DeliveryChallan): PrintField[] {
   // Only what this dispatch actually recorded: a hand-over has no LR, a courier no
   // vehicle, and an empty box on a challan reads as something nobody filled in.
   const optional: [string, string | null | undefined, boolean?][] = [
-    ["Vehicle no", dc.vehicle_number, true],
+    ["Vehicle no", vehicleWithSac(dc.vehicle_number, dc.destination_sac), true],
     ["Vehicle type", dc.vehicle_type_name],
     ["Driver", [dc.driver_name, dc.driver_phone].filter(Boolean).join(" · ") || null],
     ["Carrier", dc.carrier_name],

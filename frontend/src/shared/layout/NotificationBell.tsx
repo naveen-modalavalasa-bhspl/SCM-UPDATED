@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { pinUrgent } from "@/shared/api/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Popover, PopoverContent, PopoverTrigger } from "@heroui/react";
 import { ArrowRight, Bell, BellOff, CheckCheck } from "lucide-react";
@@ -126,7 +127,7 @@ export function NotificationBell() {
               <p className="text-xs text-muted">Approvals, orders and deliveries will show up here as they move.</p>
             </div>
           )}
-          {rows.map((row) => (
+          {pinUrgent(rows).map((row) => (
             <NotificationItem
               key={row.id}
               row={row}

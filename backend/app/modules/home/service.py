@@ -420,11 +420,31 @@ async def _build_summary(db: AsyncSession, user, date_range: DateRange = "week",
     # just taken approvals away from.
     if APPROVE_PERMISSIONS & permissions:
         overdue = pending_overdue
-        kpis.append(_kpi(
+        card = _kpi(
             "approvals", "APPROVALS", pending_total, f"{overdue} Overdue",
             "/approvals", "circle-check", tone="green",
             detail_tone="orange" if overdue else "green",
-        ))
+        )
+        # How long the queue has waited (2026-11-20, MoM point 2): stuck at the final
+        # rung past the escalation limit (red), and waiting past the attention mark
+        # (amber). Each line opens the Approvals list already filtered to it.
+        if pending_total:
+            ageing = await engine.pending_ageing_for_user(db, user)
+            highlights = []
+            if ageing["stuck"]:
+                highlights.append({
+                    "text": f"{ageing['stuck']} stuck at final approval",
+                    "tone": "red", "href": "/approvals?waiting=stuck",
+                    "hint": f"Waited over {int(ageing['after_hours'])} h; yours is the last approval.",
+                })
+            if ageing["attention"]:
+                highlights.append({
+                    "text": f"{ageing['attention']} waiting over {int(ageing['attention_hours'])} h",
+                    "tone": "amber", "href": "/approvals?waiting=attention",
+                    "hint": f"Moves up the approval ladder at {int(ageing['after_hours'])} h.",
+                })
+            card["highlights"] = highlights
+        kpis.append(card)
         if pending_total:
             attention.append(_attention(
                 "approvals", "Requests pending your approval", pending_total,

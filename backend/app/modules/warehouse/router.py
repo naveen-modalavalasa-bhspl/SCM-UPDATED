@@ -41,6 +41,7 @@ from app.modules.warehouse import box_codes
 from app.modules.warehouse import issue_labels as doc_labels
 from app.modules.warehouse import packing as wh_packing
 from app.modules.warehouse import audit_writeoff
+from app.modules.warehouse import warranty
 from app.platform.rbac.permissions import STOCK_ADJUST
 from app.platform.rbac.permissions import (
     STOCK_EDIT_APPROVE, STOCK_EDIT_CREATE, STOCK_EDIT_VIEW,
@@ -336,6 +337,42 @@ async def route_parked_receipt(receipt_id: int, db: AsyncSession = Depends(get_d
 async def complete_receipt(receipt_id: int, db: AsyncSession = Depends(get_db),
                            user=Depends(require_permission(RECEIPT_POST))):
     return await service.complete_receipt(db, receipt_id, user)
+
+
+# Warranty per received unit (MoM 2026-11-18, point 25) — `warranty.py`.
+@router.get("/receipts/{receipt_id}/warranties", response_model=s.ReceiptWarranties)
+async def receipt_warranties(receipt_id: int, db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(RECEIPT_VIEW))):
+    return await warranty.get_warranties(db, receipt_id, user)
+
+
+@router.post("/receipts/{receipt_id}/warranties", response_model=s.ReceiptWarranties)
+async def save_receipt_warranty(receipt_id: int, receipt_item_id: int = Form(...),
+                                codes: str = Form(...), start_date: str = Form(...),
+                                end_date: str = Form(...), card_no: str | None = Form(None),
+                                attachment_id: int | None = Form(None),
+                                file: UploadFile | None = File(None),
+                                db: AsyncSession = Depends(get_db),
+                                user=Depends(require_permission(RECEIPT_CREATE))):
+    return await warranty.save_warranty(
+        db, receipt_id, receipt_item_id=receipt_item_id, codes=codes, start_date=start_date,
+        end_date=end_date, card_no=card_no, upload=file, attachment_id=attachment_id, user=user)
+
+
+@router.delete("/receipts/{receipt_id}/warranties/{warranty_id}",
+               response_model=s.ReceiptWarranties)
+async def remove_receipt_warranty(receipt_id: int, warranty_id: int,
+                                  db: AsyncSession = Depends(get_db),
+                                  user=Depends(require_permission(RECEIPT_CREATE))):
+    return await warranty.remove_warranty(db, receipt_id, warranty_id, user)
+
+
+@router.get("/receipts/{receipt_id}/warranty-documents/{attachment_id}/download")
+async def receipt_warranty_document(receipt_id: int, attachment_id: int,
+                                    db: AsyncSession = Depends(get_db),
+                                    user=Depends(require_permission(RECEIPT_VIEW))):
+    path, file_name, mime_type = await warranty.warranty_document(db, receipt_id, attachment_id, user)
+    return FileResponse(path, filename=file_name, media_type=mime_type)
 
 
 @router.post("/receipts/{receipt_id}/cancel", response_model=s.ReceiptDetail)
@@ -853,6 +890,15 @@ async def post_split_issue(issue_id: int, db: AsyncSession = Depends(get_db),
                            user=Depends(require_permission(ISSUE_POST))):
     """Issue every floor piece of a split issue at once — all or nothing."""
     return await service.post_split_issue(db, issue_id, user)
+
+
+# Trays on one pick (MoM point 14), on a draft or an approved, unposted issue —
+# serials are often scanned after approval, and the trays follow them.
+@router.put("/issues/{issue_id}/lines/{line_id}/trays", response_model=s.IssueDetail)
+async def set_issue_line_trays(issue_id: int, line_id: int, body: s.IssueTraysIn,
+                               db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission(ISSUE_CREATE))):
+    return await service.set_issue_line_trays(db, issue_id, line_id, body.trays, user)
 
 
 @router.put("/issues/{issue_id}/serials", response_model=s.IssueDetail)

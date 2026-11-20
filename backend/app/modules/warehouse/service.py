@@ -96,6 +96,7 @@ from app.shared.models.combination import COMBINATION_COLUMNS
 from app.shared.masters import combinations
 from app.shared.masters import packs as master_packs
 from app.modules.warehouse import box_codes
+from app.modules.warehouse import issue_trays
 from app.modules.inventory.allocations import combo_dict, combo_key
 from app.shared.models.warehouse import Bin, Warehouse
 from app.shared.numbering import next_number
@@ -10968,6 +10969,9 @@ async def _apply_issue_lines(db: AsyncSession, issue: m.MaterialIssue,
             pack_hierarchy_id=line_packs[index - 1][0],
             pack_breakdown=line_packs[index - 1][1],
             break_bulk=bool(getattr(line, "break_bulk", False)),
+            trays=issue_trays.clean(
+                line.trays, issued=issued, label=f"Line {index} ({item.code})",
+                line_codes=[*(line.serial_numbers or []), *(line.imei_numbers or [])]),
             **line_combos[index - 1],
         ))
     _issue_totals(issue)
@@ -12877,6 +12881,7 @@ async def submit_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue
     _guard(issue.status, {IssueStatus.DRAFT.value}, "submit", "issue")
     if not issue.items:
         raise ValidationError("An issue with no lines has nothing to approve")
+    issue_trays.assert_complete(issue)
     # A stock transfer (an STO's issue, or one serving an STR) names who carries or
     # receives it, exactly as a direct issue does (2026-11-02). Checked at submit, not
     # on save: the STO's own draft is written by its approval hook with nobody named.
@@ -13020,6 +13025,8 @@ async def _plan_floor_split(db: AsyncSession, parent) -> tuple[dict, list]:
             "bin_id": bin_id, "bin_code": node.get("code") or line.bin_code,
             "batch_id": batch_id, "batch_no": batch_no, "expiry_date": expiry,
             "qty": qty,
+            # Which parent pick this slice is cut from — its trays follow (2026-11-20).
+            "parent_line_id": getattr(line, "id", None),
             # The parent line's own rate, so a child is valued exactly as the parent.
             "rate": line.rate,
             "combination": combinations.carry(line),
@@ -13194,6 +13201,8 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
     sequence = int(await db.scalar(
         select(func.count()).select_from(m.MaterialIssue)
         .where(m.MaterialIssue.parent_issue_id == parent.id)) or 0)
+    #: {id(piece line): the parent pick it was cut from}, for the trays below.
+    source_of: dict[int, int] = {}
     for floor_id, bucket in by_floor.items():
         sequence, child_no = await _next_child_issue_no(db, parent.issue_no, sequence)
         child = m.MaterialIssue(
@@ -13228,7 +13237,7 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
             created_by_name=getattr(user, "full_name", None),
         )
         for number, spec in enumerate(bucket["lines"], start=1):
-            child.items.append(m.MaterialIssueLine(
+            child.items.append(piece_line := m.MaterialIssueLine(
                 line_no=number,
                 indent_item_id=spec["indent_item_id"],
                 item_id=spec["item_id"], item_code=spec["item_code"],
@@ -13252,6 +13261,7 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
                 # approved, not any brand of the item.
                 **spec["combination"],
             ))
+            source_of[id(piece_line)] = spec.get("parent_line_id")
         _issue_totals(child)
         db.add(child)
         created.append(child)
@@ -13267,7 +13277,22 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
         indent_id=parent.indent_id, project_id=parent.project_id,
         warehouse_id=parent.warehouse_id,
         items=[line for child in created for line in child.items]), user)
-    await _hand_codes_to_floor_pieces(db, parent, created)
+    kept = await _hand_codes_to_floor_pieces(db, parent, created)
+    # The parent's trays go with the stock (MoM point 14): each piece line takes the
+    # trays its own codes are in, then its share of the uncoded room, in tray order.
+    by_parent: dict[int, list] = {}
+    for child in created:
+        for line in child.items:
+            by_parent.setdefault(source_of.get(id(line)), []).append(line)
+    for parent_line in parent.items:
+        pieces = by_parent.get(parent_line.id) or []
+        if not parent_line.trays or not pieces:
+            continue
+        shares = issue_trays.split_for_pieces(parent_line.trays, [
+            {"qty": line.issued_qty, "codes": kept.get(id(line), [])} for line in pieces])
+        for line, share in zip(pieces, shares):
+            line.trays = share
+    await db.flush()
     for child in created:
         # A direct parent's hold, re-taken piece by piece (see the release above).
         await _hold_direct_issue_stock(db, child, user)
@@ -13319,7 +13344,7 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
 
 
 async def _hand_codes_to_floor_pieces(db: AsyncSession, parent: m.MaterialIssue,
-                                      pieces: list[m.MaterialIssue]) -> None:
+                                      pieces: list[m.MaterialIssue]) -> dict[int, list[str]]:
     """Give each floor piece the unit codes for its own quantity (2026-10-13).
 
     The pieces are written straight to the table and never passed through
@@ -13359,6 +13384,8 @@ async def _hand_codes_to_floor_pieces(db: AsyncSession, parent: m.MaterialIssue,
     await db.flush()
 
     used: set[str] = set()
+    #: {id(piece line): the parent's codes it kept} — what decides its trays.
+    kept: dict[int, list[str]] = {}
     for piece in pieces:
         inputs = []
         for line in piece.items:
@@ -13368,6 +13395,7 @@ async def _hand_codes_to_floor_pieces(db: AsyncSession, parent: m.MaterialIssue,
                     and where.get(c) == (int(line.item_id), int(line.batch_id or 0),
                                          int(line.bin_id or 0))][:want]
             used.update(mine)
+            kept[id(line)] = mine
             inputs.append(s.IssueItemWrite(
                 item_id=line.item_id, indent_item_id=line.indent_item_id,
                 requested_qty=_d(line.requested_qty), issued_qty=_d(line.issued_qty),
@@ -13376,6 +13404,7 @@ async def _hand_codes_to_floor_pieces(db: AsyncSession, parent: m.MaterialIssue,
                 serial_numbers=mine))
         await _reserve_issue_serials(db, piece, inputs)
     await db.flush()
+    return kept
 
 
 async def _next_child_issue_no(db: AsyncSession, parent_no: str,
@@ -13689,6 +13718,36 @@ async def set_issue_serials(db: AsyncSession, issue_id: int,
     return await get_issue(db, issue.id)
 
 
+async def set_issue_line_trays(db: AsyncSession, issue_id: int, line_id: int,
+                               trays: list, user) -> m.MaterialIssue:
+    """Put one pick into trays (MoM point 14) without rewriting the document — on a
+    draft, or once approved by whoever issues it, until it is posted."""
+    issue = await get_issue(db, issue_id)
+    _guard(issue.status, {IssueStatus.DRAFT.value, IssueStatus.APPROVED.value},
+           "change the trays on", "issue")
+    if issue.is_stock_posted:
+        raise ValidationError(f"{issue.issue_no} has already been posted — its trays are fixed.")
+    if issue.status == IssueStatus.APPROVED.value:
+        await _assert_issue_holder(db, issue, user)
+    line = next((row for row in issue.items if row.id == line_id), None)
+    if line is None:
+        raise NotFoundError(f"That line is not on {issue.issue_no}")
+    codes = [*(getattr(line, "serial_numbers", None) or []),
+             *(getattr(line, "unit_keys", None) or []),
+             *(getattr(line, "imei_numbers", None) or [])]
+    before = line.trays
+    line.trays = issue_trays.clean(
+        trays, issued=line.issued_qty, label=f"Line {line.line_no} ({line.item_code})",
+        line_codes=codes)
+    await write_audit(db, entity="out_issues", entity_id=issue.id, entity_no=issue.issue_no,
+                      action=AuditAction.UPDATE, actor=user,
+                      summary=f"Trays set on line {line.line_no}: "
+                              + (", ".join(issue_trays.tray_numbers(line.trays)) or "none"),
+                      before={"trays": before}, after={"trays": line.trays})
+    await db.commit()
+    return await get_issue(db, issue.id)
+
+
 def _row_combo(row) -> dict:
     """A balance row's combination, in the shape `move_stock_out` takes."""
     return {"brand_id": int(row.brand_id or 0), "variant_id": int(row.variant_id or 0),
@@ -13875,6 +13934,7 @@ async def _post_issue_core(db: AsyncSession, issue_id: int, user) -> m.MaterialI
     if issue.is_stock_posted:
         raise ValidationError(f"{issue.issue_no} has already been posted")
     await _assert_issue_holder(db, issue, user)
+    issue_trays.assert_complete(issue)
     # Expiry and FEFO, re-read at the moment the goods LEAVE (2026-10-13). The save
     # checked them, but approval can take days: a picked batch may have expired since,
     # or a GRN may have brought in one that expires earlier. Same check as the save,
@@ -15497,7 +15557,7 @@ async def direct_issues_for_recipient(db: AsyncSession, user, *, search: str | N
         "can_acknowledge": issue.status in _DIRECT_ACK_OPEN,
         "lines": [{"item_code": line.item_code, "item_name": line.item_name,
                    "uom_code": line.uom_code, "batch_no": line.batch_no,
-                   "issued_qty": line.issued_qty}
+                   "issued_qty": line.issued_qty, "trays": line.trays or []}
                   for line in issue.items if _d(line.issued_qty) > 0],
     } for issue in issues]
 
@@ -15560,7 +15620,7 @@ async def stock_transfer_issues_for_receiver(
             "can_acknowledge": issue.status in _DIRECT_ACK_OPEN,
             "lines": [{"item_code": line.item_code, "item_name": line.item_name,
                        "uom_code": line.uom_code, "batch_no": line.batch_no,
-                       "issued_qty": line.issued_qty}
+                       "issued_qty": line.issued_qty, "trays": line.trays or []}
                       for line in issue.items if _d(line.issued_qty) > 0],
             "sto_id": order.id if order else None,
             "sto_no": order.sto_no if order else None,
@@ -15760,6 +15820,8 @@ async def direct_issue_receipt(db: AsyncSession, issue_id: int, user) -> dict:
             "item_id": line.item_id,
             "item_code": line.item_code, "item_name": line.item_name,
             "uom_code": line.uom_code,
+            # The trays it was put into at the issue desk (MoM point 14).
+            "trays": [{**tray, "issue_no": issue.issue_no} for tray in (line.trays or [])],
             **combinations.carry(line),
             "approved_quantity": float(sent),
             "issued_quantity": float(sent),
@@ -16713,6 +16775,8 @@ async def get_dispatch(db: AsyncSession, dispatch_id: int, user=None) -> m.Dispa
     # that travels with the truck says what the stickers say.
     ctx = await box_codes.pack_context(db, [row.box_code for row in dispatch.items if row.box_code])
     setattr(dispatch, "box_paths", {code: c["path"] for code, c in ctx.items()})
+    setattr(dispatch, "line_trays", await issue_trays.by_issue_line(
+        db, [row.issue_item_id for row in dispatch.items]))
     setattr(dispatch, "public_scan_token", public_label_token("d", dispatch.id))
     for package in dispatch.packages:
         setattr(package, "public_scan_token", public_label_token("p", package.id))
@@ -24408,6 +24472,15 @@ async def list_serials(db: AsyncSession, params: PageParams, *, status: str | No
     page = await paginate(db, stmt.order_by(m.SerialNumber.id.desc()), params)
     hu_of = {row.id: row.handling_unit_id for row in page["items"]}
     page["items"] = await _decorate_serials(db, page["items"])
+    # Each unit's warranty as recorded on the GRN it arrived on (MoM point 25).
+    from app.modules.warehouse import warranty
+    covers = await warranty.by_item(
+        db, {row["item_id"] for row in page["items"]},
+        codes=[c for row in page["items"] for c in (row.get("serial_number"), row.get("imei"))])
+    for row in page["items"]:
+        cover = (covers.get((int(row["item_id"]), row.get("serial_number")))
+                 or covers.get((int(row["item_id"]), row.get("imei"))))
+        row.update(warranty.unit_fields(cover))
     # The PACKAGE each unit sits in (2026-10-26), so a lot reads as packages with
     # their codes inside them. One query for the page.
     hu_ids = {v for v in hu_of.values() if v}
@@ -24474,6 +24547,10 @@ async def serial_summary(db: AsyncSession, *, item_ids: list[int],
     # warehouse holds the same item in several bins. The caller indexes the result
     # from the most specific key it has down to item+warehouse, so a serial row that
     # has not been given a bin yet (most of the live data) still finds its lot.
+    # Warranties recorded on GRNs for these items (MoM point 25): each lot says how many
+    # of its units have one, and how many end within 30 days or have ended.
+    from app.modules.warehouse import warranty
+    covers = await warranty.by_item(db, tracked)
     grouped: dict[tuple, dict] = {}
     for (item_id, warehouse_id, bin_id, batch_id,
          serial, imei, asset, consumable) in (await db.execute(stmt)).all():
@@ -24486,8 +24563,12 @@ async def serial_summary(db: AsyncSession, *, item_ids: list[int],
             # a consumable code a column each, and one unit is only ever one of the two.
             "asset_codes": [], "consumable_codes": [],
             "asset_count": 0, "consumable_count": 0,
+            "warranty": warranty.lot_tally(),
         })
         bucket["count"] += 1
+        if covers and item_id in tracked:
+            warranty.count_into(bucket["warranty"],
+                                covers.get((item_id, serial)) or covers.get((item_id, imei)))
         # Five is enough to recognise the lot; the rest are behind the detail panel.
         if serial and item_id in tracked and len(bucket["serials"]) < 5:
             bucket["serials"].append(serial)
@@ -25528,6 +25609,21 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
     # Issued in BOXES (2026-10-26): the boxes each indent line went out in — the
     # receiving site checks boxes, never one code per piece.
     boxes_by_line: dict[int, list[dict]] = {}
+    # The trays each indent line was put into at the issue desk (MoM point 14), with
+    # the issue they came off — an indent served in rounds has trays from each.
+    trays_by_line: dict[int, list[dict]] = {}
+    if line_ids:
+        for issue_no, indent_line_id, trays in (await db.execute(
+                select(m.MaterialIssue.issue_no, m.MaterialIssueLine.indent_item_id,
+                       m.MaterialIssueLine.trays)
+                .join(m.MaterialIssue, m.MaterialIssue.id == m.MaterialIssueLine.issue_id)
+                .where(m.MaterialIssueLine.indent_item_id.in_(line_ids),
+                       m.MaterialIssueLine.trays.isnot(None),
+                       m.MaterialIssue.is_stock_posted.is_(True),
+                       m.MaterialIssue.direction == IssueDirection.OUT.value))).all():
+            for tray in trays or []:
+                trays_by_line.setdefault(int(indent_line_id), []).append(
+                    {**tray, "issue_no": issue_no})
     if line_ids:
         for issue_id, issue_line_id, indent_line_id in (await db.execute(
                 select(m.MaterialIssue.id, m.MaterialIssueLine.id,
@@ -25569,6 +25665,7 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
                 "issued_combinations": issued_combos.get(item.id, []),
                 # Issued in boxes: the box codes, each with what it carried.
                 "box_codes": line_boxes,
+                "trays": trays_by_line.get(item.id, []),
                 "approved_quantity": float(approved),
                 "issued_quantity": float(issued),
                 "dispatched_quantity": float(dispatched),
@@ -28096,6 +28193,8 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
                 "tracking_type": (TrackingType.NONE.value if line.id in box_lines
                                   else getattr(line, "tracking_type", None)),
                 "box_codes": box_lines.get(line.id, []),
+                # The trays the storekeeper put this pick into (MoM point 14).
+                "trays": line.trays or [],
                 "requires_qc": bool(getattr(line, "requires_qc", False)),
                 # Snapshotted on the issue line at creation, so the packer sees what
                 # is actually in the carton rather than a blank the receiving point
@@ -29732,3 +29831,28 @@ async def anywhere_in_reach(db: AsyncSession, request, user) -> bool:
 # Imported last: `trips` reaches back into this module for the gate-out and the
 # acknowledgement helpers, all of which are defined by this line.
 from app.modules.warehouse import trips as _trips  # noqa: E402,F401
+
+
+# ---------------------------------------------------------------------------
+# An issue moved up its approval ladder by the escalation sweep (2026-11-20)
+# ---------------------------------------------------------------------------
+async def _refresh_issue_after_escalation(db: AsyncSession, instance) -> None:
+    """The issue keeps a "waiting on" label; after the system moved it up a rung that
+    label names the new holders. Other documents read their approver off the engine."""
+    if not str(instance.doc_type or "").endswith("ISSUE"):
+        return
+    issue = await db.get(m.MaterialIssue, instance.doc_id)
+    if issue is None:
+        return
+    approvers = await engine.current_approvers(db, instance.doc_type, issue.id)
+    issue.current_approver_name = _approver_label(
+        approvers, await _approver_rank(db, instance.doc_type, issue.id))
+
+
+def _register_escalation_hook() -> None:
+    from app.platform.workflow import escalation
+    if _refresh_issue_after_escalation not in escalation.ON_ESCALATED:
+        escalation.ON_ESCALATED.append(_refresh_issue_after_escalation)
+
+
+_register_escalation_hook()

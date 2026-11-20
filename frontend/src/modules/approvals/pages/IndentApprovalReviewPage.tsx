@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { OfficeStockNote } from "../components/OfficeStockNote";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   AlertCircle, ArrowLeft, Building2, CalendarDays, Check, CheckCircle2, ClipboardCheck,
@@ -289,6 +290,13 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
   const defaultTarget = targetOptions.find((target) => target.is_default)?.sequence ?? null;
   const chosenTarget = targetSequence ?? defaultTarget;
   const chosenOption = targetOptions.find((target) => target.sequence === chosenTarget);
+  // The raising office's last receipt and balance per line (2026-11-20, MoM point 3).
+  const officeStock = useQuery({
+    queryKey: ["approvals", "office-stock", indentId],
+    queryFn: () => approvalsApi.indentOfficeStock(indentId),
+    enabled: Number.isFinite(indentId) && indentId > 0,
+  });
+  const officeLine = (lineId: number) => officeStock.data?.lines.find((l) => l.line_id === lineId);
   const availability = useQuery({
     queryKey: ["approvals", "availability", indentId],
     queryFn: () => approvalsApi.indentAvailability(indentId),
@@ -676,6 +684,9 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
                             </strong>
                             <p className="truncate font-mono text-xs text-muted">{line.item_code}</p>
                             <ServedNote line={line} unit={unit} />
+                            <OfficeStockNote line={officeLine(line.id)} unit={unit}
+                              hasPoint={officeStock.data?.has_point ?? true}
+                              loading={officeStock.isLoading} />
                           </div>
                         </div>
                       </td>
@@ -746,6 +757,9 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
                       <strong className="block truncate font-semibold text-ink">{line.item_name}</strong>
                       <p className="truncate font-mono text-xs text-muted">{line.item_code}</p>
                       <ServedNote line={line} unit={unit} />
+                            <OfficeStockNote line={officeLine(line.id)} unit={unit}
+                              hasPoint={officeStock.data?.has_point ?? true}
+                              loading={officeStock.isLoading} />
                     </div>
                     <DifferenceChip difference={difference} unit={unit} isZero={isZero} />
                   </div>

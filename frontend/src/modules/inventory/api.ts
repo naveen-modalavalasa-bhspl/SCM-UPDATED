@@ -1,7 +1,7 @@
 import type { QuantityChangeRow } from "@/shared/components";
 import { api } from "@/shared/api/client";
 import type {
-  PositionLocationTag, PositionLocationWrite, FloorOption, FloorAccess, MovementClassification,
+  LotWarranty, PositionLocationTag, PositionLocationWrite, FloorOption, FloorAccess, MovementClassification,
   MyStockingPoints, PositionSearchHit, StockingPointQuery, StockingPointTagPage,
   AllocationDecision,
   AllocationHistoryRow,
@@ -254,6 +254,7 @@ export const indexSerials = (rows: SerialSummaryRow[]) => {
       .concat(row.consumable_codes ?? []).slice(0, 5);
     seen.asset_count = (seen.asset_count ?? 0) + (row.asset_count ?? 0);
     seen.consumable_count = (seen.consumable_count ?? 0) + (row.consumable_count ?? 0);
+    seen.warranty = mergeWarranty(seen.warranty, row.warranty);
   };
   for (const r of rows) {
     const bin = unplaced(r.bin_id), batch = unplaced(r.batch_id);
@@ -973,3 +974,16 @@ export const getBoxLabelFacets = (params: { warehouse_id: string; status?: strin
 
 export const markBoxLabelsPrinted = (ids: number[]) =>
   api.post<{ printed: number }>("/api/warehouse/box-labels/printed", { ids }).then((r) => r.data);
+
+
+/** Two lots' warranty tallies as one — for a row read at a wider key. */
+export function mergeWarranty(a?: LotWarranty, b?: LotWarranty): LotWarranty | undefined {
+  if (!a) return b ? { ...b } : undefined;
+  if (!b) return a;
+  const ends = [a.next_end, b.next_end].filter(Boolean) as string[];
+  return {
+    covered: a.covered + b.covered, active: a.active + b.active,
+    expiring: a.expiring + b.expiring, expired: a.expired + b.expired,
+    next_end: ends.sort()[0] ?? null,
+  };
+}

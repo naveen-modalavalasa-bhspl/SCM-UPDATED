@@ -11,7 +11,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, ArrowLeft, Boxes, CheckCircle2, FileText, ScanLine, Send } from "lucide-react";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
-import { DateInput, LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
+import { DateInput, LinesEditor, QtyInput, ReasonInput, TextInput, type LineColumn } from "../components/LinesEditor";
 import { ReceiptLinePacking } from "../components/ReceiptLinePacking";
 import {
   type PackEntry, PackQty, baseOf, checkFrom, checkSummary, expandPacks, greedy, hierarchyOf,
@@ -19,6 +19,7 @@ import {
 } from "@/shared/packing";
 import { Lookup } from "../components/Lookup";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
+import { GrnWarrantyPanel } from "../components/GrnWarrantyPanel";
 import { ReceiptLinkedDocuments } from "../components/LinkedDocuments";
 import { ReceiptRoutingPanel } from "../components/ReceiptRouting";
 import { UnitCodesModal } from "../components/UnitCodesModal";
@@ -1398,10 +1399,10 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     {
       key: "reason",
       header: "Rejection reason",
-      width: "min-w-[16rem] w-64",
+      width: "min-w-[20rem] w-80",
       hideOnNarrow: true,
       render: (l, i) => (
-        <TextInput
+        <ReasonInput
           ariaLabel={`Rejection reason, line ${i + 1}`}
           value={l.rejection_reason}
           disabled={locked || !isGrn || num(l.rejected_qty) === 0}
@@ -1890,6 +1891,10 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           routing_busy={route.isPending}
         />
       )}
+
+      {/* Warranty per received serial (MoM point 25) — on a saved GRN, since a
+          warranty belongs to a unit the GRN has recorded. Never blocks the GRN. */}
+      {isGrn && doc && <GrnWarrantyPanel receiptId={doc.id} canEdit={canFile} />}
 
       <Section title="Remarks">
         <Input value={form.remarks ?? ""} disabled={locked} onChange={(e) => set("remarks", e.target.value)} />

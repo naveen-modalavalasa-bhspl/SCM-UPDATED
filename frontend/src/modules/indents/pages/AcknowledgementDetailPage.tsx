@@ -1,5 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { TrayChips } from "../components/TrayChips";
 import { Navigate, useLocation, useNavigate, useParams } from "react-router-dom";
+import { vehicleWithSac } from "@/modules/indents/displayFormat";
 import {
   INDENT_ACK_HOME, TRANSFER_ACK_HOME, ackDetailPath, isTransferRow,
 } from "../ackPaths";
@@ -1505,7 +1507,7 @@ function ConsignmentSlip({ no, isConsignment, leg, packages, loading, failed }: 
     },
     leg?.vehicle_number && {
       key: "vehicle", icon: RectangleHorizontal, label: "Vehicle",
-      value: leg.vehicle_number, mono: true,
+      value: vehicleWithSac(leg.vehicle_number, leg.destination_sac), mono: true,
     },
     leg?.driver_name && {
       key: "driver", icon: UserRound, label: "Driver", value: leg.driver_name,
@@ -2044,6 +2046,8 @@ function PackageLineRow({
               </div>
               <div className="mt-0.5 font-mono text-[11px] text-muted">{line.item_code}</div>
               <ReceivedCombination line={line} />
+              {/* Which trays to open for it (MoM point 14) — hover a tray for its codes. */}
+              <TrayChips trays={line.trays} uom={line.uom_code} className="mt-1.5" />
               {/* The packs this package holds of it, as the packer left them — codes
                   stay per unit (2026-10-22). Older consignments fall back to the
                   line's packs cut to this package's quantity. */}

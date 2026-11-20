@@ -1,4 +1,5 @@
 import { PackQty, hierarchyOf, packable, usePackOptions } from "@/shared/packing";
+import { TrayChips } from "@/modules/indents/components/TrayChips";
 import { IssuePickPacking } from "../components/IssuePickPacking";
 import { memo, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { flushSync } from "react-dom";
@@ -1563,6 +1564,8 @@ export default function ConsignmentForm() {
                                 <div className="font-mono text-xs font-semibold text-ink">{line.item_code ?? line.item_id}</div>
                                 <div className="max-w-[260px] truncate text-xs text-muted">{line.item_name ?? "—"}</div>
                                 <CombinationTag value={line} className="mt-1" />
+                                {/* The trays it was put into at the issue desk (MoM point 14). */}
+                                <TrayChips trays={line.trays} uom={line.uom_code} className="mt-1" />
                               {source && !doc && <QcTag line={line} />}
                               </td>
                               <td className="px-3 py-2"><BatchPlace line={line} /></td>

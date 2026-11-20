@@ -235,9 +235,11 @@ async def preview(db: AsyncSession) -> dict:
             "days_overdue": _age_days(deadline, now),
             "reminders_sent": seen["reminders"],
             "escalated": seen["escalated"],
+            # No "ESCALATE" to the HCM manager any more (MoM 2026-11-18, point 2): a
+            # waiting approval now moves up the document's OWN ladder after the
+            # escalation limit (`workflow.escalation`). Reminders stop at the cap.
             "next_action": (
-                "ESCALATE" if (not seen["escalated"]
-                               and seen["reminders"] >= config["max_reminders"])
+                "WAIT" if seen["reminders"] >= config["max_reminders"]
                 else "REMIND" if can_remind else "WAIT"
             ),
         })

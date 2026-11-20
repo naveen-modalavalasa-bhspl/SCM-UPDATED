@@ -256,3 +256,12 @@ async def test_pieces_that_together_skip_an_older_batch_issue_nothing(monkeypatc
     with pytest.raises(service.ValidationError, match="Across the floor pieces"):
         await service.post_split_issue(db, 5, SimpleNamespace(id=42))
     assert issued == [] and not db.committed
+
+
+async def test_each_slice_names_the_pick_it_was_cut_from():
+    # The parent pick's trays follow the slice onto its floor piece (2026-11-20).
+    a, b = _line(1, BAY_A, 5, "4"), _line(2, BAY_B, 6, "3")
+    a.id, b.id = 501, 502
+    by_floor, _ = await service._plan_floor_split(_DB(), _parent(a, b))
+    assert [spec["parent_line_id"] for spec in by_floor[FLOOR_1]["lines"]] == [501]
+    assert [spec["parent_line_id"] for spec in by_floor[FLOOR_2]["lines"]] == [502]

@@ -41,6 +41,7 @@ export function OwnVehicleTrip({ doc }: { doc: TransportRequest }) {
       <div className="space-y-4 p-4">
         <div className="flex flex-wrap items-baseline gap-x-2 text-sm">
           <span className="font-mono font-semibold text-ink">{doc.vehicle_number || "—"}</span>
+          {doc.destination_sac && <span className="rounded-full bg-content3 px-2 py-0.5 text-[11px] font-semibold text-ink">SAC {doc.destination_sac}</span>}
           {doc.vehicle_type_name && <span className="text-muted">· {doc.vehicle_type_name}</span>}
         </div>
 

@@ -75,3 +75,15 @@ export const notificationsApi = {
   markAllRead: () =>
     api.post<{ count: number }>("/api/notifications/read-all").then((r) => r.data),
 };
+
+
+/** An approval stuck at its FINAL rung past the escalation limit (2026-11-20): the one
+ *  kind of notification drawn red and pinned to the top while unread. */
+export const isUrgentNotification = (row: Pick<NotificationRow, "entity_type">) =>
+  (row.entity_type ?? "").toUpperCase() === "APPROVAL_STUCK";
+
+/** Unread urgent rows first, everything else in the order it came. */
+export function pinUrgent<T extends Pick<NotificationRow, "entity_type" | "is_read">>(rows: T[]): T[] {
+  const pinned = rows.filter((r) => !r.is_read && isUrgentNotification(r));
+  return [...pinned, ...rows.filter((r) => !pinned.includes(r))];
+}

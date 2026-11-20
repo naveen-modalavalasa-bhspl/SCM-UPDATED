@@ -1155,6 +1155,29 @@ hierarchies of the vendor's own mapped items only, scoped on the token.
 - **Gate pass number shown before the press**: `numbering.peek_next_number` behind
   `GET /api/transport/dispatch-number/preview` — a preview; the press still draws.
 
+### MoM 2026-11-18 follow-ups: escalation, warranty, trays (2026-11-20)
+
+- **Approval escalation climbs the DOCUMENT'S ladder** (`platform/workflow/escalation.py`,
+  15-min job on the scheduler worker): 24 h at a rung → moved to the next rung of
+  `resolved_chain` (system ESCALATED row); at the LAST rung nothing moves — one urgent
+  `APPROVAL_STUCK` notification, pinned red in the bell, and "N stuck at final approval"
+  on the Home Approvals card; 12 h anywhere → amber "waiting over 12 h". Settings
+  `approvals.escalation.*`. The reminders job no longer escalates to the HCM manager.
+- **Warranty per received serial** (`warehouse/warranty.py`, `inb_receipt_unit_warranties`,
+  `c6e8a0b2d4f7`): keyed on the GRN line + unit code (serial, else IMEI), card in
+  `sys_attachments` (GRN_WARRANTY); "same for all" = one upload, a row per unit. A
+  missing warranty WARNS, never refuses; addable after submit. Scans show it, and
+  Stock Balance reads it (`warranty.by_item`): each lot's tally on `/serials/summary`
+  (`warranty`: covered / expiring / expired / next_end) and each unit's on `/serials`.
+- **Trays on an issue pick** (`warehouse/issue_trays.py`, `out_issue_items.trays` JSON,
+  `d7f9b1c3e5a8`): tray no, qty, codes. Save: no repeated tray per pick, a code in one
+  tray, codes ≤ qty, sum ≤ pick. Submit and post: sum == pick. After approval
+  `PUT /issues/{id}/lines/{line}/trays`. A floor split hands each piece its share
+  (`split_for_pieces`: a code takes its tray to the piece holding it, then uncoded room
+  in tray order; a piece the trays cannot cover gets none rather than being stranded).
+  Served on the consignment source, the dispatch
+  (`line_trays`) and both acknowledgements (`TrayChips`); NEVER on the Delivery Challan.
+
 ### The outward leg (doc Phase D+E), under Logistics
 
 Logistics runs the whole outward leg, in the order it happens:

@@ -805,6 +805,7 @@ def _raiser_view(doc: TransportRequest) -> dict:
         # No carrier to track on a hand-over or a company vehicle — the answer to
         # "where is it" there is a person and a phone number.
         "vehicle_number": doc.vehicle_number,
+        "destination_sac": doc.destination_sac,
         "driver_name": doc.driver_name, "driver_phone": doc.driver_phone,
         "handed_over_by_name": doc.handed_over_by_name,
         "expected_delivery_from": doc.expected_delivery_from,
@@ -1765,6 +1766,7 @@ async def create_tr(db: AsyncSession, data, user) -> TransportRequest:
         project_id=data.project_id, project_name=data.project_name,
         expected_delivery_from=data.expected_delivery_from,
         expected_delivery=data.expected_delivery, remarks=data.remarks,
+        destination_sac=(getattr(data, "destination_sac", None) or "").strip() or None,
         gate_pass_no=data.gate_pass_no,
         # The tracking handles, when the desk already holds them. A courier docket is
         # written on the booking slip at the counter, so asking for it again on a
@@ -2288,7 +2290,7 @@ async def update_tr(db: AsyncSession, tr_id: int, data, user) -> TransportReques
                   "to_location_name", "delivery_address",
                   "contact_person", "contact_phone", "distance_km", "project_id",
                   "project_name", "expected_delivery_from", "expected_delivery", "remarks",
-                  "vehicle_number",
+                  "vehicle_number", "destination_sac",
                   "driver_name", "driver_phone",
                   "driver_licence_no", "trip_reference",
                   "handed_over_by_name", "handed_over_employee_id",

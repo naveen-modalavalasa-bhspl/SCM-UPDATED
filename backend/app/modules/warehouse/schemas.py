@@ -1703,6 +1703,13 @@ class PickingDetail(PickingRead):
 # Issues
 # ---------------------------------------------------------------------------
 
+class IssueTrayIn(BaseModel):
+    """One tray a pick is put into (MoM point 14) — rules in `issue_trays.py`."""
+    tray_no: str = Field(max_length=60)
+    quantity: Decimal
+    codes: Annotated[list[str], SerialList] = Field(default_factory=list)
+
+
 class IssueItemWrite(CombinationIn):
     id: int | None = None
     indent_item_id: int | None = None
@@ -1727,6 +1734,8 @@ class IssueItemWrite(CombinationIn):
     pack_hierarchy_id: int | None = None
     pack_breakdown: Annotated[list[PackEntryIn], PACK_ENTRIES] | None = None
     break_bulk: bool = False
+    #: The trays this pick goes into, in order. None / [] = not put in trays.
+    trays: list[IssueTrayIn] | None = Field(default=None, max_length=100)
 
 
 class IssueWrite(OrgScopeIn):
@@ -1765,6 +1774,8 @@ class IssueWrite(OrgScopeIn):
 
 
 class IssueItemRead(CombinationOut, _Read):
+    #: The trays this pick went into (MoM point 14): [{tray_no, quantity, codes}].
+    trays: list[dict] | None = None
     #: On a SPLIT parent (2026-11-11): the floor piece and line that carry this line now.
     #: Its serials are listed and saved against that piece line.
     piece_issue_id: int | None = None
@@ -2580,6 +2591,8 @@ class DispatchDetail(DispatchRead):
     line_packs: list[DispatchLinePacks] = []
     # Carton › box for each package code on it: {code: [{code, name, level}]} (2026-10-28).
     box_paths: dict[str, list[dict]] = {}
+    #: The trays each issue line was put into, once per line: {issue_item_id: trays}.
+    line_trays: dict[int, list[dict]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -4142,6 +4155,14 @@ class SerialRead(_Read):
     status: str
     remarks: str | None = None
     is_active: bool
+    #: The warranty recorded on the GRN the unit arrived on (MoM point 25).
+    warranty_start: date | None = None
+    warranty_end: date | None = None
+    warranty_card_no: str | None = None
+    #: NONE, ACTIVE, EXPIRING (inside 30 days) or EXPIRED — and the sentence for it.
+    warranty_status: str = "NONE"
+    warranty_days_left: int | None = None
+    warranty_text: str | None = None
 
 
 class AttachmentRead(_Read):
@@ -4444,6 +4465,8 @@ class DirectIssueAckLine(BaseModel):
     uom_code: str | None = None
     batch_no: str | None = None
     issued_qty: Decimal = Decimal("0")
+    #: The trays it was put into at the issue desk (MoM point 14).
+    trays: list[dict] = Field(default_factory=list)
 
 
 class DirectIssueConsignment(BaseModel):
@@ -4489,6 +4512,11 @@ class IssueSerialLineIn(BaseModel):
     """One line's physical units, named after approval."""
     id: int
     serial_numbers: Annotated[list[str], SerialList] = Field(default_factory=list)
+
+
+class IssueTraysIn(BaseModel):
+    """The trays one pick goes into — replaces what it had. [] clears them."""
+    trays: list[IssueTrayIn] = Field(default_factory=list, max_length=100)
 
 
 class IssueSerialsIn(BaseModel):
@@ -4960,3 +4988,59 @@ class RepackIn(BaseModel):
     pack_hierarchy_id: int
     target: Annotated[list[PackEntryIn], Field(min_length=1, max_length=12)]
     reason: str | None = Field(default=None, max_length=300)
+
+
+# ---------------------------------------------------------------------------
+# Warranty per received unit (MoM 2026-11-18, point 25) — `warranty.py`.
+# ---------------------------------------------------------------------------
+
+class UnitWarrantyRead(BaseModel):
+    id: int
+    start_date: date
+    end_date: date
+    card_no: str | None = None
+    attachment_id: int | None = None
+    document_name: str | None = None
+    #: ACTIVE, EXPIRING (inside 30 days) or EXPIRED — and the sentence for it.
+    status: str
+    days_left: int | None = None
+    status_text: str
+    added_by_name: str | None = None
+    added_at: datetime | None = None
+
+
+class WarrantyUnit(BaseModel):
+    code: str
+    serial_number: str | None = None
+    imei: str | None = None
+    warranty: UnitWarrantyRead | None = None
+
+
+class WarrantyLine(BaseModel):
+    receipt_item_id: int
+    line_no: int | None = None
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    batch_no: str | None = None
+    units: list[WarrantyUnit] = Field(default_factory=list)
+    covered: int = 0
+    total: int = 0
+
+
+class WarrantyDocument(BaseModel):
+    id: int
+    file_name: str
+    file_size: int | None = None
+    uploaded_by_name: str | None = None
+    created_at: datetime | None = None
+
+
+class ReceiptWarranties(BaseModel):
+    receipt_id: int
+    grn_no: str | None = None
+    lines: list[WarrantyLine] = Field(default_factory=list)
+    covered: int = 0
+    total: int = 0
+    editable: bool = True
+    documents: list[WarrantyDocument] = Field(default_factory=list)

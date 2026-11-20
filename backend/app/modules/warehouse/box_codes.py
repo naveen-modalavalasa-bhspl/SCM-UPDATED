@@ -1531,6 +1531,15 @@ async def scan_unit(db: AsyncSession, unit, *, public: bool = False) -> dict:
         {"label": "Variant", "value": combo.get("variant_name")},
         {"label": "Model", "value": combo.get("model_name")},
     ]
+    # The warranty recorded on the GRN it arrived on (MoM point 25), with how long is left.
+    from app.modules.warehouse import warranty
+    cover = await warranty.for_units(db, unit.item_id,
+                                     [unit.serial_number, getattr(unit, "imei", None)])
+    if cover is not None:
+        meta.append({"label": "Warranty",
+                     "value": (f"{cover.start_date:%d %b %Y} – {cover.end_date:%d %b %Y} · "
+                               f"{warranty.status_sentence(cover.end_date)}"
+                               + (f" · card {cover.card_no}" if cover.card_no else ""))})
     return {
         "kind": "UNIT", "id": unit.id, "doc_no": code,
         "title": getattr(item, "name", None) or code,

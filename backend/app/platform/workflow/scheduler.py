@@ -30,9 +30,29 @@ async def _run() -> None:
         await reminders.run(db)
 
 
+ESCALATION_JOB_ID = "approval_escalation"
+ESCALATION_EVERY_MINUTES = 15
+
+
+async def _escalate() -> None:
+    """Move approvals that waited past the limit one rung up their own ladder, and
+    flag the ones stuck at their final rung (`workflow.escalation`). The switch and
+    the limits are re-read on every tick."""
+    from app.core.database import SessionLocal
+    from app.platform.workflow import escalation
+
+    async with SessionLocal() as db:
+        await escalation.sweep(db)
+
+
 def start() -> None:
     if not _scheduler.running:
         _scheduler.start()
+    if not _scheduler.get_job(ESCALATION_JOB_ID):
+        _scheduler.add_job(
+            _escalate, IntervalTrigger(minutes=ESCALATION_EVERY_MINUTES),
+            id=ESCALATION_JOB_ID, replace_existing=True, coalesce=True, max_instances=1,
+        )
 
 
 def shutdown() -> None:

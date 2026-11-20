@@ -63,7 +63,7 @@ export function ClaimsPanel(
                 {[
                   ["On hand", data.total_qty],
                   ["Reserved", data.reserved_qty],
-                  ["Free now", data.available_qty],
+                  ["In-hand stock", data.available_qty],
                   ["Claimed", data.claimed_total],
                 ].map(([label, value]) => (
                   <div key={label as string} className="rounded-lg border border-line bg-content1 p-2">
