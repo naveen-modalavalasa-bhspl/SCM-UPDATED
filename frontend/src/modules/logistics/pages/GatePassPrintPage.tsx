@@ -61,7 +61,12 @@ export function GatePassPrintPage() {
   const rule = modes.data?.find((m) => m.value === doc.mode);
   const gatePassNo = doc.gate_pass_no || `GP/${doc.consignment_no ?? doc.tr_no}`;
 
-  const carrying: PrintField[] = carryingFields(rule, doc).map((field) => ({
+  // An own vehicle names everyone on board, each with their own ID, under "On board"
+  // (2026-11-20) — the single custody ID rows would only print empty here.
+  const ownVehicle = doc.mode === "OWN_VEHICLE";
+  const carrying: PrintField[] = carryingFields(rule, doc)
+    .filter((field) => !(ownVehicle && (field === "handed_over_employee_id" || field === "handed_over_aadhaar")))
+    .map((field) => ({
     label: CARRYING_LABEL[field],
     value: dash(carryingValue(field, doc)),
   }));
@@ -111,7 +116,9 @@ export function GatePassPrintPage() {
         { label: "Consignment", value: dash(doc.consignment_no), mono: true },
         { label: "Carriage", value: carriageLabel(doc.carriage_mode) },
         { label: "Arrangement", value: modeLabel(doc.mode) },
-        { label: "Dispatch date", value: doc.expected_delivery_from ? fmtDate(doc.expected_delivery_from) : "—" },
+        // The day it actually left once it has; until then the planned date.
+        { label: "Dispatch date", value: doc.dispatched_at ? fmtDate(doc.dispatched_at)
+          : doc.expected_delivery_from ? fmtDate(doc.expected_delivery_from) : "—" },
         { label: "Expected delivery", value: doc.expected_delivery ? fmtDate(doc.expected_delivery) : "—" },
       ]}
       blocks={[

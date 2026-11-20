@@ -19,6 +19,7 @@ import type { OdometerPhoto, TransportRequest } from "../transportTypes";
  * both are given, and says which one is due next.
  */
 const LEFT = new Set(["IN_TRANSIT", "DELIVERED", "ACKNOWLEDGED", "CLOSED"]);
+const SIGNED = new Set(["ACKNOWLEDGED", "CLOSED"]);
 
 export function OwnVehicleTrip({ doc }: { doc: TransportRequest }) {
   const left = LEFT.has(doc.status) || Boolean(doc.dispatched_at);
@@ -88,9 +89,9 @@ export function OwnVehicleTrip({ doc }: { doc: TransportRequest }) {
           <ReadingTile trId={doc.id} reading="END" title="End reading"
                        value={doc.odometer_end} at={doc.odometer_end_at} by={doc.odometer_end_by_name}
                        photos={photos.ODOMETER_END}
-                       open={left}
+                       open={left && !SIGNED.has(doc.status)}
                        min={doc.odometer_start ?? undefined}
-                       closedNote="Recorded once the trip is done."
+                       closedNote={SIGNED.has(doc.status) ? "Fixed once the site signed." : "Recorded once the trip is done."}
                        due={left && doc.odometer_end == null}
                        dueNote="Needed before it is marked delivered." />
         </section>

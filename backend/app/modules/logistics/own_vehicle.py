@@ -40,6 +40,8 @@ DOC_ENTITY_TYPE = "TRANSPORT_REQUEST"
 ODOMETER_CATEGORY = {OdometerReading.START.value: "ODOMETER_START",
                      OdometerReading.END.value: "ODOMETER_END"}
 ODOMETER_CATEGORIES = tuple(ODOMETER_CATEGORY.values())
+# Once the site has signed, the trip's figures are part of a closed record.
+_SIGNED = {TransportStatus.ACKNOWLEDGED.value, TransportStatus.CLOSED.value}
 MAX_CREW = 20
 PHONE = re.compile(r"^[6-9]\d{9}$")
 
@@ -135,9 +137,11 @@ async def apply_arrangement(db: AsyncSession, doc: TransportRequest, data) -> No
             doc.crew_count = None
             doc.vehicle_type_id = doc.vehicle_type_name = None
         return
-    if "vehicle_type_id" in fields:
+    # Only what was actually STATED: an older caller sends these as null, and a null
+    # is "not said", not "nobody" — the release still refuses a load with no crew.
+    if "vehicle_type_id" in fields and data.vehicle_type_id is not None:
         await apply_vehicle_type(db, doc, data.vehicle_type_id)
-    if "crew" in fields or "crew_count" in fields:
+    if data.crew_count is not None or data.crew:
         apply_crew(doc, data.crew_count, list(data.crew or []))
 
 
@@ -207,6 +211,9 @@ async def record_odometer(db: AsyncSession, doc: TransportRequest, reading: str,
             raise ValidationError(
                 f"The start reading cannot be more than the end reading ({doc.odometer_end} km).")
     else:
+        if doc.status in _SIGNED:
+            raise ValidationError(
+                f"{doc.tr_no} has been signed for — the end reading can no longer change.")
         if doc.status in _NOT_LEFT:
             raise ValidationError(
                 f"{doc.tr_no} has not left yet — record the end reading once the trip is done.")

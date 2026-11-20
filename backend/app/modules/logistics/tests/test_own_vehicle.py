@@ -60,3 +60,11 @@ def test_distance_is_end_minus_start():
     doc = TransportRequest(odometer_start=Decimal("1200.5"), odometer_end=Decimal("1310"))
     assert own_vehicle.distance_km(doc) == 109.5
     assert own_vehicle.distance_km(TransportRequest()) is None
+
+
+@pytest.mark.asyncio
+async def test_the_end_reading_is_fixed_once_the_site_has_signed():
+    doc = TransportRequest(mode="OWN_VEHICLE", status="ACKNOWLEDGED", tr_no="TR-1",
+                           odometer_start=Decimal("1200"), odometer_end=Decimal("1300"))
+    with pytest.raises(ValidationError, match="signed for"):
+        await own_vehicle.record_odometer(None, doc, "END", Decimal("1350"), None, None)
