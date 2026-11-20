@@ -71,3 +71,15 @@ export function splitDeliveryOffice(
     vehicleNumber: explicitVehicle ?? suffixVehicle,
   };
 }
+
+/**
+ * A vehicle as it is written on every logistics paper (2026-11-20, MoM point 4): the
+ * registration, and the destination office's service area code beside it —
+ * "AP39UH4792 · SAC 2231". The SAC alone without a vehicle still reads; neither is "—".
+ */
+export function vehicleWithSac(vehicle?: string | null, sac?: string | null): string | null {
+  const v = vehicle?.trim();
+  const s = sac?.trim();
+  if (v && s) return `${v} · SAC ${s}`;
+  return v || (s ? `SAC ${s}` : null);
+}

@@ -18,6 +18,7 @@ from app.shared.limits import MAX_BATCH_IDS
 from app.platform.hcm.models import HcmDepartment, HcmEmployee, HcmFacility, HcmOffice
 from app.platform.rbac import permissions as perms
 from app.shared.enums import (
+    ContainerSize,
     ItemScope,
     AuditAction, CARRIER_VENDOR_TYPES, SHIPMENT_ADDRESS_WAREHOUSE_TYPES,
     AttributeDataType, CategoryTagType, UomClass,
@@ -2022,6 +2023,8 @@ class PackagingIn(BaseModel):
     """
     code: str = Field(min_length=1, max_length=50, pattern=r"^[A-Za-z0-9-]+$")
     name: str
+    #: Small / Medium / Large / Extra large (2026-11-20) — the size people call it by.
+    size_class: ContainerSize | None = None
     # All three or none: two sides describe nothing a slotting check can use, and a
     # half-measured container is why a bin check has to say "not measured" rather than
     # quietly assume the missing side away.
@@ -2061,6 +2064,7 @@ def _num(value):
 
 def packaging_out(p: Packaging) -> dict:
     return {"id": p.id, "code": p.code, "name": p.name,
+            "size_class": p.size_class,
             "length_cm": _num(p.length_cm), "width_cm": _num(p.width_cm),
             "height_cm": _num(p.height_cm), "weight_kg": _num(p.weight_kg),
             # Derived, never stored — three sides and a cube that can disagree is a bug

@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Navigate, useLocation, useNavigate, useParams } from "react-router-dom";
+import { vehicleWithSac } from "@/modules/indents/displayFormat";
 import {
   INDENT_ACK_HOME, TRANSFER_ACK_HOME, ackDetailPath, isTransferRow,
 } from "../ackPaths";
@@ -1505,7 +1506,7 @@ function ConsignmentSlip({ no, isConsignment, leg, packages, loading, failed }: 
     },
     leg?.vehicle_number && {
       key: "vehicle", icon: RectangleHorizontal, label: "Vehicle",
-      value: leg.vehicle_number, mono: true,
+      value: vehicleWithSac(leg.vehicle_number, leg.destination_sac), mono: true,
     },
     leg?.driver_name && {
       key: "driver", icon: UserRound, label: "Driver", value: leg.driver_name,

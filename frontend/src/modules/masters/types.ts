@@ -354,6 +354,8 @@ export interface MasterPackaging {
   id: number;
   code: string;
   name: string;
+  /** SMALL / MEDIUM / LARGE / EXTRA_LARGE (2026-11-20). */
+  size_class?: string | null;
   /** The outer bounding box, empty. All three or none. */
   length_cm?: number | null;
   width_cm?: number | null;

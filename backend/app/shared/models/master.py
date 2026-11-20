@@ -612,6 +612,9 @@ class Packaging(Base):
     length_cm = Column(Numeric(10, 2), nullable=True)
     width_cm = Column(Numeric(10, 2), nullable=True)
     height_cm = Column(Numeric(10, 2), nullable=True)
+    # How big the container is, in the words the floor uses (2026-11-20, MoM point 16):
+    # SMALL / MEDIUM / LARGE / EXTRA_LARGE (`shared.enums.ContainerSize`). Optional.
+    size_class = Column(String(20), nullable=True)
     # TARE: what the container weighs empty. Gross weight is on the item's rung.
     weight_kg = Column(Numeric(12, 3), nullable=True)
 

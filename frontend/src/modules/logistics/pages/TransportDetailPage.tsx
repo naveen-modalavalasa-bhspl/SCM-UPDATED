@@ -21,6 +21,7 @@ import {
 import type { CustodyValue, PersonKind } from "../components/HandoverCustody";
 import { ShipmentTimeline } from "../components/ShipmentTimeline";
 import { OwnVehicleTrip } from "../components/OwnVehicleTrip";
+import { vehicleWithSac } from "../components/vehicleLabel";
 import { ManifestTable } from "../components/ManifestTable";
 import { TripRouteStrip, TripStopsPanel } from "../components/TripStops";
 import { TONE_APPROVE, TONE_REJECT, TONE_SUBMIT, TONE_YELLOW } from "@/shared/components/tones";
@@ -699,7 +700,7 @@ export function TransportDetailPage() {
               ["Booking ref", doc.carrier_reference],
               ["Carrier accepted", fmtDateTime(doc.carrier_accepted_at, "")],
               ["Confirmed by the desk", doc.carrier_confirmed_by_name],
-              ["Vehicle", doc.vehicle_number],
+              ["Vehicle", vehicleWithSac(doc.vehicle_number, doc.destination_sac)],
               ["Vehicle type", doc.vehicle_type_name],
               ["Driver", doc.driver_name],
               // Filled by the carrier when they acknowledged the award on a tender,

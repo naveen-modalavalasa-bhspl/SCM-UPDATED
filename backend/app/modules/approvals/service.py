@@ -1044,7 +1044,7 @@ async def decision_ledger(
                 "Monthly/Consolidation"
                 if indent.indent_type == IndentType.MONTHLY.value
                 else "Stock transfer request"
-                if indent.indent_type == IndentType.STR.value else "Regular"
+                if indent.indent_type == IndentType.STR.value else "Interim"
             ),
             "indent_type": indent.indent_type,
             "status": indent.status,

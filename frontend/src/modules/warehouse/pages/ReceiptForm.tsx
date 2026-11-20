@@ -11,7 +11,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, ArrowLeft, Boxes, CheckCircle2, FileText, ScanLine, Send } from "lucide-react";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
-import { DateInput, LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
+import { DateInput, LinesEditor, QtyInput, ReasonInput, TextInput, type LineColumn } from "../components/LinesEditor";
 import { ReceiptLinePacking } from "../components/ReceiptLinePacking";
 import {
   type PackEntry, PackQty, baseOf, checkFrom, checkSummary, expandPacks, greedy, hierarchyOf,
@@ -1398,10 +1398,10 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     {
       key: "reason",
       header: "Rejection reason",
-      width: "min-w-[16rem] w-64",
+      width: "min-w-[20rem] w-80",
       hideOnNarrow: true,
       render: (l, i) => (
-        <TextInput
+        <ReasonInput
           ariaLabel={`Rejection reason, line ${i + 1}`}
           value={l.rejection_reason}
           disabled={locked || !isGrn || num(l.rejected_qty) === 0}

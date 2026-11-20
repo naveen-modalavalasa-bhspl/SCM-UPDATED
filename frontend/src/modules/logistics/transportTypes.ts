@@ -77,6 +77,7 @@ export interface RaiserTracking {
   docket_no?: string | null;
   tracking_url?: string | null;
   vehicle_number?: string | null;
+  destination_sac?: string | null;
   driver_name?: string | null;
   driver_phone?: string | null;
   handed_over_by_name?: string | null;
@@ -173,6 +174,7 @@ export interface Consignment {
   to_warehouse_id?: number | null;
   to_warehouse_name?: string | null;
   destination_office_id?: number | null;
+  destination_office_sac?: string | null;
   destination_office_name?: string | null;
   customer_name?: string | null;
   vendor_name?: string | null;
@@ -865,6 +867,7 @@ export interface TransportRequest {
   carrier_reference?: string | null;
   carrier_confirmed_by_name?: string | null;
   vehicle_number?: string | null;
+  destination_sac?: string | null;
   /** Own vehicle (2026-11-20): the kind of vehicle and who travels with it. */
   vehicle_type_id?: number | null;
   vehicle_type_name?: string | null;
@@ -1130,6 +1133,7 @@ export interface TRInput {
   manual_courier_name?: string | null;
   carrier_reference?: string | null;
   vehicle_number?: string | null;
+  destination_sac?: string | null;
   vehicle_type_id?: number | null;
   crew_count?: number | null;
   crew?: CrewMemberInput[] | null;
@@ -1337,6 +1341,7 @@ export interface DeliveryChallan {
   godown: ChallanParty;
   ship_to: ChallanParty[];
   vehicle_number?: string | null;
+  destination_sac?: string | null;
   driver_name?: string | null;
   driver_phone?: string | null;
   carrier_name?: string | null;

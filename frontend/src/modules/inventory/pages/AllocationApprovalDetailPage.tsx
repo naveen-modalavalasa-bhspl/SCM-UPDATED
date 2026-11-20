@@ -210,7 +210,7 @@ export function AllocationApprovalDetailPage() {
               <p className="text-xs text-muted">
                 {waitingOnMe
                   ? "Change a Give quantity to approve a different number. Free is what is on the shelf now, less what other pending allocations have promised."
-                  : "Free is what is on the shelf now, less what other pending allocations have promised."}
+                  : "In-hand stock is what is on the shelf now, less what other pending allocations have promised."}
               </p>
               <Button
                 variant="subtle"
@@ -228,7 +228,7 @@ export function AllocationApprovalDetailPage() {
                     <th className="p-3">Item</th>
                     <th className="p-3">Requested</th>
                     <th className="p-3">Give</th>
-                    <th className="p-3">Free now</th>
+                    <th className="p-3">In-hand stock</th>
                     <th className="p-3">Warehouse</th>
                     <th className="p-3">Shortage</th>
                   </tr>

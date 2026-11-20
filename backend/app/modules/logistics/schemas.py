@@ -185,6 +185,7 @@ class TRCreate(BaseModel):
     manual_courier_name: str | None = Field(default=None, max_length=200)
     carrier_reference: str | None = None
     vehicle_number: str | None = None
+    destination_sac: str | None = None
     # Own vehicle (2026-11-20): what kind of vehicle, and who travels with it —
     # the desk says how many first, then names each (`own_vehicle.crew_problems`).
     vehicle_type_id: int | None = None
@@ -390,6 +391,7 @@ class TROut(BaseModel):
     carrier_reference: str | None = None
     carrier_confirmed_by_name: str | None = None
     vehicle_number: str | None = None
+    destination_sac: str | None = None
     vehicle_type_id: int | None = None
     vehicle_type_name: str | None = None
     crew_count: int | None = None

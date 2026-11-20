@@ -57,6 +57,8 @@ export function PackagingTab() {
         columns={[
           { key: "code", header: "Code", render: (r) => <Code>{r.code}</Code> },
           { key: "name", header: "Name", render: (r) => r.name },
+          // Small / Medium / Large / Extra large (2026-11-20, MoM point 16).
+          { key: "size", header: "Size", render: (r) => <SizeChip size={r.size_class} /> },
           { key: "box", header: "Outer box", render: (r) => (
               r.length_cm == null ? <span className="text-warn">Not measured</span> : (
                 <span className="tabular text-sm">
@@ -104,6 +106,8 @@ export function PackagingTab() {
             pattern: /^[A-Za-z0-9-]+$/,
             patternMessage: "Use letters, numbers or a hyphen" },
           { key: "name", label: "Container type", required: true, maxLength: 200 },
+          { key: "size_class", label: "Size", type: "select", half: true,
+            options: CONTAINER_SIZES, hint: "How big it is, as the floor calls it." },
           // All three or none. The server refuses a half-measured box for the same
           // reason: two sides describe nothing a slotting check can use, and a missing
           // side treated as zero would let anything through.
@@ -130,12 +134,12 @@ export function PackagingTab() {
           { key: "is_active", label: "Active", type: "switch" },
         ]}
         emptyForm={{
-          code: "", name: "", length_cm: "", width_cm: "", height_cm: "",
+          code: "", name: "", size_class: "", length_cm: "", width_cm: "", height_cm: "",
           weight_kg: "", is_stackable: true, max_stack_tiers: "", is_rotatable: true,
           fill_efficiency_pct: "", is_returnable: false, is_active: true,
         }}
         toForm={(r) => ({
-          code: r.code, name: r.name,
+          code: r.code, name: r.name, size_class: r.size_class ?? "",
           length_cm: r.length_cm ?? "", width_cm: r.width_cm ?? "",
           height_cm: r.height_cm ?? "", weight_kg: r.weight_kg ?? "",
           is_stackable: r.is_stackable ?? true,
@@ -403,3 +407,29 @@ export function CategoryTaggingTab({ categories }: { categories: Option[] }) {
 
 /** Which items a user group may request. A group is defined by role or position in
  *  the RBAC module; this only decides its catalogue. */
+
+
+/** Container sizes, in the floor's words (2026-11-20). Values match `ContainerSize`. */
+export const CONTAINER_SIZES = [
+  { value: "SMALL", label: "Small" },
+  { value: "MEDIUM", label: "Medium" },
+  { value: "LARGE", label: "Large" },
+  { value: "EXTRA_LARGE", label: "Extra large" },
+];
+
+const SIZE_TONE: Record<string, string> = {
+  SMALL: "bg-info-bg text-info",
+  MEDIUM: "bg-ok-bg text-ok",
+  LARGE: "bg-warn-bg text-warn",
+  EXTRA_LARGE: "bg-brand/10 text-brand",
+};
+
+export function SizeChip({ size }: { size?: string | null }) {
+  if (!size) return <span className="text-sm text-muted">—</span>;
+  const label = CONTAINER_SIZES.find((s) => s.value === size)?.label ?? size;
+  return (
+    <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold ${SIZE_TONE[size] ?? "bg-content3 text-ink"}`}>
+      {label}
+    </span>
+  );
+}

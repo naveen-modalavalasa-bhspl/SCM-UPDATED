@@ -277,6 +277,7 @@ async def delivery_challan(db: AsyncSession, tr_id: int) -> dict:
         "dispatch_date": (tr.dispatched_at.date() if tr.dispatched_at
                           else tr.expected_delivery_from),
         "vehicle_type_name": getattr(tr, "vehicle_type_name", None),
+        "destination_sac": getattr(tr, "destination_sac", None),
         "project_name": tr.project_name,
         "remarks": tr.remarks,
         "consignments": blocks,

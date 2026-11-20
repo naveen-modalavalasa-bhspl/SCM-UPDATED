@@ -355,6 +355,7 @@ export interface ShipmentTrack {
   status: string;
   carrier_name?: string | null;
   vehicle_number?: string | null;
+  destination_sac?: string | null;
   driver_name?: string | null;
   driver_phone?: string | null;
   lr_no?: string | null;
@@ -399,6 +400,7 @@ export interface RaiserTracking {
   docket_no?: string | null;
   tracking_url?: string | null;
   vehicle_number?: string | null;
+  destination_sac?: string | null;
   driver_name?: string | null;
   driver_phone?: string | null;
   handed_over_by_name?: string | null;

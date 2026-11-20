@@ -939,3 +939,11 @@ class PackChangeStatus(str, Enum):
     PENDING = "PENDING"
     ACCEPTED = "ACCEPTED"
     DECLINED = "DECLINED"
+
+
+class ContainerSize(str, Enum):
+    """How big a container type is, in the floor's words (2026-11-20, MoM point 16)."""
+    SMALL = "SMALL"
+    MEDIUM = "MEDIUM"
+    LARGE = "LARGE"
+    EXTRA_LARGE = "EXTRA_LARGE"

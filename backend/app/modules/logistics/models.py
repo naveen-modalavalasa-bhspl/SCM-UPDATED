@@ -222,6 +222,10 @@ class TransportRequest(Base):
 
     # Own vehicle.
     vehicle_number = Column(String(50), nullable=True)
+    # The destination office's service area code, copied from the consignment when the
+    # leg is raised (2026-11-20, MoM point 4) so every paper that names the vehicle can
+    # name the SAC beside it. Snapshot; never updated by sync.
+    destination_sac = Column(String(30), nullable=True)
     # What KIND of vehicle (2026-11-20): `mst_vehicle_types`, with its name snapshotted.
     vehicle_type_id = Column(BigInteger, index=True, nullable=True)
     vehicle_type_name = Column(String(200), nullable=True)
