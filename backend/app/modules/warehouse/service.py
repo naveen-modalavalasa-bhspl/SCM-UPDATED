@@ -29732,3 +29732,28 @@ async def anywhere_in_reach(db: AsyncSession, request, user) -> bool:
 # Imported last: `trips` reaches back into this module for the gate-out and the
 # acknowledgement helpers, all of which are defined by this line.
 from app.modules.warehouse import trips as _trips  # noqa: E402,F401
+
+
+# ---------------------------------------------------------------------------
+# An issue moved up its approval ladder by the escalation sweep (2026-11-20)
+# ---------------------------------------------------------------------------
+async def _refresh_issue_after_escalation(db: AsyncSession, instance) -> None:
+    """The issue keeps a "waiting on" label; after the system moved it up a rung that
+    label names the new holders. Other documents read their approver off the engine."""
+    if not str(instance.doc_type or "").endswith("ISSUE"):
+        return
+    issue = await db.get(m.MaterialIssue, instance.doc_id)
+    if issue is None:
+        return
+    approvers = await engine.current_approvers(db, instance.doc_type, issue.id)
+    issue.current_approver_name = _approver_label(
+        approvers, await _approver_rank(db, instance.doc_type, issue.id))
+
+
+def _register_escalation_hook() -> None:
+    from app.platform.workflow import escalation
+    if _refresh_issue_after_escalation not in escalation.ON_ESCALATED:
+        escalation.ON_ESCALATED.append(_refresh_issue_after_escalation)
+
+
+_register_escalation_hook()

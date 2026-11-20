@@ -2,11 +2,12 @@ import { forwardRef } from "react";
 import { Link } from "react-router-dom";
 import {
   ArrowLeftRight, Bell, BellRing, Check, ChevronRight, ClipboardList, Package, PackageCheck,
-  ShoppingCart, TrendingDown, Truck,
+  ShoppingCart, TrendingDown, Truck, AlertTriangle,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import {
-  hasDocument, notificationHref, notificationKind, type NotificationKind, type NotificationRow,
+  hasDocument, isUrgentNotification, notificationHref, notificationKind, type NotificationKind,
+  type NotificationRow,
 } from "@/shared/api/notifications";
 
 /**
@@ -49,7 +50,10 @@ export const NotificationItem = forwardRef<HTMLAnchorElement, {
   /** Shown as a quiet "mark read" control on an unread row, without opening it. */
   onMarkRead?: (row: NotificationRow) => void;
 }>(({ row, variant = "compact", focused = false, onOpen, onMarkRead }, ref) => {
-  const kind = KIND[notificationKind(row)];
+  const urgent = isUrgentNotification(row) && !row.is_read;
+  const kind = urgent
+    ? { label: "Urgent approval", icon: AlertTriangle, tone: "bg-bad text-white" }
+    : KIND[notificationKind(row)];
   const Icon = kind.icon;
   const opensDocument = hasDocument(row);
   const full = variant === "full";
@@ -65,9 +69,11 @@ export const NotificationItem = forwardRef<HTMLAnchorElement, {
           full
             ? `rounded-2xl border p-4 hover:-translate-y-px hover:shadow-md ${
               focused ? "border-brand bg-brand/5 ring-2 ring-brand/30"
+                : urgent ? "border-bad/50 bg-bad-bg/60 hover:border-bad"
                 : row.is_read ? "border-line bg-content1 hover:border-brand/40"
                 : "border-brand/30 bg-brand/[0.04] hover:border-brand/60"}`
-            : `border-b border-line/60 px-4 py-3 hover:bg-content2 ${row.is_read ? "" : "bg-brand/[0.04]"}`
+            : `border-b border-line/60 px-4 py-3 hover:bg-content2 ${
+              urgent ? "border-l-4 border-l-bad bg-bad-bg/60" : row.is_read ? "" : "bg-brand/[0.04]"}`
         }`}
       >
         <span className={`relative grid shrink-0 place-items-center rounded-xl ${full ? "h-10 w-10" : "h-9 w-9"} ${kind.tone}`}>
@@ -80,6 +86,11 @@ export const NotificationItem = forwardRef<HTMLAnchorElement, {
           <span className="flex items-baseline gap-2">
             <span className={`min-w-0 flex-1 ${full ? "text-[15px]" : "text-sm"} ${
               row.is_read ? "font-medium text-body" : "font-semibold text-ink"} ${full ? "" : "line-clamp-2"}`}>
+              {urgent && (
+                <span className="mr-1.5 inline-flex rounded-full bg-bad px-1.5 py-0.5 align-middle text-[10px] font-bold uppercase tracking-wide text-white">
+                  Urgent
+                </span>
+              )}
               {row.title}
             </span>
             <span className="shrink-0 text-[11px] text-muted" title={new Date(row.created_at).toLocaleString()}>

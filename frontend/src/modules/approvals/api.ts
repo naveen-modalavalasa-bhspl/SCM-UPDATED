@@ -3,7 +3,7 @@ import type {
   ApprovalDecisionRow, ApprovalHistoryRow, ApprovalIndent, ApprovalQuantityInput,
   ApprovalReport, BulkActionResult, BulkDocumentRef,
   ConsolidationApprovalInput, ConsolidationApprovalResult,
-  IndentAvailability, IssueFromStockLine, IssueFromStockResult,
+  IndentAvailability, IndentOfficeStock, IssueFromStockLine, IssueFromStockResult,
   ConsolidationFilterOptions, ConsolidationQuery, ConsolidationWorkspace,
   CorrectionIndent, PendingApproval, ReturnTarget,
   PendingSummary, AllocationCycleRow, DecisionLedger, CycleLedger, StrSourceReview,
@@ -133,6 +133,8 @@ export interface PendingApprovalQuery {
   search?: string;
   doc_type?: string;
   overdue_only?: boolean;
+  /** "attention" = waited past the attention mark; "stuck" = final rung past the limit. */
+  waiting?: "" | "attention" | "stuck";
   raised_from?: string;
   raised_to?: string;
   sort?: string;
@@ -199,6 +201,10 @@ export const approvalsApi = {
     },
   ) =>
     api.post(`/api/approvals/indents/${indentId}/str-forward`, body).then((r) => r.data),
+  /** What the raising office last received of each item, and what it holds now. */
+  indentOfficeStock: (indentId: number) =>
+    api.get<IndentOfficeStock>(`/api/approvals/indents/${indentId}/office-stock`)
+      .then((r) => r.data),
   indentAvailability: (indentId: number) =>
     api.get<IndentAvailability>(`/api/approvals/indents/${indentId}/availability`)
       .then((r) => r.data),

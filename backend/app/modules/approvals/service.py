@@ -2,7 +2,7 @@
 import logging
 from collections import defaultdict
 from collections.abc import Iterable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import ROUND_DOWN, Decimal
 
 from sqlalchemy import and_, exists, func, or_, select
@@ -18,10 +18,11 @@ from app.modules.indents.enums import ApprovalAction, IndentStatus, IndentType
 from app.platform.settings.models import AuditLog
 from app.platform.settings.service import write_audit
 from app.platform.notifications import service as notification_service
-from app.platform.workflow import engine, service as workflow_service
+from app.platform.workflow import engine, escalation, service as workflow_service
 from app.platform.hcm.models import HcmEmployee, HcmPosition
 from app.platform.workflow.models import Action, Instance, Pending
 from app.shared.enums import AuditAction, DocType, InstanceStatus
+from app.shared.models.base import utcnow
 from app.shared.time import now as ist_now, today as ist_today
 from app.shared.uom import MAX_DECIMALS, decimals_by_code
 
@@ -196,7 +197,7 @@ async def pending_page(
     db: AsyncSession, user, page: int, size: int, *, search: str = "",
     doc_type: str = "", overdue_only: bool = False,
     raised_from: datetime | None = None, raised_to: datetime | None = None,
-    sort: str = "oldest", scope: str = "mine",
+    sort: str = "oldest", scope: str = "mine", waiting: str = "",
 ) -> dict:
     # Same rule the engine applies in pending_for_user: a task whose workflow has
     # finished is not work, whatever the row says. Without it a cancelled document
@@ -238,6 +239,16 @@ async def pending_page(
         conditions.append(Pending.doc_type == doc_type)
     if overdue_only:
         conditions.append(Pending.due_at < now)
+    # How long it has waited at this rung (2026-11-20, MoM point 2) — the Home card's
+    # two highlighted lines open the list on these. "stuck" = the final rung, past the
+    # escalation limit; "attention" = past the attention mark, any rung.
+    ageing = await escalation.get_config(db)
+    utc_now = utcnow()
+    if waiting == "attention":
+        conditions.append(Pending.created_at <= utc_now - timedelta(hours=ageing["attention_hours"]))
+    elif waiting == "stuck":
+        conditions.append(Pending.created_at <= utc_now - timedelta(hours=ageing["after_hours"]))
+        conditions.append(Pending.stage_sequence >= func.json_length(Instance.resolved_chain))
     if raised_from:
         conditions.append(Pending.created_at >= raised_from.replace(tzinfo=None))
     if raised_to:
@@ -358,6 +369,13 @@ async def pending_page(
             # timestamps go out naive, so a browser reading them as local time answered a
             # different question: "Past due 0" above a filter that returned a row.
             "overdue": bool(pending.due_at and pending.due_at < now),
+            # Hours at THIS rung, and whether it is the last rung past the escalation
+            # limit — drawn as "Waiting 14 h" (amber) / "Stuck at final" (red).
+            "waiting_hours": round((utc_now - pending.created_at).total_seconds() / 3600, 1)
+                if pending.created_at else None,
+            "is_final_rung": escalation.is_last_rung(instance, pending.stage_sequence),
+            "attention_hours": ageing["attention_hours"],
+            "escalate_after_hours": ageing["after_hours"],
             "current_stage_name": instance.current_stage_name,
             "approver_name": approver_disp,
             "is_overridden": pending.instance_id in overridden_instance_ids,

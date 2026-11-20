@@ -129,6 +129,70 @@ async def _requester_point(db: AsyncSession, indent: Indent) -> int | None:
     return await locations.ensure_point_for_position(db, position_id)
 
 
+# Movements that are not the office RECEIVING goods: stock re-addressed inside the
+# same point (the Unlocated rehome) and audit corrections. "Last given" skips them.
+_NOT_A_RECEIPT = {"UNLOCATED", "ADJUSTMENT", "STOCK_ADJUSTMENT"}
+
+
+async def office_stock_for_indent(db: AsyncSession, indent_id: int, user) -> dict:
+    """What the raising office last RECEIVED of each item, and what it holds now
+    (2026-11-20, MoM point 3) — beside each line on the approval screen, so the
+    approver judges a request against what the office was given and still has.
+
+    Read off the office's own stocking point, never stored: `stk_ledger` for the last
+    inward movement of the item there (its quantity, date and document), `stk_balance`
+    for the balance in hand. Two grouped queries for the whole indent. An office with
+    no stocking point answers `has_point: false`, never zeros — "no record" is not
+    "holds none".
+    """
+    from app.modules.inventory.models import StockMovement
+
+    indent = (await db.execute(select(Indent).where(Indent.id == indent_id))).scalars().first()
+    if indent is None:
+        raise NotFoundError("Indent not found")
+    lines = (await db.execute(
+        select(IndentItem).where(IndentItem.indent_id == indent_id).order_by(IndentItem.line_no)
+    )).scalars().all()
+    target = await _requester_point(db, indent)
+    if target is None:
+        return {"point_id": None, "point_name": None, "has_point": False,
+                "lines": [{"line_id": line.id, "item_id": line.item_id} for line in lines]}
+    item_ids = sorted({line.item_id for line in lines})
+    balances = dict((await db.execute(
+        select(Stock.item_id, func.coalesce(func.sum(Stock.total_qty), 0))
+        .where(Stock.warehouse_id == target, Stock.item_id.in_(item_ids or [0]))
+        .group_by(Stock.item_id)
+    )).all())
+    last_ids = select(func.max(StockMovement.id).label("id")).where(
+        StockMovement.warehouse_id == target,
+        StockMovement.item_id.in_(item_ids or [0]),
+        StockMovement.direction == "IN",
+        StockMovement.ref_type.not_in(_NOT_A_RECEIPT),
+    ).group_by(StockMovement.item_id).subquery()
+    last_rows = (await db.execute(
+        select(StockMovement).join(last_ids, StockMovement.id == last_ids.c.id)
+    )).scalars().all()
+    last = {row.item_id: row for row in last_rows}
+    point = await db.get(Warehouse, target)
+
+    out = []
+    for line in lines:
+        given = last.get(line.item_id)
+        out.append({
+            "line_id": line.id,
+            "item_id": line.item_id,
+            "balance": float(balances.get(line.item_id, 0) or 0),
+            "last_given": None if given is None else {
+                "quantity": float(given.quantity),
+                "date": given.txn_date.isoformat() if given.txn_date else None,
+                "ref_no": given.ref_no,
+                "ref_type": given.ref_type,
+            },
+        })
+    return {"point_id": target, "point_name": getattr(point, "name", None),
+            "has_point": True, "lines": out}
+
+
 async def availability_for_indent(db: AsyncSession, indent_id: int, user) -> dict:
     """Per line: what is still owed, and what this approver can cover from their
     own points. This is what puts "you have 10 of these" on the approval screen."""

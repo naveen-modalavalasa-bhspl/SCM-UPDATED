@@ -110,6 +110,9 @@ class ApprovalAction(str, Enum):
     # Written for each step a document did NOT wait on because its raiser holds a later
     # step of the chain (workflow.engine._skip_stages_below_raiser). Not a decision.
     SKIPPED = "SKIPPED"
+    # Written by the system when an approval waited past the escalation limit and moved
+    # to the next rung of the document's own ladder (workflow.escalation). Not a decision.
+    ESCALATED = "ESCALATED"
 
 
 class StockDirection(str, Enum):

@@ -17,6 +17,16 @@ export interface HomeKpi {
   href: string;
   icon: string;
   tone: string;
+  /** Highlighted lines under the figure (2026-11-20): the Approvals card's "stuck at
+   *  final approval" (red) and "waiting over 12 h" (amber), each a link of its own. */
+  highlights?: HomeKpiHighlight[];
+}
+
+export interface HomeKpiHighlight {
+  text: string;
+  tone: "red" | "amber";
+  href: string;
+  hint?: string;
 }
 
 export interface HomeAction {
