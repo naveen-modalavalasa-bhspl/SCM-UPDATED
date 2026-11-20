@@ -124,3 +124,68 @@ async def by_issue_line(db: AsyncSession, line_ids) -> dict[int, list[dict]]:
         .where(m.MaterialIssueLine.id.in_(ids), m.MaterialIssueLine.trays.isnot(None))
     )).all()
     return {int(line_id): list(trays) for line_id, trays in rows if trays}
+
+
+def split_for_pieces(parent_trays, pieces: list[dict]) -> list[list[dict] | None]:
+    """Hand one parent pick's trays to the floor pieces cut from it (2026-11-20).
+
+    `pieces` is each piece line in order: {"qty": what it issues, "codes": the codes it
+    holds}. A CODE decides its tray: the unit is on that piece's floor, so the tray it
+    was put into goes with it. What is left of each piece is then filled from the trays'
+    UNCODED room, in tray order — the same way the storekeeper filled them. A tray cut
+    across two pieces appears on both, each with its own share.
+
+    A piece the trays cannot cover in full gets None rather than a short list: post
+    refuses a pick whose trays do not hold all of it, and a floor piece must never be
+    stranded by a tray plan made before the split.
+    """
+    trays = [{"tray_no": t.get("tray_no"), "codes": list(t.get("codes") or []),
+              "free": _qty(t.get("quantity")) - len(t.get("codes") or [])}
+             for t in (parent_trays or []) if t.get("tray_no")]
+    if not trays:
+        return [None for _ in pieces]
+    tray_of = {code: t["tray_no"] for t in trays for code in t["codes"]}
+    by_no = {t["tray_no"]: t for t in trays}
+    out: list[list[dict] | None] = []
+    for piece in pieces:
+        need = _qty(piece.get("qty"))
+        mine: dict[str, dict] = {}
+        for code in piece.get("codes") or []:
+            no = tray_of.pop(code, None)
+            if no is None or need <= ZERO:
+                continue
+            entry = mine.setdefault(no, {"tray_no": no, "quantity": ZERO, "codes": []})
+            entry["quantity"] += 1
+            entry["codes"].append(code)
+            by_no[no]["codes"].remove(code)
+            need -= 1
+        for tray in trays:
+            if need <= ZERO:
+                break
+            take = min(tray["free"], need)
+            if take <= ZERO:
+                continue
+            tray["free"] -= take
+            need -= take
+            entry = mine.setdefault(tray["tray_no"], {"tray_no": tray["tray_no"], "quantity": ZERO, "codes": []})
+            entry["quantity"] += take
+        if need > ZERO:
+            # Coded room no piece claimed (a code that went to no floor) is still room.
+            for tray in trays:
+                if need <= ZERO:
+                    break
+                spare = [c for c in tray["codes"] if c in tray_of]
+                take = min(_qty(len(spare)), need)
+                if take <= ZERO:
+                    continue
+                for code in spare[:int(take)]:
+                    tray_of.pop(code, None)
+                    tray["codes"].remove(code)
+                need -= take
+                entry = mine.setdefault(tray["tray_no"], {"tray_no": tray["tray_no"], "quantity": ZERO, "codes": []})
+                entry["quantity"] += take
+        order = [t["tray_no"] for t in trays]
+        out.append(None if need > ZERO or not mine else [
+            {"tray_no": e["tray_no"], "quantity": float(e["quantity"]), "codes": e["codes"]}
+            for e in sorted(mine.values(), key=lambda e: order.index(e["tray_no"]))])
+    return out

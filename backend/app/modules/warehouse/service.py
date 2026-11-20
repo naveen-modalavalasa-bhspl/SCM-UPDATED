@@ -13025,6 +13025,8 @@ async def _plan_floor_split(db: AsyncSession, parent) -> tuple[dict, list]:
             "bin_id": bin_id, "bin_code": node.get("code") or line.bin_code,
             "batch_id": batch_id, "batch_no": batch_no, "expiry_date": expiry,
             "qty": qty,
+            # Which parent pick this slice is cut from — its trays follow (2026-11-20).
+            "parent_line_id": getattr(line, "id", None),
             # The parent line's own rate, so a child is valued exactly as the parent.
             "rate": line.rate,
             "combination": combinations.carry(line),
@@ -13199,6 +13201,8 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
     sequence = int(await db.scalar(
         select(func.count()).select_from(m.MaterialIssue)
         .where(m.MaterialIssue.parent_issue_id == parent.id)) or 0)
+    #: {id(piece line): the parent pick it was cut from}, for the trays below.
+    source_of: dict[int, int] = {}
     for floor_id, bucket in by_floor.items():
         sequence, child_no = await _next_child_issue_no(db, parent.issue_no, sequence)
         child = m.MaterialIssue(
@@ -13233,7 +13237,7 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
             created_by_name=getattr(user, "full_name", None),
         )
         for number, spec in enumerate(bucket["lines"], start=1):
-            child.items.append(m.MaterialIssueLine(
+            child.items.append(piece_line := m.MaterialIssueLine(
                 line_no=number,
                 indent_item_id=spec["indent_item_id"],
                 item_id=spec["item_id"], item_code=spec["item_code"],
@@ -13257,6 +13261,7 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
                 # approved, not any brand of the item.
                 **spec["combination"],
             ))
+            source_of[id(piece_line)] = spec.get("parent_line_id")
         _issue_totals(child)
         db.add(child)
         created.append(child)
@@ -13272,7 +13277,22 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
         indent_id=parent.indent_id, project_id=parent.project_id,
         warehouse_id=parent.warehouse_id,
         items=[line for child in created for line in child.items]), user)
-    await _hand_codes_to_floor_pieces(db, parent, created)
+    kept = await _hand_codes_to_floor_pieces(db, parent, created)
+    # The parent's trays go with the stock (MoM point 14): each piece line takes the
+    # trays its own codes are in, then its share of the uncoded room, in tray order.
+    by_parent: dict[int, list] = {}
+    for child in created:
+        for line in child.items:
+            by_parent.setdefault(source_of.get(id(line)), []).append(line)
+    for parent_line in parent.items:
+        pieces = by_parent.get(parent_line.id) or []
+        if not parent_line.trays or not pieces:
+            continue
+        shares = issue_trays.split_for_pieces(parent_line.trays, [
+            {"qty": line.issued_qty, "codes": kept.get(id(line), [])} for line in pieces])
+        for line, share in zip(pieces, shares):
+            line.trays = share
+    await db.flush()
     for child in created:
         # A direct parent's hold, re-taken piece by piece (see the release above).
         await _hold_direct_issue_stock(db, child, user)
@@ -13324,7 +13344,7 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
 
 
 async def _hand_codes_to_floor_pieces(db: AsyncSession, parent: m.MaterialIssue,
-                                      pieces: list[m.MaterialIssue]) -> None:
+                                      pieces: list[m.MaterialIssue]) -> dict[int, list[str]]:
     """Give each floor piece the unit codes for its own quantity (2026-10-13).
 
     The pieces are written straight to the table and never passed through
@@ -13364,6 +13384,8 @@ async def _hand_codes_to_floor_pieces(db: AsyncSession, parent: m.MaterialIssue,
     await db.flush()
 
     used: set[str] = set()
+    #: {id(piece line): the parent's codes it kept} — what decides its trays.
+    kept: dict[int, list[str]] = {}
     for piece in pieces:
         inputs = []
         for line in piece.items:
@@ -13373,6 +13395,7 @@ async def _hand_codes_to_floor_pieces(db: AsyncSession, parent: m.MaterialIssue,
                     and where.get(c) == (int(line.item_id), int(line.batch_id or 0),
                                          int(line.bin_id or 0))][:want]
             used.update(mine)
+            kept[id(line)] = mine
             inputs.append(s.IssueItemWrite(
                 item_id=line.item_id, indent_item_id=line.indent_item_id,
                 requested_qty=_d(line.requested_qty), issued_qty=_d(line.issued_qty),
@@ -13381,6 +13404,7 @@ async def _hand_codes_to_floor_pieces(db: AsyncSession, parent: m.MaterialIssue,
                 serial_numbers=mine))
         await _reserve_issue_serials(db, piece, inputs)
     await db.flush()
+    return kept
 
 
 async def _next_child_issue_no(db: AsyncSession, parent_no: str,
@@ -24448,6 +24472,15 @@ async def list_serials(db: AsyncSession, params: PageParams, *, status: str | No
     page = await paginate(db, stmt.order_by(m.SerialNumber.id.desc()), params)
     hu_of = {row.id: row.handling_unit_id for row in page["items"]}
     page["items"] = await _decorate_serials(db, page["items"])
+    # Each unit's warranty as recorded on the GRN it arrived on (MoM point 25).
+    from app.modules.warehouse import warranty
+    covers = await warranty.by_item(
+        db, {row["item_id"] for row in page["items"]},
+        codes=[c for row in page["items"] for c in (row.get("serial_number"), row.get("imei"))])
+    for row in page["items"]:
+        cover = (covers.get((int(row["item_id"]), row.get("serial_number")))
+                 or covers.get((int(row["item_id"]), row.get("imei"))))
+        row.update(warranty.unit_fields(cover))
     # The PACKAGE each unit sits in (2026-10-26), so a lot reads as packages with
     # their codes inside them. One query for the page.
     hu_ids = {v for v in hu_of.values() if v}
@@ -24514,6 +24547,10 @@ async def serial_summary(db: AsyncSession, *, item_ids: list[int],
     # warehouse holds the same item in several bins. The caller indexes the result
     # from the most specific key it has down to item+warehouse, so a serial row that
     # has not been given a bin yet (most of the live data) still finds its lot.
+    # Warranties recorded on GRNs for these items (MoM point 25): each lot says how many
+    # of its units have one, and how many end within 30 days or have ended.
+    from app.modules.warehouse import warranty
+    covers = await warranty.by_item(db, tracked)
     grouped: dict[tuple, dict] = {}
     for (item_id, warehouse_id, bin_id, batch_id,
          serial, imei, asset, consumable) in (await db.execute(stmt)).all():
@@ -24526,8 +24563,12 @@ async def serial_summary(db: AsyncSession, *, item_ids: list[int],
             # a consumable code a column each, and one unit is only ever one of the two.
             "asset_codes": [], "consumable_codes": [],
             "asset_count": 0, "consumable_count": 0,
+            "warranty": warranty.lot_tally(),
         })
         bucket["count"] += 1
+        if covers and item_id in tracked:
+            warranty.count_into(bucket["warranty"],
+                                covers.get((item_id, serial)) or covers.get((item_id, imei)))
         # Five is enough to recognise the lot; the rest are behind the detail panel.
         if serial and item_id in tracked and len(bucket["serials"]) < 5:
             bucket["serials"].append(serial)

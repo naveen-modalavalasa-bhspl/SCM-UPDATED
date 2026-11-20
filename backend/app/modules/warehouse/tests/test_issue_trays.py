@@ -47,3 +47,22 @@ def test_a_code_names_its_tray():
     trays = [{"tray_no": "T1", "codes": ["A"]}, {"tray_no": "T2", "codes": ["B"]}]
     assert issue_trays.tray_for(trays, "B") == "T2"
     assert issue_trays.tray_for(trays, "C") is None
+
+
+def test_floor_pieces_take_the_trays_their_codes_are_in():
+    parent = [{"tray_no": "T1", "quantity": 3, "codes": ["A", "B"]},
+              {"tray_no": "T2", "quantity": 2, "codes": ["C"]}]
+    # Floor 1 holds A and C (2 units); floor 2 holds B plus 2 uncoded.
+    first, second = issue_trays.split_for_pieces(parent, [
+        {"qty": 2, "codes": ["A", "C"]}, {"qty": 3, "codes": ["B"]}])
+    assert first == [{"tray_no": "T1", "quantity": 1.0, "codes": ["A"]},
+                     {"tray_no": "T2", "quantity": 1.0, "codes": ["C"]}]
+    assert second == [{"tray_no": "T1", "quantity": 2.0, "codes": ["B"]},
+                      {"tray_no": "T2", "quantity": 1.0, "codes": []}]
+
+
+def test_a_piece_the_trays_cannot_cover_gets_none_and_no_trays_means_none():
+    assert issue_trays.split_for_pieces([{"tray_no": "T1", "quantity": 2}],
+                                        [{"qty": 2}, {"qty": 1}]) == [
+        [{"tray_no": "T1", "quantity": 2.0, "codes": []}], None]
+    assert issue_trays.split_for_pieces(None, [{"qty": 1}]) == [None]

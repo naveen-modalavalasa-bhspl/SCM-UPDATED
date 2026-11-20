@@ -4155,6 +4155,14 @@ class SerialRead(_Read):
     status: str
     remarks: str | None = None
     is_active: bool
+    #: The warranty recorded on the GRN the unit arrived on (MoM point 25).
+    warranty_start: date | None = None
+    warranty_end: date | None = None
+    warranty_card_no: str | None = None
+    #: NONE, ACTIVE, EXPIRING (inside 30 days) or EXPIRED — and the sentence for it.
+    warranty_status: str = "NONE"
+    warranty_days_left: int | None = None
+    warranty_text: str | None = None
 
 
 class AttachmentRead(_Read):

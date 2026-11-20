@@ -274,3 +274,52 @@ async def for_units(db: AsyncSession, item_id: int, codes: list[str | None]):
                m.ReceiptUnitWarranty.unit_code.in_(wanted))
         .order_by(m.ReceiptUnitWarranty.id.desc()).limit(1)
     )).scalars().first()
+
+
+async def by_item(db: AsyncSession, item_ids, codes=None) -> dict[tuple[int, str], m.ReceiptUnitWarranty]:
+    """{(item, code): the newest warranty recorded for it}. `codes` narrows the read to
+    those units (chunked: a lot can name thousands); without it, every warranty of
+    those items — the table holds only what a GRN recorded, which is small."""
+    ids = sorted({int(i) for i in item_ids if i})
+    if not ids:
+        return {}
+    stmt = (select(m.ReceiptUnitWarranty)
+            .where(m.ReceiptUnitWarranty.item_id.in_(ids))
+            .order_by(m.ReceiptUnitWarranty.id))
+    rows: list = []
+    if codes is None:
+        rows = list((await db.execute(stmt)).scalars().all())
+    else:
+        wanted = sorted({c for c in codes if c})
+        for start in range(0, len(wanted), 1000):
+            rows += (await db.execute(stmt.where(
+                m.ReceiptUnitWarranty.unit_code.in_(wanted[start:start + 1000])
+            ))).scalars().all()
+    # Ordered by id, so the newest for a unit is the one left standing.
+    return {(int(row.item_id), row.unit_code): row for row in rows}
+
+
+def unit_fields(row: m.ReceiptUnitWarranty | None) -> dict:
+    """What a unit row says about its warranty — the same words the GRN uses."""
+    if row is None:
+        return {"warranty_status": "NONE"}
+    status, days = status_of(row.end_date)
+    return {"warranty_start": row.start_date, "warranty_end": row.end_date,
+            "warranty_card_no": row.card_no, "warranty_status": status,
+            "warranty_days_left": days, "warranty_text": status_sentence(row.end_date)}
+
+
+def lot_tally() -> dict:
+    return {"covered": 0, "active": 0, "expiring": 0, "expired": 0, "next_end": None}
+
+
+def count_into(tally: dict, row: m.ReceiptUnitWarranty | None) -> None:
+    """Add one unit to a lot's warranty tally: covered, and how many end soon or ended.
+    `next_end` is the soonest end among units still in warranty."""
+    if row is None:
+        return
+    status, _ = status_of(row.end_date)
+    tally["covered"] += 1
+    tally[{"ACTIVE": "active", "EXPIRING": "expiring", "EXPIRED": "expired"}[status]] += 1
+    if status != "EXPIRED" and (tally["next_end"] is None or row.end_date < tally["next_end"]):
+        tally["next_end"] = row.end_date

@@ -6,6 +6,7 @@ import { getUnits } from "../api";
 import type { UnitRow } from "../types";
 import { TONE_BLUE } from "@/shared/components/tones";
 import { writeToClipboard } from "@/shared/clipboard";
+import { UnitWarrantyChip } from "./warrantyCell";
 
 /**
  * The units standing in one lot, by name.
@@ -21,6 +22,9 @@ import { writeToClipboard } from "@/shared/clipboard";
  * and the asset-or-consumable CODE minted at putaway. They are not interchangeable and
  * are never collapsed into one column here.
  */
+
+/** Ending or ended first: those are the ones somebody has to act on. */
+const WARRANTY_ORDER: Record<string, number> = { EXPIRED: 0, EXPIRING: 1, ACTIVE: 2, NONE: 3 };
 
 const csvCell = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
 
@@ -338,12 +342,14 @@ export function UnitsPanel({
    *  CSV, and rebuilding that string on each re-render of the popover cost more than
    *  the download it exists for. */
   const everything = () => [
-    ["Serial", "IMEI", "Asset code", "Consumable code", "Batch", "Bin", "Status"],
+    ["Serial", "IMEI", "Asset code", "Consumable code", "Batch", "Bin", "Status",
+     "Warranty start", "Warranty end", "Warranty card", "Warranty"],
     ...units.map((u: UnitRow) => [
       // Blank, not the code: the export has an Asset code column of its own, and
       // repeating the value made a spreadsheet read as two identities per unit.
       realSerial(u), u.imei, u.asset_code, u.consumable_code,
       u.batch_no, u.bin_code, u.status,
+      u.warranty_start, u.warranty_end, u.warranty_card_no, u.warranty_text,
     ]),
   ].map((line) => line.map(csvCell).join(",")).join("\n");
 
@@ -385,6 +391,22 @@ export function UnitsPanel({
         </button>
       </div>
       <Group title="Serial numbers" values={serials} filename={`${stem}-serials.csv`} />
+      {/* Each unit's warranty from its GRN (MoM point 25) — ending or ended first. */}
+      {units.some((u) => (u.warranty_status ?? "NONE") !== "NONE") && (
+        <div>
+          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-muted">Warranty</div>
+          <ul className="max-h-48 space-y-1 overflow-y-auto">
+            {[...units]
+              .sort((a, b) => WARRANTY_ORDER[a.warranty_status ?? "NONE"] - WARRANTY_ORDER[b.warranty_status ?? "NONE"])
+              .map((u) => (
+                <li key={u.id} className="flex items-center justify-between gap-2">
+                  <span className="mono truncate text-[11px] text-ink">{realSerial(u) ?? u.imei ?? u.asset_code ?? u.consumable_code}</span>
+                  <UnitWarrantyChip unit={u} />
+                </li>
+              ))}
+          </ul>
+        </div>
+      )}
       <Group title="IMEI numbers" values={imeis} filename={`${stem}-imei.csv`} />
       {units.some((u) => u.package_code) ? (
         <PackageGroups units={units} stem={stem} />

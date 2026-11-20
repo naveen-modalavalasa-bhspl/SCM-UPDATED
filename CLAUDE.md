@@ -1166,11 +1166,16 @@ hierarchies of the vendor's own mapped items only, scoped on the token.
 - **Warranty per received serial** (`warehouse/warranty.py`, `inb_receipt_unit_warranties`,
   `c6e8a0b2d4f7`): keyed on the GRN line + unit code (serial, else IMEI), card in
   `sys_attachments` (GRN_WARRANTY); "same for all" = one upload, a row per unit. A
-  missing warranty WARNS, never refuses; addable after submit. Scans show it.
+  missing warranty WARNS, never refuses; addable after submit. Scans show it, and
+  Stock Balance reads it (`warranty.by_item`): each lot's tally on `/serials/summary`
+  (`warranty`: covered / expiring / expired / next_end) and each unit's on `/serials`.
 - **Trays on an issue pick** (`warehouse/issue_trays.py`, `out_issue_items.trays` JSON,
   `d7f9b1c3e5a8`): tray no, qty, codes. Save: no repeated tray per pick, a code in one
   tray, codes ≤ qty, sum ≤ pick. Submit and post: sum == pick. After approval
-  `PUT /issues/{id}/lines/{line}/trays`. Served on the consignment source, the dispatch
+  `PUT /issues/{id}/lines/{line}/trays`. A floor split hands each piece its share
+  (`split_for_pieces`: a code takes its tray to the piece holding it, then uncoded room
+  in tray order; a piece the trays cannot cover gets none rather than being stranded).
+  Served on the consignment source, the dispatch
   (`line_trays`) and both acknowledgements (`TrayChips`); NEVER on the Delivery Challan.
 
 ### The outward leg (doc Phase D+E), under Logistics
