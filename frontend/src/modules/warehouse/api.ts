@@ -1362,3 +1362,30 @@ export const packByCode = (code: string) =>
             batch_id: number; units: { serial_number: string; imei?: string | null;
                                        code: string }[] }>(
     `/api/warehouse/packs/code/${encodeURIComponent(code)}`).then((r) => r.data);
+
+/* ------------------------------------------- warranty per received unit (pt 25) -- */
+
+export const receiptWarranties = (receiptId: number) =>
+  get<import("./types").ReceiptWarranties>(`${BASE}/receipts/${receiptId}/warranties`);
+
+/** One warranty on the chosen units of one line — a new card, or one already on this GRN. */
+export const saveReceiptWarranty = async (receiptId: number, input: import("./types").WarrantyInput) => {
+  const form = new FormData();
+  form.append("receipt_item_id", String(input.receipt_item_id));
+  form.append("codes", JSON.stringify(input.codes));
+  form.append("start_date", input.start_date);
+  form.append("end_date", input.end_date);
+  if (input.card_no) form.append("card_no", input.card_no);
+  if (input.file) form.append("file", input.file);
+  else if (input.attachment_id) form.append("attachment_id", String(input.attachment_id));
+  return (await api.post<import("./types").ReceiptWarranties>(
+    `${BASE}/receipts/${receiptId}/warranties`, form)).data;
+};
+
+export const removeReceiptWarranty = async (receiptId: number, warrantyId: number) =>
+  (await api.delete<import("./types").ReceiptWarranties>(
+    `${BASE}/receipts/${receiptId}/warranties/${warrantyId}`)).data;
+
+export const downloadWarrantyDocument = async (receiptId: number, attachmentId: number) =>
+  (await api.get<Blob>(`${BASE}/receipts/${receiptId}/warranty-documents/${attachmentId}/download`,
+    { responseType: "blob" })).data;

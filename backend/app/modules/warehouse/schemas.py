@@ -4960,3 +4960,59 @@ class RepackIn(BaseModel):
     pack_hierarchy_id: int
     target: Annotated[list[PackEntryIn], Field(min_length=1, max_length=12)]
     reason: str | None = Field(default=None, max_length=300)
+
+
+# ---------------------------------------------------------------------------
+# Warranty per received unit (MoM 2026-11-18, point 25) — `warranty.py`.
+# ---------------------------------------------------------------------------
+
+class UnitWarrantyRead(BaseModel):
+    id: int
+    start_date: date
+    end_date: date
+    card_no: str | None = None
+    attachment_id: int | None = None
+    document_name: str | None = None
+    #: ACTIVE, EXPIRING (inside 30 days) or EXPIRED — and the sentence for it.
+    status: str
+    days_left: int | None = None
+    status_text: str
+    added_by_name: str | None = None
+    added_at: datetime | None = None
+
+
+class WarrantyUnit(BaseModel):
+    code: str
+    serial_number: str | None = None
+    imei: str | None = None
+    warranty: UnitWarrantyRead | None = None
+
+
+class WarrantyLine(BaseModel):
+    receipt_item_id: int
+    line_no: int | None = None
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    batch_no: str | None = None
+    units: list[WarrantyUnit] = Field(default_factory=list)
+    covered: int = 0
+    total: int = 0
+
+
+class WarrantyDocument(BaseModel):
+    id: int
+    file_name: str
+    file_size: int | None = None
+    uploaded_by_name: str | None = None
+    created_at: datetime | None = None
+
+
+class ReceiptWarranties(BaseModel):
+    receipt_id: int
+    grn_no: str | None = None
+    lines: list[WarrantyLine] = Field(default_factory=list)
+    covered: int = 0
+    total: int = 0
+    editable: bool = True
+    documents: list[WarrantyDocument] = Field(default_factory=list)

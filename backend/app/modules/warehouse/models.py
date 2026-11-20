@@ -16,7 +16,7 @@ vendor was called in March.
 """
 from sqlalchemy import (
     JSON, BigInteger, Boolean, Column, Date, DateTime, ForeignKey, Index, Integer,
-    Numeric, String, Text,
+    Numeric, String, Text, UniqueConstraint,
 )
 from sqlalchemy.orm import relationship, synonym
 
@@ -226,6 +226,46 @@ class ReceiptItem(CombinationMixin, Base):
     despatch_note_item_id = Column(BigInteger, nullable=True)
 
     receipt = relationship("Receipt", back_populates="items")
+
+
+class ReceiptUnitWarranty(Base):
+    """`inb_receipt_unit_warranties` — the warranty of ONE unit received on a GRN
+    (MoM 2026-11-18, point 25).
+
+    Keyed on the GRN line and the unit's code (its serial, else its IMEI), because at
+    the gate the unit is a string on `inb_receipt_items.serial_numbers` — the
+    `whs_serial_numbers` row is minted later, at putaway. Every later reader (a scan,
+    the stock balance) finds the warranty by item + code, so nothing on the unit path
+    had to change.
+
+    The card itself is a `sys_attachments` row (entity `GRN_WARRANTY`, the receipt's
+    id). One document may cover many units — "same warranty for all" is one upload and
+    one row per unit pointing at it.
+    """
+    __tablename__ = "inb_receipt_unit_warranties"
+
+    id = pk()
+    receipt_id = Column(ForeignKey("inb_receipts.id", ondelete="CASCADE"),
+                        index=True, nullable=False)
+    receipt_item_id = Column(ForeignKey("inb_receipt_items.id", ondelete="CASCADE"),
+                             index=True, nullable=False)
+    item_id = Column(BigInteger, nullable=False)
+    unit_code = Column(String(100), nullable=False)
+    serial_number = Column(String(100), nullable=True)
+    imei = Column(String(50), nullable=True)
+    start_date = Column(Date, nullable=False)
+    end_date = Column(Date, nullable=False)
+    card_no = Column(String(100), nullable=True)
+    attachment_id = Column(BigInteger, nullable=True)
+    created_by_id = soft_fk()
+    created_by_name = Column(String(200), nullable=True)
+    created_at = created_at_col()
+    updated_at = updated_at_col()
+
+    __table_args__ = (
+        UniqueConstraint("receipt_item_id", "unit_code", name="uq_inb_warranty_unit"),
+        Index("ix_inb_warranty_item_code", "item_id", "unit_code"),
+    )
 
 
 # ---------------------------------------------------------------------------

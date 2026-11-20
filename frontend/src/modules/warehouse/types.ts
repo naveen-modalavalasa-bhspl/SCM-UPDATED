@@ -3554,3 +3554,66 @@ export interface BoxLabel {
   printed_by_name?: string | null;
   created_at?: string | null;
 }
+
+/* Warranty per received unit on a GRN (MoM 2026-11-18, point 25). */
+export interface UnitWarranty {
+  id: number;
+  start_date: string;
+  end_date: string;
+  card_no?: string | null;
+  attachment_id?: number | null;
+  document_name?: string | null;
+  /** ACTIVE, EXPIRING (inside 30 days) or EXPIRED. */
+  status: "ACTIVE" | "EXPIRING" | "EXPIRED" | "NONE";
+  days_left?: number | null;
+  status_text: string;
+  added_by_name?: string | null;
+  added_at?: string | null;
+}
+
+export interface WarrantyUnit {
+  code: string;
+  serial_number?: string | null;
+  imei?: string | null;
+  warranty?: UnitWarranty | null;
+}
+
+export interface WarrantyLine {
+  receipt_item_id: number;
+  line_no?: number | null;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  batch_no?: string | null;
+  units: WarrantyUnit[];
+  covered: number;
+  total: number;
+}
+
+export interface WarrantyDocument {
+  id: number;
+  file_name: string;
+  file_size?: number | null;
+  uploaded_by_name?: string | null;
+  created_at?: string | null;
+}
+
+export interface ReceiptWarranties {
+  receipt_id: number;
+  grn_no?: string | null;
+  lines: WarrantyLine[];
+  covered: number;
+  total: number;
+  editable: boolean;
+  documents: WarrantyDocument[];
+}
+
+export interface WarrantyInput {
+  receipt_item_id: number;
+  codes: string[];
+  start_date: string;
+  end_date: string;
+  card_no?: string | null;
+  file?: File | null;
+  attachment_id?: number | null;
+}

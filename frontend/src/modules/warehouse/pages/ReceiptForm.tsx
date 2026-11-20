@@ -19,6 +19,7 @@ import {
 } from "@/shared/packing";
 import { Lookup } from "../components/Lookup";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
+import { GrnWarrantyPanel } from "../components/GrnWarrantyPanel";
 import { ReceiptLinkedDocuments } from "../components/LinkedDocuments";
 import { ReceiptRoutingPanel } from "../components/ReceiptRouting";
 import { UnitCodesModal } from "../components/UnitCodesModal";
@@ -1890,6 +1891,10 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           routing_busy={route.isPending}
         />
       )}
+
+      {/* Warranty per received serial (MoM point 25) — on a saved GRN, since a
+          warranty belongs to a unit the GRN has recorded. Never blocks the GRN. */}
+      {isGrn && doc && <GrnWarrantyPanel receiptId={doc.id} canEdit={canFile} />}
 
       <Section title="Remarks">
         <Input value={form.remarks ?? ""} disabled={locked} onChange={(e) => set("remarks", e.target.value)} />
