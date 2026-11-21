@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { Check, Inbox, Plus, ScanLine, Trash2, X } from "lucide-react";
+import { Inbox, Plus, ScanLine, Trash2 } from "lucide-react";
+import { SerialNumbersModal } from "./SerialNumbersModal";
 import { Button, errorMessage } from "@/shared/components";
 import type { IssueTray } from "../types";
 import { num } from "../format";
@@ -21,13 +22,15 @@ import { codesFree, leftOver, nextTrayNo, trayProblems } from "./trayPlan";
  * approved issue, whose serials are scanned after approval — edits are held here and
  * saved with their own button; "view" only shows them.
  */
-export function IssuePickTrays({ trays, issued, codes, uom, codeWord = "code", mode, onChange, onSave }: {
+export function IssuePickTrays({ trays, issued, codes, uom, codeWord = "code", itemLabel = "", mode, onChange, onSave }: {
   trays?: IssueTray[] | null;
   issued: number;
   /** The pick's own codes — what a tray may hold. */
   codes: string[];
   uom?: string | null;
   codeWord?: string;
+  /** The item, for the code picker's heading. */
+  itemLabel?: string;
   mode: "draft" | "direct" | "view";
   onChange?: (trays: IssueTray[] | null) => void;
   onSave?: (trays: IssueTray[]) => Promise<unknown>;
@@ -81,7 +84,6 @@ export function IssuePickTrays({ trays, issued, codes, uom, codeWord = "code", m
 
       <ul className="space-y-1">
         {list.map((tray, index) => {
-          const free = codesFree(codes, list, index);
           const rowProblem = problems.find((p) => p.index === index);
           return (
             <li key={index} className={`rounded-lg border px-2 py-1.5 ${rowProblem ? "border-bad/30 bg-bad-bg/20" : "border-line/50"}`}>
@@ -106,28 +108,33 @@ export function IssuePickTrays({ trays, issued, codes, uom, codeWord = "code", m
                          className="h-10 w-28 rounded-lg border border-line bg-content1 px-2 text-right text-sm font-semibold tabular text-ink outline-none transition-colors focus:border-brand focus:ring-2 focus:ring-brand/20 disabled:bg-content2" />
                   {uom && <span className="text-[10px] text-muted">{uom}</span>}
                 </label>
-                {codes.length > 0 && (
-                  <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
-                    {tray.codes.map((code) => (
-                      <span key={code} className="mono inline-flex items-center gap-0.5 rounded bg-brand/[0.08] px-1.5 py-0.5 text-[10px] font-semibold text-brand">
-                        {code}
-                        {editable && (
-                          <button type="button" aria-label={`Take ${code} out of the tray`}
-                                  onClick={() => patch(index, { codes: tray.codes.filter((c) => c !== code) })}
-                                  className="rounded hover:bg-brand/10"><X className="h-3 w-3" aria-hidden /></button>
-                        )}
-                      </span>
-                    ))}
-                    {editable && (
-                      <button type="button" onClick={() => setChoosing(choosing === index ? null : index)}
-                              disabled={!free.some((c) => !tray.codes.includes(c))}
-                              className="inline-flex min-h-7 items-center gap-1 rounded-md border border-brand/30 px-1.5 text-[10px] font-semibold text-brand hover:bg-brand/5 disabled:border-line disabled:text-muted">
-                        <Plus className="h-3 w-3" aria-hidden /> {tray.codes.length ? "More" : `Pick ${codeWord}s`}
-                        <span className="text-muted">({tray.codes.length}/{fmtQty(num(tray.quantity))})</span>
+                {codes.length > 0 && (() => {
+                  // A summary, never the list: the codes themselves are chosen and
+                  // reviewed in the picker, so a tray of 50 stays one row tall.
+                  const want = Math.floor(num(tray.quantity));
+                  const have = tray.codes.length;
+                  const full = want > 0 && have === want;
+                  return (
+                    <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+                      <button type="button" onClick={() => setChoosing(index)}
+                              disabled={!editable && have === 0}
+                              title={tray.codes.join(", ") || undefined}
+                              className={`inline-flex min-h-10 items-center gap-1.5 rounded-lg border px-3 text-xs font-semibold transition-colors disabled:opacity-50 ${
+                                full ? "border-ok/40 bg-ok-bg/50 text-ok hover:border-ok"
+                                  : have ? "border-warn/40 bg-warn-bg/40 text-warn hover:border-warn"
+                                  : "border-brand/30 text-brand hover:bg-brand/5"}`}>
+                        <ScanLine className="h-4 w-4" aria-hidden />
+                        {editable ? (have ? `Change ${codeWord}s` : `Pick ${codeWord}s`) : `View ${codeWord}s`}
+                        <span className="tabular">{have}/{fmtQty(want)}</span>
                       </button>
-                    )}
-                  </div>
-                )}
+                      {have > 0 && (
+                        <span className="mono min-w-0 truncate text-[11px] text-muted" title={tray.codes.join(", ")}>
+                          {tray.codes.slice(0, 2).join(", ")}{have > 2 ? ` +${have - 2} more` : ""}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })()}
                 {editable && (
                   <button type="button" aria-label={`Remove tray ${tray.tray_no || index + 1}`}
                           onClick={() => { setChoosing(null); write(list.filter((_, i) => i !== index)); }}
@@ -136,18 +143,6 @@ export function IssuePickTrays({ trays, issued, codes, uom, codeWord = "code", m
                   </button>
                 )}
               </div>
-              {choosing === index && editable && (
-                <CodeChooser
-                  codes={free}
-                  chosen={tray.codes}
-                  room={Math.max(Math.floor(num(tray.quantity)) - tray.codes.length, 0)}
-                  onToggle={(code) => patch(index, {
-                    codes: tray.codes.includes(code) ? tray.codes.filter((c) => c !== code) : [...tray.codes, code],
-                  })}
-                  onFill={(more) => patch(index, { codes: [...tray.codes, ...more] })}
-                  onDone={() => setChoosing(null)}
-                />
-              )}
               {rowProblem && <p className="mt-0.5 text-[10px] font-semibold text-bad">{rowProblem.message}</p>}
             </li>
           );
@@ -183,54 +178,28 @@ export function IssuePickTrays({ trays, issued, codes, uom, codeWord = "code", m
           )}
         </div>
       )}
-    </div>
-  );
-}
-
-function CodeChooser({ codes, chosen, room, onToggle, onFill, onDone }: {
-  codes: string[]; chosen: string[]; room: number;
-  onToggle: (code: string) => void; onFill: (codes: string[]) => void; onDone: () => void;
-}) {
-  const [query, setQuery] = useState("");
-  const shown = codes.filter((c) => c.toLowerCase().includes(query.trim().toLowerCase()));
-  const unchosen = codes.filter((c) => !chosen.includes(c));
-  return (
-    <div className="mt-1 rounded-md border border-brand/20 bg-brand/[0.03] p-1.5">
-      <div className="mb-1 flex flex-wrap items-center gap-1.5">
-        <input autoFocus value={query} onChange={(e) => setQuery(e.target.value)}
-               onKeyDown={(e) => {
-                 if (e.key !== "Enter") return;
-                 e.preventDefault();
-                 const exact = codes.find((c) => c.toLowerCase() === query.trim().toLowerCase());
-                 if (exact && !chosen.includes(exact) && room > 0) { onToggle(exact); setQuery(""); }
-               }}
-               placeholder="Scan a code or search" aria-label="Scan a code into this tray"
-               className="mono h-8 min-w-[10rem] flex-1 rounded-md border border-line bg-content1 px-2 text-xs" />
-        <button type="button" disabled={room <= 0 || !unchosen.length}
-                onClick={() => onFill(unchosen.slice(0, room))}
-                className="min-h-8 rounded-md px-2 text-[11px] font-semibold text-brand hover:bg-brand/5 disabled:text-muted">
-          Fill the next {Math.min(room, unchosen.length)}
-        </button>
-        <button type="button" onClick={onDone}
-                className="inline-flex min-h-8 items-center gap-1 rounded-md bg-brand px-2 text-[11px] font-semibold text-white">
-          <Check className="h-3.5 w-3.5" aria-hidden /> Done
-        </button>
-      </div>
-      <div className="flex max-h-32 flex-wrap gap-1 overflow-y-auto">
-        {shown.map((code) => {
-          const on = chosen.includes(code);
-          return (
-            <button key={code} type="button" onClick={() => onToggle(code)} disabled={!on && room <= 0}
-                    aria-pressed={on}
-                    className={`mono min-h-7 rounded px-1.5 text-[10px] font-semibold ${
-                      on ? "bg-brand text-white" : "border border-line bg-content1 text-body hover:border-brand/40 disabled:opacity-40"}`}>
-              {code}
-            </button>
-          );
-        })}
-        {!shown.length && <span className="text-[11px] text-muted">No free code matches.</span>}
-      </div>
-      {room <= 0 && <p className="mt-1 text-[10px] text-muted">This tray is full — raise its quantity to put more in.</p>}
+      {/* The codes going into one tray — the same picker QC and the consignment use:
+        * this tray's codes ticked, plus every code of the pick no OTHER tray holds,
+        * capped at the tray's quantity. */}
+      {choosing !== null && list[choosing] && (
+        <SerialNumbersModal
+          isOpen
+          onClose={() => setChoosing(null)}
+          pickMode="select"
+          noun={codeWord}
+          readOnly={!editable}
+          itemLabel={`Tray ${list[choosing].tray_no || choosing + 1}${itemLabel ? ` · ${itemLabel}` : ""}`}
+          // Exactly the tray's quantity — or every code still on offer, when the pick
+          // holds fewer than that (the rest are assigned on save).
+          quantity={Math.min(Math.floor(num(list[choosing].quantity)), codesFree(codes, list, choosing).length)}
+          available={codesFree(codes, list, choosing)}
+          initial={list[choosing].codes}
+          onSave={(picked) => {
+            patch(choosing, { codes: picked.slice(0, Math.floor(num(list[choosing].quantity))) });
+            setChoosing(null);
+          }}
+        />
+      )}
     </div>
   );
 }

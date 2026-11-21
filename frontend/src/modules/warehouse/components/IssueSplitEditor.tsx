@@ -1341,6 +1341,7 @@ function PickRow(props: PickProps) {
           codes={line.serial_numbers ?? []}
           uom={(line as { uom_code?: string | null }).uom_code ?? packOptions[0]?.base_uom}
           codeWord={(unitMeta?.label ?? "code").toLowerCase()}
+          itemLabel={[line.item_code, line.item_name].filter(Boolean).join(" · ")}
           mode={!locked ? "draft" : onSaveTrays && line.id && !pickLocked ? "direct" : "view"}
           onChange={(trays) => onPatch(split.index, { trays })}
           onSave={(trays) => onSaveTrays!(line.id!, trays)}
