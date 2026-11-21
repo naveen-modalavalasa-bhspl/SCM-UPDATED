@@ -5013,7 +5013,10 @@ class WarrantyUnit(BaseModel):
     code: str
     serial_number: str | None = None
     imei: str | None = None
+    #: The unit's warranty as it stands: its own, else its batch's.
     warranty: UnitWarrantyRead | None = None
+    #: UNIT (its own), BATCH (the batch's) or None.
+    source: str | None = None
 
 
 class WarrantyLine(BaseModel):
@@ -5023,6 +5026,10 @@ class WarrantyLine(BaseModel):
     item_code: str | None = None
     item_name: str | None = None
     batch_no: str | None = None
+    #: How the warranty is given: BATCH (one for every unit), UNIT (each its own), None.
+    mode: str | None = None
+    #: The batch's own warranty, in BATCH mode.
+    batch: UnitWarrantyRead | None = None
     units: list[WarrantyUnit] = Field(default_factory=list)
     covered: int = 0
     total: int = 0
@@ -5044,3 +5051,24 @@ class ReceiptWarranties(BaseModel):
     total: int = 0
     editable: bool = True
     documents: list[WarrantyDocument] = Field(default_factory=list)
+
+
+class UnitWarrantyIn(BaseModel):
+    """One piece's own warranty. Both dates blank = no own warranty."""
+    code: str = Field(max_length=100)
+    start_date: date | None = None
+    end_date: date | None = None
+    card_no: str | None = Field(default=None, max_length=100)
+    attachment_id: int | None = None
+
+
+class LineWarrantyIn(BaseModel):
+    """A GRN line's warranties, whole (2026-11-21): BATCH — this start/end/card covers
+    every unit; UNIT — each unit in `units`; None — no warranty. In BATCH mode `units`
+    may still carry pieces with their own, which override the batch's."""
+    mode: str | None = None
+    start_date: date | None = None
+    end_date: date | None = None
+    card_no: str | None = Field(default=None, max_length=100)
+    attachment_id: int | None = None
+    units: list[UnitWarrantyIn] = Field(default_factory=list, max_length=10_000)

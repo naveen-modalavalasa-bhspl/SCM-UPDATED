@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from types import SimpleNamespace
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -114,34 +115,60 @@ async def get_warranties(db: AsyncSession, receipt_id: int, user) -> dict:
     return await receipt_warranties(db, await _receipt(db, receipt_id, user))
 
 
+MODES = ("BATCH", "UNIT")
+
+
+def _batch_out(line, docs: dict) -> dict | None:
+    """The line's own warranty — the batch's — when it has dates."""
+    if not (line.warranty_start and line.warranty_end):
+        return None
+    status, days = status_of(line.warranty_end)
+    doc = docs.get(line.warranty_attachment_id) if line.warranty_attachment_id else None
+    return {"id": 0, "start_date": line.warranty_start, "end_date": line.warranty_end,
+            "card_no": line.warranty_card_no, "attachment_id": line.warranty_attachment_id,
+            "document_name": getattr(doc, "file_name", None), "status": status,
+            "days_left": days, "status_text": status_sentence(line.warranty_end),
+            "added_by_name": None, "added_at": None}
+
+
+async def _docs(db: AsyncSession, ids) -> dict:
+    ids = {i for i in ids if i}
+    if not ids:
+        return {}
+    from app.platform.settings.models import Attachment
+    return {doc.id: doc for doc in (await db.execute(
+        select(Attachment).where(Attachment.id.in_(ids))
+    )).scalars().all()}
+
+
 async def receipt_warranties(db: AsyncSession, receipt: m.Receipt) -> dict:
-    """Every tracked line of a GRN, each unit with its warranty or none."""
+    """Every tracked line of a GRN: how its warranty is given (one for the batch, or one
+    per piece), the batch's warranty, and each unit's — its own, else the batch's."""
     rows = (await db.execute(
         select(m.ReceiptUnitWarranty).where(m.ReceiptUnitWarranty.receipt_id == receipt.id)
     )).scalars().all()
     by_key = {(row.receipt_item_id, row.unit_code): row for row in rows}
-    doc_ids = {row.attachment_id for row in rows if row.attachment_id}
-    docs = {}
-    if doc_ids:
-        from app.platform.settings.models import Attachment
-        docs = {doc.id: doc for doc in (await db.execute(
-            select(Attachment).where(Attachment.id.in_(doc_ids))
-        )).scalars().all()}
+    lines_in = sorted(_tracked_lines(receipt), key=lambda li: li.line_no or 0)
+    docs = await _docs(db, [row.attachment_id for row in rows]
+                       + [li.warranty_attachment_id for li in lines_in])
 
     lines, covered_all, total_all = [], 0, 0
-    for line in sorted(_tracked_lines(receipt), key=lambda li: li.line_no or 0):
+    for line in lines_in:
+        batch = _batch_out(line, docs) if line.warranty_mode == "BATCH" else None
         units = []
         for unit in line_units(line):
             row = by_key.get((line.id, unit["code"]))
-            units.append({**unit, "warranty": _row_out(row, docs) if row else None})
+            own = _row_out(row, docs) if row else None
+            units.append({**unit, "warranty": own or batch,
+                          "source": "UNIT" if own else "BATCH" if batch else None})
         covered = sum(1 for unit in units if unit["warranty"])
         covered_all += covered
         total_all += len(units)
         lines.append({
             "receipt_item_id": line.id, "line_no": line.line_no, "item_id": line.item_id,
             "item_code": line.item_code, "item_name": line.item_name,
-            "batch_no": line.batch_no, "units": units, "covered": covered,
-            "total": len(units),
+            "batch_no": line.batch_no, "mode": line.warranty_mode, "batch": batch,
+            "units": units, "covered": covered, "total": len(units),
         })
     return {
         "receipt_id": receipt.id, "grn_no": receipt.grn_no, "lines": lines,
@@ -153,6 +180,133 @@ async def receipt_warranties(db: AsyncSession, receipt: m.Receipt) -> dict:
             for doc in sorted(docs.values(), key=lambda d: d.id)
         ],
     }
+
+
+async def upload_cards(db: AsyncSession, receipt_id: int, uploads: list, user) -> list[dict]:
+    """Many warranty cards in one press (bulk). Each file is checked and stored on its
+    own; the answer names each one's id so the screen can point units at it."""
+    receipt = await _receipt(db, receipt_id, user)
+    if receipt.status == ReceiptStatus.CANCELLED.value:
+        raise ValidationError("This GRN was cancelled — its warranties cannot change.")
+    files = [u for u in uploads or [] if getattr(u, "filename", None)]
+    if not files:
+        raise ValidationError("Choose at least one warranty card — a PDF or a photo.")
+    if len(files) > MAX_CARDS_PER_UPLOAD:
+        raise ValidationError(
+            f"Upload at most {MAX_CARDS_PER_UPLOAD} cards at a time — send the rest in a second batch.")
+    out = []
+    for upload in files:
+        doc = await attachments.add_attachment(
+            db, entity_type=ENTITY, entity_id=receipt.id, upload=upload,
+            doc_category=CATEGORY, user=user)
+        out.append({"id": doc.id, "file_name": doc.file_name, "file_size": doc.file_size,
+                    "uploaded_by_name": doc.uploaded_by_name, "created_at": doc.created_at})
+    return out
+
+
+MAX_CARDS_PER_UPLOAD = 200
+
+
+def _entry_dates(entry, where: str) -> tuple[date, date] | None:
+    """An entry's two dates, or None when both are blank (= no warranty). Half a period
+    is refused: a start with no end describes nothing."""
+    start, end = getattr(entry, "start_date", None), getattr(entry, "end_date", None)
+    if not start and not end:
+        return None
+    if not start or not end:
+        raise ValidationError(f"{where}: give both the warranty start and end date.")
+    start, end = _parse_date(start, "start date"), _parse_date(end, "end date")
+    if end < start:
+        raise ValidationError(f"{where}: the warranty cannot end before it starts.")
+    return start, end
+
+
+async def save_line(db: AsyncSession, receipt_id: int, line_id: int, data, user) -> dict:
+    """One GRN line's warranties, all at once — how they are given, the batch's, and
+    each piece's. Replaces what the line had; a unit left out has no own warranty.
+
+    Every unit named must be one of the line's serials / IMEIs, and every card must be
+    one filed on THIS GRN. Refused whole, never half-applied."""
+    receipt = await _receipt(db, receipt_id, user)
+    if receipt.status == ReceiptStatus.CANCELLED.value:
+        raise ValidationError("This GRN was cancelled — its warranties cannot change.")
+    line = next((li for li in receipt.items if li.id == line_id), None)
+    if line is None:
+        raise NotFoundError("That line is not on this GRN.")
+    label = f"Line {line.line_no} ({line.item_name or line.item_code})"
+    mode = (data.mode or "").upper() or None
+    if mode not in (None, *MODES):
+        raise ValidationError("Choose how the warranty is given: for the whole batch, or per piece.")
+    units = {unit["code"]: unit for unit in line_units(line)}
+
+    cards = {e.attachment_id for e in data.units if e.attachment_id}
+    if data.attachment_id:
+        cards.add(data.attachment_id)
+    if cards:
+        from app.platform.settings.models import Attachment
+        ok = set((await db.execute(select(Attachment.id).where(
+            Attachment.id.in_(cards), Attachment.entity_type == ENTITY,
+            Attachment.entity_id == receipt.id))).scalars().all())
+        if cards - ok:
+            raise ValidationError(f"{label}: a warranty card named is not filed on this GRN — upload it again.")
+
+    batch = _entry_dates(data, f"{label}, batch warranty") if mode == "BATCH" else None
+    if mode == "BATCH" and batch is None:
+        raise ValidationError(f"{label}: give the batch warranty's start and end date.")
+    wanted: dict[str, tuple] = {}
+    for entry in data.units:
+        code = (entry.code or "").strip()
+        if not code:
+            continue
+        if code not in units:
+            raise ValidationError(f"{label}: {code} is not one of this line's serials or IMEIs.")
+        if code in wanted:
+            raise ValidationError(f"{label}: {code} is listed twice.")
+        dates = _entry_dates(entry, f"{label}, {code}")
+        if dates is None:
+            continue
+        wanted[code] = (dates, (entry.card_no or "").strip()[:100] or None, entry.attachment_id)
+
+    line.warranty_mode = mode
+    line.warranty_start, line.warranty_end = batch if batch else (None, None)
+    line.warranty_card_no = ((data.card_no or "").strip()[:100] or None) if batch else None
+    line.warranty_attachment_id = data.attachment_id if batch else None
+
+    existing = {row.unit_code: row for row in (await db.execute(
+        select(m.ReceiptUnitWarranty).where(m.ReceiptUnitWarranty.receipt_item_id == line.id)
+    )).scalars().all()}
+    if mode is None:
+        wanted = {}
+    gone = [row.id for code, row in existing.items() if code not in wanted]
+    if gone:
+        await db.execute(delete(m.ReceiptUnitWarranty).where(m.ReceiptUnitWarranty.id.in_(gone)))
+    name = getattr(user, "full_name", None) or getattr(user, "name", None)
+    for code, ((start, end), card_no, attachment_id) in wanted.items():
+        row = existing.get(code)
+        if row is None:
+            row = m.ReceiptUnitWarranty(
+                receipt_id=receipt.id, receipt_item_id=line.id, item_id=line.item_id,
+                unit_code=code, serial_number=units[code]["serial_number"],
+                imei=units[code]["imei"])
+            db.add(row)
+        row.start_date, row.end_date, row.card_no = start, end, card_no
+        row.attachment_id = attachment_id
+        row.created_by_id = getattr(user, "id", None)
+        row.created_by_name = name
+        row.updated_at = utcnow()
+    covered = len(units) if batch else len(wanted)
+    await write_audit(
+        db, entity="inb_receipts", entity_id=receipt.id, entity_no=receipt.grn_no,
+        action=AuditAction.UPDATE, actor=user,
+        summary=(f"Warranty for {label}: "
+                 + ("none" if mode is None else
+                    f"one for the whole batch, {batch[0]:%d %b %Y} – {batch[1]:%d %b %Y}"
+                    + (f", {len(wanted)} piece(s) with their own" if wanted else "")
+                    if batch else f"per piece, {len(wanted)} of {len(units)} given")),
+        after={"receipt_item_id": line.id, "mode": mode, "covered": covered,
+               "units_with_own": len(wanted)})
+    await db.commit()
+    return await receipt_warranties(db, await _receipt(db, receipt_id, user))
 
 
 def _parse_date(value, label: str) -> date:
@@ -268,12 +422,11 @@ async def for_units(db: AsyncSession, item_id: int, codes: list[str | None]):
     wanted = [code for code in codes if code]
     if not wanted:
         return None
-    return (await db.execute(
-        select(m.ReceiptUnitWarranty)
-        .where(m.ReceiptUnitWarranty.item_id == item_id,
-               m.ReceiptUnitWarranty.unit_code.in_(wanted))
-        .order_by(m.ReceiptUnitWarranty.id.desc()).limit(1)
-    )).scalars().first()
+    covers = await by_item(db, [item_id], codes=wanted)
+    for code in wanted:
+        if (int(item_id), code) in covers:
+            return covers[(int(item_id), code)]
+    return None
 
 
 async def by_item(db: AsyncSession, item_ids, codes=None) -> dict[tuple[int, str], m.ReceiptUnitWarranty]:
@@ -296,7 +449,25 @@ async def by_item(db: AsyncSession, item_ids, codes=None) -> dict[tuple[int, str
                 m.ReceiptUnitWarranty.unit_code.in_(wanted[start:start + 1000])
             ))).scalars().all()
     # Ordered by id, so the newest for a unit is the one left standing.
-    return {(int(row.item_id), row.unit_code): row for row in rows}
+    own = {(int(row.item_id), row.unit_code): row for row in rows}
+    # A unit with none of its own carries its batch's, when the GRN gave one for the
+    # whole batch (2026-11-21). Read per line — a handful of rows — and expanded here.
+    out: dict[tuple[int, str], object] = {}
+    wanted = None if codes is None else {c for c in codes if c}
+    for line in (await db.execute(
+            select(m.ReceiptItem).where(m.ReceiptItem.item_id.in_(ids),
+                                        m.ReceiptItem.warranty_mode == "BATCH",
+                                        m.ReceiptItem.warranty_start.isnot(None),
+                                        m.ReceiptItem.warranty_end.isnot(None))
+            .order_by(m.ReceiptItem.id))).scalars().all():
+        cover = SimpleNamespace(start_date=line.warranty_start, end_date=line.warranty_end,
+                                card_no=line.warranty_card_no)
+        for unit in line_units(line):
+            for code in (unit["serial_number"], unit["imei"]):
+                if code and (wanted is None or code in wanted):
+                    out[(int(line.item_id), code)] = cover
+    out.update(own)
+    return out
 
 
 def unit_fields(row: m.ReceiptUnitWarranty | None) -> dict:

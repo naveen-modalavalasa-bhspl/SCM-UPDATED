@@ -224,6 +224,14 @@ class ReceiptItem(CombinationMixin, Base):
     declared_pack_breakdown = Column(JSON, nullable=True)
     pack_breakdown = Column(JSON, nullable=True)
     despatch_note_item_id = Column(BigInteger, nullable=True)
+    # How this line's units carry a warranty (2026-11-21): BATCH — one warranty for every
+    # unit, held here; UNIT — each unit its own (`inb_receipt_unit_warranties`); NULL —
+    # nothing stated. In BATCH mode a unit's own row still overrides the batch's.
+    warranty_mode = Column(String(10), nullable=True)
+    warranty_start = Column(Date, nullable=True)
+    warranty_end = Column(Date, nullable=True)
+    warranty_card_no = Column(String(100), nullable=True)
+    warranty_attachment_id = Column(BigInteger, nullable=True)
 
     receipt = relationship("Receipt", back_populates="items")
 

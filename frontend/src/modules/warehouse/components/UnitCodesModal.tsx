@@ -2,9 +2,18 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/react";
 import {
   AlertTriangle, Check, CheckCircle2, ChevronDown, ClipboardList, ClipboardPaste, Eraser,
-  Layers, ScanLine, Smartphone, Tag, X,
+  Layers, ScanLine, ShieldAlert, ShieldCheck, Smartphone, Tag, X,
 } from "lucide-react";
 import { fmtQty } from "../format";
+import {
+  BatchWarrantyForm, BulkWarrantyBar, FillEmptyBar, ImportReport, RowWarrantyCells,
+  SwitchConfirm, WarrantyModeChooser,
+} from "./WarrantyParts";
+import {
+  emptyEntry, entryProblem, hasDates, isBlank, matchCards, type LineWarrantyDraft,
+  type WarrantyEntry, type WarrantyMode,
+} from "./warrantyDraft";
+import { checkSheet, downloadTemplate, readSheet, templateWorkbook } from "./warrantyExcel";
 
 /**
  * Serials and IMEIs for every unit of one item on a receipt (2026-10-21).
@@ -44,6 +53,19 @@ export interface UnitCodeSave {
   index: number;
   serial_numbers: string[] | null;
   imei_numbers: string[] | null;
+  /** The line's warranty as left in the popup (2026-11-21), when warranties are on. */
+  warranty?: LineWarrantyDraft;
+}
+
+/** Warranty inside the popup (2026-11-21): how it is given, the batch's, each piece's. */
+export interface UnitWarrantyOptions {
+  /** May the warranty be changed here — a GRN not cancelled, by someone who may file. */
+  editable: boolean;
+  /** Each line's draft, by the line's index in the form. */
+  drafts: Record<number, LineWarrantyDraft | undefined>;
+  /** Set when the codes are fixed (a submitted GRN): the popup's Save goes straight to
+   *  the server. Without it, the warranty is kept with the form and saved with the GRN. */
+  persist?: (updates: UnitCodeSave[]) => Promise<void>;
 }
 
 type Kind = "serial" | "imei";
@@ -101,7 +123,7 @@ function imeiWarning(value: string): string | null {
 
 export function UnitCodesModal({
   isOpen, onClose, onSave, readOnly = false, itemName, itemCode, uom, trackSerial,
-  trackImei, groups, focusIndex,
+  trackImei, groups, focusIndex, warranty,
 }: {
   isOpen: boolean;
   onClose: () => void;
@@ -115,6 +137,8 @@ export function UnitCodesModal({
   groups: UnitCodeGroup[];
   /** The line the popup was opened from — its group is the one shown first. */
   focusIndex: number;
+  /** Warranty per batch or per piece, captured with the codes (2026-11-21). */
+  warranty?: UnitWarrantyOptions;
 }) {
   const kinds: Kind[] = [...(trackSerial ? ["serial" as const] : []),
                          ...(trackImei ? ["imei" as const] : [])];
@@ -132,6 +156,23 @@ export function UnitCodesModal({
   const [bulkText, setBulkText] = useState("");
   const [bulkMode, setBulkMode] = useState<BulkMode>(defaultMode);
 
+  // ---- warranty (2026-11-21) ----------------------------------------------------
+  // Per GROUP (line): how the warranty is given (undefined = not chosen yet), the
+  // batch's entry, and one entry per ROW — an entry follows its row, so re-scanning a
+  // code keeps the dates typed beside it.
+  const wOn = !!warranty;
+  const wEdit = !!warranty?.editable;
+  const [wMode, setWMode] = useState<(WarrantyMode | undefined)[]>([]);
+  const [wBatch, setWBatch] = useState<WarrantyEntry[]>([]);
+  const [wRows, setWRows] = useState<WarrantyEntry[][]>([]);
+  const [fill, setFill] = useState<WarrantyEntry>(emptyEntry());
+  const [report, setReport] = useState<{ tone: "ok" | "bad" | "warn"; title: string; lines: string[] } | null>(null);
+  const [switching, setSwitching] = useState<{ group: number; to: WarrantyMode } | null>(null);
+  const [persisting, setPersisting] = useState(false);
+  const [persistError, setPersistError] = useState<string | null>(null);
+  const cardInput = useRef<HTMLInputElement>(null);
+  const cardTarget = useRef<{ group: number; row: number | "batch" } | null>(null);
+
   // A fresh copy every time it opens: Cancel must leave the line exactly as it was.
   useEffect(() => {
     if (!isOpen) return;
@@ -146,6 +187,26 @@ export function UnitCodesModal({
     setScanNote(null);
     setBulkText("");
     setBulkMode(defaultMode);
+    // The paste box only while there are units left to code — open on a finished line
+    // it is 200 px of nothing between the storekeeper and the rows (2026-11-21).
+    setBulkOpen(groups.some((g) => Math.max(g.serials.length, g.imeis.length) < Math.floor(g.qty)));
+    if (warranty) {
+      const drafts = groups.map((g) => warranty.drafts[g.index]);
+      // A line nobody has decided for yet opens on the question, not on "No warranty".
+      setWMode(drafts.map((d) => d?.mode ?? (d?.dirty ? null : undefined)));
+      setWBatch(drafts.map((d) => ({ ...(d?.batch ?? emptyEntry()) })));
+      setWRows(groups.map((g, gi) => {
+        const length = Math.max(Math.floor(g.qty), g.serials.length, g.imeis.length);
+        return Array.from({ length }, (_, i) => {
+          const code = (g.serials[i] || g.imeis[i] || "").trim();
+          return { ...(drafts[gi]?.units[code] ?? emptyEntry()) };
+        });
+      }));
+      setFill(emptyEntry());
+      setReport(null);
+      setSwitching(null);
+      setPersistError(null);
+    }
     setTimeout(() => scanRef.current?.focus(), 150);
   }, [isOpen]);
 
@@ -189,6 +250,11 @@ export function UnitCodesModal({
     }
     return { done, units, dupes, half, over };
   }, [rows, seen]);
+
+  // Folded away the moment the last unit gets its code: the rows (and their warranty
+  // columns) are what is left to look at.
+  const allCoded = stats.units > 0 && stats.done >= stats.units;
+  useEffect(() => { if (isOpen && allCoded) setBulkOpen(false); }, [allCoded, isOpen]);
 
   const groupDone = (g: number) =>
     (rows[g] ?? []).slice(0, Math.floor(groups[g]?.qty ?? 0)).filter(rowDone).length;
@@ -339,8 +405,160 @@ export function UnitCodesModal({
   const clearGroup = () => setRows((current) => current.map((groupRows, g) =>
     g !== active ? groupRows : groupRows.map(() => ({ serial: "", imei: "" }))));
 
+  // ---- warranty helpers --------------------------------------------------------
+  const codeOf = (r?: Row) => ((r?.serial || r?.imei || "") as string).trim();
+  const entryAt = (group: number, row: number) => wRows[group]?.[row] ?? emptyEntry();
+  const setEntry = (group: number, row: number, patch: Partial<WarrantyEntry>) =>
+    setWRows((cur) => cur.map((list, g) => {
+      if (g !== group) return list;
+      const next = [...list];
+      while (next.length <= row) next.push(emptyEntry());
+      next[row] = { ...next[row], ...patch };
+      return next;
+    }));
+  const setBatch = (group: number, patch: Partial<WarrantyEntry>) =>
+    setWBatch((cur) => cur.map((e, g) => (g === group ? { ...e, ...patch } : e)));
+  const ownCount = (group: number) =>
+    (rows[group] ?? []).filter((r, i) => codeOf(r) && hasDates(entryAt(group, i))).length;
+  const chooseMode = (group: number, to: WarrantyMode, confirmed = false) => {
+    if (!confirmed && wMode[group] === "UNIT" && to !== "UNIT" && ownCount(group) > 0) {
+      setSwitching({ group, to });
+      return;
+    }
+    setSwitching(null);
+    if (to !== "UNIT" && wMode[group] === "UNIT") {
+      setWRows((cur) => cur.map((list, g) => (g === group ? list.map(() => emptyEntry()) : list)));
+    }
+    setWMode((cur) => { const next = [...cur]; next[group] = to; return next; });
+  };
+  /** How many units of a group are covered right now. */
+  const wCovered = (group: number) => {
+    const units = (rows[group] ?? []).slice(0, Math.floor(groups[group]?.qty ?? 0)).filter((r) => codeOf(r));
+    if (wMode[group] === "BATCH") return hasDates(wBatch[group]) ? units.length : 0;
+    if (wMode[group] === "UNIT") {
+      return (rows[group] ?? []).filter((r, i) => i < Math.floor(groups[group]?.qty ?? 0) && codeOf(r)
+        && hasDates(entryAt(group, i))).length;
+    }
+    return 0;
+  };
+  const wStats = useMemo(() => {
+    let cov = 0, problems = 0;
+    groups.forEach((_, g) => {
+      cov += wCovered(g);
+      if (wMode[g] === "BATCH" && entryProblem(wBatch[g])) problems += 1;
+      if (wMode[g] === "UNIT") {
+        (rows[g] ?? []).forEach((r, i) => { if (codeOf(r) && entryProblem(entryAt(g, i))) problems += 1; });
+      }
+    });
+    return { covered: cov, problems };
+  }, [rows, wRows, wMode, wBatch]);
+
+  const pickCard = (group: number, row: number | "batch") => {
+    cardTarget.current = { group, row };
+    cardInput.current?.click();
+  };
+  const onCardPicked = (file: File | null) => {
+    const t = cardTarget.current;
+    if (!file || !t) return;
+    const patch = { file, attachmentId: null, documentName: null, fileHint: null };
+    if (t.row === "batch") setBatch(t.group, patch); else setEntry(t.group, t.row, patch);
+  };
+  const emptyDateRows = (group: number) =>
+    (rows[group] ?? []).filter((_r, i) => i < Math.floor(groups[group]?.qty ?? 0)
+      && !hasDates(entryAt(group, i))).length;
+  const applyFill = (group: number) => {
+    const qtyG = Math.floor(groups[group]?.qty ?? 0);
+    let n = 0;
+    setWRows((cur) => cur.map((list, g) => {
+      if (g !== group) return list;
+      const next = Array.from({ length: Math.max(list.length, qtyG) }, (_, i) => list[i] ?? emptyEntry());
+      return next.map((e, i) => {
+        if (i >= qtyG || hasDates(e)) return e;
+        n += 1;
+        return { ...e, start: fill.start, end: fill.end };
+      });
+    }));
+    setReport({ tone: "ok", title: `Dates given to ${emptyDateRows(group)} unit${emptyDateRows(group) === 1 ? "" : "s"}. Add each one's card in its row, or all at once with "Card files".`, lines: [] });
+    void n;
+  };
+
+  /** The sheet, checked whole; applied only when nothing is wrong with it. */
+  const importSheet = async (group: number, file: File) => {
+    const g = groups[group];
+    const qtyG = Math.floor(g?.qty ?? 0);
+    let raw: Record<string, unknown>[];
+    try { raw = await readSheet(file); }
+    catch { setReport({ tone: "bad", title: `${file.name} could not be read — save it as .xlsx and try again.`, lines: [] }); return; }
+    const takenElsewhere = new Set<string>();
+    rows.forEach((list, gi) => { if (gi !== group) list.forEach((r) => {
+      if (r.serial.trim()) takenElsewhere.add(r.serial.trim().toLowerCase());
+      if (r.imei.trim()) takenElsewhere.add(r.imei.trim().toLowerCase());
+    }); });
+    const out = checkSheet(raw, { qty: qtyG, trackSerial, trackImei, takenElsewhere });
+    // Codes fixed (a submitted GRN): the sheet may only describe the units already here.
+    if (readOnly) {
+      const here = new Set((rows[group] ?? []).map((r) => codeOf(r).toLowerCase()).filter(Boolean));
+      out.rows.forEach((r, i) => {
+        const code = (r.serial || r.imei).trim();
+        if (code && !here.has(code.toLowerCase())) out.problems.push(`Row ${i + 2}: ${code} is not one of this line's units.`);
+      });
+    }
+    if (out.problems.length) {
+      setReport({ tone: "bad", title: `Nothing was applied — ${out.problems.length} thing${out.problems.length === 1 ? "" : "s"} to fix in ${file.name}:`, lines: out.problems });
+      return;
+    }
+    if (readOnly) {
+      const byCode = new Map(out.rows.map((r) => [(r.serial || r.imei).trim().toLowerCase(), r.entry]));
+      setWRows((cur) => cur.map((list, gi) => gi !== group ? list
+        : (rows[group] ?? []).map((r, i) => ({ ...(list[i] ?? emptyEntry()), ...(byCode.get(codeOf(r).toLowerCase()) ?? {}) }))));
+    } else {
+      setRows((cur) => cur.map((list, gi) => gi !== group ? list
+        : out.rows.map((r) => ({ serial: trackSerial ? r.serial : "", imei: trackImei ? r.imei : "" }))));
+      setWRows((cur) => cur.map((list, gi) => gi !== group ? list : out.rows.map((r) => ({ ...r.entry }))));
+    }
+    setWMode((cur) => { const next = [...cur]; next[group] = "UNIT"; return next; });
+    const withDates = out.rows.filter((r) => hasDates(r.entry)).length;
+    const named = out.rows.filter((r) => r.entry.fileHint).length;
+    setReport({
+      tone: out.warnings.length ? "warn" : "ok",
+      title: `${out.rows.length} units read from ${file.name} · ${withDates} with a warranty`
+        + (named ? ` · ${named} card file${named === 1 ? "" : "s"} named — attach them with "Card files"` : ""),
+      lines: out.warnings,
+    });
+  };
+
+  /** Many cards at once, matched to their units by the sheet's file names or the codes. */
+  const importCards = (group: number, files: File[]) => {
+    if (wMode[group] === "BATCH") {
+      setBatch(group, { file: files[0], attachmentId: null, documentName: null });
+      setReport({ tone: files.length > 1 ? "warn" : "ok",
+        title: `${files[0].name} is the batch's card.${files.length > 1 ? ` The other ${files.length - 1} file(s) were not used — a batch has one card.` : ""}`, lines: [] });
+      return;
+    }
+    const list = rows[group] ?? [];
+    const codes = list.map(codeOf).filter(Boolean);
+    const hints: Record<string, string | null | undefined> = {};
+    list.forEach((r, i) => { const c = codeOf(r); if (c) hints[c] = entryAt(group, i).fileHint; });
+    const { matched, unmatched } = matchCards(files, codes, hints);
+    setWRows((cur) => cur.map((entries, gi) => gi !== group ? entries
+      : list.map((r, i) => {
+        const f = matched.get(codeOf(r));
+        const e = entries[i] ?? emptyEntry();
+        return f ? { ...e, file: f, attachmentId: null, documentName: null, fileHint: null } : e;
+      })));
+    if (wMode[group] !== "UNIT") setWMode((cur) => { const next = [...cur]; next[group] = "UNIT"; return next; });
+    setReport({
+      tone: unmatched.length ? "warn" : "ok",
+      title: `${matched.size} of ${files.length} card file${files.length === 1 ? "" : "s"} matched to their units.`,
+      lines: unmatched.map((f) => `${f.name} — no unit matches it. Name it after the serial (e.g. ${codes[0] ?? "SN0001"}.pdf) or list it in the sheet's "Card file name" column.`),
+    });
+  };
+
   const blocked = stats.dupes > 0 || stats.half > 0 || stats.over > 0;
-  const blockReason = stats.dupes > 0
+  const wBlocked = wOn && wEdit && wStats.problems > 0;
+  const blockReason = wBlocked
+    ? `${wStats.problems} warranty ${wStats.problems === 1 ? "entry needs" : "entries need"} fixing — both dates, and never ending before starting.`
+    : stats.dupes > 0
     ? "Two units cannot share one code — fix the red cells."
     : stats.half > 0
       ? "Each handset needs both its serial and its IMEI, or neither — fill or clear the amber rows."
@@ -348,15 +566,44 @@ export function UnitCodesModal({
         ? "There are more codes than units received — remove the extra rows."
         : null;
 
-  const save = () => {
-    onSave(groups.map((g, gi) => {
-      const kept = (rows[gi] ?? []).filter((r) => r.serial.trim() || r.imei.trim());
-      return {
-        index: g.index,
-        serial_numbers: trackSerial ? kept.map((r) => r.serial.trim()).filter(Boolean) : null,
-        imei_numbers: trackImei ? kept.map((r) => r.imei.trim()).filter(Boolean) : null,
+  const updates = (): UnitCodeSave[] => groups.map((g, gi) => {
+    const kept = (rows[gi] ?? []).filter((r) => r.serial.trim() || r.imei.trim());
+    const out: UnitCodeSave = {
+      index: g.index,
+      serial_numbers: trackSerial ? kept.map((r) => r.serial.trim()).filter(Boolean) : null,
+      imei_numbers: trackImei ? kept.map((r) => r.imei.trim()).filter(Boolean) : null,
+    };
+    if (wOn && wEdit) {
+      const units: Record<string, WarrantyEntry> = {};
+      (rows[gi] ?? []).forEach((r, i) => {
+        const code = codeOf(r);
+        const e = entryAt(gi, i);
+        if (code && !isBlank(e)) units[code] = e;
+      });
+      out.warranty = {
+        mode: wMode[gi] ?? null,
+        batch: wBatch[gi] ?? emptyEntry(),
+        units: wMode[gi] === "UNIT" ? units : {},
+        dirty: true,
       };
-    }));
+    }
+    return out;
+  });
+
+  const save = async () => {
+    const next = updates();
+    if (warranty?.persist) {
+      setPersisting(true); setPersistError(null);
+      try { await warranty.persist(next); }
+      catch (e) {
+        setPersistError((e as { message?: string })?.message ?? "The warranty could not be saved.");
+        setPersisting(false);
+        return;
+      }
+      setPersisting(false);
+    } else {
+      onSave(next);
+    }
     onClose();
   };
 
@@ -364,17 +611,26 @@ export function UnitCodesModal({
   const g = groups[active];
   const groupRows = rows[active] ?? [];
   const qty = Math.floor(g?.qty ?? 0);
+  const unitMode = wOn && wMode[active] === "UNIT";
+  const gridCols = [
+    "3.5rem",
+    ...(trackSerial ? ["minmax(9rem,1fr)"] : []),
+    ...(trackImei ? ["minmax(9rem,1fr)"] : []),
+    ...(unitMode ? ["9rem", "9rem", "minmax(6.5rem,0.7fr)", "minmax(7rem,0.8fr)"] : []),
+    "2.5rem",
+  ].join(" ");
   const pct = stats.units ? Math.round((stats.done / stats.units) * 100) : 0;
 
   return (
     <Modal
       isOpen={isOpen}
       onClose={onClose}
-      size="4xl"
+      size={wOn ? "5xl" : "4xl"}
       backdrop="blur"
       scrollBehavior="inside"
       classNames={{
-        base: "rounded-3xl border border-line/80 shadow-2xl bg-content1 overflow-hidden",
+        base: `rounded-3xl border border-line/80 shadow-2xl bg-content1 overflow-hidden ${
+          unitMode ? "!max-w-[min(1320px,96vw)]" : ""}`,
         backdrop: "bg-black/50 backdrop-blur-sm",
       }}
     >
@@ -389,6 +645,7 @@ export function UnitCodesModal({
               <div className="min-w-0 space-y-0.5">
                 <h3 className="text-base font-bold text-ink">
                   {readOnly ? `Unit ${noun}s` : `Scan a ${noun} for every unit`}
+                  {wOn && <span className="font-semibold text-muted"> & {readOnly ? "their" : "its"} warranty</span>}
                 </h3>
                 <p className="truncate text-xs font-normal text-muted">
                   <span className="font-semibold text-ink">{itemName}</span>
@@ -397,11 +654,21 @@ export function UnitCodesModal({
                 </p>
               </div>
             </div>
-            <div className="shrink-0 text-right">
-              <div className={`text-lg font-bold tabular ${stats.done === stats.units && stats.units > 0 ? "text-ok" : "text-ink"}`}>
-                {stats.done}<span className="text-sm font-semibold text-muted"> / {stats.units}</span>
+            <div className="flex shrink-0 gap-5 text-right">
+              <div>
+                <div className={`text-lg font-bold tabular ${stats.done === stats.units && stats.units > 0 ? "text-ok" : "text-ink"}`}>
+                  {stats.done}<span className="text-sm font-semibold text-muted"> / {stats.units}</span>
+                </div>
+                <div className="text-[11px] font-medium text-muted">units coded</div>
               </div>
-              <div className="text-[11px] font-medium text-muted">units coded</div>
+              {wOn && (
+                <div>
+                  <div className={`text-lg font-bold tabular ${wStats.covered === stats.units && stats.units > 0 ? "text-ok" : wStats.covered ? "text-warn" : "text-muted"}`}>
+                    {wStats.covered}<span className="text-sm font-semibold text-muted"> / {stats.units}</span>
+                  </div>
+                  <div className="text-[11px] font-medium text-muted">with warranty</div>
+                </div>
+              )}
             </div>
           </div>
           <div className="h-1.5 w-full overflow-hidden rounded-full bg-content2">
@@ -526,16 +793,58 @@ export function UnitCodesModal({
             </div>
           )}
 
+          {/* Warranty (2026-11-21): how it is given, then given — batch or per piece. */}
+          {wOn && g && qty > 0 && (
+            <div className="space-y-2">
+              <WarrantyModeChooser mode={wMode[active] ?? null} chosen={wMode[active] !== undefined}
+                                   qty={qty} disabled={!wEdit} onChoose={(m) => chooseMode(active, m)} />
+              {switching && switching.group === active && (
+                <SwitchConfirm count={ownCount(active)} to={switching.to}
+                               onYes={() => chooseMode(active, switching.to, true)}
+                               onNo={() => setSwitching(null)} />
+              )}
+              {wMode[active] === "BATCH" && (
+                <BatchWarrantyForm entry={wBatch[active] ?? emptyEntry()} qty={qty} disabled={!wEdit}
+                                   onChange={(patch) => setBatch(active, patch)}
+                                   onPickCard={() => pickCard(active, "batch")} />
+              )}
+              {wMode[active] === "UNIT" && wEdit && (
+                <>
+                  <FillEmptyBar draft={fill} empty={emptyDateRows(active)}
+                                onDraft={(patch) => setFill((f) => ({ ...f, ...patch }))}
+                                onApply={() => applyFill(active)} />
+                  <BulkWarrantyBar
+                    sheetLabel={readOnly ? "Upload warranty sheet" : "Upload Excel"}
+                    onTemplate={() => downloadTemplate(templateWorkbook({
+                      rows: groupRows.map((r, i) => ({ ...r, entry: entryAt(active, i) })),
+                      qty, trackSerial, trackImei, itemName, batchNo: g.batchNo,
+                    }), `${(itemCode || itemName).replace(/[^\w.-]+/g, "_")}-${g.batchNo || `line${g.index + 1}`}-warranty.xlsx`)}
+                    onSheet={(file) => void importSheet(active, file)}
+                    onCards={(files) => importCards(active, files)} />
+                </>
+              )}
+              {report && <ImportReport {...report} onClose={() => setReport(null)} />}
+            </div>
+          )}
+
           {g && qty === 0 && groupRows.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-line p-6 text-center text-sm text-muted">
               Enter the received quantity on line {g.index + 1} first — one row is drawn per unit.
             </div>
           ) : g && (
             <div ref={tableRef} className="overflow-hidden rounded-2xl border border-line/80">
-              <div className={`grid ${both ? "grid-cols-[3.5rem_1fr_1fr_2.5rem]" : "grid-cols-[3.5rem_1fr_2.5rem]"} border-b border-line bg-content2/60 text-[11px] font-bold uppercase tracking-wider text-muted`}>
+              <div style={{ gridTemplateColumns: gridCols }} className="grid border-b border-line bg-content2/60 text-[11px] font-bold uppercase tracking-wider text-muted">
                 <div className="px-3 py-2">Unit</div>
                 {trackSerial && <div className="px-3 py-2">Serial number</div>}
                 {trackImei && <div className="px-3 py-2">IMEI <span className="font-medium normal-case tracking-normal">(15 digits)</span></div>}
+                {unitMode && (
+                  <>
+                    <div className="px-2 py-2">Warranty starts</div>
+                    <div className="px-2 py-2">Ends</div>
+                    <div className="px-2 py-2">Card no.</div>
+                    <div className="px-2 py-2">Card</div>
+                  </>
+                )}
                 <div />
               </div>
               <div className="max-h-[46vh] overflow-y-auto">
@@ -543,10 +852,13 @@ export function UnitCodesModal({
                   const extra = row >= qty;
                   const done = rowDone(r);
                   const half = rowHalf(r);
+                  const wEntry = entryAt(active, row);
+                  const wProblem = unitMode && !!codeOf(r) ? entryProblem(wEntry) : null;
+                  const wHas = (unitMode && hasDates(wEntry)) || (wMode[active] === "BATCH" && hasDates(wBatch[active]));
                   return (
-                    <div key={row}
-                         className={`grid ${both ? "grid-cols-[3.5rem_1fr_1fr_2.5rem]" : "grid-cols-[3.5rem_1fr_2.5rem]"} items-start border-b border-line/50 last:border-b-0 ${
-                           extra ? "bg-bad-bg/40" : half ? "bg-warn-bg/40" : done ? "bg-ok-bg/20" : ""}`}>
+                    <div key={row} style={{ gridTemplateColumns: gridCols }}
+                         className={`grid items-start border-b border-line/50 last:border-b-0 ${
+                           extra || wProblem ? "bg-bad-bg/40" : half ? "bg-warn-bg/40" : done ? "bg-ok-bg/20" : ""}`}>
                       <div className="px-3 py-2.5 font-mono text-xs font-semibold tabular text-muted">
                         {row + 1}
                       </div>
@@ -591,11 +903,24 @@ export function UnitCodesModal({
                           </div>
                         );
                       })}
-                      <div className="flex justify-center py-2.5">
+                      {unitMode && (
+                        <RowWarrantyCells entry={wEntry} unit={row + 1} disabled={!wEdit}
+                                          onChange={(patch) => setEntry(active, row, patch)}
+                                          onPickCard={() => pickCard(active, row)} />
+                      )}
+                      <div className="flex flex-col items-center gap-1 py-2.5">
                         {extra
                           ? <span title="More codes than units received"><AlertTriangle className="h-4 w-4 text-bad" /></span>
                           : done ? <CheckCircle2 className="h-4 w-4 text-ok" /> : null}
+                        {wOn && !extra && done && (
+                          wProblem
+                            ? <span title={wProblem}><ShieldAlert className="h-4 w-4 text-bad" /></span>
+                            : wHas ? <span title="Has a warranty"><ShieldCheck className="h-4 w-4 text-ok" /></span> : null
+                        )}
                       </div>
+                      {wProblem && (
+                        <p className="col-span-full -mt-1 px-3 pb-1.5 text-[11px] font-medium text-bad">Unit {row + 1} warranty: {wProblem}</p>
+                      )}
                     </div>
                   );
                 })}
@@ -621,18 +946,37 @@ export function UnitCodesModal({
                 <CheckCircle2 className="h-3.5 w-3.5" /> Every unit has its {noun}.
               </span>
             ) : null}
+            {wOn && !blockReason && stats.units > 0 && (
+              <span className={`mt-0.5 block ${wStats.covered === stats.units ? "text-ok" : "text-muted"}`}>
+                {wStats.covered === stats.units
+                  ? "Every unit has its warranty."
+                  : `${stats.units - wStats.covered} unit${stats.units - wStats.covered === 1 ? "" : "s"} without a warranty — fine to save; add it whenever the card arrives.`}
+                {warranty?.persist ? "" : " Cards upload when the GRN is saved."}
+              </span>
+            )}
+            {persistError && (
+              <span className="mt-0.5 flex items-center gap-1.5 font-medium text-bad">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> {persistError}
+              </span>
+            )}
           </div>
           <button type="button" onClick={onClose}
                   className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-line bg-content1 px-3 text-xs font-semibold text-ink-700 transition-all hover:bg-content2">
-            <X className="h-4 w-4" /> {readOnly ? "Close" : "Cancel"}
+            <X className="h-4 w-4" /> {readOnly && !(wOn && wEdit) ? "Close" : "Cancel"}
           </button>
-          {!readOnly && (
-            <button type="button" onClick={save} disabled={blocked}
+          {(!readOnly || (wOn && wEdit)) && (
+            <button type="button" onClick={() => void save()} disabled={blocked || wBlocked || persisting}
                     title={blockReason ?? undefined}
                     className="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-brand px-3.5 text-xs font-bold text-white shadow-sm transition-all hover:bg-brand/90 disabled:cursor-not-allowed disabled:opacity-50">
-              <Check className="h-4 w-4" /> Save {stats.done} of {stats.units}
+              <Check className="h-4 w-4" />
+              {persisting ? "Saving warranty…"
+                : readOnly ? `Save warranty · ${wStats.covered} of ${stats.units}`
+                : wOn ? `Save ${stats.done} of ${stats.units} · warranty ${wStats.covered}`
+                : `Save ${stats.done} of ${stats.units}`}
             </button>
           )}
+          <input ref={cardInput} type="file" className="hidden" accept="application/pdf,image/*"
+                 onChange={(e) => { onCardPicked(e.target.files?.[0] ?? null); e.target.value = ""; }} />
         </ModalFooter>
       </ModalContent>
     </Modal>

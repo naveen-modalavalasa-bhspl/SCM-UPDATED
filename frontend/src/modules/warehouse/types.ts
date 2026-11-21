@@ -3585,7 +3585,10 @@ export interface WarrantyUnit {
   code: string;
   serial_number?: string | null;
   imei?: string | null;
+  /** Its warranty as it stands: its own, else its batch's. */
   warranty?: UnitWarranty | null;
+  /** UNIT (its own), BATCH (the batch's), or none. */
+  source?: "UNIT" | "BATCH" | null;
 }
 
 export interface WarrantyLine {
@@ -3595,6 +3598,10 @@ export interface WarrantyLine {
   item_code?: string | null;
   item_name?: string | null;
   batch_no?: string | null;
+  /** How the warranty is given (2026-11-21): one for the batch, one per piece, or none. */
+  mode?: "BATCH" | "UNIT" | null;
+  /** The batch's own warranty, in BATCH mode. */
+  batch?: UnitWarranty | null;
   units: WarrantyUnit[];
   covered: number;
   total: number;
@@ -3626,4 +3633,15 @@ export interface WarrantyInput {
   card_no?: string | null;
   file?: File | null;
   attachment_id?: number | null;
+}
+
+/** PUT /receipts/{id}/lines/{line}/warranty — a line's warranties, whole. */
+export interface LineWarrantyIn {
+  mode: "BATCH" | "UNIT" | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  card_no?: string | null;
+  attachment_id?: number | null;
+  units: { code: string; start_date?: string | null; end_date?: string | null;
+           card_no?: string | null; attachment_id?: number | null }[];
 }

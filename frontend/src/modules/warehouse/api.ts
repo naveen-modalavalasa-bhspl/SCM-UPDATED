@@ -1393,3 +1393,15 @@ export const removeReceiptWarranty = async (receiptId: number, warrantyId: numbe
 export const downloadWarrantyDocument = async (receiptId: number, attachmentId: number) =>
   (await api.get<Blob>(`${BASE}/receipts/${receiptId}/warranty-documents/${attachmentId}/download`,
     { responseType: "blob" })).data;
+
+/** A whole GRN line's warranties in one save — batch or per piece (2026-11-21). */
+export const saveLineWarranty = (receiptId: number, lineId: number, body: import("./types").LineWarrantyIn) =>
+  put<import("./types").ReceiptWarranties>(`${BASE}/receipts/${receiptId}/lines/${lineId}/warranty`, body);
+
+/** Many warranty cards in one request; the answer names each one's id, in order. */
+export const uploadWarrantyCards = async (receiptId: number, files: File[]) => {
+  const form = new FormData();
+  for (const file of files) form.append("files", file);
+  return (await api.post<import("./types").WarrantyDocument[]>(
+    `${BASE}/receipts/${receiptId}/warranty-cards`, form)).data;
+};
