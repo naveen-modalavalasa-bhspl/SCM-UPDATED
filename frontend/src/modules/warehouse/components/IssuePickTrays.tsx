@@ -84,25 +84,26 @@ export function IssuePickTrays({ trays, issued, codes, uom, codeWord = "code", m
           const free = codesFree(codes, list, index);
           const rowProblem = problems.find((p) => p.index === index);
           return (
-            <li key={index} className={`rounded-md border px-1.5 py-1 ${rowProblem ? "border-bad/30 bg-bad-bg/20" : "border-line/50"}`}>
+            <li key={index} className={`rounded-lg border px-2 py-1.5 ${rowProblem ? "border-bad/30 bg-bad-bg/20" : "border-line/50"}`}>
               <div className="flex flex-wrap items-center gap-1.5">
-                <label className="flex items-center gap-1 text-[10px] font-semibold text-muted">
+                {/* Wide enough for a real tray label ("TRAY-WH1-0042") and a 44 px tap target. */}
+                <label className="flex min-w-0 flex-1 basis-56 items-center gap-1.5 text-[11px] font-semibold text-muted sm:flex-none">
                   Tray
-                  <span className="relative">
-                    <ScanLine className="pointer-events-none absolute left-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-muted" aria-hidden />
+                  <span className="relative min-w-0 flex-1">
+                    <ScanLine className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" aria-hidden />
                     <input value={tray.tray_no} disabled={!editable} maxLength={60}
                            aria-label={`Tray number ${index + 1}`} placeholder="Scan or type"
                            onChange={(e) => patch(index, { tray_no: e.target.value })}
                            onKeyDown={(e) => { if (e.key === "Enter") e.preventDefault(); }}
-                           className="mono h-8 w-28 rounded-md border border-line bg-content1 pl-5 pr-1.5 text-xs font-semibold text-ink disabled:bg-content2" />
+                           className="mono h-10 w-full min-w-[12rem] rounded-lg border border-line bg-content1 pl-8 pr-2 text-sm font-semibold text-ink outline-none transition-colors focus:border-brand focus:ring-2 focus:ring-brand/20 disabled:bg-content2 sm:w-64" />
                   </span>
                 </label>
-                <label className="flex items-center gap-1 text-[10px] font-semibold text-muted">
+                <label className="flex items-center gap-1.5 text-[11px] font-semibold text-muted">
                   Qty
                   <input type="number" min={0} step="any" value={tray.quantity} disabled={!editable}
                          aria-label={`Quantity in tray ${tray.tray_no || index + 1}`}
                          onChange={(e) => patch(index, { quantity: num(e.target.value) })}
-                         className="h-8 w-20 rounded-md border border-line bg-content1 px-1.5 text-right text-xs font-semibold tabular text-ink disabled:bg-content2" />
+                         className="h-10 w-28 rounded-lg border border-line bg-content1 px-2 text-right text-sm font-semibold tabular text-ink outline-none transition-colors focus:border-brand focus:ring-2 focus:ring-brand/20 disabled:bg-content2" />
                   {uom && <span className="text-[10px] text-muted">{uom}</span>}
                 </label>
                 {codes.length > 0 && (
@@ -130,7 +131,7 @@ export function IssuePickTrays({ trays, issued, codes, uom, codeWord = "code", m
                 {editable && (
                   <button type="button" aria-label={`Remove tray ${tray.tray_no || index + 1}`}
                           onClick={() => { setChoosing(null); write(list.filter((_, i) => i !== index)); }}
-                          className="ml-auto inline-flex h-8 w-8 items-center justify-center rounded-lg text-muted hover:bg-bad-bg hover:text-bad">
+                          className="ml-auto inline-flex h-10 w-10 items-center justify-center rounded-lg text-muted hover:bg-bad-bg hover:text-bad">
                     <Trash2 className="h-3.5 w-3.5" aria-hidden />
                   </button>
                 )}
