@@ -150,8 +150,9 @@ export function PackagingTab() {
           is_active: r.is_active,
         })}
         bulk={mastersApi.packaging}
-        onCreate={(v) => mastersApi.packaging.create(v as Partial<MasterPackaging>)}
-        onUpdate={(id, v) => mastersApi.packaging.update(id, v as Partial<MasterPackaging>)}
+        // A blank Size is "not stated", sent as null — never the select's empty string.
+        onCreate={(v) => mastersApi.packaging.create({ ...v, size_class: v.size_class || null } as Partial<MasterPackaging>)}
+        onUpdate={(id, v) => mastersApi.packaging.update(id, { ...v, size_class: v.size_class || null } as Partial<MasterPackaging>)}
         onDeactivate={mastersApi.packaging.deactivate}
       />
     </>
