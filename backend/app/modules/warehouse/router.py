@@ -359,6 +359,22 @@ async def save_receipt_warranty(receipt_id: int, receipt_item_id: int = Form(...
         end_date=end_date, card_no=card_no, upload=file, attachment_id=attachment_id, user=user)
 
 
+# A whole line's warranties in one save — batch or per piece (2026-11-21).
+@router.put("/receipts/{receipt_id}/lines/{line_id}/warranty", response_model=s.ReceiptWarranties)
+async def save_line_warranty(receipt_id: int, line_id: int, body: s.LineWarrantyIn,
+                             db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(RECEIPT_CREATE))):
+    return await warranty.save_line(db, receipt_id, line_id, body, user)
+
+
+# Many warranty cards at once; the answer names each one's id.
+@router.post("/receipts/{receipt_id}/warranty-cards", response_model=list[s.WarrantyDocument])
+async def upload_warranty_cards(receipt_id: int, files: list[UploadFile] = File(...),
+                                db: AsyncSession = Depends(get_db),
+                                user=Depends(require_permission(RECEIPT_CREATE))):
+    return await warranty.upload_cards(db, receipt_id, files, user)
+
+
 @router.delete("/receipts/{receipt_id}/warranties/{warranty_id}",
                response_model=s.ReceiptWarranties)
 async def remove_receipt_warranty(receipt_id: int, warranty_id: int,

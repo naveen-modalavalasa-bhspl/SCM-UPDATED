@@ -11,6 +11,13 @@ from pydantic import BaseModel, Field
 DateRange = Literal["day", "week", "month", "quarter", "custom"]
 
 
+class HomeKpiHighlight(BaseModel):
+    text: str
+    tone: str
+    href: str
+    hint: str | None = None
+
+
 class HomeKpi(BaseModel):
     key: str
     label: str
@@ -20,6 +27,10 @@ class HomeKpi(BaseModel):
     href: str
     icon: str
     tone: str = "brand"
+    #: Lines under the figure, each its own link (2026-11-20, MoM point 2): on the
+    #: Approvals card, "N stuck at final approval" (red) and "N waiting over 12 h"
+    #: (amber). Declared here or the response model drops them on the way out.
+    highlights: list[HomeKpiHighlight] = []
 
 
 class HomeAction(BaseModel):

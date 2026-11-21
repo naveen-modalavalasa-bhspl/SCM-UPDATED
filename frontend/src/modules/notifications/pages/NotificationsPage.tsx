@@ -8,7 +8,7 @@ import {
 } from "@/shared/components";
 import { useDebouncedValue } from "@/shared/hooks/useDebouncedValue";
 import {
-  notificationKeys, notificationsApi, type NotificationRow,
+  isUrgentNotification, notificationKeys, notificationsApi, type NotificationRow,
 } from "@/shared/api/notifications";
 
 /**
@@ -114,7 +114,12 @@ export function NotificationsPage() {
 
   const groups = useMemo(() => {
     const out: { label: string; rows: NotificationRow[] }[] = [];
+    // Unread urgent ones first, in a group of their own (2026-11-21): an approval stuck
+    // at its final rung must not sit under the day's ordinary traffic.
+    const urgent = rows.filter((row) => !row.is_read && isUrgentNotification(row));
+    if (urgent.length) out.push({ label: "Needs you now", rows: urgent });
     for (const row of rows) {
+      if (urgent.includes(row)) continue;
       const label = dayLabel(row.created_at);
       const last = out[out.length - 1];
       if (last && last.label === label) last.rows.push(row);
@@ -166,9 +171,10 @@ export function NotificationsPage() {
         <div className={`space-y-6 transition-opacity ${isFetching ? "opacity-70" : ""}`}>
           {groups.map((group) => (
             <section key={group.label} aria-label={group.label}>
-              <h2 className="mb-2 flex items-center gap-3 text-[11px] font-semibold uppercase tracking-wider text-muted">
+              <h2 className={`mb-2 flex items-center gap-3 text-[11px] font-semibold uppercase tracking-wider ${
+                group.label === "Needs you now" ? "text-danger" : "text-muted"}`}>
                 {group.label}
-                <span className="h-px flex-1 bg-line" aria-hidden />
+                <span className={`h-px flex-1 ${group.label === "Needs you now" ? "bg-danger/40" : "bg-line"}`} aria-hidden />
                 <span className="normal-case tracking-normal">{group.rows.length}</span>
               </h2>
               <ul className="space-y-2.5">

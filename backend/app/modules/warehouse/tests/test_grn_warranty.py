@@ -102,3 +102,60 @@ async def test_refusals_name_the_problem(db, store):
     with pytest.raises(ValidationError, match="Attach the warranty card"):
         await warranty.save_warranty(db, receipt_id, receipt_item_id=line_id, codes=["SN1"],
                                      start_date=today, end_date=today, card_no=None)
+
+
+# --- One warranty for the whole batch, or one per piece (2026-11-21) -----------------
+
+from app.modules.warehouse.schemas import LineWarrantyIn, UnitWarrantyIn  # noqa: E402
+
+
+@pytest.mark.asyncio
+async def test_a_batch_warranty_covers_every_unit_and_a_piece_may_override(db, store):
+    receipt_id, line_id = await _grn(db)
+    start, end = date.today(), date.today() + timedelta(days=730)
+    out = await warranty.save_line(db, receipt_id, line_id, LineWarrantyIn(
+        mode="BATCH", start_date=start, end_date=end, card_no="BATCH-1",
+        units=[UnitWarrantyIn(code="SN2", start_date=start, end_date=start + timedelta(days=5))]), None)
+    line = out["lines"][0]
+    assert (line["mode"], line["covered"], line["total"]) == ("BATCH", 3, 3)
+    by_code = {u["code"]: u for u in line["units"]}
+    assert by_code["SN1"]["source"] == "BATCH" and by_code["SN2"]["source"] == "UNIT"
+    assert by_code["SN2"]["warranty"]["status"] == "EXPIRING"
+    # Stock Balance and scans read the batch's for a unit with none of its own.
+    covers = await warranty.by_item(db, [501])
+    assert covers[(501, "SN1")].card_no == "BATCH-1"
+    assert covers[(501, "IM1")].card_no == "BATCH-1"          # found by its IMEI too
+    assert covers[(501, "SN2")].card_no is None               # its own wins
+    assert (await warranty.for_units(db, 501, ["SN3"])).end_date == end
+
+
+@pytest.mark.asyncio
+async def test_per_piece_replaces_the_line_and_none_clears_it(db, store):
+    receipt_id, line_id = await _grn(db)
+    start, end = date.today(), date.today() + timedelta(days=365)
+    out = await warranty.save_line(db, receipt_id, line_id, LineWarrantyIn(
+        mode="UNIT", units=[UnitWarrantyIn(code="SN1", start_date=start, end_date=end, card_no="C1"),
+                            UnitWarrantyIn(code="SN3", start_date=start, end_date=end)]), None)
+    assert (out["lines"][0]["mode"], out["lines"][0]["covered"]) == ("UNIT", 2)
+    out = await warranty.save_line(db, receipt_id, line_id, LineWarrantyIn(
+        mode="UNIT", units=[UnitWarrantyIn(code="SN3", start_date=start, end_date=end)]), None)
+    assert out["lines"][0]["covered"] == 1                     # SN1 left out = removed
+    out = await warranty.save_line(db, receipt_id, line_id, LineWarrantyIn(mode=None), None)
+    assert (out["lines"][0]["mode"], out["lines"][0]["covered"]) == (None, 0)
+
+
+@pytest.mark.asyncio
+async def test_a_line_save_is_refused_whole(db, store):
+    receipt_id, line_id = await _grn(db)
+    today = date.today()
+    with pytest.raises(ValidationError, match="SN9 is not one of this line"):
+        await warranty.save_line(db, receipt_id, line_id, LineWarrantyIn(
+            mode="UNIT", units=[UnitWarrantyIn(code="SN9", start_date=today, end_date=today)]), None)
+    with pytest.raises(ValidationError, match="give both the warranty start and end"):
+        await warranty.save_line(db, receipt_id, line_id, LineWarrantyIn(
+            mode="UNIT", units=[UnitWarrantyIn(code="SN1", start_date=today)]), None)
+    with pytest.raises(ValidationError, match="batch warranty's start and end"):
+        await warranty.save_line(db, receipt_id, line_id, LineWarrantyIn(mode="BATCH"), None)
+    with pytest.raises(ValidationError, match="not filed on this GRN"):
+        await warranty.save_line(db, receipt_id, line_id, LineWarrantyIn(
+            mode="BATCH", start_date=today, end_date=today, attachment_id=99999), None)

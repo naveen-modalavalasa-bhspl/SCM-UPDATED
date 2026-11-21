@@ -1163,12 +1163,22 @@ hierarchies of the vendor's own mapped items only, scoped on the token.
   `APPROVAL_STUCK` notification, pinned red in the bell, and "N stuck at final approval"
   on the Home Approvals card; 12 h anywhere → amber "waiting over 12 h". Settings
   `approvals.escalation.*`. The reminders job no longer escalates to the HCM manager.
-- **Warranty per received serial** (`warehouse/warranty.py`, `inb_receipt_unit_warranties`,
-  `c6e8a0b2d4f7`): keyed on the GRN line + unit code (serial, else IMEI), card in
-  `sys_attachments` (GRN_WARRANTY); "same for all" = one upload, a row per unit. A
-  missing warranty WARNS, never refuses; addable after submit. Scans show it, and
-  Stock Balance reads it (`warranty.by_item`): each lot's tally on `/serials/summary`
-  (`warranty`: covered / expiring / expired / next_end) and each unit's on `/serials`.
+- **Warranty per received serial — in the Serial / IMEI popup** (`warehouse/warranty.py`,
+  `c6e8a0b2d4f7`, `e8a0c2d4f6b9`; screen `UnitCodesModal` + `WarrantyParts`, rules
+  `warrantyDraft.ts`, sheet `warrantyExcel.ts`). The popup asks first how it is given:
+  **BATCH** — one start/end/card no./card on the GRN LINE (`inb_receipt_items.warranty_*`)
+  covering every unit; **UNIT** — each row gets its own, one `inb_receipt_unit_warranties`
+  row per unit (keyed on the line + code, serial else IMEI). A unit's own row overrides
+  the batch's everywhere (`by_item`, `for_units`). Saved WHOLE per line:
+  `PUT /receipts/{id}/lines/{line}/warranty` (replaces the line's set; refused whole),
+  cards first via `POST /receipts/{id}/warranty-cards` (many at once). On a draft GRN
+  the popup keeps it in the form and `ReceiptForm.persistWarranties` saves it after the
+  GRN (codes must exist first); on a submitted GRN the popup saves it straight away.
+  Excel template/upload is checked whole in the browser — exactly the received quantity
+  of rows, no repeated code, real dates, never ending before starting — and card files
+  are matched by the sheet's file name or the code in the file name (`matchCards`). A
+  missing warranty WARNS, never refuses. Stock Balance reads it: each lot's tally on
+  `/serials/summary` (`warranty`) and each unit's on `/serials`.
 - **Trays on an issue pick** (`warehouse/issue_trays.py`, `out_issue_items.trays` JSON,
   `d7f9b1c3e5a8`): tray no, qty, codes. Save: no repeated tray per pick, a code in one
   tray, codes ≤ qty, sum ≤ pick. Submit and post: sum == pick. After approval

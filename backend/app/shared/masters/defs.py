@@ -2025,6 +2025,13 @@ class PackagingIn(BaseModel):
     name: str
     #: Small / Medium / Large / Extra large (2026-11-20) — the size people call it by.
     size_class: ContainerSize | None = None
+
+    @field_validator("size_class", mode="before")
+    @classmethod
+    def blank_size_is_none(cls, value):
+        # The form's "no size" option is an empty string; it means "not stated".
+        return None if isinstance(value, str) and not value.strip() else value
+
     # All three or none: two sides describe nothing a slotting check can use, and a
     # half-measured container is why a bin check has to say "not measured" rather than
     # quietly assume the missing side away.
