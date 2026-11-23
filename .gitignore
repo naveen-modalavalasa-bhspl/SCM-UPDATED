@@ -133,3 +133,9 @@ frontend/vite.config.d.ts
 # A SQLite file in a MySQL-only project (CLAUDE.md: no SQLite fallback). Whatever
 # wrote it, it is not source and it can carry live rows.
 backend/scm.db
+
+# ---- Text / scratch files ----
+# Stray text files, dumps, and notes across all folders (keep requirements.txt)
+*.txt
+!requirements.txt
+!backend/requirements.txt

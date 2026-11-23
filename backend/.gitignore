@@ -5,3 +5,5 @@ __pycache__/
 dev.db
 .pytest_cache/
 *.egg-info/
+*.txt
+!requirements.txt
