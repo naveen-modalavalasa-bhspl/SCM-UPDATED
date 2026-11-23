@@ -1188,6 +1188,28 @@ hierarchies of the vendor's own mapped items only, scoped on the token.
   Served on the consignment source, the dispatch
   (`line_trays`) and both acknowledgements (`TrayChips`); NEVER on the Delivery Challan.
 
+### Supplier bank + GST switch, shipping addresses, notifications (2026-11-23)
+
+- **Supplier bank details are MANDATORY** (`procurement/suppliers.bank_problems`: bank
+  name, account 9–18 digits typed twice on screen, IFSC `AAAA0XXXXXX`); the list serves
+  the account masked, `get_supplier` in full. The supplier portal shows them VIEW ONLY.
+  "Payment terms (days)" is off the form. `mst_vendors.is_same_state` (NULL = follow the
+  GSTIN): ON = CGST+SGST, OFF = IGST; no GSTIN defaults OFF. `vendor_tax_region` is the
+  one reader; a PO freezes its answer at submit (`tax_region_fixed`). Migration `f1b3d5a7c9e2`.
+- **Shipping addresses** (`whs_warehouse_addresses`, `shared/masters/warehouse_addresses.py`,
+  `a2c4e6f8b0d1`, `b4d6f8a0c2e3`): many per warehouse, one default, never deleted (left
+  out → inactive), the default mirrored onto `whs_warehouses.address`. Edited on BOTH
+  warehouse screens (`ShippingAddressesEditor`; Warehouse › Masters detail lists them).
+  RFQ: warehouse, then one of its addresses — required to submit. PO: carries the RFQ's;
+  a DRAFT may change it (`POAddressesTerms` → `PODeliverTo`); a direct PO picks warehouse +
+  address on the form. The document keeps the TEXT (editable, "edited for this document");
+  `warehouse_addresses.resolve` refuses an address of another warehouse.
+- **Notifications**: the bell polls the unread count every 20 s and reads the list only
+  when it rises; new rows (`notificationArrivals.arrivals`, by id — the first read only
+  sets the mark) open the panel, never over a dialog (it rings and waits), closing after
+  8 s unless hovered or urgent. Desktop pop-ups are a per-browser switch in the panel
+  (localStorage), shown only when the tab is not in front; bursts over 3 collapse to one.
+
 ### The outward leg (doc Phase D+E), under Logistics
 
 Logistics runs the whole outward leg, in the order it happens:

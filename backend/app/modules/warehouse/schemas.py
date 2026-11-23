@@ -131,6 +131,9 @@ class WarehouseWrite(BaseModel):
     is_bin_managed: bool = False
     requires_inward: bool | None = None
     is_active: bool = True
+    #: The warehouse's shipping addresses (2026-11-23), saved with it as one set —
+    #: None leaves them as they are. See `shared/masters/warehouse_addresses.py`.
+    shipping_addresses: list[dict] | None = Field(default=None, max_length=50)
 
     @model_validator(mode="after")
     def coordinates_are_a_pair(self):

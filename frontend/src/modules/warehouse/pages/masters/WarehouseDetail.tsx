@@ -16,6 +16,7 @@ import { fmtQty } from "../../format";
 import { byRung, parentTypesOf, typeOfLocation } from "../../storageTypes";
 import type { Bin } from "../../types";
 import { usePointLabel } from "../../usePointLabel";
+import { ShippingAddressList } from "../../components/ShippingAddressList";
 
 /**
  * One warehouse: its details, the storage locations inside it, and the labels to stick
@@ -173,8 +174,10 @@ export default function WarehouseDetail() {
         <MetaRow label="Storage" value={warehouse.is_bin_managed ? "Bin managed" : "Bulk"} />
         <MetaRow label="Status" value={warehouse.is_active ? "Active" : "Inactive"} />
         <MetaRow label="Locations" value={warehouse.is_bin_managed ? flat.length : "—"} />
-        <MetaRow label="Address" value={warehouse.address} />
       </MetaCard>
+
+      <ShippingAddressList warehouseId={warehouse.id}
+                           onEdit={() => nav(`/warehouse/masters/warehouses/${warehouse.id}/edit`)} />
 
       {!warehouse.is_bin_managed ? (
         <Card className="px-6 py-10 text-center text-sm text-muted">

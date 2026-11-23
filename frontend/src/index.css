@@ -666,3 +666,13 @@ h3,
   .splash-mark  { background-position: 190% 0, 0 0; }
   .splash-comet { transform: scaleX(0.6); opacity: 0.6; }
 }
+
+/* The bell, when something arrived behind a dialog or a background tab. */
+@keyframes bell-ring {
+  0%, 60%, 100% { transform: rotate(0); }
+  10%, 30% { transform: rotate(14deg); }
+  20%, 40% { transform: rotate(-14deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .animate-\[bell-ring_1s_ease-in-out_infinite\] { animation: none; }
+}

@@ -179,6 +179,7 @@ export interface WarehouseWrite {
   is_bin_managed: boolean;
   requires_inward?: boolean | null;
   is_active: boolean;
+  shipping_addresses?: unknown[];
 }
 
 /**

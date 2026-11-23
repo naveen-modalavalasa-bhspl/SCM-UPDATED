@@ -629,6 +629,9 @@ class WarehouseIn(BaseModel):
     # means arrivals here go through Material Inward -> GRN -> QC before they count.
     requires_inward: bool | None = None
     is_active: bool = True
+    #: The warehouse's shipping addresses (2026-11-23), saved with it as one set —
+    #: None leaves them as they are. See `shared/masters/warehouse_addresses.py`.
+    shipping_addresses: list[dict] | None = Field(default=None, max_length=50)
 
 
 def warehouse_kind_filter(request, stmt):
@@ -681,10 +684,16 @@ async def apply_warehouse(db: AsyncSession, w: Warehouse, data: WarehouseIn) -> 
     if data.incharge_id is not None and incharge is None:
         raise ValidationError("In-charge: that employee does not exist. Pick one from the list.")
 
-    for key, value in data.model_dump().items():
+    for key, value in data.model_dump(exclude={"shipping_addresses"}).items():
         setattr(w, key, value)
     w.facility_name = facility.name if facility else None
     w.incharge_name = incharge.full_name if incharge else None
+    if data.shipping_addresses is not None:
+        from app.shared.masters import warehouse_addresses
+        if w.id is None:
+            db.add(w)
+            await db.flush()
+        await warehouse_addresses.save(db, w, data.shipping_addresses)
     # A facility knows its office, so the office follows from it unless set explicitly.
     if facility is not None and data.office_id is None:
         w.office_id = facility.office_id
