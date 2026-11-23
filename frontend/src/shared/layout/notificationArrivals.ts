@@ -15,17 +15,16 @@ export function arrivals(rows: Pick<NotificationRow, "id" | "is_read">[], seenUp
   return { fresh, seenUpTo: top };
 }
 
-/** Open the panel? Not over a dialog someone is typing into (it waits for it to close),
- *  not while the tab is in the background (the desktop pop-up speaks instead). */
-export function shouldOpenPanel(opts: { fresh: number; dialogOpen: boolean; visible: boolean }) {
-  return opts.fresh > 0 && opts.visible && !opts.dialogOpen;
+/** Open the panel the moment something arrives — over a dialog too, and whether or
+ *  not the tab is in front (decided 2026-11-23). It stays open until the person closes
+ *  it: nothing closes it on a timer. */
+export function shouldOpenPanel(opts: { fresh: number }) {
+  return opts.fresh > 0;
 }
 
-/** Close itself after a while — unless one of the new rows is urgent, or the pointer is
- *  on the panel. */
-export const AUTO_CLOSE_MS = 8_000;
-export function shouldAutoClose(rows: Pick<NotificationRow, "id" | "entity_type">[], fresh: number[]) {
-  return !rows.some((r) => fresh.includes(r.id) && isUrgentNotification(r));
+/** An urgent arrival keeps its desktop pop-up on screen until it is clicked. */
+export function needsInteraction(rows: Pick<NotificationRow, "id" | "entity_type">[], fresh: number[]) {
+  return rows.some((r) => fresh.includes(r.id) && isUrgentNotification(r));
 }
 
 /** The words on a desktop pop-up for several arrivals at once: one per row up to three,
