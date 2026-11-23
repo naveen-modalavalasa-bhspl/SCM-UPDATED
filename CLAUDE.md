@@ -1204,11 +1204,14 @@ hierarchies of the vendor's own mapped items only, scoped on the token.
   a DRAFT may change it (`POAddressesTerms` → `PODeliverTo`); a direct PO picks warehouse +
   address on the form. The document keeps the TEXT (editable, "edited for this document");
   `warehouse_addresses.resolve` refuses an address of another warehouse.
-- **Notifications**: the bell polls the unread count every 20 s and reads the list only
+- **Notifications**: the bell polls the unread count every 10 s and reads the list only
   when it rises; new rows (`notificationArrivals.arrivals`, by id — the first read only
-  sets the mark) open the panel, never over a dialog (it rings and waits), closing after
-  8 s unless hovered or urgent. Desktop pop-ups are a per-browser switch in the panel
-  (localStorage), shown only when the tab is not in front; bursts over 3 collapse to one.
+  sets the mark) open the panel AT ONCE, over an open dialog too (decided 2026-11-23),
+  and it stays open until closed — no timer. Over a dialog the panel's layer is marked
+  `data-react-aria-top-layer` and its `aria-hidden` lifted, or it is unreadable and
+  unreachable by role. Desktop pop-ups are a per-browser switch in the panel
+  (localStorage), shown on every arrival, tab in front or not; bursts over 3 collapse
+  to one; an urgent one stays until clicked.
 
 ### The outward leg (doc Phase D+E), under Logistics
 

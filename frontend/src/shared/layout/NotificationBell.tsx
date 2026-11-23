@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { notificationHref, pinUrgent } from "@/shared/api/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -9,13 +9,10 @@ import {
 } from "@/shared/api/notifications";
 import { NotificationItem } from "@/shared/components/NotificationItem";
 import {
-  arrivals, AUTO_CLOSE_MS, desktopActive, desktopBatch, desktopSupported,
-  setDesktopPref, shouldAutoClose, shouldOpenPanel,
+  arrivals, desktopActive, desktopBatch, desktopSupported,
+  needsInteraction, setDesktopPref, shouldOpenPanel,
 } from "./notificationArrivals";
 
-/** A modal someone is working in — the bell waits for it rather than cover it. */
-const dialogOpen = () => !!document.querySelector('[role="dialog"][aria-modal="true"], [role="alertdialog"]');
-const tabInFront = () => document.visibilityState === "visible" && document.hasFocus();
 
 /**
  * Unread alerts for the signed-in person, from `sys_notifications`.
@@ -40,21 +37,20 @@ export function NotificationBell() {
   const [open, setOpen] = useState(false);
   // Rows that arrived since the page last looked, drawn with a "New" ring.
   const [fresh, setFresh] = useState<number[]>([]);
-  // New rows arrived while a dialog was open: the bell rings and opens once it closes.
-  const [waiting, setWaiting] = useState(false);
+  // Rings from an arrival until the panel is looked at and closed.
+  const [ringing, setRinging] = useState(false);
   const [desktopOn, setDesktopOn] = useState(desktopActive);
   const [blocked, setBlocked] = useState(() => desktopSupported() && Notification.permission === "denied");
   const seenUpTo = useRef<number | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
   const lastCount = useRef<number | null>(null);
-  const closeTimer = useRef<number | null>(null);
-  const hovered = useRef(false);
 
-  // Polled rather than pushed: there is no websocket in this app. Every 20 s, and on
+  // Polled rather than pushed: there is no websocket in this app. Every 10 s, and on
   // returning to the tab — the count only; the list is read when it goes up.
   const { data: unread } = useQuery({
     queryKey: COUNT_KEY,
     queryFn: notificationsApi.unreadCount,
-    refetchInterval: 20_000,
+    refetchInterval: 10_000,
     refetchIntervalInBackground: true,
     refetchOnWindowFocus: true,
   });
@@ -81,16 +77,6 @@ export function NotificationBell() {
     onSuccess: refresh,
   });
 
-  const stopTimer = () => { if (closeTimer.current) window.clearTimeout(closeTimer.current); closeTimer.current = null; };
-  const startTimer = useCallback(() => {
-    stopTimer();
-    closeTimer.current = window.setTimeout(() => { if (!hovered.current) setOpen(false); }, AUTO_CLOSE_MS);
-  }, []);
-  const popOpen = useCallback((list: NotificationRow[], ids: number[]) => {
-    setWaiting(false);
-    setOpen(true);
-    if (shouldAutoClose(list, ids)) startTimer(); else stopTimer();
-  }, [startTimer]);
 
   // The count went up (or this is the first read): read the list and see what is new.
   useEffect(() => {
@@ -109,13 +95,14 @@ export function NotificationBell() {
       if (!result.fresh.length) return;
       setFresh((f) => [...new Set([...result.fresh, ...f])]);
       const newRows = list.filter((r) => result.fresh.includes(r.id));
-      // The desktop speaks when the tab is not in front; the panel when it is.
-      if (desktopActive() && !tabInFront()) {
+      // Both speak on every arrival: the panel in the app, and — when switched on — a
+      // pop-up on the desktop, whether or not this tab is in front.
+      if (desktopActive()) {
         for (const pop of desktopBatch(newRows)) {
           try {
             const n = new Notification(pop.title, {
               body: pop.body, tag: `scm-${pop.id}`, icon: "/favicon.ico",
-              requireInteraction: !!pop.row && !shouldAutoClose([pop.row], [pop.row.id]),
+              requireInteraction: !!pop.row && needsInteraction([pop.row], [pop.row.id]),
             });
             n.onclick = () => {
               window.focus();
@@ -126,27 +113,16 @@ export function NotificationBell() {
           } catch { /* a browser that refuses page-made notifications */ }
         }
       }
-      if (shouldOpenPanel({ fresh: result.fresh.length, dialogOpen: dialogOpen(), visible: document.visibilityState === "visible" })) {
-        popOpen(list, result.fresh);
-      } else {
-        setWaiting(true);
+      // Opens the moment it arrives — over a dialog too — and stays until closed.
+      if (shouldOpenPanel({ fresh: result.fresh.length })) {
+        setRinging(true);
+        setOpen(true);
       }
     }).catch(() => { /* the next poll tries again */ });
     return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unread]);
 
-  // Something arrived behind a dialog or a background tab: open once the way is clear.
-  useEffect(() => {
-    if (!waiting) return;
-    const t = window.setInterval(() => {
-      if (shouldOpenPanel({ fresh: 1, dialogOpen: dialogOpen(), visible: document.visibilityState === "visible" })) {
-        popOpen(qc.getQueryData<NotificationRow[]>(KEY) ?? [], fresh);
-      }
-    }, 1_000);
-    return () => window.clearInterval(t);
-  }, [waiting, fresh, popOpen, qc]);
-  useEffect(() => () => stopTimer(), []);
 
   const toggleDesktop = async () => {
     if (!desktopSupported()) return;
@@ -156,7 +132,7 @@ export function NotificationBell() {
     setBlocked(permission === "denied");
     if (permission === "granted") {
       setDesktopPref(true); setDesktopOn(true);
-      try { new Notification("Desktop alerts are on", { body: "You'll get a pop-up here when something needs you and this tab is not in front.", tag: "scm-desktop-on" }); }
+      try { new Notification("Desktop alerts are on", { body: "You'll get a pop-up here the moment something arrives.", tag: "scm-desktop-on" }); }
       catch { /* fine */ }
     }
   };
@@ -168,11 +144,27 @@ export function NotificationBell() {
     if (!row.is_read) markRead.mutate(row.id);
     setOpen(false);
   };
+  // Opened over a dialog, the panel lands in a layer the dialog has hidden from screen
+  // readers (aria-hidden on everything outside it). Mark it as a top layer and lift the
+  // flag, so it is read and reachable like the dialog itself.
+  useEffect(() => {
+    if (!open) return;
+    const lift = () => {
+      let el: HTMLElement | null = panelRef.current;
+      while (el && el.parentElement && el.parentElement !== document.body) el = el.parentElement;
+      if (el && el.parentElement === document.body) {
+        el.setAttribute("data-react-aria-top-layer", "true");
+        if (el.getAttribute("aria-hidden") === "true") el.removeAttribute("aria-hidden");
+      }
+    };
+    const t = window.setTimeout(lift, 0);
+    const t2 = window.setTimeout(lift, 120);
+    return () => { window.clearTimeout(t); window.clearTimeout(t2); };
+  }, [open]);
+
   const onOpenChange = (next: boolean) => {
     setOpen(next);
-    stopTimer();
-    if (next) setWaiting(false);
-    else setFresh([]);
+    if (!next) { setFresh([]); setRinging(false); }
   };
 
   const count = unread ?? 0;
@@ -182,12 +174,12 @@ export function NotificationBell() {
       <PopoverTrigger>
         <button
           aria-label={count ? `Notifications, ${count} unread` : "Notifications"}
-          className={`relative flex h-11 w-11 items-center justify-center rounded-lg hover:bg-content2 hover:text-ink ${waiting ? "text-brand" : "text-muted"}`}
+          className={`relative flex h-11 w-11 items-center justify-center rounded-lg hover:bg-content2 hover:text-ink ${ringing ? "text-brand" : "text-muted"}`}
         >
-          {waiting
+          {ringing
             ? <BellRing className="h-5 w-5 origin-top animate-[bell-ring_1s_ease-in-out_infinite]" />
             : <Bell className="h-5 w-5" />}
-          {waiting && <span className="absolute inset-1 animate-ping rounded-lg bg-brand/20" aria-hidden />}
+          {ringing && <span className="absolute inset-1 animate-ping rounded-lg bg-brand/20" aria-hidden />}
           {count > 0 && (
             <span className="absolute right-1.5 top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-bad px-1 text-[10px] font-bold text-white">
               {count > 99 ? "99+" : count}
@@ -195,9 +187,8 @@ export function NotificationBell() {
           )}
         </button>
       </PopoverTrigger>
-      <PopoverContent className="w-[min(26rem,calc(100vw-2rem))] overflow-hidden p-0"
-                      onMouseEnter={() => { hovered.current = true; stopTimer(); }}
-                      onMouseLeave={() => { hovered.current = false; }}>
+      <PopoverContent className="w-[min(26rem,calc(100vw-2rem))] overflow-hidden p-0">
+        <div ref={panelRef} className="contents" />
         <div className="flex w-full items-center justify-between gap-2 border-b border-line bg-gradient-to-r from-brand/[0.06] to-content1 px-4 py-3">
           <div className="flex items-center gap-2">
             <span className="font-semibold text-ink">Notifications</span>
@@ -261,7 +252,7 @@ export function NotificationBell() {
               <p className="text-xs font-semibold text-ink">Desktop pop-ups</p>
               <p className="text-[11px] leading-4 text-muted">
                 {blocked ? "Blocked for this site — allow notifications in the browser's site settings."
-                  : desktopOn ? "On — a pop-up appears when this tab is not in front."
+                  : desktopOn ? "On — a pop-up appears on your computer the moment one arrives."
                   : "Get a pop-up on your computer even while you work in another window."}
               </p>
             </div>

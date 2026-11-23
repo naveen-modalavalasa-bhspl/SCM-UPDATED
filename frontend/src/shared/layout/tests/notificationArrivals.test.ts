@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { arrivals, desktopBatch, shouldAutoClose, shouldOpenPanel } from "../notificationArrivals";
+import { arrivals, desktopBatch, needsInteraction, shouldOpenPanel } from "../notificationArrivals";
 
 describe("notification arrivals", () => {
   it("the first read only sets the mark", () => {
@@ -10,15 +10,13 @@ describe("notification arrivals", () => {
     const r = arrivals([{ id: 8, is_read: false }, { id: 7, is_read: true }, { id: 5, is_read: false }], 5);
     expect(r).toEqual({ fresh: [8], seenUpTo: 8 });
   });
-  it("opens only when visible and no dialog is open", () => {
-    expect(shouldOpenPanel({ fresh: 1, dialogOpen: false, visible: true })).toBe(true);
-    expect(shouldOpenPanel({ fresh: 1, dialogOpen: true, visible: true })).toBe(false);
-    expect(shouldOpenPanel({ fresh: 1, dialogOpen: false, visible: false })).toBe(false);
-    expect(shouldOpenPanel({ fresh: 0, dialogOpen: false, visible: true })).toBe(false);
+  it("opens whenever something new arrived", () => {
+    expect(shouldOpenPanel({ fresh: 1 })).toBe(true);
+    expect(shouldOpenPanel({ fresh: 0 })).toBe(false);
   });
-  it("an urgent arrival keeps the panel open", () => {
-    expect(shouldAutoClose([{ id: 9, entity_type: "APPROVAL_STUCK" }], [9])).toBe(false);
-    expect(shouldAutoClose([{ id: 9, entity_type: "PO" }], [9])).toBe(true);
+  it("an urgent arrival's desktop pop-up waits to be clicked", () => {
+    expect(needsInteraction([{ id: 9, entity_type: "APPROVAL_STUCK" }], [9])).toBe(true);
+    expect(needsInteraction([{ id: 9, entity_type: "PO" }], [9])).toBe(false);
   });
   it("a burst becomes one desktop pop-up", () => {
     const rows = [1, 2, 3, 4].map((id) => ({ id, title: `T${id}`, body: "" }));
