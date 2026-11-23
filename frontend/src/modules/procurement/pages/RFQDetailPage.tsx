@@ -502,7 +502,7 @@ export function RFQDetailPage() {
                     },
                     { label: "Priority", value: rfq.priority ?? "Normal" },
                     { label: "Department", value: departmentOf(rfq) ?? "\u2014" },
-                    { label: "Shipment Address", value: rfq.warehouse_name ?? "\u2014" },
+                    { label: "Delivery warehouse", value: rfq.warehouse_name ?? "\u2014" },
                     { label: "Project", value: rfq.project_name ?? "\u2014" },
                     { label: rfq.organization_name ? "Organisation" : "Company",
                       value: rfq.organization_name ?? rfq.company_name ?? "\u2014" },
@@ -510,6 +510,18 @@ export function RFQDetailPage() {
                 />
 
 
+
+                {/* Where the goods are delivered (2026-11-23) — the suppliers see the same. */}
+                {rfq.shipping_address ? (
+                  <div className="mt-4 border-t border-line/60 pt-4">
+                    <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-muted">Shipping address</div>
+                    <p className="whitespace-pre-line text-sm text-body">{rfq.shipping_address}</p>
+                  </div>
+                ) : rfq.status === "DRAFT" && (
+                  <p className="mt-4 rounded-lg bg-warn-bg px-3 py-2 text-xs font-medium text-warn">
+                    No shipping address yet — edit the RFQ and choose one before sending it.
+                  </p>
+                )}
 
                 {rfq.terms && (
                   <div className="mt-4 border-t border-line/60 pt-4">

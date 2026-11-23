@@ -8,6 +8,7 @@ import { Button } from "../components/ActionButton";
 import { api } from "@/shared/api/client";
 import { consolidationApi, requisitionApi, rfqApi } from "../api";
 import { blankLine, LinePicker, type DraftLine } from "../components/LinePicker";
+import { ShippingAddressPicker } from "../components/ShippingAddressPicker";
 import { emptyOrgValue, OrgFields, orgMissing, orgPayload, orgValueCarried, orgValueFrom, type OrgValue } from "../components/OrgFields";
 import { departmentOf, isOlderDocument } from "../orgScope";
 import { fmtDate, todayIst } from "@/shared/datetime";
@@ -40,6 +41,10 @@ export function RFQFormPage() {
   const [title, setTitle] = useState("");
   const [dueDate, setDueDate] = useState("");
   const [terms, setTerms] = useState("");
+  // Where the goods are delivered (2026-11-23): one of the warehouse's shipping
+  // addresses, required, and what every supplier reads.
+  const [ship, setShip] = useState<{ addressId: number | null; text: string }>({ addressId: null, text: "" });
+  const [triedShip, setTriedShip] = useState(false);
   // Empty means "use the default" — the backend decides what that is, so the form
   // never has to carry a copy of it.
   const [evaluationMethod, setEvaluationMethod] = useState("");
@@ -121,6 +126,7 @@ export function RFQFormPage() {
     setEvaluationMethod(existing.evaluation_method ?? "");
     setFreightRequired(Boolean(existing.freight_required));
     setOrg(orgValueFrom(existing));
+    setShip({ addressId: existing.shipping_address_id ?? null, text: existing.shipping_address ?? "" });
     // Who was invited, which is now the whole of what this form holds about vendors.
     // An RFQ saved before allocation moved to the comparison may still carry old
     // per-supplier invitation quantities. Re-saving a draft intentionally normalizes
@@ -234,6 +240,8 @@ export function RFQFormPage() {
         evaluation_method: evaluationMethod || null,
         freight_required: freightRequired,
         ...orgPayload(org, legacy),
+        shipping_address_id: ship.addressId,
+        shipping_address: ship.text || null,
         // Suppliers only. Splitting a line between them is a decision taken against
         // PRICES, and at this point nobody has any — see the note on the section
         // below. `vendor_allocations` is deliberately not sent: the service reads
@@ -281,6 +289,13 @@ export function RFQFormPage() {
     }
     if (!chosenVendors.length) {
       setProblem("Pick at least one supplier to send this RFQ to.");
+      return;
+    }
+    if (!ship.text.trim()) {
+      setTriedShip(true);
+      setProblem(org.warehouseId === ""
+        ? "Pick the delivery warehouse and one of its shipping addresses."
+        : "Choose the shipping address the goods are delivered to.");
       return;
     }
     const missing = legacy ? null : orgMissing(org);
@@ -386,6 +401,13 @@ export function RFQFormPage() {
       <Card className="space-y-5 p-5">
         <OrgFields value={org} legacy={legacy} disabled={bookingLocked}
                    onChange={(patch) => setOrg((current) => ({ ...current, ...patch }))} />
+
+        <ShippingAddressPicker
+          warehouseId={org.warehouseId} warehouseName={org.warehouseName}
+          addressId={ship.addressId} text={ship.text} required
+          disabled={Boolean(existing && existing.status !== "DRAFT")}
+          error={triedShip && !ship.text.trim() ? "Choose where the goods are delivered." : null}
+          onChange={setShip} />
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
           <Field label="Title">

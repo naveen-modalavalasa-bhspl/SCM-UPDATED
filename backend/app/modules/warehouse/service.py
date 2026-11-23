@@ -83,6 +83,7 @@ from app.platform.workflow import ladder as wf_ladder
 from app.platform.workflow.models import Action as WfAction
 from app.platform.workflow.models import Instance as WfInstance
 from app.modules.inventory.service import warehouse_ids_for_user
+from app.shared.masters import warehouse_addresses
 from app.shared.scope import scope_condition
 from app.shared.enums import (
     ApprovalAction, AuditAction, DespatchNoteStatus, DocType, IndentStatus,
@@ -536,7 +537,7 @@ async def create_warehouse(db: AsyncSession, data: s.WarehouseWrite, user) -> Wa
     if existing:
         raise ValidationError(f"Warehouse code {data.code} is already in use")
 
-    values = data.model_dump()
+    values = data.model_dump(exclude={"shipping_addresses"})
     if (data.warehouse_type or "").strip().upper() == "MAIN":
         values["is_bin_managed"] = True
     if data.latitude is not None:
@@ -545,6 +546,8 @@ async def create_warehouse(db: AsyncSession, data: s.WarehouseWrite, user) -> Wa
     wh = Warehouse(**values)
     db.add(wh)
     await db.flush()
+    if data.shipping_addresses is not None:
+        await warehouse_addresses.save(db, wh, data.shipping_addresses)
     await write_audit(db, entity="whs_warehouses", entity_id=wh.id, entity_no=wh.code,
                       action=AuditAction.CREATE, actor=user, after=data.model_dump(mode="json"))
     await db.commit()
@@ -557,7 +560,7 @@ async def update_warehouse(db: AsyncSession, warehouse_id: int, data: s.Warehous
     wh = await _get(db, Warehouse, warehouse_id, "Warehouse")
     if (data.warehouse_type or "").strip().upper() == "MAIN":
         data.is_bin_managed = True
-    before = {c: getattr(wh, c) for c in data.model_dump()}
+    before = {c: getattr(wh, c) for c in data.model_dump(exclude={"shipping_addresses"})}
 
     if data.code != wh.code:
         clash = await db.scalar(
@@ -577,8 +580,10 @@ async def update_warehouse(db: AsyncSession, warehouse_id: int, data: s.Warehous
     moved = (_d(wh.latitude) != _d(data.latitude) or _d(wh.longitude) != _d(data.longitude)
              or (wh.latitude is None) != (data.latitude is None))
     starts_keeping_locations = not wh.is_bin_managed and data.is_bin_managed
-    for field, value in data.model_dump().items():
+    for field, value in data.model_dump(exclude={"shipping_addresses"}).items():
         setattr(wh, field, value)
+    if data.shipping_addresses is not None:
+        await warehouse_addresses.save(db, wh, data.shipping_addresses)
     # Only a coordinate somebody actually TYPED is a verified pin. The form sends the
     # stored pair back on every save, and relabelling a gazetteer match as MANUAL
     # because a name was corrected would promote a guess to the planner's highest

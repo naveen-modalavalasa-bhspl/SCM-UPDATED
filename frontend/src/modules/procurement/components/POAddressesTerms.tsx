@@ -7,6 +7,7 @@ import { Button } from "./ActionButton";
 import { poApi } from "../api";
 import type { PurchaseOrder } from "../types";
 import { AddressesTermsCards, type AddressTermKey } from "./POHeaderFields";
+import { PODeliverTo } from "./PODeliverTo";
 
 /**
  * A purchase order's Addresses and Terms & conditions (2026-10-26).
@@ -20,11 +21,17 @@ import { AddressesTermsCards, type AddressTermKey } from "./POHeaderFields";
  */
 const KEYS: AddressTermKey[] = ["billing_address", "shipping_address", "payment_terms",
   "delivery_terms", "material_terms", "logistics_terms"];
-type Draft = Record<AddressTermKey, string> & { paymentTermId: number | "" };
+type Draft = Record<AddressTermKey, string> & {
+  paymentTermId: number | "";
+  warehouseId: number | ""; warehouseName: string; shippingAddressId: number | null;
+};
 
 const valuesOf = (po: PurchaseOrder): Draft => ({
   ...(Object.fromEntries(KEYS.map((k) => [k, (po[k] as string | null | undefined) ?? ""])) as Record<AddressTermKey, string>),
   paymentTermId: po.payment_term_id ?? "",
+  warehouseId: po.warehouse_id ?? "",
+  warehouseName: po.warehouse_name ?? "",
+  shippingAddressId: po.shipping_address_id ?? null,
 });
 
 export function POAddressesTerms({ po, editable, onSaved }: {
@@ -39,13 +46,20 @@ export function POAddressesTerms({ po, editable, onSaved }: {
   const dirty: string[] = [
     ...KEYS.filter((k) => draft[k].trim() !== saved[k].trim()),
     ...(String(draft.paymentTermId) !== String(saved.paymentTermId) ? ["payment_term_id"] : []),
+    ...(String(draft.warehouseId) !== String(saved.warehouseId) ? ["warehouse_id"] : []),
+    ...((draft.shippingAddressId ?? null) !== (saved.shippingAddressId ?? null) ? ["shipping_address_id"] : []),
   ];
+  // The warehouse and its address travel together, and the text with them.
+  const deliveryDirty = dirty.some((k) => k === "warehouse_id" || k === "shipping_address_id");
 
   const save = useMutation({
     mutationFn: () => poApi.update(po.id, {
       ...Object.fromEntries(KEYS.filter((k) => dirty.includes(k)).map((k) => [k, draft[k].trim()])),
       ...(dirty.includes("payment_term_id") && draft.paymentTermId !== ""
         ? { payment_term_id: Number(draft.paymentTermId) } : {}),
+      ...(deliveryDirty && draft.warehouseId !== ""
+        ? { warehouse_id: Number(draft.warehouseId), shipping_address_id: draft.shippingAddressId,
+            shipping_address: draft.shipping_address.trim() } : {}),
     }),
     onSuccess: () => {
       toast.success(`${dirty.length} change${dirty.length === 1 ? "" : "s"} saved on the purchase order`);
@@ -63,13 +77,19 @@ export function POAddressesTerms({ po, editable, onSaved }: {
         orderTotal={Number(po.total_amount ?? 0)}
         changed={dirty}
         editableNote="Editable while the order is a draft"
+        shippingSlot={(editable || draft.warehouseId !== "") ? (
+          <PODeliverTo disabled={!editable} required={editable && draft.warehouseId !== ""}
+            value={{ warehouseId: draft.warehouseId, warehouseName: draft.warehouseName,
+                     shippingAddressId: draft.shippingAddressId, shipping_address: draft.shipping_address }}
+            onChange={(patch) => setDraft((d) => ({ ...d, ...patch }))} />
+        ) : undefined}
       />
 
       {/* Save / Discard — only once something actually changed. */}
       {editable && dirty.length > 0 && (
         <div className="sticky bottom-3 z-20 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-brand/30 bg-content1/95 px-4 py-3 shadow-lg backdrop-blur">
           <span className="text-sm text-ink">
-            <b>{dirty.length}</b> unsaved change{dirty.length === 1 ? "" : "s"} to addresses and terms
+            <b>{dirty.length}</b> unsaved change{dirty.length === 1 ? "" : "s"} to delivery, addresses and terms
           </span>
           <div className="flex gap-2">
             <Button variant="ghost" onClick={() => setDraft(saved)} disabled={save.isPending}>

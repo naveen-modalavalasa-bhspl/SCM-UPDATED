@@ -367,6 +367,13 @@ class Vendor(Base):
     pan = Column(String(20), nullable=True)
     payment_terms_days = Column(Integer, nullable=True)
     credit_limit = Column(Numeric(16, 2), nullable=True)
+    # Where we pay them (2026-11-23) — required on every supplier a buyer adds.
+    bank_name = Column(String(150), nullable=True)
+    bank_account_no = Column(String(30), nullable=True)
+    ifsc_code = Column(String(11), nullable=True)
+    # Same state as us: TRUE = CGST + SGST, FALSE = IGST. NULL = never said, which
+    # falls back to comparing the two GSTINs' state codes (the rule before this).
+    is_same_state = Column(Boolean, nullable=True)
     rating = Column(Numeric(4, 2), nullable=True)
     is_approved = Column(Boolean, nullable=False, default=False)
     is_blacklisted = Column(Boolean, nullable=False, default=False)

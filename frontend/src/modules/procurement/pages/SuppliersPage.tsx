@@ -8,6 +8,11 @@ import { Can, Card, ConfirmModal, EmptyState, ErrorBanner, Field, Input, PageHea
 import { Button } from "../components/ActionButton";
 import { fmtDate } from "@/shared/datetime";
 import { supplierRegisterApi } from "../api";
+import {
+  accountProblem, bankFromIfsc, cleanAccount, cleanIfsc, confirmProblem, gstStateCode,
+  ifscProblem, sameStateFromGstin,
+} from "../bankDetails";
+import { Landmark, ReceiptText } from "lucide-react";
 import type { Supplier, SupplierInput } from "../types";
 
 const SIZE = 20;
@@ -48,7 +53,8 @@ const monogram = (name: string) => name.trim().charAt(0).toUpperCase() || "?";
 
 const BLANK: SupplierInput = {
   name: "", code: "", vendor_type: "MATERIAL", contact_person: "", phone: "",
-  email: "", city: "", state: "", gstin: "", payment_terms_days: null,
+  email: "", city: "", state: "", gstin: "",
+  bank_name: "", bank_account_no: "", ifsc_code: "", is_same_state: null,
   issue_login: true, username: "",
 };
 
@@ -85,6 +91,14 @@ export function SuppliersPage() {
   const [slice, setSlice] = useState<"" | "quotable" | "with_login" | "without_login">("");
   const [form, setForm] = useState<SupplierInput | null>(null);
   const [editing, setEditing] = useState<Supplier | null>(null);
+  // The account number typed a second time, and whether anybody has touched the
+  // "same state" switch (untouched, it follows their GSTIN) — 2026-11-23.
+  const [bankConfirm, setBankConfirm] = useState("");
+  const [sameTouched, setSameTouched] = useState(false);
+  const [showErrors, setShowErrors] = useState(false);
+  const { data: home } = useQuery({
+    queryKey: ["supplier-tax-home"], queryFn: supplierRegisterApi.taxHome, staleTime: 10 * 60_000,
+  });
   const [confirmOff, setConfirmOff] = useState<Supplier | null>(null);
 
   const { data, isLoading, error } = useQuery({
@@ -114,13 +128,35 @@ export function SuppliersPage() {
   });
 
   const invalidates = [KEY, SUMMARY_KEY, ["vendors"]];
-  const close = () => { setForm(null); setEditing(null); };
+  const close = () => { setForm(null); setEditing(null); setBankConfirm(""); setSameTouched(false); setShowErrors(false); };
+  /** The switch as it reads right now: what someone set, else what their GSTIN says. */
+  const sameState = (f: SupplierInput) => sameTouched || editing
+    ? Boolean(f.is_same_state ?? sameStateFromGstin(home?.state_code, f.gstin))
+    : sameStateFromGstin(home?.state_code, f.gstin);
+  const bankIssues = (f: SupplierInput) => ({
+    bank_name: (f.bank_name ?? "").trim() ? null : "Required.",
+    ifsc_code: ifscProblem(f.ifsc_code),
+    bank_account_no: accountProblem(f.bank_account_no),
+    confirm: confirmProblem(f.bank_account_no, bankConfirm),
+  });
+  const bankOk = (f: SupplierInput) => Object.values(bankIssues(f)).every((v) => v === null);
+  const payload = (f: SupplierInput): SupplierInput => {
+    const body: SupplierInput = {
+      ...f,
+      bank_account_no: cleanAccount(f.bank_account_no),
+      ifsc_code: cleanIfsc(f.ifsc_code),
+      is_same_state: sameState(f),
+    };
+    // An older supplier nobody has set the switch for keeps following its GSTIN.
+    if (editing && editing.same_state_inferred && !sameTouched) delete body.is_same_state;
+    return clean(body);
+  };
 
   const save = useAction({
     run: (body: SupplierInput) =>
       editing
-        ? supplierRegisterApi.update(editing.id, clean(body))
-        : supplierRegisterApi.create(clean(body)),
+        ? supplierRegisterApi.update(editing.id, payload(body))
+        : supplierRegisterApi.create(payload(body)),
     success: (row) => editing
       ? `${row.name} updated`
       : row.has_login
@@ -157,13 +193,20 @@ export function SuppliersPage() {
   const busy = save.isPending || issue.isPending || reset.isPending
     || toggleLogin.isPending || deactivate.isPending;
 
-  const openEdit = (row: Supplier) => {
+  const openEdit = async (listed: Supplier) => {
+    // The list carries only the masked account; the form reads the one supplier whole.
+    const row = await supplierRegisterApi.get(listed.id).catch(() => listed);
     setEditing(row);
+    setSameTouched(false);
+    setShowErrors(false);
+    setBankConfirm(row.bank_account_no ?? "");
     setForm({
       name: row.name, code: row.code ?? "", vendor_type: row.vendor_type,
       contact_person: row.contact_person ?? "", phone: row.phone ?? "",
       email: row.email ?? "", city: row.city ?? "", state: row.state ?? "",
-      gstin: row.gstin ?? "", payment_terms_days: row.payment_terms_days ?? null,
+      gstin: row.gstin ?? "",
+      bank_name: row.bank_name ?? "", bank_account_no: row.bank_account_no ?? "",
+      ifsc_code: row.ifsc_code ?? "", is_same_state: row.is_same_state ?? null,
     });
   };
 
@@ -192,6 +235,12 @@ export function SuppliersPage() {
           <span className="truncate font-mono">{row.code ?? "—"}</span>
           <span aria-hidden className="text-line">•</span>
           <span className="truncate uppercase tracking-wide">{row.vendor_type}</span>
+          {row.has_bank_details === false && (
+            <span className="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-warn-bg px-1.5 py-0.5 text-[10px] font-semibold normal-case tracking-normal text-warn"
+                  title="Edit the supplier to add where we pay them">
+              <AlertTriangle className="h-3 w-3" aria-hidden /> No bank details
+            </span>
+          )}
         </span>
       </div>
     </div>
@@ -453,7 +502,13 @@ export function SuppliersPage() {
         busy={save.isPending}
         confirmDisabled={!form?.name?.trim()}
         error={save.error}
-        onConfirm={() => form && save.mutate(form)}
+        onConfirm={() => {
+          if (!form) return;
+          // Bank details are required: show every problem at once rather than a
+          // button that will not press for no stated reason.
+          if (!bankOk(form)) { setShowErrors(true); return; }
+          save.mutate(form);
+        }}
         onClose={close}
       >
         {form && (
@@ -504,14 +559,84 @@ export function SuppliersPage() {
               <Input value={form.gstin ?? ""}
                 onChange={(e) => set({ gstin: e.target.value.toUpperCase() })} />
             </Field>
-            <Field label="Payment terms (days)">
-              <Input type="number" min={0} max={365}
-                value={form.payment_terms_days ?? ""}
-                onChange={(e) => set({
-                  payment_terms_days: e.target.value === ""
-                    ? null : Number(e.target.value),
-                })} />
-            </Field>
+            {/* GST: which tax their invoices carry (2026-11-23). */}
+            {(() => {
+              const on = sameState(form);
+              const theirs = gstStateCode(form.gstin);
+              return (
+                <div className="sm:col-span-2 flex flex-wrap items-center gap-3 rounded-xl border border-line bg-surface-2 px-3 py-2.5">
+                  <ReceiptText className="h-5 w-5 shrink-0 text-brand" aria-hidden />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm font-semibold text-ink">Same state as us</div>
+                    <div className="text-xs text-muted">
+                      {on ? <><b className="text-ink">CGST + SGST</b> apply — the tax is split in half.</>
+                          : <><b className="text-ink">IGST</b> applies — inter-state supply.</>}
+                      {!sameTouched && !(editing && !editing.same_state_inferred) && (
+                        <> {theirs && home?.state_code
+                          ? `Set from their GSTIN (state ${theirs}, ours ${home.state_code}).`
+                          : "No GSTIN to compare yet — IGST until you say otherwise."}</>
+                      )}
+                    </div>
+                  </div>
+                  <button type="button" role="switch" aria-checked={on} aria-label="Same state as us"
+                          onClick={() => { setSameTouched(true); set({ is_same_state: !on }); }}
+                          className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition-colors ${on ? "bg-brand" : "bg-content3"}`}>
+                    <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${on ? "translate-x-6" : "translate-x-1"}`} />
+                  </button>
+                </div>
+              );
+            })()}
+
+            {/* Where we pay them (2026-11-23) — required. */}
+            {(() => {
+              const issues = bankIssues(form);
+              const show = (key: keyof typeof issues, typed?: string | null) =>
+                (showErrors || !!(typed ?? "").trim()) ? issues[key] : null;
+              const bank = bankFromIfsc(form.ifsc_code);
+              return (
+                <section aria-label="Bank details" className="sm:col-span-2 rounded-xl border border-line p-3">
+                  <h3 className="mb-2 flex items-center gap-2 text-sm font-bold text-ink">
+                    <Landmark className="h-4 w-4 text-brand" aria-hidden /> Bank details
+                    <span className="text-xs font-normal text-muted">— where we pay them. Required.</span>
+                    {bankOk(form) && <CheckCircle2 className="ml-auto h-4 w-4 text-ok" aria-label="Bank details complete" />}
+                  </h3>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <Field label="Bank name" error={show("bank_name", form.bank_name) ?? undefined}>
+                      <Input value={form.bank_name ?? ""} maxLength={150} className={PLACEHOLDER}
+                        placeholder={bank ?? "State Bank of India"}
+                        onChange={(e) => set({ bank_name: e.target.value })} />
+                    </Field>
+                    <Field label="IFSC code" error={show("ifsc_code", form.ifsc_code) ?? undefined}
+                           hint={!issues.ifsc_code && bank ? `${bank}` : "11 characters, e.g. SBIN0001234"}>
+                      <Input value={form.ifsc_code ?? ""} maxLength={15} className={`${PLACEHOLDER} font-mono uppercase`}
+                        placeholder="SBIN0001234"
+                        onChange={(e) => {
+                          const ifsc = cleanIfsc(e.target.value);
+                          const guess = bankFromIfsc(ifsc);
+                          // A recognised code fills the bank's name when nobody has typed one.
+                          set({ ifsc_code: ifsc, ...(guess && !(form.bank_name ?? "").trim() ? { bank_name: guess } : {}) });
+                        }} />
+                    </Field>
+                    <Field label="Account number" error={show("bank_account_no", form.bank_account_no) ?? undefined}>
+                      <Input value={form.bank_account_no ?? ""} inputMode="numeric" maxLength={24}
+                        className={`${PLACEHOLDER} font-mono`} placeholder="9 to 18 digits" autoComplete="off"
+                        onChange={(e) => set({ bank_account_no: e.target.value.replace(/[^\d\s-]/g, "") })} />
+                    </Field>
+                    <Field label="Confirm account number" error={show("confirm", bankConfirm) ?? undefined}
+                           hint={!issues.confirm ? "Matches." : "Type it again — one wrong digit pays somebody else."}>
+                      <Input value={bankConfirm} inputMode="numeric" maxLength={24} autoComplete="off"
+                        className={`${PLACEHOLDER} font-mono`} placeholder="Same number again"
+                        onPaste={(e) => e.preventDefault()}
+                        onChange={(e) => setBankConfirm(e.target.value.replace(/[^\d\s-]/g, ""))} />
+                    </Field>
+                  </div>
+                  <p className="mt-2 flex items-center gap-1.5 text-[11px] text-muted">
+                    <Lock className="h-3 w-3" aria-hidden />
+                    The supplier sees these in their portal but cannot change them.
+                  </p>
+                </section>
+              );
+            })()}
 
             {!editing && (
               <div className="sm:col-span-2 rounded-xl border border-line bg-surface-2 p-3">

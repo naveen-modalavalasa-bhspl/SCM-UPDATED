@@ -11,6 +11,7 @@ import { blankLine, LinePicker, type DraftLine } from "../components/LinePicker"
 import {
   blankPOHeader, POHeaderFields, poHeaderPayload, poMissingAddresses, type POHeaderValue,
 } from "../components/POHeaderFields";
+import { PODeliverTo } from "../components/PODeliverTo";
 import type { POCopyTemplate } from "../types";
 import { money } from "./RequisitionListPage";
 import { toPayload } from "@/shared/packing";
@@ -157,7 +158,7 @@ export function POFormPage() {
       poApi.create({
         vendor_id: Number(vendorId),
         expected_date: expectedDate || null,
-        ...poHeaderPayload(header),
+        ...poHeaderPayload(header, { delivery: true }),
         lines: lines
           .filter((line) => line.item_id !== "" && Number(line.quantity) > 0)
           .map((line) => ({
@@ -203,6 +204,19 @@ export function POFormPage() {
     }
     if (totals.discount > totals.sub) {
       setProblem("The discount is more than the order sub-total.");
+      return;
+    }
+    // Where it is delivered: a warehouse and one of its shipping addresses. A copy of
+    // an older order may carry only the text, which the server accepts.
+    if (header.warehouseId === "" || header.warehouseId === undefined) {
+      if (!(copied && header.shipping_address.trim())) {
+        setTriedBooking(true);
+        setProblem("Pick the delivery warehouse and one of its shipping addresses.");
+        return;
+      }
+    } else if (!header.shippingAddressId || !header.shipping_address.trim()) {
+      setTriedBooking(true);
+      setProblem("Choose one of the warehouse's shipping addresses — it is printed on the order.");
       return;
     }
     // BUG_SCM_016 — the server refuses these too; said here first, by name.
@@ -303,6 +317,15 @@ export function POFormPage() {
             showInvalid={triedBooking}
             orderTotal={totals.grand}
             onChange={(patch) => setHeader((current) => ({ ...current, ...patch }))}
+            shippingSlot={
+              <PODeliverTo required showInvalid={triedBooking}
+                value={{
+                  warehouseId: header.warehouseId ?? "", warehouseName: header.warehouseName ?? "",
+                  shippingAddressId: header.shippingAddressId ?? null,
+                  shipping_address: header.shipping_address,
+                }}
+                onChange={(patch) => setHeader((current) => ({ ...current, ...patch }))} />
+            }
           />
         </div>
 

@@ -26,6 +26,7 @@ ladder and enters no workflow; it is an administrator's act, gated by permission
 alone, exactly as the carrier register is.
 """
 import logging
+import re
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -114,7 +115,63 @@ async def _accounts_by_vendor(db: AsyncSession,
     return {row.vendor_id: row for row in rows}
 
 
-def _row(vendor: Vendor, account: VendorUser | None) -> dict:
+# --------------------------------------------------------------------------- #
+#  Bank details (2026-11-23) — required, checked here, masked everywhere but the form
+# --------------------------------------------------------------------------- #
+IFSC_RE = re.compile(r"^[A-Z]{4}0[A-Z0-9]{6}$")
+ACCOUNT_RE = re.compile(r"^\d{9,18}$")
+
+
+def clean_ifsc(value: str | None) -> str:
+    return re.sub(r"\s+", "", (value or "")).upper()
+
+
+def clean_account(value: str | None) -> str:
+    return re.sub(r"[\s-]+", "", (value or ""))
+
+
+def bank_problems(bank_name: str | None, account_no: str | None, ifsc: str | None) -> list[str]:
+    """What is wrong with a supplier's bank details, in words — empty when they are
+    right. Pure, so it is tested."""
+    out = []
+    if not (bank_name or "").strip():
+        out.append("Give the supplier's bank name.")
+    account = clean_account(account_no)
+    if not account:
+        out.append("Give the supplier's bank account number.")
+    elif not ACCOUNT_RE.match(account):
+        out.append("A bank account number is 9 to 18 digits.")
+    code = clean_ifsc(ifsc)
+    if not code:
+        out.append("Give the branch's IFSC code.")
+    elif not IFSC_RE.match(code):
+        out.append("An IFSC code is 11 characters: 4 letters, a 0, then 6 letters or digits (e.g. SBIN0001234).")
+    return out
+
+
+def mask_account(account_no: str | None) -> str | None:
+    """`••••••4321` — enough to recognise the account, never enough to pay into it."""
+    account = clean_account(account_no)
+    if not account:
+        return None
+    return "•" * max(len(account) - 4, 2) + account[-4:]
+
+
+async def _same_state_default(db: AsyncSession, gstin: str | None) -> bool:
+    """What the switch starts as: our GSTIN's state code against theirs. No GSTIN on
+    either side is IGST (OFF) — the rule taxes have always followed here."""
+    from app.modules.procurement import service as svc
+    return svc.tax_region(await svc._company_gstin(db), gstin) == "INTRA"
+
+
+async def tax_home(db: AsyncSession) -> dict:
+    """Our GSTIN and its state code — what a supplier's GSTIN is compared against."""
+    from app.modules.procurement import service as svc
+    gstin = await svc._company_gstin(db)
+    return {"company_gstin": gstin, "state_code": svc._state_code(gstin)}
+
+
+def _row(vendor: Vendor, account: VendorUser | None, *, full_bank: bool = False) -> dict:
     return {
         "id": vendor.id,
         "code": vendor.code,
@@ -127,6 +184,14 @@ def _row(vendor: Vendor, account: VendorUser | None) -> dict:
         "state": vendor.state,
         "gstin": vendor.gstin,
         "payment_terms_days": vendor.payment_terms_days,
+        "bank_name": vendor.bank_name,
+        "ifsc_code": vendor.ifsc_code,
+        "bank_account_masked": mask_account(vendor.bank_account_no),
+        # The whole number only on the single read the edit form makes.
+        "bank_account_no": vendor.bank_account_no if full_bank else None,
+        "has_bank_details": not bank_problems(vendor.bank_name, vendor.bank_account_no,
+                                              vendor.ifsc_code),
+        "is_same_state": vendor.is_same_state,
         "is_active": vendor.is_active,
         "is_approved": vendor.is_approved,
         "is_blacklisted": vendor.is_blacklisted,
@@ -170,7 +235,12 @@ async def list_suppliers(db: AsyncSession, params: PageParams,
 async def get_supplier(db: AsyncSession, vendor_id: int) -> dict:
     vendor = await _supplier(db, vendor_id)
     accounts = await _accounts_by_vendor(db, [vendor.id])
-    return _row(vendor, accounts.get(vendor.id))
+    row = _row(vendor, accounts.get(vendor.id), full_bank=True)
+    # What the switch reads as when nobody has set it — the GSTIN rule's answer.
+    if vendor.is_same_state is None:
+        row["is_same_state"] = await _same_state_default(db, vendor.gstin)
+        row["same_state_inferred"] = True
+    return row
 
 
 async def supplier_summary(db: AsyncSession) -> dict:
@@ -224,6 +294,9 @@ async def create_supplier(db: AsyncSession, data, user) -> dict:
     passwords must not be able to make one quotable by accident. The row is created,
     the login can be issued, and approval stays where it always was.
     """
+    problems = bank_problems(data.bank_name, data.bank_account_no, data.ifsc_code)
+    if problems:
+        raise ValidationError(" ".join(problems))
     code = (data.code or "").strip().upper() or await _next_code(db, data.name)
     clash = (await db.execute(
         select(Vendor).where(func.upper(Vendor.code) == code)
@@ -239,6 +312,10 @@ async def create_supplier(db: AsyncSession, data, user) -> dict:
         address=data.address, city=data.city, state=data.state, pincode=data.pincode,
         gstin=data.gstin, pan=data.pan,
         payment_terms_days=data.payment_terms_days,
+        bank_name=data.bank_name.strip(), bank_account_no=clean_account(data.bank_account_no),
+        ifsc_code=clean_ifsc(data.ifsc_code),
+        is_same_state=(data.is_same_state if data.is_same_state is not None
+                       else await _same_state_default(db, data.gstin)),
         is_approved=False, is_blacklisted=False, is_active=True,
     )
     db.add(vendor)
@@ -269,12 +346,27 @@ async def update_supplier(db: AsyncSession, vendor_id: int, data, user) -> dict:
             setattr(vendor, field, payload[field])
     if not (vendor.name or "").strip():
         raise ValidationError("A supplier needs a name")
+    # Bank details are required of every supplier saved from here on — an older one
+    # missing them is asked for them the first time it is edited.
+    if "bank_name" in payload:
+        vendor.bank_name = (payload["bank_name"] or "").strip() or None
+    if "bank_account_no" in payload:
+        vendor.bank_account_no = clean_account(payload["bank_account_no"]) or None
+    if "ifsc_code" in payload:
+        vendor.ifsc_code = clean_ifsc(payload["ifsc_code"]) or None
+    if "is_same_state" in payload:
+        vendor.is_same_state = payload["is_same_state"]
+    problems = bank_problems(vendor.bank_name, vendor.bank_account_no, vendor.ifsc_code)
+    if problems:
+        raise ValidationError(" ".join(problems))
+    bank_changed = any(k in payload for k in ("bank_name", "bank_account_no", "ifsc_code"))
     await write_audit(db, entity=AUDIT_ENTITY, entity_id=vendor.id,
                       entity_no=vendor.code, action=AuditAction.UPDATE, actor=user,
                       before=before,
                       after={"name": vendor.name, "vendor_type": vendor.vendor_type,
                              "is_active": vendor.is_active},
-                      summary=f"Updated supplier {vendor.name}")
+                      summary=(f"Updated supplier {vendor.name}"
+                               + (" — bank details changed" if bank_changed else "")))
     await db.commit()
     return await get_supplier(db, vendor.id)
 

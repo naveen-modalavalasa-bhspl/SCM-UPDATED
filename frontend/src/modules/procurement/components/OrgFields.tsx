@@ -202,14 +202,14 @@ export function OrgFields({
             the document. The LABEL is all that changed — `warehouseId` on the wire and
             `warehouse_id` in the database are untouched, so nothing already reading
             either has to know. */}
-        <Field label="Shipment Address" hint="Warehouses only — not LIP or MDP field points.">
+        <Field label="Delivery warehouse" hint="Warehouses only — its shipping addresses are offered below.">
           <ItemCombobox
             value={value.warehouseId}
             options={warehouseOptions}
             isLoading={loadingWarehouses}
             onQueryChange={setWarehouseQuery}
             onChange={(v) => onChange({ warehouseId: v })}
-            placeholder="Search shipment addresses…"
+            placeholder="Search warehouses…"
           />
         </Field>
 
