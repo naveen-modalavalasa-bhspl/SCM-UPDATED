@@ -96,3 +96,85 @@ export function reasonRowsFrom(
   }
   return [newReasonRow(total > 0 ? String(total) : "")];
 }
+
+/* --- Per item (SCM_0129, 2026-11-13) ---------------------------------------------------
+ *
+ * The reasons moved onto each ITEM: "Damaged 3, Expired 2" on the line of 5 handsets,
+ * "Damaged 4" on the line of chargers — so the decision desk knows which item was
+ * damaged and which expired. Each line's rows add up to that line's quantity; the whole
+ * return's figure is ADDED UP from the lines and never typed. The server checks the same
+ * per item (`service._assert_item_reasons`).
+ */
+
+/** A saved reason row, as the server serves it. */
+export interface SavedReasonRow {
+  reason: string;
+  reason_label?: string | null;
+  quantity: string | number;
+  note?: string | null;
+  item_id?: number | null;
+}
+
+/** The whole return's reasons, added up over its items: one entry per reason, most
+ *  units first. What the desks see. */
+export function summariseReasons(
+  rows: { reason: string; quantity: string | number }[],
+  labelOf: (reason: string) => string = (reason) => reason,
+): { reason: string; label: string; quantity: number }[] {
+  const totals = new Map<string, number>();
+  for (const row of rows) {
+    const qty = positive(String(row.quantity));
+    if (!row.reason || qty <= 0) continue;
+    totals.set(row.reason, round3((totals.get(row.reason) ?? 0) + qty));
+  }
+  return [...totals.entries()]
+    .map(([reason, quantity]) => ({ reason, label: labelOf(reason), quantity }))
+    .sort((a, b) => b.quantity - a.quantity);
+}
+
+/** A saved return's reasons, as the lines will hold them.
+ *
+ *  - given per item: each item's rows go on its line (the first line of that item);
+ *  - one reason for the whole return (every return before reason rows, and most after):
+ *    it is true of every unit, so every line opens with it;
+ *  - several reasons for the whole return over ONE line: they are that line's;
+ *  - several over several lines: nobody said which unit was which, so the lines open
+ *    blank and the old split is handed back as `legacy`, to be shown, not guessed at.
+ */
+export function lineReasonsFrom(
+  saved: SavedReasonRow[] | undefined,
+  reason: string | null | undefined,
+  reasonNote: string | null | undefined,
+  lines: { item_id: number; quantity: string | number }[],
+): { perLine: ReasonRow[][]; legacy: SavedReasonRow[] } {
+  const rows = saved ?? [];
+  const blank = () => lines.map((line) => [newReasonRow(String(line.quantity ?? ""))]);
+  const toRows = (list: SavedReasonRow[]) => list.map((row) => ({
+    ...newReasonRow(String(row.quantity)), reason: row.reason, note: row.note ?? "",
+  }));
+  if (rows.some((row) => row.item_id)) {
+    const claimed = new Set<number>();
+    return {
+      perLine: lines.map((line) => {
+        if (claimed.has(line.item_id)) return [newReasonRow(String(line.quantity ?? ""))];
+        claimed.add(line.item_id);
+        const own = rows.filter((row) => row.item_id === line.item_id);
+        return own.length ? toRows(own) : [newReasonRow(String(line.quantity ?? ""))];
+      }),
+      legacy: [],
+    };
+  }
+  const single = rows.length === 1 ? rows[0] : rows.length === 0 && reason
+    ? { reason, quantity: 0, note: reasonNote } : null;
+  if (single) {
+    return {
+      perLine: lines.map((line) => [{
+        ...newReasonRow(String(line.quantity ?? "")),
+        reason: single.reason, note: single.note ?? "",
+      }]),
+      legacy: [],
+    };
+  }
+  if (rows.length > 1 && lines.length === 1) return { perLine: [toRows(rows)], legacy: [] };
+  return { perLine: blank(), legacy: rows };
+}

@@ -174,7 +174,7 @@ export function RequisitionListPage() {
           columns={columns}
           keyOf={(r) => r.id}
           loading={isLoading}
-          onRowClick={(r) => nav(`/procurement/requisitions/${r.id}`)}
+          onRowClick={(r) => nav(r.status === "DRAFT" ? `/procurement/requisitions/${r.id}/edit` : `/procurement/requisitions/${r.id}`)}
           page={page}
           totalPages={totalPages}
           onPageChange={setPage}
@@ -186,7 +186,10 @@ export function RequisitionListPage() {
                 : "No requisitions yet. Raise one to start the buying chain."
           }
           renderCard={(r) => (
-            <div className="space-y-1.5">
+            <div
+              className="space-y-1.5 cursor-pointer"
+              onClick={() => nav(r.status === "DRAFT" ? `/procurement/requisitions/${r.id}/edit` : `/procurement/requisitions/${r.id}`)}
+            >
               <div className="flex items-start justify-between gap-2">
                 <span className="font-mono text-xs font-semibold text-ink">{r.req_no}</span>
                 <StatusPill status={r.status} />

@@ -1056,10 +1056,26 @@ class DispatchReceiptSource(BaseModel):
 # ---------------------------------------------------------------------------
 
 class InspectionParameter(BaseModel):
+    """One reading on an inspection line, stored in the line's `parameters` JSON.
+
+    `scope` says which side of the split the reading was taken on — the goods kept or
+    the goods turned away — and `unit_code` names the individual unit (serial, IMEI,
+    asset/consumable code, box) a serial-tracked line's reading is about. Both are
+    blank on rows written before they existed: those render as line-level readings.
+    """
     name: str
     expected: str | None = None
     observed: str | None = None
     result: str | None = None
+    scope: str | None = None
+    unit_code: str | None = None
+    qty: float | None = None
+
+    @model_validator(mode="after")
+    def _shape(self):
+        if self.scope is not None and self.scope not in ("ACCEPTED", "REJECTED"):
+            raise ValueError("reading scope must be ACCEPTED or REJECTED")
+        return self
 
 
 class InspectionItemWrite(BaseModel):
@@ -1069,6 +1085,10 @@ class InspectionItemWrite(BaseModel):
     batch_no: str | None = None
     inspected_qty: Decimal = Decimal("0")
     accepted_qty: Decimal = Decimal("0")
+    #: How much was rejected (2026-11-13, SCM_0124). Sent, it lets a line be saved
+    #: still being judged — accepted + rejected below inspected stays Pending
+    #: (`service.qc_split`). Left out, the rest of the line is rejected, as before.
+    rejected_qty: Decimal = Decimal("0")
     parameters: Annotated[list[InspectionParameter], ConfigEntries] | None = None
     result: InspectionResult = InspectionResult.PENDING
     defect_type: str | None = None
@@ -1169,6 +1189,8 @@ class OutboundInspectionItemWrite(BaseModel):
     batch_no: str | None = None
     inspected_qty: Decimal = Decimal("0")
     accepted_qty: Decimal = Decimal("0")
+    #: See `InspectionItemWrite.rejected_qty` (SCM_0124).
+    rejected_qty: Decimal = Decimal("0")
     parameters: Annotated[list[InspectionParameter], ConfigEntries] | None = None
     result: InspectionResult = InspectionResult.PENDING
     defect_type: str | None = None
@@ -1254,6 +1276,51 @@ class OutboundInspectionDetail(OutboundInspectionRead):
     items: list[OutboundInspectionItemRead] = []
     # Its issue executes a stock transfer, so it is worked on Inventory > Stock Transfer.
     is_stock_transfer: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Rejected stock (what QC turned away, and what became of it)
+# ---------------------------------------------------------------------------
+
+class RejectionOutcomeRead(_Read):
+    id: int
+    inspection_id: int
+    inspection_item_id: int
+    inspection_no: str | None = None
+    direction: str
+    issue_id: int | None = None
+    receipt_id: int | None = None
+    warehouse_id: int | None = None
+    warehouse_name: str | None = None
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    batch_no: str | None = None
+    rejected_qty: Decimal
+    rejection_reason: str | None = None
+    unit_codes: list[dict] | None = None
+    outcome: str
+    outcome_by_name: str | None = None
+    outcome_at: datetime | None = None
+    outcome_remarks: str | None = None
+    outcome_doc_no: str | None = None
+    created_at: datetime | None = None
+
+
+class RejectionDecisionIn(BaseModel):
+    action: str
+    remarks: str | None = None
+    #: The document that carried the decision out — purchase return, replacement GRN.
+    doc_no: str | None = None
+
+
+class RejectionSummary(BaseModel):
+    """Counts and quantities by outcome, for the register's KPI tiles. Bounded: one
+    GROUP BY over the rows in scope, never a page of rows counted in Python."""
+    by_outcome: dict[str, int] = {}
+    qty_by_outcome: dict[str, float] = {}
+    total_qty: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -2652,7 +2719,7 @@ class ReturnItemWrite(BaseModel):
     returnable_qty: Decimal | None = None
 
 
-class ReturnWrite(BaseModel):
+class ReturnWrite(OrgScopeIn):
     return_date: date
     po_id: int | None = None
     grn_id: int | None = None
@@ -2710,7 +2777,10 @@ class ReturnItemRead(CombinationOut, _Read):
     returnable_qty: Decimal | None = None
 
 
-class ReturnRead(_Read):
+class ReturnRead(OrgScopeOut, _Read):
+    #: The project its number is drawn under (2026-11-12).
+    project_id: int | None = None
+    project_name: str | None = None
     id: int
     return_no: str
     return_date: date
@@ -3132,6 +3202,15 @@ class PurchaseReturnSourceDetail(BaseModel):
     total_original_qty: Decimal = Decimal("0")
     total_previously_returned: Decimal = Decimal("0")
     total_returnable_qty: Decimal = Decimal("0")
+    # The source's organisation and project (2026-11-12), copied onto the return and
+    # shown locked on its number card. All null off an older GRN / PO.
+    organization_id: int | None = None
+    organization_code: str | None = None
+    organization_name: str | None = None
+    org_department_id: int | None = None
+    org_department_name: str | None = None
+    project_id: int | None = None
+    project_name: str | None = None
 
 
 #: How a purchase return physically travels back to the supplier, in the order the
@@ -4365,6 +4444,9 @@ class IssueDispatchSource(BaseModel):
     issue_no: str
     issue_nos: list[str] = []
     warehouse_id: int
+    #: The origin's name, served with it (SCM_0132): "From warehouse" used to look it up
+    #: in a warehouse list the logistics desk is not allowed to read, and stayed "—".
+    warehouse_name: str | None = None
     project_id: int | None = None
     destination_office_id: int | None = None
     destination_office_name: str | None = None

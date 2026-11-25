@@ -1,7 +1,9 @@
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { FileText } from "lucide-react";
-import { StatusPill, type Column } from "@/shared/components";
+import { StatusPill, SubNav, type Column } from "@/shared/components";
 import { DocumentList } from "../components/DocumentList";
+import { RejectedQuantitiesTab } from "../components/RejectedQuantitiesTab";
 import { listInspections, listOutboundInspections, deleteInspection, deleteOutboundInspection, DRAFT_DELETE_PERMISSION } from "../api";
 import { fmtDate } from "../format";
 import type { Inspection } from "../types";
@@ -39,6 +41,10 @@ export default function QualityInspection({
   basePath?: string;
 }) {
   const nav = useNavigate();
+  // SCM_0167: the register has two views. "Inspections" is every sheet; "Rejected
+  // quantities" is the rejection register — only inspections that rejected something,
+  // with the rejected quantity, the reason and (Phase 3) the outcome trail.
+  const [tab, setTab] = useState<"inspections" | "rejected">("inspections");
 
   const columns: Column<Inspection>[] = [
     {
@@ -94,8 +100,35 @@ export default function QualityInspection({
     },
   ];
 
+  if (tab === "rejected") {
+    return (
+      <div className="space-y-4">
+        <SubNav
+          label={title}
+          value={tab}
+          onChange={(k) => setTab(k as typeof tab)}
+          items={[
+            { key: "inspections", label: "Inspections" },
+            { key: "rejected", label: "Rejected quantities" },
+          ]}
+        />
+        <RejectedQuantitiesTab type={type} stockTransfer={stockTransfer} basePath={basePath} />
+      </div>
+    );
+  }
+
   return (
-    <DocumentList<Inspection>
+    <div className="space-y-4">
+      <SubNav
+        label={title}
+        value={tab}
+        onChange={(k) => setTab(k as typeof tab)}
+        items={[
+          { key: "inspections", label: "Inspections" },
+          { key: "rejected", label: "Rejected quantities" },
+        ]}
+      />
+      <DocumentList<Inspection>
       title={title}
       queryKey={`wh-inspections-${type}-${stockTransfer ?? "all"}`}
       fetch={(p) => type === "OUTGOING"
@@ -160,6 +193,7 @@ export default function QualityInspection({
           <QcRowResult summary={summaryFromRow(r)} />
         </div>
       )}
-    />
+      />
+    </div>
   );
 }

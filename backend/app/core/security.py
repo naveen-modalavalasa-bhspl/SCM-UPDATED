@@ -18,6 +18,15 @@ calling an awaitable and never awaiting it writes a coroutine object into
 import asyncio
 from datetime import datetime, timedelta, timezone
 
+import bcrypt
+
+# Compatibility patch for passlib with bcrypt >= 4.0.0.
+# passlib 1.7.4 reads `bcrypt.__about__.__version__`, which bcrypt 4.0.0 removed.
+if not hasattr(bcrypt, "__about__"):
+    class _About:
+        __version__ = getattr(bcrypt, "__version__", "4.0.0")
+    bcrypt.__about__ = _About()
+
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 

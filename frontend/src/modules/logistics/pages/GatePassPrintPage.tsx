@@ -1,6 +1,7 @@
 import { useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { PrintTemplate, type PrintColumn, type PrintField } from "@/shared/components";
+import { cartonCountLabel, cartonsOf, passPackageTotal } from "../components/gatePassPackages";
 import { fmtDate } from "@/shared/datetime";
 import { displayUom } from "@/modules/indents/displayFormat";
 import { transportApi } from "../api";
@@ -70,22 +71,42 @@ export function GatePassPrintPage() {
   const hasWeight = (Number(doc.total_weight_kg) > 0)
     || items.some((line) => line.weight_kg != null && Number(line.weight_kg) > 0);
 
+  // Columns add up to 100% so the sheet never runs off the page edge, and Packages is
+  // wide enough for the carton numbers it now prints (SCM_0130).
   const columns: PrintColumn[] = hasWeight
     ? [
-        { header: "Item", width: "38%" },
-        { header: "UOM", width: "8%" },
-        { header: "Qty", align: "right", width: "11%" },
-        { header: "Packages", align: "right", width: "11%" },
-        { header: "Weight (kg)", align: "right", width: "12%" },
-        { header: "Remarks", width: "15%" },
+        { header: "Item", width: "34%" },
+        { header: "UOM", width: "7%" },
+        { header: "Qty", align: "right", width: "9%" },
+        { header: "Packages", width: "22%" },
+        { header: "Weight (kg)", align: "right", width: "11%" },
+        { header: "Remarks", width: "17%" },
       ]
     : [
-        { header: "Item", width: "44%" },
-        { header: "UOM", width: "9%" },
-        { header: "Qty", align: "right", width: "13%" },
-        { header: "Packages", align: "right", width: "13%" },
-        { header: "Remarks", width: "16%" },
+        { header: "Item", width: "38%" },
+        { header: "UOM", width: "8%" },
+        { header: "Qty", align: "right", width: "10%" },
+        { header: "Packages", width: "24%" },
+        { header: "Remarks", width: "20%" },
       ];
+
+  /** Which cartons this item went in — the consignment's own record (SCM_0130). A line
+   *  with no consignment behind it keeps its typed package count. */
+  const packagesCell = (line: (typeof items)[number]) => {
+    const cartons = cartonsOf(line.package_quantities);
+    if (!cartons.length) return line.package_count;
+    return (
+      <span className="block break-words">
+        <span className="font-semibold" style={{ color: "#141a2a" }}>{cartonCountLabel(cartons)}</span>
+        <span className="block font-mono text-[8.5px]" style={{ color: "#697187" }}>
+          {cartons.join(", ")}
+        </span>
+      </span>
+    );
+  };
+  const totalPackages = passPackageTotal(doc);
+  const totalLabel = doc.consignment_package_total
+    ? `${totalPackages} carton${totalPackages === 1 ? "" : "s"}` : totalPackages;
 
   const receivedByDisplay = doc.received_by_name?.trim()
     || (["PENDING_APPROVAL", "DRAFT", "READY", "IN_TRANSIT", "QUOTING", "AWAITING_CARRIER"].includes(doc.status)
@@ -146,7 +167,7 @@ export function GatePassPrintPage() {
       items={items.map((line) => {
         const itemCell = (
           <>
-            <span className="font-semibold" style={{ color: "#141a2a" }}>{dash(line.item_name)}</span>
+            <span className="font-semibold break-words" style={{ color: "#141a2a" }}>{dash(line.item_name)}</span>
             {line.item_code && (
               <span className="ml-1 font-mono text-[8.5px]" style={{ color: "#697187" }}>{line.item_code}</span>
             )}
@@ -160,7 +181,7 @@ export function GatePassPrintPage() {
               itemCell,
               displayUom(line.uom_code),
               line.quantity,
-              line.package_count,
+              packagesCell(line),
               line.weight_kg != null && Number(line.weight_kg) > 0 ? line.weight_kg : "—",
               dash(line.remarks),
             ]
@@ -168,7 +189,7 @@ export function GatePassPrintPage() {
               itemCell,
               displayUom(line.uom_code),
               line.quantity,
-              line.package_count,
+              packagesCell(line),
               dash(line.remarks),
             ];
       })}
@@ -176,18 +197,18 @@ export function GatePassPrintPage() {
         hasWeight
           ? [
               `${doc.total_items} item${doc.total_items === 1 ? "" : "s"}`,
-              "", doc.total_qty, doc.total_packages, doc.total_weight_kg, "",
+              "", doc.total_qty, totalLabel, doc.total_weight_kg, "",
             ]
           : [
               `${doc.total_items} item${doc.total_items === 1 ? "" : "s"}`,
-              "", doc.total_qty, doc.total_packages, "",
+              "", doc.total_qty, totalLabel, "",
             ]
       }
       remarks={doc.remarks}
       /* Three hands touch the load on the way out, and the pass is the only place all
          three sign. Printed as empty boxes on purpose — they are signed on paper. */
       signatures={["Dispatched by", "Security / gate", "Received by"]}
-      footerNote="Valid for this one movement only. The gate must check the package count on this pass against the load before the vehicle leaves; the live record of this shipment is the one held in the system."
+      footerNote="Valid for this one movement only. The gate must count the cartons on this pass against the load before the vehicle leaves; the live record of this shipment is the one held in the system."
     />
   );
 }

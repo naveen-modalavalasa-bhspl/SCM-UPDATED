@@ -1026,6 +1026,10 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   // an indent / STR / STO issue hides them: a direct issue names its own destination
   // and already says "None" for a point without them.
   const hideVehicleSac = needsVehicleSac === false;
+  /** The number card is on screen — then IT asks for project / department, and the
+   *  form's own two boxes stay off (2026-11-13). */
+  const numberCardShown = direction === "OUT" && !olderScope
+    && (!!linkedScope || !form.indent_id);
   const scopeLocks: DocNumberLocks = locked ? { all: true }
     : linkedScope ? { organisation: true, project: true, department: true } : {};
   // The issue executes a Stock Transfer Order whose destination is a real point: the
@@ -1699,7 +1703,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         </MetaCard>
       )}
 
-      {direction === "OUT" && !olderScope && (linkedScope || !form.indent_id) && (
+      {numberCardShown && (
         <div className="mb-5">
           <DocumentNumberCard
             docType="WH_ISSUE" value={scope} exclusive
@@ -1829,6 +1833,12 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                                                : "Pick warehouse first"} />
           </Field>
           )}
+          {/* Project and department live on the number card above (2026-11-13) — asked
+              ONCE. The HCM department this box used to ask for is not shown at all: it
+              is filled from the indent / STR / STO, and the organisation's own
+              departments are picked on the card. Kept only where there is no card — an
+              inward return, or an issue older than organisations. */}
+          {!numberCardShown && (<>
           <Field label="Department">
             <Lookup name="departments" load={departmentOptions} value={form.department_id ?? ""}
                     isDisabled={locked}
@@ -1851,6 +1861,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                       setProjectName(option?.name ?? null);
                     }} placeholder="Project" />
           </Field>
+          </>)}
           {direct && stoIssue ? (
             <>
               <div className="sm:col-span-2">

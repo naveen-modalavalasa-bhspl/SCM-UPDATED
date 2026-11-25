@@ -4,8 +4,8 @@ import { ArrowDown, Check, Lock, ShieldAlert, ShoppingCart } from "lucide-react"
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  PageHeader, Button, Card, Field, Input, QuantityChanges, ResponsiveList, StatusPill,
-  useToast, type Column,
+  PageHeader, Button, Card, DocumentScopeStrip, Field, Input, QuantityChanges, ResponsiveList,
+  StatusPill, useToast, type Column,
 } from "@/shared/components";
 import {
   approveMaterialRequest, getMaterialRequest, materialRequestQuantityChanges,
@@ -358,6 +358,10 @@ export function MaterialRequestDetailPage() {
           : <StatusPill status={data.status} />}
       />
 
+      {/* Whose paper it is on (2026-11-12) — read-only; says nothing on an older
+          request raised before organisations, or one raised automatically. */}
+      <DocumentScopeStrip doc={data} number={data.mr_no} className="mb-4" />
+
       <Card className="mb-4 p-4">
         <dl className="grid gap-3 text-sm sm:grid-cols-3">
           <div>
@@ -374,7 +378,11 @@ export function MaterialRequestDetailPage() {
           </div>
           <div>
             <dt className="text-muted">With</dt>
-            <dd className="text-ink">{data.current_approver_name ?? "—"}</dd>
+            {/* SCM_0155: where the request is now, for every status (served). */}
+            <dd className="text-ink">
+              {data.with_text ?? data.current_approver_name ?? "—"}
+              {data.with_note && <span className="block text-xs text-muted">{data.with_note}</span>}
+            </dd>
           </div>
         </dl>
         {data.remarks && <p className="mt-3 text-sm text-muted">{data.remarks}</p>}

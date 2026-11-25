@@ -88,6 +88,26 @@ async def ladder(db: AsyncSession, item_id: int,
         for row in found:
             if row.hierarchy_id == int(hierarchy_id):
                 return row
+        # A hierarchy that was retired in master data after an order or despatch note
+        # was already raised still describes goods that physically arrived in that packing.
+        # Fall back to reading the retired hierarchy if it belongs to this item.
+        h = await db.scalar(
+            select(PackHierarchy).where(
+                PackHierarchy.id == int(hierarchy_id),
+                PackHierarchy.item_id == int(item_id),
+            )
+        )
+        if h is not None:
+            uom = await db.scalar(select(Item.uom_code).where(Item.id == item_id))
+            rungs = (await db.execute(
+                select(ItemPackaging)
+                .where(ItemPackaging.hierarchy_id == h.id)
+                .order_by(ItemPackaging.level)
+            )).scalars().all()
+            return packing.build_ladder(
+                hierarchy_id=h.id, hierarchy_name=h.name,
+                base_uom=uom, rungs=rungs
+            )
         raise ValidationError(
             "That pack hierarchy does not belong to this item (or is no longer "
             "active). Pick one of the item's own hierarchies.")

@@ -383,3 +383,30 @@ def args_of(values: dict) -> dict:
     document."""
     from types import SimpleNamespace
     return number_args(SimpleNamespace(department_name=None, **values))
+
+
+async def carry_or_select(db: AsyncSession, data, source=None) -> tuple[dict | None, dict | None]:
+    """Whose paper a document is on when it MAY have a document before it (2026-11-12) —
+    a purchase return off a GRN / PO, an indent return off its indent, a transport
+    request off its indent, a vendor payment off its PO. Returns (values to stamp with
+    `stamp_with_project`, `next_number` arguments), or (None, None) for the old numbering.
+
+    - A source that carries an organisation: COPIED from it — organisation, department,
+      project — and fixed. The year is this document's own (picked, else today's),
+      never the source's, which may be last year's.
+    - Otherwise (no source, or an older one): what the number card SELECTED. A request
+      that names no organisation is a caller with no card — an automatic path, an older
+      client — and keeps the numbering it always had rather than being refused.
+    """
+    if source is not None and uses_org(source):
+        values = {field: getattr(source, field, None) for field in SCOPE_FIELDS}
+        values["fiscal_year"] = assert_fiscal_year(getattr(data, "fiscal_year", None))
+        values["project_id"] = getattr(source, "project_id", None)
+        values["project_name"] = getattr(source, "project_name", None)
+        args = number_args(source, carried=True)
+        args["fiscal_year"] = values["fiscal_year"]
+        return values, args
+    if not getattr(data, "organization_id", None):
+        return None, None
+    values = await resolve_free(db, data)
+    return (values, args_of(values)) if values else (None, None)

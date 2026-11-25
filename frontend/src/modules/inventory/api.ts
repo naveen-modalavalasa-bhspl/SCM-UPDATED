@@ -457,6 +457,12 @@ export interface MaterialRequestCreate {
   priority?: string | null;
   required_by?: string | null;
   remarks?: string | null;
+  /** The number card's selection (2026-11-12) — `docNumberPayload`. Left out by the
+   *  allocation screen's Raise MR, which numbers under the indent's project. */
+  organization_id?: number | null;
+  project_id?: number | null;
+  org_department_id?: number | null;
+  fiscal_year?: string | null;
 }
 
 /** Raise a request by hand. `indent_id` set when the allocation screen raised it for a

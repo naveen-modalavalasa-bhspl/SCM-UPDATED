@@ -145,7 +145,22 @@ export function textAllowed(text: string, rule: GuardRule): boolean {
   if (t === "") return true;
   const sign = rule.negative ? "-?" : "";
   const frac = rule.decimals === 0 ? "" : rule.decimals === null ? "(\\.\\d*)?" : `(\\.\\d{0,${rule.decimals}})?`;
-  return new RegExp(`^${sign}\\d*${frac}$`).test(t) && /\d/.test(t);
+  // `\d+`, not `\d*` (SCM_0156): a digit comes before any point — ".5" is not a
+  // quantity anybody writes down, and "0.5" is.
+  return new RegExp(`^${sign}\\d+${frac}$`).test(t);
+}
+
+/** SCM_0156: would this point land with no digit before it? For a text box the caret
+ *  says where it lands; a number box hides its caret and reports "" both when empty
+ *  and while holding a lone "-", so there the empty value is the test. */
+export function leadingPoint(el: HTMLInputElement, insert: string): boolean {
+  if (!insert.startsWith(".")) return false;
+  // `QuantityInput` turns it into "0." itself; refusing it here, in the capture phase,
+  // would swallow the key before that box ever saw it.
+  if (el.dataset.leadingZero === "auto") return false;
+  if (el.type === "number") return el.value === "";
+  const before = el.value.slice(0, el.selectionStart ?? el.value.length);
+  return before === "" || before === "-";
 }
 
 /** For a text-type box the caret is known: refuse a digit past the allowed decimals. */
@@ -154,7 +169,9 @@ function exceedsDecimals(el: HTMLInputElement, insert: string, rule: GuardRule):
   const start = el.selectionStart ?? el.value.length;
   const end = el.selectionEnd ?? start;
   const next = el.value.slice(0, start) + insert + el.value.slice(end);
-  return !textAllowed(next, rule);
+  // A box that writes the leading zero itself is judged on what it will write.
+  const judged = el.dataset.leadingZero === "auto" && next.startsWith(".") ? `0${next}` : next;
+  return !textAllowed(judged, rule);
 }
 
 let installed = false;
@@ -172,7 +189,8 @@ export function installNumberGuard(doc: Document = document): void {
     if (!isNumericBox(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.key.length !== 1) return; // Backspace, arrows, Tab, Enter …
     const rule = ruleFor(e.target);
-    if (!charAllowed(e.key, rule) || exceedsDecimals(e.target, e.key, rule)) e.preventDefault();
+    if (!charAllowed(e.key, rule) || exceedsDecimals(e.target, e.key, rule)
+        || leadingPoint(e.target, e.key)) e.preventDefault();
   }, true);
 
   // Mobile keyboards often send "Unidentified" keydowns; the text arrives here.
@@ -180,7 +198,8 @@ export function installNumberGuard(doc: Document = document): void {
     const ev = e as InputEvent;
     if (!isNumericBox(ev.target) || ev.inputType !== "insertText" || !ev.data) return;
     const rule = ruleFor(ev.target);
-    if ([...ev.data].some((ch) => !charAllowed(ch, rule)) || exceedsDecimals(ev.target, ev.data, rule)) {
+    if ([...ev.data].some((ch) => !charAllowed(ch, rule)) || exceedsDecimals(ev.target, ev.data, rule)
+        || leadingPoint(ev.target, ev.data)) {
       ev.preventDefault();
     }
   }, true);

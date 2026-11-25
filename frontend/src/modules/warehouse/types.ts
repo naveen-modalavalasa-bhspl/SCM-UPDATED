@@ -1,3 +1,4 @@
+import type { ScopedDoc } from "@/shared/useDocNumberScope";
 import type { CombinationValue } from "@/shared/combination";
 /**
  * Warehouse module types.
@@ -974,6 +975,66 @@ export interface OutboundInspectionWrite {
   remarks?: string | null;
   items: OutboundInspectionItemWrite[];
 }
+
+// ---------------------------------------------------------------------------
+// Rejection register (SCM_REJ) — what every QC door turned away, and where it went
+// ---------------------------------------------------------------------------
+
+/** One named unit a rejection turned away. `kind` says which identifier it is. */
+export interface RejectionUnitCode {
+  code: string;
+  kind: "serial" | "imei" | "asset" | "consumable" | "unit" | "box";
+  /** Boxes name the qty rejected out of them; whole units carry none. */
+  qty?: number;
+}
+
+export type RejectionOutcomeState =
+  | "PENDING" | "DISPOSED" | "RETURNED_TO_VENDOR" | "RETURNED_TO_STOCK" | "REPLACED";
+
+export type RejectionDirection = "INWARD" | "OUTWARD" | "STOCK_TRANSFER";
+
+/** One row of `whs_rejection_outcomes` — a single rejected inspection LINE, with
+ *  its snapshot of the line and the outcome a decision later wrote on it. */
+export interface RejectionOutcome {
+  id: number;
+  inspection_id: number;
+  inspection_item_id: number;
+  inspection_no: string | null;
+  direction: RejectionDirection;
+  issue_id?: number | null;
+  receipt_id?: number | null;
+  warehouse_id?: number | null;
+  warehouse_name?: string | null;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  batch_no?: string | null;
+  rejected_qty: number | string;
+  rejection_reason?: string | null;
+  unit_codes?: RejectionUnitCode[] | null;
+  outcome: RejectionOutcomeState;
+  outcome_by_name?: string | null;
+  outcome_at?: string | null;
+  outcome_remarks?: string | null;
+  outcome_doc_no?: string | null;
+  created_at?: string | null;
+}
+
+/** The KPI summary of the register — counts and quantities by outcome. */
+export interface RejectionSummary {
+  by_outcome: Record<string, number>;
+  qty_by_outcome: Record<string, number>;
+  total_qty: number;
+}
+
+/** The body of a POST /rejection-outcomes/{id}/decide — a terminal decision. */
+export interface RejectionDecision {
+  action: Exclude<RejectionOutcomeState, "PENDING">;
+  remarks?: string | null;
+  doc_no?: string | null;
+}
+
 
 /** `whs_warehouse_items` — one putaway task per received line. */
 export interface Putaway extends CombinationValue {
@@ -2040,6 +2101,8 @@ export interface IssueDispatchSource {
   issue_no: string;
   issue_nos?: string[];
   warehouse_id: number;
+  /** The origin's name, served with it (SCM_0132). */
+  warehouse_name?: string | null;
   project_id?: number | null;
   destination_office_id?: number | null;
   destination_office_name?: string | null;
@@ -2124,7 +2187,7 @@ export interface AcknowledgeWrite {
 /* ------------------------------------------------------- purchase returns -- */
 
 /** `pro_returns`. Enriched with auto-fetched vendor snapshot — never typed. */
-export interface PurchaseReturn {
+export interface PurchaseReturn extends ScopedDoc {
   id: number;
   return_no: string;
   return_date: string;
@@ -2555,6 +2618,11 @@ export interface PurchaseReturnWrite {
   vendor_state?: string | null;
   vendor_pincode?: string | null;
   vendor_gstin?: string | null;
+  /** The number card's selection (2026-11-12) — `docNumberPayload`. */
+  organization_id?: number | null;
+  project_id?: number | null;
+  org_department_id?: number | null;
+  fiscal_year?: string | null;
 }
 
 /** Return reasons — served, never hard-coded. */
@@ -2648,7 +2716,7 @@ export interface PurchaseReturnSourceLookup {
   message?: string | null;
 }
 
-export interface PurchaseReturnSourceDetail {
+export interface PurchaseReturnSourceDetail extends ScopedDoc {
   source_type: string;
   source_id: number;
   source_no: string;

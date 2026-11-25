@@ -1,4 +1,4 @@
-import { useState, type KeyboardEvent, type WheelEvent } from "react";
+import { useState, type KeyboardEvent, type ReactNode, type WheelEvent } from "react";
 import { PackageSearch, Plus, Trash2 } from "lucide-react";
 import { Field, Input, Select } from "@/shared/components";
 import { ItemCombobox } from "@/modules/indents/components/ItemCombobox";
@@ -77,6 +77,7 @@ export function ReturnLinesEditor({
   stock,
   disabled = false,
   lockedNote = null,
+  renderBelow,
 }: {
   lines: ReturnLineWrite[];
   onChange: (lines: ReturnLineWrite[]) => void;
@@ -92,6 +93,10 @@ export function ReturnLinesEditor({
    * below) rather than beneath a greyed-out copy of them.
    */
   lockedNote?: string | null;
+  /** Drawn under a line, across its full width — the line's reasons (SCM_0129). Given
+   *  the line's holding so it can speak in the shelf's own unit. */
+  renderBelow?: (line: ReturnLineWrite, index: number,
+                 holding: ReturnType<typeof holdingFor>) => ReactNode;
 }) {
   // Loads the per-UOM decimals table once and re-renders when it lands (isWholeUnit).
   useUomDecimals(stock[0]?.uom_code ?? null);
@@ -175,7 +180,7 @@ export function ReturnLinesEditor({
         * 1fr / 120px / 44px columns, the same 44px delete target at the end. The labels
         * moved off a separate uppercase header strip and onto the fields themselves, which
         * is where the indent puts them — the words are unchanged. */}
-      <ul className="space-y-3">
+      <ul className={renderBelow ? "space-y-4" : "space-y-3"}>
         {lines.map((line, index) => {
           const holding = line.item_id ? holdingFor(stock, line.item_id, line) : null;
           const combos = line.item_id ? combosOf(line.item_id) : [];
@@ -188,7 +193,12 @@ export function ReturnLinesEditor({
           const fractional = whole && Number.isFinite(wanted) && !Number.isInteger(wanted);
 
           return (
-            <li key={index} className="grid gap-3 sm:grid-cols-[1fr_120px_44px]">
+            <li
+              key={index}
+              className={`grid gap-3 sm:grid-cols-[1fr_120px_44px] ${
+                renderBelow ? "border-b border-line pb-4 last:border-0 last:pb-0" : ""
+              }`}
+            >
               <div>
                 <Field label={index === 0 ? "Item" : ""}>
                   <ItemCombobox
@@ -333,6 +343,9 @@ export function ReturnLinesEditor({
                 >
                   <Trash2 className="h-4 w-4" />
                 </button>
+              )}
+              {renderBelow && line.item_id > 0 && (
+                <div className="sm:col-span-3">{renderBelow(line, index, holding)}</div>
               )}
             </li>
           );

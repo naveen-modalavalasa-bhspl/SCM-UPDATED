@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/react";
-import { Button, Field, Input, Select, Textarea, errorMessage } from "@/shared/components";
+import { Button, DocumentNumberCard, Field, Input, Select, Textarea, errorMessage } from "@/shared/components";
+import { useDocNumberScope, type ScopedDoc } from "@/shared/useDocNumberScope";
 import { todayISO } from "../paymentRules";
 import type { FiledDocument, Milestone, PaymentInput } from "../types";
 import { money } from "./PaymentSchedule";
@@ -8,10 +9,12 @@ import { money } from "./PaymentSchedule";
 /** Record one payment against one milestone. It counts as paid once its approval
  *  ladder signs it; until then it holds its amount so nobody records it twice. */
 export function RecordPaymentModal({
-  poId, poNo, milestone, modes, invoices, saving, error, onClose, onSave,
+  poId, poNo, po, milestone, modes, invoices, saving, error, onClose, onSave,
 }: {
   poId: number;
   poNo: string;
+  /** The order's scope (2026-11-12): copied onto the payment, shown locked. */
+  po?: ScopedDoc | null;
   milestone: Milestone | null;
   modes: string[];
   invoices: FiledDocument[];
@@ -27,6 +30,14 @@ export function RecordPaymentModal({
   const [reference, setReference] = useState("");
   const [invoice, setInvoice] = useState("");
   const [remarks, setRemarks] = useState("");
+  // Whose paper the payment is on (2026-11-12): the ORDER's when it carries an
+  // organisation — the money is the PO's — so only the year is picked; against an
+  // older order, selected here. `carry_or_select` on the server.
+  const numberScope = useDocNumberScope({
+    editing: false,
+    carried: po?.organization_id ? po : null,
+    carriedLabel: poNo,
+  });
 
   useEffect(() => {
     if (!milestone) return;
@@ -41,7 +52,7 @@ export function RecordPaymentModal({
   const invalid = !value || value <= 0 || tooMuch || needsRef || !paidOn;
 
   return (
-    <Modal isOpen={!!milestone} onClose={onClose} size="lg" scrollBehavior="inside">
+    <Modal isOpen={!!milestone} onClose={onClose} size="3xl" scrollBehavior="inside">
       <ModalContent>
         {milestone && (
           <>
@@ -52,6 +63,11 @@ export function RecordPaymentModal({
               </span>
             </ModalHeader>
             <ModalBody className="space-y-3">
+              <DocumentNumberCard
+                docType="vendor_payment" value={numberScope.value} exclusive
+                ready={numberScope.ready} locks={numberScope.locks} source={numberScope.source}
+                showInvalid={numberScope.touched} onChange={numberScope.onChange}
+              />
               {milestone.trigger_met === null && (
                 <p className="rounded-xl bg-amber-50 p-3 text-sm text-amber-800">
                   The system cannot see this event ({milestone.trigger.toLowerCase()}).
@@ -122,6 +138,7 @@ export function RecordPaymentModal({
             <ModalFooter>
               <Button variant="ghost" onClick={onClose}>Cancel</Button>
               <Button disabled={invalid || saving} onClick={() => onSave({
+                ...numberScope.payload(),
                 po_id: poId, milestone_id: milestone.id, amount: value, paid_on: paidOn,
                 mode, reference_no: reference.trim() || null,
                 invoice_attachment_id: invoice ? Number(invoice) : null,
