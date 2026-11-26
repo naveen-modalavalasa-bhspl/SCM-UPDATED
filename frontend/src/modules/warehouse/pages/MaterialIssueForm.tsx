@@ -1,5 +1,5 @@
 import {
-  Button, Can, ConfirmModal, DocumentNumberCard, ErrorBanner, Field, Input, PageHeader, StatusPill,
+  Button, Can, ConfirmModal, errorMessage, DocumentNumberCard, ErrorBanner, Field, Input, PageHeader, StatusPill,
 } from "@/shared/components";
 import {
   docNumberPayload, docNumberValueFrom, emptyDocNumberValue, type DocNumberLocks,
@@ -970,8 +970,17 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     }))
     .filter((r) => r.strict && r.need > 0 && r.have !== null && r.have < r.need);
 
+  // What the server last accepted, as sent. Submit saves first (see `act`), and
+  // re-sending a body the server already holds re-ran the whole save — every unit and
+  // box released and held again — for nothing, doubling the wait on a large issue.
+  const lastSaved = useRef<string | null>(null);
   const save = useMutation({
-    mutationFn: () => (editing ? updateIssue(Number(id), payload()) : createIssue(payload())),
+    mutationFn: async () => {
+      const body = payload();
+      const saved = await (editing ? updateIssue(Number(id), body) : createIssue(body));
+      lastSaved.current = JSON.stringify(body);
+      return saved;
+    },
     onError: (error) => {
       if (isStaleSave(error)) setChangedElsewhere(true);
     },
@@ -1321,7 +1330,8 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         // at all, or a status-guard error on a second press that had nothing to do
         // with what was actually wrong. Saving here first means submit always acts
         // on what the user is looking at.
-        if (editing && doc?.status === "DRAFT") await save.mutateAsync();
+        if (editing && doc?.status === "DRAFT"
+            && JSON.stringify(payload()) !== lastSaved.current) await save.mutateAsync();
         return submitIssue(numId);
       }
       if (what === "approve") return approveIssue(numId, reason);
@@ -1502,6 +1512,14 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     enabled: !!form.warehouse_id && isBinManaged && waitingPlacement.length > 0,
     staleTime: 30_000,
   });
+  // ONE write at a time on this document (2026-11-26). Save, Submit (which saves
+  // first), Approve, Issue from stock and the serial picker all rewrite the same
+  // unit and box rows; a second press while the first was still running queued
+  // behind it on the database and came back as a 409 or a 60 s "System error". The
+  // server now refuses the second outright — this keeps the screen from sending it.
+  const busy = save.isPending || saveSerials.isPending || act.isPending
+    || split.isPending || postSplit.isPending;
+
   const repairUnlocated = useMutation({
     mutationFn: () => repairUnlocatedStock(form.warehouse_id, true),
     onSuccess: () => {
@@ -1555,12 +1573,12 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                   variant="subtle"
                   onClick={() => {
                     setTouched(true);
-                    if (form.warehouse_id && form.items.length && blocking.length === 0
+                    if (!busy && form.warehouse_id && form.items.length && blocking.length === 0
                         && !missingDestination && !missingIssuedTo) {
                       save.mutate();
                     }
                   }}
-                  disabled={save.isPending || blocking.length > 0}
+                  disabled={busy || blocking.length > 0}
                   title={blocking.length > 0 ? blocking[0].message : undefined}
                 >
                   {save.isPending ? "Saving…" : "Save"}
@@ -1572,7 +1590,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                 <Button
                   className={TONE_SUBMIT}
                   onClick={() => setConfirming("submit")}
-                  disabled={blocking.length > 0}
+                  disabled={busy || blocking.length > 0}
                   title={blocking.length > 0 ? blocking[0].message : undefined}
                 >
                   Submit for approval
@@ -1585,15 +1603,15 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                 "You are not a valid approver" error after clicking. */}
             {editing && doc?.status === "PENDING_APPROVAL" && doc?.can_approve && (
               <Can do="issue.issue">
-                <Button className={TONE_APPROVE} onClick={() => setConfirming("approve")}>Approve</Button>
-                <Button className={TONE_REJECT} variant="danger" onClick={() => setConfirming("reject")}>Reject</Button>
+                <Button className={TONE_APPROVE} disabled={busy} onClick={() => setConfirming("approve")}>Approve</Button>
+                <Button className={TONE_REJECT} variant="danger" disabled={busy} onClick={() => setConfirming("reject")}>Reject</Button>
               </Can>
             )}
             {editing && doc?.status === "APPROVED" && !doc?.is_stock_posted && (
               <Can do="issue.issue">
                 <Button
                   onClick={() => setConfirming("post")}
-                  disabled={problems.length > 0 || !doc?.can_issue_from_stock}
+                  disabled={busy || problems.length > 0 || !doc?.can_issue_from_stock}
                   title={!doc?.can_issue_from_stock
                     ? `With ${doc?.currently_with ?? "another person"} — only they, someone they report to, or an approver of this issue can issue it`
                     : problems.length > 0 ? problems[0].message : undefined}
@@ -1605,7 +1623,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
             {/* A split parent: its raiser or approver issues every floor piece at once. */}
             {editing && doc?.status === "SPLIT" && doc?.can_issue_split && (
               <Can do="issue.issue">
-                <Button onClick={() => setConfirming("postSplit")}>Issue from stock</Button>
+                <Button disabled={busy} onClick={() => setConfirming("postSplit")}>Issue from stock</Button>
               </Can>
             )}
             {/* The manager's other option on the same approved issue: hand it to the
@@ -1614,7 +1632,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
             {editing && doc?.status === "APPROVED" && !doc?.is_stock_posted
               && !doc?.parent_issue_id && (
               <Can do="issue.split">
-                <Button className={TONE_BLUE} disabled={split.isPending}
+                <Button className={TONE_BLUE} disabled={busy}
                         onClick={() => setConfirming("split")}>
                   {split.isPending ? "Splitting…" : "Split across floors"}
                 </Button>
@@ -1625,7 +1643,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
             {editing && doc && !doc.is_stock_posted
               && !["CANCELLED", "ACKNOWLEDGED", "SPLIT", "CLOSED"].includes(doc.status) && (
               <Can do="issue.create">
-                <Button variant="danger" onClick={() => setConfirming("cancel")}>Cancel</Button>
+                <Button variant="danger" disabled={busy} onClick={() => setConfirming("cancel")}>Cancel</Button>
               </Can>
             )}
             {editing && doc?.is_stock_posted && direction === "OUT" && (
@@ -2242,6 +2260,27 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
           </div>
         )}
 
+        {(saveSerials.isPending || saveSerials.isError) && (() => {
+          const lineId = saveSerials.variables?.id;
+          const saved = (doc?.items ?? []).find((l) => l.id === lineId);
+          const what = saved ? `${saved.item_code} — ${saved.item_name}` : "this line";
+          return saveSerials.isPending ? (
+            <div role="status"
+                 className="sticky top-2 z-20 mb-3 rounded-lg border border-info/40 bg-info-bg px-3 py-2 text-sm text-ink">
+              Saving serials for <b>{what}</b>… wait for it to finish before opening the next line.
+            </div>
+          ) : (
+            <div role="alert"
+                 className="sticky top-2 z-20 mb-3 flex items-start justify-between gap-3 rounded-lg border border-bad/40 bg-bad-bg px-3 py-2 text-sm text-ink">
+              <span>
+                <b>Serials for {what} were NOT saved.</b> {errorMessage(saveSerials.error)}
+                {" "}Open its serials again and press Save.
+              </span>
+              <Button variant="subtle" onClick={() => saveSerials.reset()}>Dismiss</Button>
+            </div>
+          );
+        })()}
+
         <IssueSplitEditor
           groups={groups}
           lines={form.items}
@@ -2256,7 +2295,11 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
           unitsLocked={serialsLocked && !splitParentOpen}
           codesLocked={codesLocked && !splitParentOpen}
           unitsHidden={unitsHidden}
-          onPickUnits={setSerialLine}
+          // One serial save at a time (2026-11-26, WHI0352): opening the next line's
+          // picker while the last save is still running is how two saves came to
+          // overlap. The server now keeps both either way; this keeps the screen
+          // from showing a line as saved before the server has said so.
+          onPickUnits={(index) => { if (!saveSerials.isPending) setSerialLine(index); }}
           onSourcePicked={(index, line) => { void fillCodesFor(index, line); }}
           onQuantityChanged={fillCodesSoon}
           meta={trackingMeta}

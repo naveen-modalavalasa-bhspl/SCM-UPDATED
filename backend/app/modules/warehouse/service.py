@@ -8705,7 +8705,12 @@ async def _reserve_issue_serials(
     db: AsyncSession,
     issue: m.MaterialIssue,
     inputs: list[s.IssueItemWrite],
+    *,
+    only_line_ids: set[int] | None = None,
 ) -> None:
+    """Hold the units each line names. `only_line_ids` limits it to those lines;
+    every other line is left exactly as the database holds it (its entry in
+    `inputs` is then ignored) — see `set_issue_serials`."""
     # Every line carries its own stamp, so a unit held for line 3 is never read as
     # line 5's. See _issue_line_serial_marker.
     markers = {line.id: _issue_line_serial_marker(issue.id, line.id)
@@ -8713,6 +8718,8 @@ async def _reserve_issue_serials(
     line_no_by_marker = {markers[line.id]: line.line_no for line in issue.items}
     unpicked = await _lines_without_source(db, issue)
     for line, data in zip(issue.items, inputs, strict=True):
+        if only_line_ids is not None and line.id not in only_line_ids:
+            continue
         marker = markers[line.id]
         item = await _item_snapshot(db, line.item_id)
         serials = [value.strip() for value in (data.serial_numbers or []) if value.strip()]
@@ -8816,9 +8823,14 @@ async def _reserve_issue_serials(
                 m.SerialNumber.serial_number.in_(values))
 
         rows = []
+        # `populate_existing`: a locking read returns the LATEST committed row, but
+        # SQLAlchemy hands back an object already in the session without refreshing
+        # it — so a unit another request held a moment ago could still read as free
+        # (or the reverse) off the copy loaded when this issue was opened.
         for names in _in_chunks(serials):
             rows.extend((await db.execute(
                 stmt.where(_named(names)).with_for_update()
+                .execution_options(populate_existing=True)
             )).scalars().all())
 
         by_key: dict[str, m.SerialNumber] = {}
@@ -12529,8 +12541,88 @@ async def _assert_issue_not_stale(db: AsyncSession, issue: m.MaterialIssue,
     )
 
 
+# ---- one write per issue at a time, and how long each step took (2026-11-26) ------
+#
+# Save, Submit, Approve and Issue-from-stock on ONE issue all rewrite the same unit,
+# box and reservation rows. Two of them at once (a second click while the first is
+# still running, Submit pressed during a Save — Submit saves first — or a second tab)
+# used to meet half-way through, on `whs_serial_numbers`, and the later one sat in a
+# lock wait until MySQL gave up after 50 s: a 409 "record is being updated", or nginx's
+# 60 s "System error", with nothing saved and nothing said about why.
+#
+# Each of them now claims the issue's HEADER row first, with NOWAIT: the second request
+# is refused at once with a sentence naming the document, before it has touched a unit.
+
+_MYSQL_LOCK_NOWAIT = 3572      # "lock(s) could not be acquired immediately and NOWAIT is set"
+_MYSQL_LOCK_WAIT_TIMEOUT = 1205
+
+# A write slower than this logs each of its steps — the only way to tell WHICH part of
+# a save is slow on the live data, which no test database reproduces.
+SLOW_ISSUE_WRITE_SECONDS = 5.0
+
+
+async def _claim_issue_for_write(db: AsyncSession, issue_id: int, *,
+                                 wait: bool = False) -> None:
+    """Lock `out_issues` row `issue_id` for this transaction, or refuse at once.
+
+    `wait=True` queues behind the holder instead (up to innodb_lock_wait_timeout) —
+    for the serial picker, whose saves are small and arrive line after line while
+    the storekeeper works down the issue; refusing every second one would be a
+    screen nobody could use.
+    """
+    try:
+        found = (await db.execute(
+            select(m.MaterialIssue.id).where(m.MaterialIssue.id == issue_id)
+            .with_for_update(nowait=not wait)
+        )).scalar_one_or_none()
+    except DBAPIError as exc:
+        args = getattr(getattr(exc, "orig", None), "args", None) or ()
+        if args and args[0] in (_MYSQL_LOCK_NOWAIT, _MYSQL_LOCK_WAIT_TIMEOUT):
+            try:   # a plain read takes no lock; the name only makes the sentence clearer
+                issue_no = (await db.execute(select(m.MaterialIssue.issue_no).where(
+                    m.MaterialIssue.id == issue_id))).scalar_one_or_none()
+            except Exception:                 # noqa: BLE001 -- never worse than the refusal
+                issue_no = None
+            raise ConflictError(
+                f"{issue_no or 'This issue'} is being saved by another request right now "
+                "(a second click, another tab, or another user). Wait a few seconds for "
+                "it to finish, then reload the page and try again.") from exc
+        raise
+    if found is None:
+        raise NotFoundError(f"Issue {issue_id} not found")
+
+
+class _StepTimer:
+    """Times the steps of one issue write; logs them only when the whole was slow."""
+
+    def __init__(self, what: str, issue_id: int):
+        import time
+        self._now = time.perf_counter
+        self.what, self.issue_id = what, issue_id
+        self.start = self.last = self._now()
+        self.steps: list[tuple[str, float]] = []
+
+    def mark(self, step: str) -> None:
+        now = self._now()
+        self.steps.append((step, now - self.last))
+        self.last = now
+
+    def done(self, issue_no: str | None = None, lines: int | None = None) -> None:
+        total = self._now() - self.start
+        if total < SLOW_ISSUE_WRITE_SECONDS:
+            return
+        slowest = sorted(self.steps, key=lambda s: s[1], reverse=True)
+        logger.warning(
+            "slow %s of issue %s (%s, %s lines): %.1fs — %s", self.what, self.issue_id,
+            issue_no, lines, total,
+            ", ".join(f"{name} {secs:.2f}s" for name, secs in slowest))
+
+
 async def update_issue(db: AsyncSession, issue_id: int, data: s.IssueWrite, user) -> m.MaterialIssue:
+    await _claim_issue_for_write(db, issue_id)
+    timer = _StepTimer("save", issue_id)
     issue = await get_issue(db, issue_id)
+    timer.mark("load")
     _guard(issue.status, {IssueStatus.DRAFT.value}, "edit", "issue")
     await _assert_issue_not_stale(db, issue, data.expected_updated_at)
     # The same rule as on create. An STO's own issue is exempt: the transfer order is
@@ -12600,20 +12692,26 @@ async def update_issue(db: AsyncSession, issue_id: int, data: s.IssueWrite, user
                                        exclude_issue_id=issue.id)
         await _guard_network_own_stock(db, data.items, data.indent_id, wh.id,
                                        exclude_issue_id=issue.id)
+    timer.mark("header + guards")
     await _clear_issue_serial_reservations(db, issue.id)
+    timer.mark("release held units/boxes")
     await _apply_issue_lines(db, issue, data.items)
+    timer.mark("write lines")
     # The edit that matters most on this screen: a storekeeper who moves a line onto
     # the bay the goods are actually in moves inventory's hold with it, and frees the
     # bay he has left. See `_realign_issue_reservations`.
     await _realign_issue_reservations(db, issue, user)
     await _hold_direct_issue_stock(db, issue, user)
+    timer.mark("stock holds")
     # Then the same floor gate `create_issue` applies, in the same place: a repointed
     # line may only land on a bay this user's position actually covers.
     await _assert_issue_floor_access(db, issue, user)
     await _reserve_issue_serials(db, issue, data.items)
+    timer.mark("hold units/boxes/codes")
     # A coded pack leaves whole unless the line says break bulk (2026-10-08).
     await wh_packing.assert_issue_packs(db, issue, await _issue_units_by_line(db, issue),
                                         user)
+    timer.mark("pack check")
     if issue.direction == IssueDirection.IN.value and issue.original_issue_id:
         original = await get_issue(db, issue.original_issue_id)
         _validate_issue_return(issue, original)
@@ -12628,6 +12726,8 @@ async def update_issue(db: AsyncSession, issue_id: int, data: s.IssueWrite, user
                       action=AuditAction.UPDATE, actor=user, before=before,
                       after={"total_qty": str(issue.total_qty)})
     await db.commit()
+    timer.mark("flush + commit")
+    timer.done(issue.issue_no, len(data.items or []))
     return await get_issue(db, issue_id)
 
 
@@ -12924,6 +13024,7 @@ async def submit_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue
     configured it falls back rather than stranding the document (rule 8), which is why
     a failure to start is logged and the document still moves.
     """
+    await _claim_issue_for_write(db, issue_id)
     issue = await get_issue(db, issue_id)
     _guard(issue.status, {IssueStatus.DRAFT.value}, "submit", "issue")
     if not issue.items:
@@ -13539,6 +13640,7 @@ async def act_on_issue(
     db: AsyncSession, issue_id: int, action: str, comments: str, user,
 ) -> m.MaterialIssue:
     """Apply an approval decision and keep the warehouse document in sync."""
+    await _claim_issue_for_write(db, issue_id)
     issue = await get_issue(db, issue_id)
     _guard(
         issue.status, {IssueStatus.PENDING_APPROVAL.value},
@@ -13714,7 +13816,18 @@ async def set_issue_serials(db: AsyncSession, issue_id: int,
     open, because that is decided at the shelf. `update_issue` cannot do this: it
     is DRAFT-only by design, and post_issue refuses an incomplete serial set, so an
     approved serialized issue had no way to reach ISSUED at all.
+
+    ONLY the lines named in `data` are touched (2026-11-26). It used to free every
+    line's units and re-hold them all from the copy it had just read — so two saves a
+    few seconds apart (Keyboard, then Hematology, each saved while the other was still
+    running) each wrote back the OTHER line as it was before: the second save read the
+    Keyboard line with no serial yet, freed the serial the first save had just held,
+    and re-held "nothing" for it. Only the last line saved kept its serial, and
+    Issue from stock then refused the issue (WHI0352, 2026-11-26). Now a save frees and
+    holds its own lines and never reads or writes the rest, and saves of one issue
+    queue behind each other on the header row.
     """
+    await _claim_issue_for_write(db, issue_id, wait=True)
     issue = await get_issue(db, issue_id)
     _guard(issue.status, {IssueStatus.DRAFT.value, IssueStatus.APPROVED.value},
            "capture serials on", "issue")
@@ -13729,8 +13842,10 @@ async def set_issue_serials(db: AsyncSession, issue_id: int,
         raise ValidationError(
             f"Line {sorted(unknown)[0]} is not on {issue.issue_no}")
 
-    # _reserve_issue_serials zips strictly against issue.items, so every line is
-    # restated — the ones not being edited keep the serials already reserved.
+    # _reserve_issue_serials zips strictly against issue.items, so every line gets an
+    # entry; only the edited ones (`only_line_ids`) are read. The rest are restated
+    # for shape and ignored — they keep whatever the database holds for them.
+    edited = set(by_line)
     inputs = [
         s.IssueItemWrite(
             item_id=line.item_id,
@@ -13752,15 +13867,16 @@ async def set_issue_serials(db: AsyncSession, issue_id: int,
         )
         for line in issue.items
     ]
-    await _clear_issue_serial_reservations(db, issue.id)
-    await _reserve_issue_serials(db, issue, inputs)
+    await _clear_issue_serial_reservations(db, issue.id, line_ids=edited)
+    await _reserve_issue_serials(db, issue, inputs, only_line_ids=edited)
     await wh_packing.assert_issue_packs(db, issue, await _issue_units_by_line(db, issue),
                                         user)
 
+    # The edited lines only: they are the ones this request decided anything about.
     await write_audit(db, entity="out_issues", entity_id=issue.id,
                       entity_no=issue.issue_no, action=AuditAction.UPDATE, actor=user,
                       after={"serials": {str(line.id): getattr(line, "serial_numbers", [])
-                                         for line in issue.items}})
+                                         for line in issue.items if line.id in edited}})
     await db.commit()
     return await get_issue(db, issue.id)
 
@@ -14319,8 +14435,13 @@ async def _post_issue_core(db: AsyncSession, issue_id: int, user) -> m.MaterialI
 
 async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
     """Issue one approved issue from stock: `_post_issue_core`, then commit."""
+    await _claim_issue_for_write(db, issue_id)
+    timer = _StepTimer("issue-from-stock", issue_id)
     await _post_issue_core(db, issue_id, user)
+    timer.mark("checks + stock moves + codes + packs")
     await db.commit()
+    timer.mark("commit")
+    timer.done()
     return await get_issue(db, issue_id)
 
 
