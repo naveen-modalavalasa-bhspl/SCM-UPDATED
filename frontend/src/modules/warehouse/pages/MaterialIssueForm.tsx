@@ -1,5 +1,5 @@
 import {
-  Button, Can, ConfirmModal, DocumentNumberCard, ErrorBanner, Field, Input, PageHeader, StatusPill,
+  Button, Can, ConfirmModal, errorMessage, DocumentNumberCard, ErrorBanner, Field, Input, PageHeader, StatusPill,
 } from "@/shared/components";
 import {
   docNumberPayload, docNumberValueFrom, emptyDocNumberValue, type DocNumberLocks,
@@ -2167,6 +2167,27 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
           </div>
         )}
 
+        {(saveSerials.isPending || saveSerials.isError) && (() => {
+          const lineId = saveSerials.variables?.id;
+          const saved = (doc?.items ?? []).find((l) => l.id === lineId);
+          const what = saved ? `${saved.item_code} — ${saved.item_name}` : "this line";
+          return saveSerials.isPending ? (
+            <div role="status"
+                 className="sticky top-2 z-20 mb-3 rounded-lg border border-info/40 bg-info-bg px-3 py-2 text-sm text-ink">
+              Saving serials for <b>{what}</b>… wait for it to finish before opening the next line.
+            </div>
+          ) : (
+            <div role="alert"
+                 className="sticky top-2 z-20 mb-3 flex items-start justify-between gap-3 rounded-lg border border-bad/40 bg-bad-bg px-3 py-2 text-sm text-ink">
+              <span>
+                <b>Serials for {what} were NOT saved.</b> {errorMessage(saveSerials.error)}
+                {" "}Open its serials again and press Save.
+              </span>
+              <Button variant="subtle" onClick={() => saveSerials.reset()}>Dismiss</Button>
+            </div>
+          );
+        })()}
+
         <IssueSplitEditor
           groups={groups}
           lines={form.items}
@@ -2181,7 +2202,11 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
           unitsLocked={serialsLocked && !splitParentOpen}
           codesLocked={codesLocked && !splitParentOpen}
           unitsHidden={unitsHidden}
-          onPickUnits={setSerialLine}
+          // One serial save at a time (2026-11-26, WHI0352): opening the next line's
+          // picker while the last save is still running is how two saves came to
+          // overlap. The server now keeps both either way; this keeps the screen
+          // from showing a line as saved before the server has said so.
+          onPickUnits={(index) => { if (!saveSerials.isPending) setSerialLine(index); }}
           onSourcePicked={(index, line) => { void fillCodesFor(index, line); }}
           meta={trackingMeta}
           problemAt={problemAt}
