@@ -883,8 +883,17 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     }))
     .filter((r) => r.strict && r.need > 0 && r.have !== null && r.have < r.need);
 
+  // What the server last accepted, as sent. Submit saves first (see `act`), and
+  // re-sending a body the server already holds re-ran the whole save — every unit and
+  // box released and held again — for nothing, doubling the wait on a large issue.
+  const lastSaved = useRef<string | null>(null);
   const save = useMutation({
-    mutationFn: () => (editing ? updateIssue(Number(id), payload()) : createIssue(payload())),
+    mutationFn: async () => {
+      const body = payload();
+      const saved = await (editing ? updateIssue(Number(id), body) : createIssue(body));
+      lastSaved.current = JSON.stringify(body);
+      return saved;
+    },
     onSuccess: (saved: Issue) => {
       qc.invalidateQueries({ queryKey: [`wh-issues-${direction}`] });
       qc.invalidateQueries({ queryKey: ["wh-issue", String(saved.id)] });
@@ -1229,7 +1238,8 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         // at all, or a status-guard error on a second press that had nothing to do
         // with what was actually wrong. Saving here first means submit always acts
         // on what the user is looking at.
-        if (editing && doc?.status === "DRAFT") await save.mutateAsync();
+        if (editing && doc?.status === "DRAFT"
+            && JSON.stringify(payload()) !== lastSaved.current) await save.mutateAsync();
         return submitIssue(numId);
       }
       if (what === "approve") return approveIssue(numId, reason);
@@ -1410,6 +1420,14 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     enabled: !!form.warehouse_id && isBinManaged && waitingPlacement.length > 0,
     staleTime: 30_000,
   });
+  // ONE write at a time on this document (2026-11-26). Save, Submit (which saves
+  // first), Approve, Issue from stock and the serial picker all rewrite the same
+  // unit and box rows; a second press while the first was still running queued
+  // behind it on the database and came back as a 409 or a 60 s "System error". The
+  // server now refuses the second outright — this keeps the screen from sending it.
+  const busy = save.isPending || saveSerials.isPending || act.isPending
+    || split.isPending || postSplit.isPending;
+
   const repairUnlocated = useMutation({
     mutationFn: () => repairUnlocatedStock(form.warehouse_id, true),
     onSuccess: () => {
@@ -1463,12 +1481,12 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                   variant="subtle"
                   onClick={() => {
                     setTouched(true);
-                    if (form.warehouse_id && form.items.length && blocking.length === 0
+                    if (!busy && form.warehouse_id && form.items.length && blocking.length === 0
                         && !missingDestination && !missingIssuedTo) {
                       save.mutate();
                     }
                   }}
-                  disabled={save.isPending || blocking.length > 0}
+                  disabled={busy || blocking.length > 0}
                   title={blocking.length > 0 ? blocking[0].message : undefined}
                 >
                   {save.isPending ? "Saving…" : "Save"}
@@ -1480,7 +1498,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                 <Button
                   className={TONE_SUBMIT}
                   onClick={() => setConfirming("submit")}
-                  disabled={blocking.length > 0}
+                  disabled={busy || blocking.length > 0}
                   title={blocking.length > 0 ? blocking[0].message : undefined}
                 >
                   Submit for approval
@@ -1493,15 +1511,15 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                 "You are not a valid approver" error after clicking. */}
             {editing && doc?.status === "PENDING_APPROVAL" && doc?.can_approve && (
               <Can do="issue.issue">
-                <Button className={TONE_APPROVE} onClick={() => setConfirming("approve")}>Approve</Button>
-                <Button className={TONE_REJECT} variant="danger" onClick={() => setConfirming("reject")}>Reject</Button>
+                <Button className={TONE_APPROVE} disabled={busy} onClick={() => setConfirming("approve")}>Approve</Button>
+                <Button className={TONE_REJECT} variant="danger" disabled={busy} onClick={() => setConfirming("reject")}>Reject</Button>
               </Can>
             )}
             {editing && doc?.status === "APPROVED" && !doc?.is_stock_posted && (
               <Can do="issue.issue">
                 <Button
                   onClick={() => setConfirming("post")}
-                  disabled={problems.length > 0 || !doc?.can_issue_from_stock}
+                  disabled={busy || problems.length > 0 || !doc?.can_issue_from_stock}
                   title={!doc?.can_issue_from_stock
                     ? `With ${doc?.currently_with ?? "another person"} — only they, someone they report to, or an approver of this issue can issue it`
                     : problems.length > 0 ? problems[0].message : undefined}
@@ -1513,7 +1531,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
             {/* A split parent: its raiser or approver issues every floor piece at once. */}
             {editing && doc?.status === "SPLIT" && doc?.can_issue_split && (
               <Can do="issue.issue">
-                <Button onClick={() => setConfirming("postSplit")}>Issue from stock</Button>
+                <Button disabled={busy} onClick={() => setConfirming("postSplit")}>Issue from stock</Button>
               </Can>
             )}
             {/* The manager's other option on the same approved issue: hand it to the
@@ -1522,7 +1540,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
             {editing && doc?.status === "APPROVED" && !doc?.is_stock_posted
               && !doc?.parent_issue_id && (
               <Can do="issue.split">
-                <Button className={TONE_BLUE} disabled={split.isPending}
+                <Button className={TONE_BLUE} disabled={busy}
                         onClick={() => setConfirming("split")}>
                   {split.isPending ? "Splitting…" : "Split across floors"}
                 </Button>
@@ -1533,7 +1551,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
             {editing && doc && !doc.is_stock_posted
               && !["CANCELLED", "ACKNOWLEDGED", "SPLIT", "CLOSED"].includes(doc.status) && (
               <Can do="issue.create">
-                <Button variant="danger" onClick={() => setConfirming("cancel")}>Cancel</Button>
+                <Button variant="danger" disabled={busy} onClick={() => setConfirming("cancel")}>Cancel</Button>
               </Can>
             )}
             {editing && doc?.is_stock_posted && direction === "OUT" && (

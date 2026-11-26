@@ -1293,12 +1293,19 @@ class SerialNumber(Base):
     # margin — 773k rows against 94 stock balances — and `item_id` alone is worth
     # almost nothing on it (23 distinct items). These two are the shapes every unit
     # lookup actually has; without them opening one material issue took 26 seconds.
-    # The `remarks` prefix index is created by `d4e5f6a7b8c9` in raw SQL: the column
-    # is 500 wide and MySQL will only index the front of it.
+    # `remarks` is a PREFIX index (the column is 500 wide; every reservation stamp is
+    # far shorter than 80). Migration `c7b8a9d0e1f2` builds it in raw SQL, but a
+    # database made by bootstrap is stamped at head and never runs that migration —
+    # bootstrap only builds the indexes the MODEL declares. Without it, every issue
+    # save's "release this issue's units" UPDATE scanned all ~773k unit rows and,
+    # under REPEATABLE READ, LOCKED every one of them until commit: saves ran past
+    # nginx's 60 s and every other issue save queued behind them (1205 -> 409).
+    # Same name as the migration's, so a database that has it is left alone.
     __table_args__ = (
         Index("ix_whs_serial_stock_lookup",
               "item_id", "warehouse_id", "status", "is_active", "batch_id", "bin_id"),
         Index("ix_whs_serial_point_item", "item_id", "warehouse_id", "is_active"),
+        Index("ix_whs_serial_remarks", "remarks", mysql_length={"remarks": 80}),
     )
 
 
