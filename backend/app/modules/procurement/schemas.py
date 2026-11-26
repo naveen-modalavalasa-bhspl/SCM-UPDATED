@@ -435,6 +435,9 @@ class POCopyLineOut(CombinationOut):
     item_id: int
     item_code: str | None = None
     item_name: str | None = None
+    # The item master's own description, so the copy says what each line IS — a PO
+    # line has no description column of its own (QA-5 BUG_0012).
+    item_description: str | None = None
     uom_code: str | None = None
     quantity: float
     rate: float

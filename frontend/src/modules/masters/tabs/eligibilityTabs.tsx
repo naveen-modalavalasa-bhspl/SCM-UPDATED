@@ -106,8 +106,8 @@ export function ItemEligibilityTab({ items }: { items: Option[] }) {
   // that is untagged today is open to everyone, and ticking it here is what closes it.
   const tagged = useQuery({
     queryKey: ["masters", "item-eligibility", "tagged-ids"],
-    queryFn: () => mastersApi.itemEligibility.list({ size: 500 })
-      .then((page) => new Set(page.items
+    queryFn: () => mastersApi.itemEligibility.listAll()
+      .then((rows) => new Set(rows
         .filter((row) => row.is_active)
         .map((row) => row.item_id))),
     staleTime: 60_000,

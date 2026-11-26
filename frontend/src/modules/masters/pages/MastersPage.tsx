@@ -189,7 +189,7 @@ export function MastersShell({
   });
   const cats = useQuery({
     queryKey: ["masters", "categories", "all"],
-    queryFn: () => mastersApi.categories.list({ size: 200 }).then((p) => p.items),
+    queryFn: () => mastersApi.categories.listAll(),
     enabled: wanted("categories"),
   });
   const facilities = useQuery({
@@ -198,12 +198,12 @@ export function MastersShell({
   });
   const projects = useQuery({
     queryKey: ["masters", "projects", "all"],
-    queryFn: () => mastersApi.projects.list({ size: 300 }).then((p) => p.items),
+    queryFn: () => mastersApi.projects.listAll(),
     enabled: wanted("projects"),
   });
   const items = useQuery({
     queryKey: ["masters", "items", "all"],
-    queryFn: () => mastersApi.items.list({ size: 300 }).then((p) => p.items),
+    queryFn: () => mastersApi.items.listAll(),
     enabled: wanted("items"),
   });
 

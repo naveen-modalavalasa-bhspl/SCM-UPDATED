@@ -1,3 +1,4 @@
+import { usePageSize } from "@/shared/hooks/usePageSize";
 import { useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
@@ -14,8 +15,6 @@ import type { ProviderBoardRow } from "../transportTypes";
 import { ManifestTable } from "../components/ManifestTable";
 import { isTripLeg, legDestination } from "../components/manifestView";
 import { TripRouteStrip } from "../components/TripStops";
-
-const SIZE = 20;
 
 /** The three views of this desk.
  *
@@ -94,6 +93,7 @@ const SETTLED_STATUSES = new Set([
 export function ProviderSelectionPage() {
   const [params, setParams] = useSearchParams();
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = usePageSize("ProviderSelectionPage", 20);
   const [search, setSearch] = useState("");
   const [viewKey, setViewKey] = useState<ViewKey>("open");
   // A narrower question INSIDE the open view, set by the KPI strip. Not a `?status=`:
@@ -108,15 +108,15 @@ export function ProviderSelectionPage() {
   const wantsInvite = params.get("invite") === "1";
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["transport-provider-board", viewKey, page, search],
+    queryKey: ["transport-provider-board", viewKey, page, search, pageSize],
     queryFn: () => transportApi.providerBoard({
-      page, size: SIZE, status: view.status, search: search.trim() || undefined,
+      page, size: pageSize, status: view.status, search: search.trim() || undefined,
     }),
     refetchInterval: 5_000,
   });
 
   const rows = data?.items ?? [];
-  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / SIZE));
+  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / pageSize));
   const quoting = rows.filter((r) => r.status === "QUOTING").length;
   const awaiting = rows.filter((r) => r.status === "AWAITING_CARRIER").length;
   // READY and everything past it: the provider question is answered. Counted this way
@@ -283,6 +283,8 @@ export function ProviderSelectionPage() {
           page={page}
           totalPages={totalPages}
           onPageChange={setPage}
+          pageSize={pageSize}
+          onPageSizeChange={(size) => { setPageSize(size); setPage(1); }}
           empty={view.empty}
           renderCard={(r) => (
             <div className="space-y-1.5">

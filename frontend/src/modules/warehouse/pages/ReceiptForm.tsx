@@ -9,8 +9,9 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, ArrowLeft, Boxes, CheckCircle2, FileText, ScanLine, Send, ShieldCheck } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Boxes, CheckCircle2, FileText, Layers, ScanLine, Send, ShieldCheck } from "lucide-react";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
+import { withAnotherBatch } from "../receiptBatches";
 import { DateInput, LinesEditor, QtyInput, ReasonInput, TextInput, type LineColumn } from "../components/LinesEditor";
 import { ReceiptLinePacking } from "../components/ReceiptLinePacking";
 import {
@@ -1119,6 +1120,14 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     return `Line ${index + 1}${code ? ` · ${code}` : ""}: ${message}${more}`;
   })();
 
+  /** One item, a second batch (QA-5 BUG_007) — see `withAnotherBatch`. */
+  const addBatchOf = (index: number) => setForm((current) => {
+    const poItemId = current.items[index]?.po_item_id;
+    const owed = poItemId && poState
+      ? num(poState.lines.find((p) => p.po_item_id === poItemId)?.pending_qty) : 0;
+    return { ...current, items: withAnotherBatch(current.items, index, owed) };
+  });
+
   /** Fold a duplicate line into the earlier one — its packs and its codes as well as
    *  its quantity. Summing only the quantity left the packs describing the first line
    *  alone, and a packed line's quantity IS its packs, so the next edit undid it. */
@@ -1425,13 +1434,27 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       width: "min-w-[18rem] w-72",
       hideOnNarrow: true,
       render: (l, i) => (
-        <TextInput
-          ariaLabel={`Batch, line ${i + 1}`}
-          value={l.batch_no}
-          disabled={locked || !isGrn}
-          placeholder="Batch no"
-          onChange={(v) => patchLine(i, { batch_no: v })}
-        />
+        <div className="space-y-1.5">
+          <TextInput
+            ariaLabel={`Batch, line ${i + 1}`}
+            value={l.batch_no}
+            disabled={locked || !isGrn}
+            placeholder="Batch no"
+            onChange={(v) => patchLine(i, { batch_no: v })}
+          />
+          {/* A consignment's batches are the sender's: they arrive as they left. */}
+          {!locked && isGrn && !fromConsignment && !!l.item_id && (
+            <button
+              type="button"
+              onClick={() => addBatchOf(i)}
+              title="The same item arrived in another batch — add a row for it under this one"
+              className="inline-flex min-h-9 items-center gap-1.5 rounded-lg px-2 text-xs font-medium text-brand transition hover:bg-brand/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
+            >
+              <Layers className="h-3.5 w-3.5" aria-hidden />
+              Another batch
+            </button>
+          )}
+        </div>
       ),
     },
     {

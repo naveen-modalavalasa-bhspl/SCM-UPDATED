@@ -1,3 +1,4 @@
+import { fetchAllPages, asPage } from "@/shared/api/fetchAll";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -209,16 +210,14 @@ export default function ReturnFormPage() {
   const { data: stockPage } = useQuery({
     queryKey: ["returns", "my-stock", pickedIndentId],
     queryFn: () =>
-      returnsApi.myStock({ size: 500, ...(pickedIndentId ? { indent_id: pickedIndentId } : {}) }),
+      fetchAllPages(returnsApi.myStock, pickedIndentId ? { indent_id: pickedIndentId } : {}).then(asPage),
     enabled: indentAnswered,
   });
 
-  // The raiser's own indents, past approval. 200 is well inside the shared page ceiling
-  // and a picker cannot paginate; a storekeeper with more than 200 open requests does
-  // not exist in this data.
+  // The raiser's own indents, past approval — every one of them, paged through.
   const { data: indentPage } = useQuery({
     queryKey: ["returns", "indent-options"],
-    queryFn: () => returnsApi.indents({ size: 200 }),
+    queryFn: () => fetchAllPages(returnsApi.indents).then(asPage),
   });
 
   const { data: existing } = useQuery({

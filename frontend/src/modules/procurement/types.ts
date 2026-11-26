@@ -271,6 +271,8 @@ export interface POCopyTemplate extends POHeader {
     item_id: number;
     item_code?: string | null;
     item_name?: string | null;
+    /** The item master's description (QA-5 BUG_0012). */
+    item_description?: string | null;
     uom_code?: string | null;
     quantity: number;
     rate: number;

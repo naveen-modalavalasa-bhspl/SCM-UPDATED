@@ -1,3 +1,4 @@
+import { fetchAllPages, asPage } from "@/shared/api/fetchAll";
 import { PackQty } from "@/shared/packing";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -671,7 +672,7 @@ export function DispatchConfirmPage() {
   // Only packed consignments: nothing else is a thing that can be sent anywhere.
   const { data: ready, isLoading } = useQuery({
     queryKey: ["lgs-packed-consignments"],
-    queryFn: () => consignmentApi.list({ status: "PACKED", size: 100 }),
+    queryFn: () => fetchAllPages(consignmentApi.list, { status: "PACKED" }).then(asPage),
     // A return leg is not chosen from the packed list — it is the load this screen
     // was opened on — so the picker behind this is not drawn and the list is not read.
     enabled: !isLeg,

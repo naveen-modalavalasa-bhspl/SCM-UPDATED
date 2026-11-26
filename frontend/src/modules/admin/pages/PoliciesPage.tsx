@@ -1,3 +1,4 @@
+import { fetchAllPages, asPage } from "@/shared/api/fetchAll";
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -130,7 +131,7 @@ export function PoliciesPage() {
   });
   const rules = useQuery({
     queryKey: ["admin", "rules", "policies"],
-    queryFn: () => adminApi.rules.list({ size: 100 }),
+    queryFn: () => fetchAllPages(adminApi.rules.list).then(asPage),
   });
 
   const template = TEMPLATES.find((item) => item.key === templateKey);

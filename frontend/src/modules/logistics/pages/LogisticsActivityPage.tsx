@@ -1,3 +1,4 @@
+import { usePageSize } from "@/shared/hooks/usePageSize";
 import { useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
@@ -9,8 +10,6 @@ import {
 import { transportApi } from "../api";
 import { modeLabel, modeTint, money } from "../components/modeCopy";
 import type { ActivityRow } from "../transportTypes";
-
-const SIZE = 25;
 
 /**
  * How each result reads at a glance. Colour never carries the meaning on its own —
@@ -108,6 +107,7 @@ export function LogisticsActivityPage() {
   const nav = useNavigate();
   const [params, setParams] = useSearchParams();
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = usePageSize("LogisticsActivityPage", 25);
   const [search, setSearch] = useState("");
   const [eventType, setEventType] = useState("");
   const [from, setFrom] = useState("");
@@ -130,7 +130,7 @@ export function LogisticsActivityPage() {
     dispatch_id: dispatchId,
     tr_id: trId,
     page,
-    size: SIZE,
+    size: pageSize,
   }), [search, eventType, from, to, claimsOnly, dispatchId, trId, page]);
 
   const { data, isLoading, error } = useQuery({
@@ -330,8 +330,10 @@ export function LogisticsActivityPage() {
           loading={isLoading}
           onRowClick={(row) => nav(`/logistics/shipments/${row.tr_id}`)}
           page={page}
-          totalPages={Math.max(1, Math.ceil(total / SIZE))}
+          totalPages={Math.max(1, Math.ceil(total / pageSize))}
           onPageChange={setPage}
+          pageSize={pageSize}
+          onPageSizeChange={(size) => { setPageSize(size); setPage(1); }}
           empty={filtered || scoped
             ? "No activity matches these filters."
             : "Nothing has happened on a shipment yet."}

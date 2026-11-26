@@ -12,6 +12,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Accordion, AccordionItem } from "@heroui/react";
 import { ArrowLeft, Info, Lock, MapPin, FileText, ChevronRight, ChevronDown, Tag } from "lucide-react";
 import { SplitFamilyCard } from "../components/SplitFamilyCard";
+import { ChangedElsewhereBanner, isStaleSave } from "../components/ChangedElsewhereBanner";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { Lookup } from "../components/Lookup";
 import { ItemPicker } from "../components/ItemPicker";
@@ -50,7 +51,9 @@ import type {
 } from "../types";
 import { usePointLabel } from "../usePointLabel";
 import { TONE_APPROVE, TONE_BLUE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
-import { codesNeeded, comboKeyOf, sourcesFor } from "../issueSplits";
+import {
+  codesNeeded, codesTakenElsewhere, comboKeyOf, fillsCodesItself, sourcesFor, topUpCodes, trimUnits,
+} from "../issueSplits";
 import { PackagePickerModal } from "../components/PackagePickerModal";
 import { DocLabelsDialog } from "../components/DocLabelsDialog";
 import { IssueTypeTiles, type IssueMode } from "../components/IssueTypeTiles";
@@ -348,8 +351,36 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     enabled: !editing && direction === "OUT" && pickingSourceId > 0,
   });
 
+  /**
+   * Two windows, one issue (QA-5 BUG_006).
+   *
+   * `loadedStamp` is the version this form was filled from; every save sends it back
+   * (`expected_updated_at`) and the server refuses one made from an older copy. And a
+   * background re-read must never throw away what is being typed: when the issue
+   * changes underneath an edited form, the form is KEPT and a banner says so — the
+   * storekeeper chooses when to reload. Before this, a refetch silently reset the
+   * form, which is how a ticked code "unticked itself" on screen.
+   */
+  const [loadedStamp, setLoadedStamp] = useState<string | null>(null);
+  const [changedElsewhere, setChangedElsewhere] = useState(false);
+  const baseline = useRef<{ id: number; json: string } | null>(null);
+  const acceptNextDoc = useRef(false);
+  const [reloadTick, setReloadTick] = useState(0);
+  const formDirty = () => !!baseline.current && JSON.stringify(form.items) !== baseline.current.json;
+
   useEffect(() => {
     if (!doc) return;
+    const sameIssue = baseline.current?.id === doc.id;
+    if (sameIssue && !acceptNextDoc.current && formDirty()) {
+      // Edited here and not saved yet. A re-read that only refreshed what the server
+      // decorates (units available, holds) changes nothing the storekeeper typed, so
+      // it is simply not applied; a re-read of a NEWER version is said out loud.
+      if ((doc.updated_at ?? null) !== loadedStamp) setChangedElsewhere(true);
+      return;
+    }
+    acceptNextDoc.current = false;
+    setChangedElsewhere(false);
+    setLoadedStamp(doc.updated_at ?? null);
     setMode(modeOf(doc));
     setScope(docNumberValueFrom(doc));
     setOlderScope(!doc.organization_id);
@@ -444,7 +475,30 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         box_codes: l.box_codes ?? null,
       })),
     });
-  }, [doc]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc, reloadTick]);
+
+  // What the form held the moment it was filled from the issue — what "edited" means.
+  useEffect(() => {
+    if (doc && loadedStamp === (doc.updated_at ?? null)) {
+      baseline.current = { id: doc.id, json: JSON.stringify(form.items) };
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadedStamp, doc?.id, reloadTick]);
+
+  /** Re-read the issue after one of OUR OWN actions — its new version is the baseline. */
+  const refreshIssue = () => {
+    acceptNextDoc.current = true;
+    void qc.invalidateQueries({ queryKey: ["wh-issue", id] });
+  };
+
+  /** Throw the local edits away and fill the form from the issue as it now stands. */
+  const reloadLatest = () => {
+    acceptNextDoc.current = true;
+    setReloadTick((tick) => tick + 1);
+    save.reset();
+    refreshIssue();
+  };
 
   useEffect(() => {
     if (!pickingSource.data) return;
@@ -498,21 +552,33 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   const setLines = (items: IssueItemWrite[]) => setForm((f) => ({ ...f, items }));
 
   /**
-   * A pick has just been given its batch and location: fill its asset / consumable
-   * codes there and then, oldest first, up to the quantity it issues (2026-10-12).
+   * Fill a pick's asset / consumable codes, oldest first, up to the quantity it issues.
+   *
+   * Runs the moment a pick's source is decided AND every time its quantity changes —
+   * "the codes follow the quantity", whichever was entered first (QA-5 BUG_003 /
+   * BUG_009). It TOPS UP rather than replaces (`topUpCodes`): codes the storekeeper
+   * swapped in by hand stay, codes another pick of the same item already holds are
+   * never handed out twice, and a lowered quantity has already been trimmed by
+   * `trimUnits`.
    *
    * Those codes are the system's own labels — nobody reads them off a maker's box — so
-   * the storekeeper should see them the moment the source is decided, not after a
-   * save. The server still checks every one on save (`_reserve_issue_serials`) and tops
-   * up anything missing (`_autofill_codes`); this only makes the choice visible early.
-   * They stay swappable in the code screen. Serial / IMEI picks are read off the goods
-   * and are never pre-filled.
+   * they are on screen at once, not after a save. The server still checks every one
+   * on save (`_reserve_issue_serials`) and tops up anything missing (`_autofill_codes`).
+   * Serial / IMEI picks are read off the goods and are never pre-filled.
    */
+  const fillTimers = useRef(new Map<number, ReturnType<typeof setTimeout>>());
+  useEffect(() => () => {
+    for (const timer of fillTimers.current.values()) clearTimeout(timer);
+  }, []);
   const fillCodesFor = async (index: number, line: IssueItemWrite) => {
-    const type = line.tracking_type;
-    if (type !== "ASSET" && type !== "CONSUMABLE") return;
+    if (!fillsCodesItself(line)) return;
     const need = Math.trunc(num(line.issued_qty));
-    if (!need || !line.item_id || !form.warehouse_id) return;
+    if (!line.item_id || !form.warehouse_id) return;
+    const current = trimUnits(line, need);
+    if (need <= 0 || current.length >= need) return;
+    // Ask for enough to cover what the other picks of this item hold too, since they
+    // are filtered out here rather than on the server. Capped at the API's page.
+    const others = codesTakenElsewhere(form.items, index);
     try {
       const page = await listSerials({
         item_id: line.item_id,
@@ -525,21 +591,40 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         claim_free: !line.id || undefined,
         status: "available",
         page: 1,
-        size: Math.min(need, 500),
+        size: Math.min(need + current.length + others.size, 500),
       });
-      const codes = (page.items ?? [])
+      const candidates = (page.items ?? [])
         .map((row) => row.asset_code ?? row.consumable_code ?? row.serial_number)
-        .filter((code): code is string => !!code)
-        .slice(0, need);
+        .filter((code): code is string => !!code);
       setForm((f) => ({
         ...f,
-        items: f.items.map((l, i) => (
-          i === index && l.batch_id === line.batch_id && l.bin_id === line.bin_id
-            ? { ...l, serial_numbers: codes } : l)),
+        items: f.items.map((l, i) => {
+          // Only if the pick still stands where it stood when we asked: a batch,
+          // location or quantity changed while the answer was in flight is a
+          // different question, and its own fill is already on the way.
+          if (i !== index || l.batch_id !== line.batch_id || l.bin_id !== line.bin_id
+              || Math.trunc(num(l.issued_qty)) !== need) return l;
+          return {
+            ...l,
+            serial_numbers: topUpCodes(l.serial_numbers ?? [], need, candidates,
+              codesTakenElsewhere(f.items, i)),
+          };
+        }),
       }));
     } catch {
       // Not fatal: the save fills them (`_autofill_codes`) and says so if it cannot.
     }
+  };
+  /** A quantity typed digit by digit is one question, asked once it settles. */
+  const fillCodesSoon = (index: number, line: IssueItemWrite) => {
+    // A pick issued by the BOX names package codes, chosen in the package picker.
+    if (!fillsCodesItself(line) || line.issue_in_boxes) return;
+    const timers = fillTimers.current;
+    clearTimeout(timers.get(index));
+    timers.set(index, setTimeout(() => {
+      timers.delete(index);
+      void fillCodesFor(index, line);
+    }, 350));
   };
 
   /* ----------------------------------------------- where the stock actually is --
@@ -853,6 +938,8 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     // The card first: the form's own project, kept in step with it, wins below.
     ...(direction === "OUT" && !olderScope ? docNumberPayload(scope) : {}),
     ...form,
+    // The version this edit was made against; the server refuses an older one.
+    ...(editing && loadedStamp ? { expected_updated_at: loadedStamp } : {}),
     // `normalizeSplits` first: the splits of one ask share its requested quantity
     // between them, and the server refuses a line requesting nothing or issuing more
     // than it asked for. Done once here rather than on every keystroke, so the number
@@ -885,7 +972,12 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
 
   const save = useMutation({
     mutationFn: () => (editing ? updateIssue(Number(id), payload()) : createIssue(payload())),
+    onError: (error) => {
+      if (isStaleSave(error)) setChangedElsewhere(true);
+    },
     onSuccess: (saved: Issue) => {
+      // Our own save: the re-read that follows is the new baseline, not a stranger's.
+      acceptNextDoc.current = true;
       qc.invalidateQueries({ queryKey: [`wh-issues-${direction}`] });
       qc.invalidateQueries({ queryKey: ["wh-issue", String(saved.id)] });
       // Saving moves holds (a direct issue's own, a relocated allocation's), so the
@@ -899,7 +991,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     mutationFn: ({ issueId, ...line }: { id: number; serial_numbers: string[]; issueId?: number }) =>
       setIssueSerials(issueId ?? Number(id), [line]),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["wh-issue", id] });
+      refreshIssue();
     },
   });
 
@@ -1203,7 +1295,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     mutationFn: () => postSplitIssue(Number(id)),
     onSuccess: () => {
       setConfirming(null);
-      qc.invalidateQueries({ queryKey: ["wh-issue", id] });
+      refreshIssue();
       qc.invalidateQueries({ queryKey: [`wh-issues-${direction}`] });
     },
   });
@@ -1211,7 +1303,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     mutationFn: () => splitIssue(Number(id)),
     onSuccess: (result) => {
       setSplitResult(result);
-      qc.invalidateQueries({ queryKey: ["wh-issue", id] });
+      refreshIssue();
       qc.invalidateQueries({ queryKey: [`wh-issues-${direction}`] });
     },
   });
@@ -1247,7 +1339,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         setJustPosted(true);
       }
       else if (what === "ack") void alerts.success("issue.acknowledged", { number });
-      qc.invalidateQueries({ queryKey: ["wh-issue", id] });
+      refreshIssue();
       qc.invalidateQueries({ queryKey: ["wh-issue-sources"] });
       qc.invalidateQueries({ queryKey: ["wh-issue-approvals", id] });
       qc.invalidateQueries({ queryKey: [`wh-issues-${direction}`] });
@@ -1554,7 +1646,8 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         }
       />
 
-      <ErrorBanner error={save.error ?? saveSerials.error ?? pullIndent.error ?? pullEmployee.error ?? pickingSource.error} />
+      {changedElsewhere && <ChangedElsewhereBanner onReload={reloadLatest} />}
+      <ErrorBanner error={(isStaleSave(save.error) ? null : save.error) ?? saveSerials.error ?? pullIndent.error ?? pullEmployee.error ?? pickingSource.error} />
 
       {/* The moment the goods leave is the moment their labels are wanted — part packs
           cut at posting have only just got their codes. */}
@@ -2165,6 +2258,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
           unitsHidden={unitsHidden}
           onPickUnits={setSerialLine}
           onSourcePicked={(index, line) => { void fillCodesFor(index, line); }}
+          onQuantityChanged={fillCodesSoon}
           meta={trackingMeta}
           problemAt={problemAt}
           unitSupply={unitSupply}
@@ -2176,7 +2270,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
           onSaveTrays={awaitingIssue && doc ? async (lineId, trays) => {
             const saved = await setIssueLineTrays(doc.id, lineId, trays);
             qc.setQueryData(["wh-issue", id], saved);
-            qc.invalidateQueries({ queryKey: ["wh-issue", id] });
+            refreshIssue();
           } : undefined}
         />
 

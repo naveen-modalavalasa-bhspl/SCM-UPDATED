@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useState } from "react";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, Search } from "lucide-react";
+import { moreMatchesLabel, optionWindow } from "@/shared/components/optionWindow";
 
 export interface ItemOption {
   value: number;
@@ -44,6 +45,10 @@ export function ItemCombobox({
   const filtered = useMemo(
     () => filterItemOptions(options, query === selectedLabel ? "" : query),
     [options, query, selectedLabel],
+  );
+  const drawn = useMemo(
+    () => optionWindow(filtered, (option) => option.value === value),
+    [filtered, value],
   );
 
   useEffect(() => {
@@ -116,7 +121,7 @@ export function ItemCombobox({
           role="listbox"
           className="absolute z-30 mt-1 max-h-72 w-full overflow-y-auto rounded-xl border border-line bg-content1 p-1 shadow-xl"
         >
-          {filtered.map((option) => (
+          {drawn.shown.map((option) => (
             <button
               key={option.value}
               type="button"
@@ -136,6 +141,12 @@ export function ItemCombobox({
               {option.label}
             </button>
           ))}
+          {drawn.hidden > 0 && (
+            <div className="sticky bottom-0 flex items-center gap-2 border-t border-line bg-content1/95 px-3 py-2 text-xs text-muted backdrop-blur">
+              <Search className="h-3.5 w-3.5 shrink-0 text-brand" aria-hidden />
+              {moreMatchesLabel(drawn.hidden, drawn.matched)}
+            </div>
+          )}
           {isLoading && (
             <div className="px-3 py-4 text-center text-sm text-muted">
               Searching items...

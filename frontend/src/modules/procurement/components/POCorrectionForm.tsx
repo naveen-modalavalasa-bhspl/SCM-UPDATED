@@ -1,9 +1,9 @@
+import { getAllPages } from "@/shared/api/fetchAll";
 import { useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { FilePen, Save } from "lucide-react";
 import { DocumentNumberCard, ErrorBanner, Field, Input, Select, useToast } from "@/shared/components";
 import { Button } from "./ActionButton";
-import { api } from "@/shared/api/client";
 import { todayIst } from "@/shared/datetime";
 import { poApi } from "../api";
 import type { PurchaseOrder } from "../types";
@@ -61,9 +61,7 @@ export function POCorrectionForm({ po, onSaved, onCancel, mode = "correction" }:
   const { data: vendors = [] } = useQuery({
     queryKey: ["po-vendors"],
     queryFn: () =>
-      api.get<{ items: MasterVendor[] }>("/api/vendors", {
-        params: { size: 200, is_active: true, kind: "MATERIAL" },
-      }).then((r) => r.data.items),
+      getAllPages<MasterVendor>("/api/vendors", { is_active: true, kind: "MATERIAL" }),
   });
   // The current vendor may sit outside the first page of the master; keep it listed.
   const vendorOptions = useMemo(() => {

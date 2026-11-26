@@ -1188,6 +1188,32 @@ hierarchies of the vendor's own mapped items only, scoped on the token.
   Served on the consignment source, the dispatch
   (`line_trays`) and both acknowledgements (`TrayChips`); NEVER on the Delivery Challan.
 
+### QA-5 production bugs: every row, codes follow the quantity, stale saves (2026-11-26)
+
+- **A dropdown never stops at page 1.** `shared/api/fetchAll.ts` (`fetchAllPages`,
+  `getAllPages`, `asPage`) pages through 500 at a time (the server's `MAX_PAGE_SIZE`,
+  unchanged) up to 25,000 rows, and warns past that. Masters have `listAll`. Do NOT
+  "fix" a short list by raising `size:` — that is the defect (BUG_0013/14/16/17).
+  Only the first 100 matches are DRAWN (`optionWindow`, in `Select` and
+  `ItemCombobox`), with "Showing 100 of N — keep typing"; the chosen one stays in view.
+  Server pickers: `MASTER_LOOKUP_LIMIT` 5,000 / `DOCUMENT_LOOKUP_LIMIT` 1,000
+  (warehouse), carriers 2,000, vehicles 5,000, report filters 2,000.
+- **Rows per page** (BUG_0011): `usePageSize(screen)` + `ResponsiveList`
+  `pageSize`/`onPageSizeChange` (20/50/100/200/500, remembered per screen in the browser).
+- **Codes follow the quantity** (BUG_003/009): an asset / consumable pick tops up its
+  codes whenever its quantity changes, not only when its location is picked
+  (`onQuantityChanged`, `topUpCodes`, `codesTakenElsewhere`). Never takes a code another
+  pick of the item holds; keeps hand-swapped codes. Serial / IMEI still never auto-fill.
+- **A second batch on a GRN** (BUG_007): "Another batch" on a line (`withAnotherBatch`)
+  adds a sibling on the same PO line; the PO cap still adds the rows up.
+- **Stale saves** (BUG_006): `IssueWrite.expected_updated_at`; `update_issue` locks the
+  header and raises 409 when it moved (`_assert_issue_not_stale`), and stamps
+  `updated_at` itself. The form keeps unsaved edits through a re-read and shows
+  `ChangedElsewhereBanner`; our own actions re-read through `refreshIssue()`.
+- **Ledger "With"** (BUG_0015) is derived from each document's status
+  (`procurement/ledger.py` `_with`). **PO Copy** carries `item_description` (BUG_0012),
+  shown under every PO line (`LineDescription`).
+
 ### Supplier bank + GST switch, shipping addresses, notifications (2026-11-23)
 
 - **Supplier bank details are MANDATORY** (`procurement/suppliers.bank_problems`: bank

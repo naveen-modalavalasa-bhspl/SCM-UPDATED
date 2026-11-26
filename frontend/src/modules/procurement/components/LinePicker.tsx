@@ -1,11 +1,10 @@
-import { useState } from "react";
+import { getAllPages } from "@/shared/api/fetchAll";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowDown, Lock, Trash2 } from "lucide-react";
+import { ArrowDown, FileText, Lock, Trash2 } from "lucide-react";
 import { Field, Input } from "@/shared/components";
 import { Button } from "./ActionButton";
 import { useToast } from "@/shared/components/Toast";
 import { ItemCombobox } from "@/modules/indents/components/ItemCombobox";
-import { api } from "@/shared/api/client";
 import { todayIst } from "@/shared/datetime";
 import { ChevronRight } from "lucide-react";
 import { packable, usePackOptions, type PackEntry } from "@/shared/packing";
@@ -51,6 +50,7 @@ interface MasterItem {
   name: string;
   uom_code?: string | null;
   tax_percent?: number | null;
+  description?: string | null;
 }
 
 /**
@@ -95,15 +95,11 @@ export function LinePicker({
    *  is then set by the packs. Only the purchase order asks this. */
   showPacking?: boolean;
 }) {
-  const [search, setSearch] = useState("");
   const toast = useToast();
 
   const { data: items = [], isLoading } = useQuery({
-    queryKey: ["procurement-items", search],
-    queryFn: () =>
-      api.get<{ items: MasterItem[] }>("/api/items", {
-        params: { search: search || undefined, size: 50, is_active: true },
-      }).then((r) => r.data.items),
+    queryKey: ["procurement-items", "all"],
+    queryFn: () => getAllPages<MasterItem>("/api/items", { is_active: true }),
   });
 
   const label = (code: string | null | undefined, name: string | null | undefined) =>
@@ -184,7 +180,6 @@ export function LinePicker({
                 value={line.item_id}
                 options={optionsFor(line)}
                 isLoading={isLoading}
-                onQueryChange={setSearch}
                 isDisabled={disabled || !!line.id}
                 // Pressing a greyed-out row says why rather than doing nothing at all.
                 onDisabledSelect={() =>
@@ -210,6 +205,7 @@ export function LinePicker({
                     uom_code: chosen?.uom_code ?? null,
                     item_code: chosen?.code ?? null,
                     item_name: chosen?.name ?? null,
+                    description: chosen?.description?.trim() || undefined,
                     // Only when the master actually states one. A null there means
                     // nobody has classified the item, and filling 0 would put an
                     // exempt rate on the line without anybody deciding it.
@@ -220,6 +216,8 @@ export function LinePicker({
                 }}
               />
             </Field>
+            <LineDescription text={line.description
+              || items.find((item) => item.id === line.item_id)?.description} />
           </div>
           <div className="sm:col-span-2">
             <Field label={index === 0 ? "Quantity" : ""} required={index === 0}>
@@ -400,6 +398,25 @@ function CapHint({ line, on }: { line: DraftLine; on: boolean }) {
   return (
     <p className="mt-1 inline-flex items-center gap-1 text-[11px] text-muted">
       <Lock className="h-3 w-3" /> Up to {fmt(cap)} · can only be lowered
+    </p>
+  );
+}
+
+/** What the item IS, in the master's words, under the picker (QA-5 BUG_0012).
+ *  Two lines, clamped, with the whole text on hover: a description is there to tell
+ *  apart two items whose names read alike, not to push the quantity off the row. */
+function LineDescription({ text }: { text?: string | null }) {
+  const value = text?.trim();
+  if (!value) return null;
+  return (
+    <p
+      title={value}
+      className="mt-1.5 flex items-start gap-1.5 rounded-lg bg-content2/60 px-2.5 py-1.5 text-xs leading-snug text-muted"
+    >
+      <FileText className="mt-0.5 h-3.5 w-3.5 shrink-0 text-brand/70" aria-hidden />
+      <span className="line-clamp-2">
+        <span className="sr-only">Description: </span>{value}
+      </span>
     </p>
   );
 }

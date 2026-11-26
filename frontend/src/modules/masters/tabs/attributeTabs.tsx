@@ -27,7 +27,7 @@ export function FeaturesTab() {
           <Active on={r.is_active} />
         </div>
       )}
-      fetchList={(search) => mastersApi.features.list({ search, size: 200 }).then((p) => p.items)}
+      fetchList={(search) => mastersApi.features.listAll({ search })}
       fields={[
         { key: "code", label: "Code", required: true },
         { key: "name", label: "Name", required: true },
@@ -100,7 +100,7 @@ export function PackagingTab() {
             </div>
           </div>
         )}
-        fetchList={(search) => mastersApi.packaging.list({ search, size: 200 }).then((p) => p.items)}
+        fetchList={(search) => mastersApi.packaging.listAll({ search })}
         fields={[
           { key: "code", label: "Code", required: true, maxLength: 50,
             pattern: /^[A-Za-z0-9-]+$/,
@@ -206,7 +206,7 @@ export function AttributesTab({ uoms }: { uoms: Option[] }) {
             </div>
           </div>
         )}
-        fetchList={(search) => mastersApi.attributes.list({ search, size: 200 }).then((p) => p.items)}
+        fetchList={(search) => mastersApi.attributes.listAll({ search })}
         fields={[
           { key: "code", label: "Code", required: true, maxLength: 50,
             pattern: /^[A-Za-z0-9_]+$/,
@@ -278,7 +278,7 @@ export function SpecsTab({ uoms }: { uoms: Option[] }) {
             <div className="text-xs text-muted">{r.uom_code ?? "no unit"}</div>
           </div>
         )}
-        fetchList={(search) => mastersApi.specs.list({ search, size: 200 }).then((p) => p.items)}
+        fetchList={(search) => mastersApi.specs.listAll({ search })}
         fields={[
           { key: "code", label: "Code", required: true, maxLength: 50,
             pattern: /^[A-Za-z0-9_]+$/,
@@ -313,15 +313,15 @@ export function CategoryTaggingTab({ categories }: { categories: Option[] }) {
 
   const attributes = useQuery({
     queryKey: ["masters", "attributes", "all"],
-    queryFn: () => mastersApi.attributes.list({ size: 300 }).then((p) => p.items),
+    queryFn: () => mastersApi.attributes.listAll(),
   });
   const specs = useQuery({
     queryKey: ["masters", "specs", "all"],
-    queryFn: () => mastersApi.specs.list({ size: 300 }).then((p) => p.items),
+    queryFn: () => mastersApi.specs.listAll(),
   });
   const features = useQuery({
     queryKey: ["masters", "features", "all"],
-    queryFn: () => mastersApi.features.list({ size: 300 }).then((p) => p.items),
+    queryFn: () => mastersApi.features.listAll(),
   });
 
   const source = { ATTRIBUTE: attributes.data, SPEC: specs.data,
@@ -365,7 +365,7 @@ export function CategoryTaggingTab({ categories }: { categories: Option[] }) {
           </div>
         )}
         fetchList={(search) =>
-          mastersApi.categoryTags.list({ search, size: 500 }).then((p) => p.items)}
+          mastersApi.categoryTags.listAll({ search })}
         fields={[
           { key: "category_id", label: "Category", type: "select",
             options: categories, required: true },

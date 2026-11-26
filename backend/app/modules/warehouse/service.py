@@ -36,7 +36,9 @@ from sqlalchemy.orm import aliased, selectinload
 from app.core.database import SessionLocal
 from app.core.config import settings
 
-from app.core.exceptions import AppException, NotFoundError, PermissionError_, ValidationError
+from app.core.exceptions import (
+    AppException, ConflictError, NotFoundError, PermissionError_, ValidationError,
+)
 from app.core.pagination import PageParams, paginate
 from app.core.dependencies import via_scoped_grant
 from app.platform.rbac.permissions import INDENT_VIEW
@@ -104,7 +106,7 @@ from app.shared.numbering import next_number
 from app.shared import packing as shared_packing
 from app.shared.masters.packs import ladders as pack_ladders_for
 from app.modules.warehouse import packing as wh_packing
-from app.shared.time import now as ist_now, today as ist_today
+from app.shared.time import now as ist_now, to_ist, today as ist_today
 from app.shared.limits import UNIT_MINT_CHUNK, limit as unit_limit
 
 logger = logging.getLogger(__name__)
@@ -12491,9 +12493,46 @@ async def _apply_direct_issue_scope(db: AsyncSession, issue, data, user) -> None
                              "out_issues", user)
 
 
+def _stamp_second(value: datetime) -> datetime:
+    """One instant as the column stores it: naive IST (`app/shared/time.py`), whole
+    seconds. MySQL DATETIME keeps no fraction while the copy just written in Python
+    does, and a client may send the value back with an offset — compared raw, every
+    save straight after another would read as stale."""
+    return (to_ist(value) or value).replace(microsecond=0)
+
+
+async def _assert_issue_not_stale(db: AsyncSession, issue: m.MaterialIssue,
+                                  expected: datetime | None) -> None:
+    """Refuse a save made from a copy of the issue that is no longer the latest.
+
+    QA-5 BUG_006: one login open on two PCs, both on the same material issue. Each save
+    rewrote every line from its own copy, so the second undid the first without a
+    word, and two saves landing together raced each other into lock waits and
+    half-applied holds — the "intermittent error" and the slowness. The header row is
+    LOCKED here first, so two saves of one issue queue rather than interleave, and the
+    second is then told plainly what happened.
+    """
+    current = (await db.execute(
+        select(m.MaterialIssue.updated_at)
+        .where(m.MaterialIssue.id == issue.id)
+        .with_for_update())).scalar_one()
+    if expected is None or current is None:
+        return
+    if _stamp_second(current) == _stamp_second(expected):
+        return
+    when = _stamp_second(current).strftime("%d %b %Y, %I:%M %p")
+    raise ConflictError(
+        f"{issue.issue_no} was saved again after you opened it — from another window, "
+        f"another computer or by someone else (at {when}). Nothing of yours has been "
+        f"saved. Reload the issue to see the latest, then make your change again.",
+        title="Changed in another window",
+    )
+
+
 async def update_issue(db: AsyncSession, issue_id: int, data: s.IssueWrite, user) -> m.MaterialIssue:
     issue = await get_issue(db, issue_id)
     _guard(issue.status, {IssueStatus.DRAFT.value}, "edit", "issue")
+    await _assert_issue_not_stale(db, issue, data.expected_updated_at)
     # The same rule as on create. An STO's own issue is exempt: the transfer order is
     # its request, and names the destination itself.
     from app.modules.inventory.models import StockTransferOrder
@@ -12580,6 +12619,9 @@ async def update_issue(db: AsyncSession, issue_id: int, data: s.IssueWrite, user
         _validate_issue_return(issue, original)
     if picking:
         _validate_picking_issue(issue, picking)
+    # Stamped by hand: a save that changed only lines leaves the header columns as they
+    # were, `onupdate` never fires, and the next stale copy would pass the check above.
+    issue.updated_at = utcnow()
     await db.flush()
 
     await write_audit(db, entity="out_issues", entity_id=issue.id, entity_no=issue.issue_no,
@@ -26410,7 +26452,21 @@ async def run_report(db: AsyncSession, key: str, *, warehouse_id: int | None = N
 # Options (lookups the forms need)
 # ---------------------------------------------------------------------------
 
-LOOKUP_LIMIT = 200
+# How many rows a picker is sent. These used to be one LOOKUP_LIMIT of 200, and a
+# dropdown that stops at row 200 hides item 201 with nothing on screen saying the list
+# was cut (QA-5, BUG_0013/16/17). Every option endpoint orders by an indexed column and
+# does its per-row work in memory over grouped reads, so a few thousand rows is one
+# short request; the dropdown draws only the first matches (`optionWindow`) and
+# filters the rest as the user types.
+#
+# Masters (items, vendors, bins, batches, people, projects, vehicles, carriers): all of
+# them — 5,000 is past every master on the live data (983 warehouses is the largest).
+MASTER_LOOKUP_LIMIT = 5000
+# Open documents (orders still owed, issues waiting, consignments inbound): these are
+# filtered to what is still actionable, so 1,000 open at once is already a backlog.
+DOCUMENT_LOOKUP_LIMIT = 1000
+# Kept for anything outside this module that imported the old name.
+LOOKUP_LIMIT = DOCUMENT_LOOKUP_LIMIT
 # One grouped consignment is one lorry-load of issues, not a batch job. Well past any
 # real delivery, and small enough that a save stays one short request.
 MAX_ISSUES_PER_CONSIGNMENT = 50
@@ -26510,7 +26566,7 @@ async def item_options(db: AsyncSession, search: str | None = None, *,
             # widening is how the picker got misleading in the first place.
             stmt = stmt.where(Item.id.in_(held.keys() or {0}))
 
-    rows = (await db.execute(stmt.order_by(Item.code).limit(LOOKUP_LIMIT))).scalars().all()
+    rows = (await db.execute(stmt.order_by(Item.code).limit(MASTER_LOOKUP_LIMIT))).scalars().all()
     # How many decimals each row's unit allows — the same rule `_apply_issue_lines`
     # enforces on save (SCM_0080). Served here so the issue form can stop a
     # fractional quantity being TYPED for a whole-unit item, rather than only
@@ -26542,7 +26598,7 @@ async def vendor_options(db: AsyncSession, search: str | None = None) -> list[di
     if search:
         like = f"%{search}%"
         stmt = stmt.where(or_(Vendor.code.ilike(like), Vendor.name.ilike(like)))
-    rows = (await db.execute(stmt.order_by(Vendor.name).limit(LOOKUP_LIMIT))).scalars().all()
+    rows = (await db.execute(stmt.order_by(Vendor.name).limit(MASTER_LOOKUP_LIMIT))).scalars().all()
     return [{"id": r.id, "code": r.code, "name": r.name} for r in rows]
 
 
@@ -26718,7 +26774,7 @@ async def bin_options(db: AsyncSession, warehouse_id: int, search: str | None = 
     if search:
         like = f"%{search}%"
         stmt = stmt.where(or_(Bin.code.ilike(like), Bin.name.ilike(like)))
-    rows = (await db.execute(stmt.distinct().order_by(Bin.code).limit(LOOKUP_LIMIT))).scalars().all()
+    rows = (await db.execute(stmt.distinct().order_by(Bin.code).limit(MASTER_LOOKUP_LIMIT))).scalars().all()
     index = await _location_index(db, warehouse_id)
     out = []
     for r in rows:
@@ -26769,7 +26825,7 @@ async def batch_options(
         stmt = stmt.where(Stock.bin_id == bin_id)
     rows = (await db.execute(
         stmt.order_by(m.Batch.expiry_date.is_(None), m.Batch.expiry_date)
-        .limit(LOOKUP_LIMIT)
+        .limit(MASTER_LOOKUP_LIMIT)
     )).scalars().all()
     return [{"id": row.id, "code": row.batch_no, "name": row.batch_no} for row in rows]
 
@@ -26848,7 +26904,7 @@ async def po_options(db: AsyncSession, search: str | None = None, warehouse_id: 
     if search:
         stmt = stmt.where(PurchaseOrder.po_no.ilike(f"%{search}%"))
     rows = (await db.execute(
-        stmt.order_by(PurchaseOrder.id.desc()).limit(LOOKUP_LIMIT))).all()
+        stmt.order_by(PurchaseOrder.id.desc()).limit(DOCUMENT_LOOKUP_LIMIT))).all()
     return [{"id": po_id, "code": po_no, "name": vendor_name or po_no}
             for po_id, po_no, vendor_name in rows]
 
@@ -26936,7 +26992,7 @@ async def receipt_options(
             m.Receipt.vendor_name.ilike(like),
         ))
     rows = (await db.execute(
-        stmt.order_by(m.Receipt.id.desc()).limit(LOOKUP_LIMIT))).scalars().all()
+        stmt.order_by(m.Receipt.id.desc()).limit(DOCUMENT_LOOKUP_LIMIT))).scalars().all()
     return [{
         "id": r.id,
         "code": (
@@ -26994,7 +27050,7 @@ async def incoming_dispatch_options(
             m.Dispatch.lr_no.ilike(like),
         ))
     rows = (await db.execute(
-        stmt.order_by(m.Dispatch.id.desc()).limit(LOOKUP_LIMIT))).scalars().all()
+        stmt.order_by(m.Dispatch.id.desc()).limit(DOCUMENT_LOOKUP_LIMIT))).scalars().all()
     return [{
         "id": r.id,
         "code": r.dispatch_no,
@@ -27232,7 +27288,7 @@ async def indent_options(
         stmt = stmt.where(Reservation.warehouse_id == warehouse_id)
     if search:
         stmt = stmt.where(Indent.indent_no.ilike(f"%{search}%"))
-    rows = (await db.execute(stmt.order_by(Indent.id.desc()).limit(LOOKUP_LIMIT))).scalars().all()
+    rows = (await db.execute(stmt.order_by(Indent.id.desc()).limit(DOCUMENT_LOOKUP_LIMIT))).scalars().all()
     
     if warehouse_id is not None:
         peers = await _same_tier_warehouse_ids(db, warehouse_id)
@@ -27381,7 +27437,7 @@ async def sto_issue_options(
                               StockTransferOrder.to_warehouse_name.ilike(like),
                               StockTransferOrder.str_no.ilike(like)))
     rows = (await db.execute(
-        stmt.order_by(StockTransferOrder.id.desc()).limit(LOOKUP_LIMIT))).all()
+        stmt.order_by(StockTransferOrder.id.desc()).limit(DOCUMENT_LOOKUP_LIMIT))).all()
     return [{
         "id": order.id, "sto_no": order.sto_no,
         "kind": "STR" if order.str_id else "DIRECT", "str_no": order.str_no,
@@ -27745,7 +27801,7 @@ async def inspectable_issue_options(db: AsyncSession,
     if search:
         stmt = stmt.where(m.MaterialIssue.issue_no.ilike(f"%{search}%"))
     rows = (await db.execute(
-        stmt.order_by(m.MaterialIssue.id.desc()).limit(LOOKUP_LIMIT)
+        stmt.order_by(m.MaterialIssue.id.desc()).limit(DOCUMENT_LOOKUP_LIMIT)
     )).scalars().all()
     return [
         {
@@ -27851,7 +27907,7 @@ async def issue_options(db: AsyncSession, search: str | None = None, *,
     if search:
         stmt = stmt.where(m.MaterialIssue.issue_no.ilike(f"%{search}%"))
     rows = (await db.execute(
-        stmt.order_by(m.MaterialIssue.id.desc()).limit(LOOKUP_LIMIT)
+        stmt.order_by(m.MaterialIssue.id.desc()).limit(DOCUMENT_LOOKUP_LIMIT)
     )).scalars().all()
     if destination_warehouse_id:
         points = await _requesting_points(db, list(rows))
@@ -27890,7 +27946,7 @@ async def returnable_issue_options(
     if search:
         stmt = stmt.where(m.MaterialIssue.issue_no.ilike(f"%{search}%"))
     rows = (await db.execute(
-        stmt.order_by(m.MaterialIssue.id.desc()).limit(LOOKUP_LIMIT)
+        stmt.order_by(m.MaterialIssue.id.desc()).limit(DOCUMENT_LOOKUP_LIMIT)
     )).scalars().all()
     return [{
         "id": row.id,
@@ -28241,7 +28297,7 @@ async def employee_options(db: AsyncSession, search: str | None = None) -> list[
         stmt = stmt.where(or_(HcmEmployee.full_name.ilike(like),
                               HcmEmployee.emp_code.ilike(like)))
     rows = (await db.execute(
-        stmt.order_by(HcmEmployee.full_name).limit(LOOKUP_LIMIT))).scalars().all()
+        stmt.order_by(HcmEmployee.full_name).limit(MASTER_LOOKUP_LIMIT))).scalars().all()
     return [{"id": r.id, "code": r.emp_code, "name": r.full_name} for r in rows]
 
 
@@ -28471,14 +28527,14 @@ async def project_options(db: AsyncSession, search: str | None = None) -> list[d
     if search:
         like = f"%{search}%"
         stmt = stmt.where(or_(Project.code.ilike(like), Project.name.ilike(like)))
-    rows = (await db.execute(stmt.order_by(Project.name).limit(LOOKUP_LIMIT))).scalars().all()
+    rows = (await db.execute(stmt.order_by(Project.name).limit(MASTER_LOOKUP_LIMIT))).scalars().all()
     return [{"id": r.id, "code": r.code, "name": r.name} for r in rows]
 
 
 async def department_options(db: AsyncSession) -> list[dict]:
     from app.platform.hcm.models import HcmDepartment
     rows = (await db.execute(
-        select(HcmDepartment).order_by(HcmDepartment.name).limit(LOOKUP_LIMIT))).scalars().all()
+        select(HcmDepartment).order_by(HcmDepartment.name).limit(MASTER_LOOKUP_LIMIT))).scalars().all()
     return [{"id": r.id, "code": getattr(r, "code", None), "name": r.name} for r in rows]
 
 
@@ -28496,7 +28552,7 @@ async def vehicle_options(db: AsyncSession, search: str | None = None) -> list[d
            "ORDER BY vehicle_number LIMIT :limit")
     try:
         rows = (await db.execute(text(sql), {
-            "search": search, "like": f"%{search or ''}%", "limit": LOOKUP_LIMIT})).all()
+            "search": search, "like": f"%{search or ''}%", "limit": MASTER_LOOKUP_LIMIT})).all()
     except Exception:  # noqa: BLE001 - the table belongs to another team and may not exist yet
         logger.warning("trn_vehicles is not available; the vehicle dropdown will be empty")
         return []
@@ -28512,7 +28568,7 @@ async def carrier_options(db: AsyncSession, search: str | None = None) -> list[d
            "ORDER BY name LIMIT :limit")
     try:
         rows = (await db.execute(text(sql), {
-            "search": search, "like": f"%{search or ''}%", "limit": LOOKUP_LIMIT})).all()
+            "search": search, "like": f"%{search or ''}%", "limit": MASTER_LOOKUP_LIMIT})).all()
     except Exception:  # noqa: BLE001
         logger.warning("trn_carriers is not available; the carrier dropdown will be empty")
         return []

@@ -796,6 +796,7 @@ async def copy_po_template(db: AsyncSession, po_id: int, user) -> dict:
             continue
         lines.append({
             "item_id": item.id, "item_code": item.code, "item_name": item.name,
+            "item_description": (item.description or "").strip() or None,
             "uom_code": item.uom_code or line.uom_code,
             "quantity": float(line.quantity), "rate": float(line.rate),
             "tax_percent": float(item.tax_percent if item.tax_percent is not None

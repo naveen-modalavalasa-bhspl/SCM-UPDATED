@@ -452,7 +452,8 @@ async def audit_items(db: AsyncSession, warehouse_id: int, user, *,
     if search and search.strip():
         like = f"%{search.strip()}%"
         stmt = stmt.where(or_(Item.code.ilike(like), Item.name.ilike(like)))
-    rows = (await db.execute(stmt.order_by(Item.name).limit(200))).all()
+    # Every item the point holds — a picker cut at 200 hides the rest (QA-5).
+    rows = (await db.execute(stmt.order_by(Item.name).limit(5000))).all()
     return [{
         "item_id": r.id, "item_code": r.code, "item_name": r.name, "uom_code": r.uom_code,
         "system_qty": float(r.qty or 0), "reserved_qty": float(r.reserved or 0),

@@ -1,3 +1,4 @@
+import { usePageSize } from "@/shared/hooks/usePageSize";
 import { useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
@@ -28,15 +29,16 @@ export default function ReturnsListPage() {
       : "all";
 
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = usePageSize("ReturnsListPage", 20);
   const [status, setStatus] = useState("");
   const [search, setSearch] = useState("");
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["returns", "list", { page, status, search, scope }],
+    queryKey: ["returns", "list", { page, status, search, scope }, pageSize],
     queryFn: () =>
       returnsApi.list({
         page,
-        size: 20,
+        size: pageSize,
         // The "To approve" tab is a status filter, not a separate feed: the backend
         // already flags who may act, and `can_act` is what gates the buttons.
         status: scope === "approvals" ? "PENDING_APPROVAL" : status,
@@ -48,7 +50,7 @@ export default function ReturnsListPage() {
   const rows = (data?.items ?? []).filter(
     (row) => (scope === "approvals" ? row.can_act : true),
   );
-  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / (data?.size || 20)));
+  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / pageSize));
 
   const columns: Column<StockReturn>[] = [
     {
@@ -189,6 +191,8 @@ export default function ReturnsListPage() {
         page={page}
         totalPages={totalPages}
         onPageChange={setPage}
+        pageSize={pageSize}
+        onPageSizeChange={(size) => { setPageSize(size); setPage(1); }}
         empty={
           <EmptyState
             title={

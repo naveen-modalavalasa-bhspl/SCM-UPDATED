@@ -1,3 +1,4 @@
+import { fetchAllPages, asPage } from "@/shared/api/fetchAll";
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -62,7 +63,7 @@ export function RulesPage() {
 
   const rules = useQuery({
     queryKey: ["admin", "rules", activeEvent],
-    queryFn: () => adminApi.rules.list({ event_code: activeEvent, size: 100 }),
+    queryFn: () => fetchAllPages(adminApi.rules.list, { event_code: activeEvent }).then(asPage),
     enabled: Boolean(activeEvent),
   });
 

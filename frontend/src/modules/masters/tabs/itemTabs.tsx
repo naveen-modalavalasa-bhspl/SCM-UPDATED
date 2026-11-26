@@ -14,7 +14,7 @@ export function ItemsTab() {
 }
 
 export function ItemSubClassesTab() {
-  const classes=useQuery({queryKey:["masters", "item-classes", "all"],queryFn:()=>mastersApi.itemClasses.list({size:300}).then(r=>r.items)});
+  const classes=useQuery({queryKey:["masters", "item-classes", "all"],queryFn:()=>mastersApi.itemClasses.listAll()});
   const classOpts=(classes.data??[]).map(r=>({value:r.id,label:`${r.code} — ${r.name}`}));
   return <MasterCrud<MasterItemSubClass>
     title="Item subclass" queryKey="item-subclasses" searchable managePerm="master.class.manage"
@@ -22,7 +22,7 @@ export function ItemSubClassesTab() {
       {key:"name",header:"Name",render:r=>r.name},
       {key:"class",header:"Item Class",render:r=>r.item_class_name??"—"}]}
     renderCard={r=><div><Code>{r.code}</Code><div>{r.name}</div></div>}
-    fetchList={search=>mastersApi.itemSubClasses.list({search,size:300}).then(r=>r.items)}
+    fetchList={search=>mastersApi.itemSubClasses.listAll({search})}
     fields={[{key:"item_class_id",label:"Item Class",type:"select",options:classOpts,required:true},
       {key:"code",label:"Code",required:true,...CODE_RULE},
       {key:"name",label:"Name",required:true,maxLength:200},
@@ -43,7 +43,7 @@ export function CategoriesTab({ cats: _cats }: { cats: Option[] }) {
   // under a Level 2. A Level 1 has no parent and is not asked for one.
   const all = useQuery({
     queryKey: ["masters", "categories", "levels"],
-    queryFn: () => mastersApi.categories.list({ size: 300 }).then((p) => p.items),
+    queryFn: () => mastersApi.categories.listAll(),
   });
   const parentsAt = (level: number): Option[] => (all.data ?? [])
     .filter((c) => c.level === level - 1 && c.is_active)
@@ -64,7 +64,7 @@ export function CategoriesTab({ cats: _cats }: { cats: Option[] }) {
           <Active on={r.is_active} />
         </div>
       )}
-      fetchList={(search) => mastersApi.categories.list({ search, size: 200 }).then((p) => p.items)}
+      fetchList={(search) => mastersApi.categories.listAll({ search })}
       newActions={[
         { label: "Level 1", preset: { level: 1, parent_id: null } },
         { label: "Level 2", preset: { level: 2, parent_id: null } },
@@ -126,7 +126,7 @@ export function ItemClassesTab() {
           <Active on={r.is_active} />
         </div>
       )}
-      fetchList={(search) => mastersApi.itemClasses.list({ search, size: 200 }).then((p) => p.items)}
+      fetchList={(search) => mastersApi.itemClasses.listAll({ search })}
       fields={[
         { key: "code", label: "Code", required: true, ...CODE_RULE },
         { key: "name", label: "Name", required: true, maxLength: 200 },
@@ -163,7 +163,7 @@ export function HsnCodesTab() {
           <div className="text-xs text-muted">GST {r.gst_rate}%</div>
         </div>
       )}
-      fetchList={(search) => mastersApi.hsnCodes.list({ search, size: 300 }).then((p) => p.items)}
+      fetchList={(search) => mastersApi.hsnCodes.listAll({ search })}
       fields={[
         { key: "code", label: "HSN / SAC code", required: true, maxLength: 8,
           pattern: /^\d{8}$/,
@@ -196,7 +196,7 @@ export function HsnCodesTab() {
 export function GeneralNamesTab() {
   const brands = useQuery({
     queryKey: ["masters", "brands", "all"],
-    queryFn: () => mastersApi.brands.list({ size: 300 }).then((r) => r.items),
+    queryFn: () => mastersApi.brands.listAll(),
   });
   const brandOpts: Option[] = (brands.data ?? [])
     .map((r) => ({ value: r.id, label: `${r.code} — ${r.name}` }));
@@ -222,8 +222,7 @@ export function GeneralNamesTab() {
           </div>
         </div>
       )}
-      fetchList={(search) => mastersApi.generalNames.list({ search, size: 200 })
-        .then((p) => p.items)}
+      fetchList={(search) => mastersApi.generalNames.listAll({ search })}
       fields={[
         { key: "code", label: "Code", required: true, ...CODE_RULE },
         { key: "name", label: "Name", required: true, maxLength: 200 },
@@ -247,7 +246,7 @@ export function GeneralNamesTab() {
 export function BrandsTab() {
   const manufacturers = useQuery({
     queryKey: ["masters", "manufacturers", "all"],
-    queryFn: () => mastersApi.manufacturers.list({ size: 300 }).then((r) => r.items),
+    queryFn: () => mastersApi.manufacturers.listAll(),
   });
   const manufacturerOpts: Option[] = (manufacturers.data ?? [])
     .map((r) => ({ value: r.id, label: `${r.code} — ${r.name}` }));
@@ -274,7 +273,7 @@ export function BrandsTab() {
           </div>
         </div>
       )}
-      fetchList={(search) => mastersApi.brands.list({ search, size: 200 }).then((p) => p.items)}
+      fetchList={(search) => mastersApi.brands.listAll({ search })}
       fields={[
         { key: "code", label: "Code", required: true, ...CODE_RULE },
         { key: "name", label: "Name", required: true, maxLength: 200 },

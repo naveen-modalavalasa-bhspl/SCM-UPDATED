@@ -1,10 +1,10 @@
+import { getAllPages } from "@/shared/api/fetchAll";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Copy } from "lucide-react";
 import { Card, DocumentNumberCard, ErrorBanner, Field, FormActions, Input, PageHeader, Select, useToast } from "@/shared/components";
 import { Button } from "../components/ActionButton";
-import { api } from "@/shared/api/client";
 import { fmtDate, todayIst } from "@/shared/datetime";
 import { poApi } from "../api";
 import { blankLine, LinePicker, type DraftLine } from "../components/LinePicker";
@@ -42,6 +42,7 @@ function headerFromCopy(t: POCopyTemplate): POHeaderValue {
 const linesFromCopy = (t: POCopyTemplate): DraftLine[] => t.lines.length
   ? t.lines.map((line) => ({
     item_id: line.item_id, item_code: line.item_code, item_name: line.item_name,
+    description: line.item_description ?? undefined,
     uom_code: line.uom_code, quantity: String(line.quantity), rate: String(line.rate),
     tax_percent: String(line.tax_percent),
     combo: comboFrom(line),
@@ -118,9 +119,7 @@ export function POFormPage() {
       // Material suppliers only. The vendor master holds the logistics partners too —
       // a carrier IS a vendor — but a purchase order for goods is never placed on a
       // courier, and the transport leg has its own document.
-      api.get<{ items: MasterVendor[] }>("/api/vendors", {
-        params: { size: 200, is_active: true, kind: "MATERIAL" },
-      }).then((r) => r.data.items),
+      getAllPages<MasterVendor>("/api/vendors", { is_active: true, kind: "MATERIAL" }),
   });
   // The copied vendor may sit outside the one page of the master the Select holds;
   // without its own option the box would render empty while a vendor is chosen.

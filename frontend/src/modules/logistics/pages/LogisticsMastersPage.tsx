@@ -55,7 +55,7 @@ export function LogisticsMastersPage() {
             <div className="text-xs text-muted">{capacity(r)}</div>
           </div>
         )}
-        fetchList={(search) => api.list({ search, size: 300 }).then((r) => r.items)}
+        fetchList={(search) => api.listAll({ search })}
         fields={[
           { key: "code", label: "Code", required: true, ...CODE_RULE },
           { key: "name", label: "Vehicle type", required: true, maxLength: 200 },

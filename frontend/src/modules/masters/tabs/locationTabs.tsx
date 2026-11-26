@@ -37,7 +37,7 @@ export function WarehousesTab({ facilities }: { facilities: Option[] }) {
           </div>
         </div>
       )}
-      fetchList={(search) => mastersApi.warehouses.list({ search, size: 100 }).then((p) => p.items)}
+      fetchList={(search) => mastersApi.warehouses.listAll({ search })}
       fields={[
         { key: "code", label: "Code", required: true, maxLength: 50,
           pattern: /^[A-Za-z0-9-]+$/,
@@ -118,7 +118,7 @@ export function ProjectsTab() {
       </div>
       <ReadOnlyTab<Project>
         title="Projects"
-        fetchList={() => mastersApi.projects.list({ size: 300 }).then((p) => p.items)}
+        fetchList={() => mastersApi.projects.listAll()}
         columns={[
           { key: "code", header: "Code", render: (r) => <Code>{r.code}</Code> },
           { key: "name", header: "Name", render: (r) => r.name },

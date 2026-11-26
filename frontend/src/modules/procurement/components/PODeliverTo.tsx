@@ -1,9 +1,8 @@
-import { useState } from "react";
+import { getAllPages } from "@/shared/api/fetchAll";
 import { useQuery } from "@tanstack/react-query";
 import { Warehouse } from "lucide-react";
 import { Field } from "@/shared/components";
 import { ItemCombobox } from "@/modules/indents/components/ItemCombobox";
-import { api } from "@/shared/api/client";
 import { ShippingAddressPicker } from "./ShippingAddressPicker";
 
 interface NamedRow { id: number; code?: string | null; name: string }
@@ -30,14 +29,11 @@ export function PODeliverTo({ value, onChange, disabled = false, required = fals
   required?: boolean;
   showInvalid?: boolean;
 }) {
-  const [query, setQuery] = useState("");
   const { data: warehouses = [], isLoading } = useQuery({
-    queryKey: ["org-warehouses", query],
+    queryKey: ["org-warehouses", "all"],
     enabled: !disabled,
     queryFn: () =>
-      api.get<{ items: NamedRow[] }>("/api/warehouses", {
-        params: { search: query || undefined, size: 50, is_active: true, kind: "SHIPMENT_ADDRESS" },
-      }).then((r) => r.data.items),
+      getAllPages<NamedRow>("/api/warehouses", { is_active: true, kind: "SHIPMENT_ADDRESS" }),
   });
   // The chosen warehouse may not be on this page of results — keep its option drawn.
   const selected = warehouses.find((w) => w.id === value.warehouseId);
@@ -64,7 +60,6 @@ export function PODeliverTo({ value, onChange, disabled = false, required = fals
             value={value.warehouseId}
             options={options}
             isLoading={isLoading}
-            onQueryChange={setQuery}
             onChange={(v) => {
               const id = v === "" ? "" : Number(v);
               const row = warehouses.find((w) => w.id === id);

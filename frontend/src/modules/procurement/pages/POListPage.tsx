@@ -1,3 +1,4 @@
+import { usePageSize } from "@/shared/hooks/usePageSize";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Copy, Download } from "lucide-react";
@@ -30,7 +31,6 @@ const STATUSES = [
 const money = (n?: number) =>
   `₹${Number(n ?? 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-const SIZE = 20;
 
 /** "Copy as new PO" from the register. Opens the New PO form pre-filled; nothing is
  *  saved until that form is. Stops the click so the row does not open as well. */
@@ -77,6 +77,7 @@ export function POListPage() {
   // strip above applies them, the Overview links straight into them, and a filtered
   // register is a link somebody can paste to a colleague.
   const { get, getBool, set, clear, page, setPage, activeCount } = useUrlFilters();
+  const [pageSize, setPageSize] = usePageSize("POListPage", 20);
   const search = get("search");
   const status = get("status");
   const vendor = get("vendor");
@@ -97,7 +98,7 @@ export function POListPage() {
     date_to: dateTo || undefined,
     pending_for_me: pendingForMe || undefined,
     page,
-    size: SIZE,
+    size: pageSize,
   };
 
   const { data, isLoading, error } = useQuery({
@@ -121,7 +122,7 @@ export function POListPage() {
     .map((v) => ({ value: v as string, label: v as string }))
     .sort((a, b) => a.label.localeCompare(b.label));
   const rows = all.filter((r) => !vendor || r.vendor_name === vendor);
-  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / SIZE));
+  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / pageSize));
 
   const columns: Column<POListRow>[] = [
     {
@@ -240,6 +241,8 @@ export function POListPage() {
           page={page}
           totalPages={totalPages}
           onPageChange={setPage}
+          pageSize={pageSize}
+          onPageSizeChange={(size) => { setPageSize(size); setPage(1); }}
           empty={
             pendingForMe
               ? "Nothing is waiting for your signature."

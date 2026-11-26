@@ -89,7 +89,9 @@ logger = logging.getLogger(__name__)
 
 AUDIT_ENTITY = "lgs_transport_requests"
 ZERO = Decimal("0")
-LOOKUP_LIMIT = 50
+# Every carrier in the master: a provider dropdown that stops at 50 hides the 51st
+# partner with nothing on screen saying so (QA-5). Carriers are a few hundred at most.
+LOOKUP_LIMIT = 2000
 MANUAL_COURIER_SETTING = "logistics.manual_courier_dispatch"
 THIRD_PARTY_VENDOR_SETTING = "logistics.send_third_party_to_vendor"
 

@@ -1,3 +1,4 @@
+import { getAllPages } from "@/shared/api/fetchAll";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -5,7 +6,6 @@ import { Switch } from "@heroui/react";
 import { Truck } from "lucide-react";
 import { Card, DocumentNumberCard, ErrorBanner, Field, FormActions, Input, Textarea, PageHeader, Select, useToast } from "@/shared/components";
 import { Button } from "../components/ActionButton";
-import { api } from "@/shared/api/client";
 import { consolidationApi, requisitionApi, rfqApi } from "../api";
 import { blankLine, LinePicker, type DraftLine } from "../components/LinePicker";
 import { ShippingAddressPicker } from "../components/ShippingAddressPicker";
@@ -100,13 +100,12 @@ export function RFQFormPage() {
       // being asked for. The union across the lines, not the intersection — a tender
       // for gauze and syringes goes to whoever can supply either. The same rule is
       // checked again on save; this only decides what is offered.
-      const response = await api.get<{ items: MasterVendor[] }>("/api/vendors", {
-        params: {
-          search: vendorSearch || undefined, size: 50, is_active: true,
-          kind: "MATERIAL", item_ids: String(itemId),
-        },
+      // Every mapped supplier, paged through: a first page of 50 hid the rest (QA-5).
+      const rows = await getAllPages<MasterVendor>("/api/vendors", {
+        search: vendorSearch || undefined, is_active: true,
+        kind: "MATERIAL", item_ids: String(itemId),
       });
-      return [itemId, response.data.items] as const;
+      return [itemId, rows] as const;
     }))),
     // No items chosen yet means no question to ask: an unfiltered list here would be
     // every supplier in the master, which is the thing this restriction removes.

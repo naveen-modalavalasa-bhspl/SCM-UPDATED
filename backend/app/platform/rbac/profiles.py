@@ -1029,7 +1029,7 @@ async def preview_profile(db: AsyncSession, key: str) -> dict:
             HcmPositionAssignment.is_active.is_(True),
         )
         .order_by(HcmEmployee.full_name)
-        .limit(200)
+        .limit(5000)
     )).all()
     return {"key": key, "items": [{
         "employee_id": r.id, "name": r.full_name, "emp_code": r.emp_code,

@@ -1,3 +1,4 @@
+import { usePageSize } from "@/shared/hooks/usePageSize";
 import { useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
@@ -58,6 +59,7 @@ export default function DecisionQueuePage() {
   const receiving = queue === QUEUE.ENDORSEMENT;
 
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = usePageSize("DecisionQueuePage", 20);
   const [search, setSearch] = useState("");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
@@ -75,11 +77,11 @@ export default function DecisionQueuePage() {
   };
 
   const { data, isLoading, isFetching, error } = useQuery({
-    queryKey: ["returns", "queue", queue, page, term, dateFrom, dateTo],
+    queryKey: ["returns", "queue", queue, page, term, dateFrom, dateTo, pageSize],
     queryFn: () =>
       returnsApi.list({
         page,
-        size: 20,
+        size: pageSize,
         queue,
         search: term,
         date_from: dateFrom,
@@ -92,7 +94,7 @@ export default function DecisionQueuePage() {
 
   const rows = data?.items ?? [];
   const total = data?.total ?? 0;
-  const totalPages = Math.max(1, Math.ceil(total / (data?.size || 20)));
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
   const columns: Column<StockReturn>[] = useMemo(() => [
     {
@@ -270,6 +272,8 @@ export default function DecisionQueuePage() {
         page={page}
         totalPages={totalPages}
         onPageChange={setPage}
+        pageSize={pageSize}
+        onPageSizeChange={(size) => { setPageSize(size); setPage(1); }}
         empty={
           // A filtered queue coming back empty is not an empty queue, and saying
           // "nothing waiting on you" there sends somebody looking for a configuration

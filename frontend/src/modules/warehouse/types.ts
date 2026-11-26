@@ -1616,6 +1616,8 @@ export interface StockAvailability {
 }
 
 export interface IssueWrite {
+  /** The `updated_at` an edit was made against (QA-5 BUG_006). */
+  expected_updated_at?: string | null;
   /** Whose paper it is on (2026-11-09); null on an issue older than organisations. */
   organization_id?: number | null;
   organization_name?: string | null;

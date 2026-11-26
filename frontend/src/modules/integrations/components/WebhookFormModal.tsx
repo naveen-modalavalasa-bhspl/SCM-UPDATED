@@ -1,3 +1,4 @@
+import { fetchAllPages, asPage } from "@/shared/api/fetchAll";
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/react";
@@ -61,7 +62,7 @@ export function WebhookFormModal({ open, editing, onClose, onSaved }: {
   // fetched here so the picker offers codes that actually authenticate.
   const clients = useQuery({
     queryKey: ["apis", "clients", "for-webhooks"],
-    queryFn: () => integrationsApi.listClients({ size: 100 }),
+    queryFn: () => fetchAllPages(integrationsApi.listClients).then(asPage),
     enabled: open,
   });
 

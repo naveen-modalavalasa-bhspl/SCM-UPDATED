@@ -1,10 +1,10 @@
+import { getAllPages } from "@/shared/api/fetchAll";
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Modal, ModalBody, ModalContent, ModalHeader } from "@heroui/react";
 import { Check, Layers, Package, Save } from "lucide-react";
 import { Button, Can, Field, Select, useToast } from "@/shared/components";
-import { api } from "@/shared/api/client";
 import { useAuth } from "@/shared/auth/AuthContext";
 import {
   HierarchyLadder, USAGES, USAGE_LABEL, usePackOptions, type ContainerUsage, type PackHierarchy,
@@ -36,8 +36,7 @@ function useItemParam(): [number | "", (id: number | "") => void] {
 function useItems() {
   return useQuery({
     queryKey: ["masters", "items", "picker"],
-    queryFn: () => api.get<{ items: ItemRow[] }>("/api/items", { params: { size: 500 } })
-      .then((r) => r.data.items),
+    queryFn: () => getAllPages<ItemRow>("/api/items"),
     staleTime: 60_000,
   });
 }

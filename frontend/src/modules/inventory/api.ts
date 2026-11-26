@@ -1,3 +1,4 @@
+import { getAllPages, asPage } from "@/shared/api/fetchAll";
 import type { QuantityChangeRow } from "@/shared/components";
 import { api } from "@/shared/api/client";
 import type {
@@ -319,14 +320,10 @@ export const lookupUnit = (code: string) =>
     .catch(() => null);
 
 export const getCatalogItems = () =>
-  api
-    .get<Page<CatalogItemOption>>("/api/items", { params: { size: 500 } })
-    .then((r) => unwrap(r.data));
+  getAllPages<CatalogItemOption>("/api/items");
 
 export const getVendors = () =>
-  api
-    .get<Page<VendorOption>>("/api/vendors", { params: { size: 200 } })
-    .then((r) => unwrap(r.data));
+  getAllPages<VendorOption>("/api/vendors");
 
 // ---- stock ----
 
@@ -444,11 +441,7 @@ export const createStockTransfer = (payload: StockTransferCreate) =>
 // ---- material requests ----
 
 export const listMaterialRequests = (params?: { status?: string; indent_id?: number }) =>
-  api
-    .get<Page<MaterialRequestListRow>>("/api/material-requests", {
-      params: { ...params, size: 100 },
-    })
-    .then((r) => r.data);
+  getAllPages<MaterialRequestListRow>("/api/material-requests", { ...params }).then(asPage);
 
 export interface MaterialRequestCreate {
   items: { item_id: number; quantity: number; project_id?: number | null;
@@ -591,20 +584,17 @@ export const getFulfilmentBatches = (includeDone = false) =>
  *  he approves. An approver who has already signed and passed it up keeps seeing it on
  *  /indents and in its journey — it is simply no longer work waiting on him. */
 export const getFulfillmentQueue = (status?: string, owedOnly = true, indentType?: string) =>
-  api
-    // STRs come from Stock Transfer's own list, so serving one needs
-    // `stock.transfer.serve` rather than all of Indents.
-    .get<Page<Record<string, unknown>>>(
-      indentType === "STR" ? "/api/indents/stock-transfer-requests" : "/api/indents", {
-      params: {
-        size: 100,
-        to_serve: true,
-        ...(owedOnly ? { has_remainder: true } : {}),
-        ...(status ? { status } : {}),
-        ...(indentType && indentType !== "STR" ? { indent_type: indentType } : {}),
-      },
-    })
-    .then((r) => r.data);
+  // Every row, not the first 100: the desk is a queue, and a queue that stops at 100
+  // hides indents still owed with nothing on screen saying so (QA-5). STRs come from
+  // Stock Transfer's own list, so serving one needs `stock.transfer.serve` rather than
+  // all of Indents.
+  getAllPages<Record<string, unknown>>(
+    indentType === "STR" ? "/api/indents/stock-transfer-requests" : "/api/indents", {
+      to_serve: true,
+      ...(owedOnly ? { has_remainder: true } : {}),
+      ...(status ? { status } : {}),
+      ...(indentType && indentType !== "STR" ? { indent_type: indentType } : {}),
+    }).then(asPage);
 
 // ---- allocation: the human decision ----
 
@@ -633,9 +623,7 @@ export const createAllocation = (indentId: number, decisions: AllocationDecision
     .then((r) => r.data);
 
 export const listAllocations = (params?: { status?: string; indent_id?: number }) =>
-  api
-    .get<Page<AllocationListRow>>("/api/allocations", { params: { ...params, size: 100 } })
-    .then((r) => r.data);
+  getAllPages<AllocationListRow>("/api/allocations", { ...params }).then(asPage);
 
 export const getAllocation = (id: number) =>
   api.get<Allocation>(`/api/allocations/${id}`).then((r) => r.data);
@@ -669,9 +657,9 @@ const ALLOCATION_DOC_TYPES = ["ALLOCATION", "OWN_STOCK_ALLOCATION"];
 // this user has and keeping two of the types in the browser would silently drop
 // allocations past the first page.
 export const getPendingInventoryApprovals = () =>
-  api.get<Page<WorkflowPending>>("/api/workflow/pending", {
-    params: { doc_type: ALLOCATION_DOC_TYPES.join(","), page: 1, size: 500 },
-  }).then((r) => r.data.items ?? []);
+  getAllPages<WorkflowPending>("/api/workflow/pending", {
+    doc_type: ALLOCATION_DOC_TYPES.join(","),
+  });
 
 // ---- New Inventory Module Endpoints ----
 

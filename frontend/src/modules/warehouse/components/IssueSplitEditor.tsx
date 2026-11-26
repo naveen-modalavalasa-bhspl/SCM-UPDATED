@@ -152,6 +152,10 @@ interface Props {
   /** A pick has just been given its batch AND location (or batch, where the point
    *  keeps none) — the form fills asset / consumable codes for it there and then. */
   onSourcePicked?: (index: number, line: IssueItemWrite) => void;
+  /** A pick's quantity has changed with its source already decided — the form tops
+   *  its codes up to the new quantity (QA-5 BUG_009: a second batch given its location
+   *  first and its quantity after was never filled). */
+  onQuantityChanged?: (index: number, line: IssueItemWrite) => void;
   meta: (code?: TrackingType | null) => TrackingTypeMeta | null;
   /** Flat indices that carry a problem, so the row can show it where it happened. */
   problemAt: Map<number, { level: "error" | "warn"; message: string }>;
@@ -179,7 +183,8 @@ interface Props {
 
 export function IssueSplitEditor({
   groups, lines, onChange, sourcesByItem, warehouseId, indentId, binManaged,
-  locked, unitsLocked, codesLocked, unitsHidden = false, onPickUnits, onSourcePicked, meta, problemAt, unitSupply,
+  locked, unitsLocked, codesLocked, unitsHidden = false, onPickUnits, onSourcePicked, onQuantityChanged,
+  meta, problemAt, unitSupply,
   sourcesReady, onAddItem, renderItemPicker, onRemoveGroup, renderRate, packOptionsByItem,
   onSaveTrays,
 }: Props) {
@@ -193,6 +198,9 @@ export function IssueSplitEditor({
     const picked = event?.locationPicked ? !!line.bin_id
       : event?.batchPicked ? !!line.batch_id && !binManaged : false;
     if (picked && onSourcePicked) onSourcePicked(index, line);
+    // The quantity moved on a pick whose source is already decided: the codes follow it.
+    else if ("issued_qty" in change && onQuantityChanged
+             && (binManaged ? !!line.bin_id : true)) onQuantityChanged(index, line);
   };
 
   /** A direct issue picks which brand / variant / model it gives, off what the point

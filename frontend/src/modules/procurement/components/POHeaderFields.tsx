@@ -1,3 +1,4 @@
+import { getAllPages } from "@/shared/api/fetchAll";
 import { useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Field, Input, Select } from "@/shared/components";
@@ -274,8 +275,8 @@ export function AddressesTermsCards({
   const { data: terms = [] } = useQuery({
     queryKey: ["po-payment-terms"],
     queryFn: () =>
-      api.get<{ items: PaymentTermRow[] }>("/api/payment-terms", { params: { size: 300 } })
-        .then((r) => r.data.items.filter((t) => t.is_active)),
+      getAllPages<PaymentTermRow>("/api/payment-terms")
+        .then((rows) => rows.filter((t) => t.is_active)),
   });
   const pickedTerm = terms.find((t) => String(t.id) === String(value.paymentTermId));
 
@@ -438,9 +439,7 @@ export function POHeaderFields({
   const { data: projects = [] } = useQuery({
     queryKey: ["po-projects"],
     queryFn: () =>
-      api.get<{ items: NamedRow[] }>("/api/projects", {
-        params: { size: 200, is_active: true },
-      }).then((r) => r.data.items),
+      getAllPages<NamedRow>("/api/projects", { is_active: true }),
   });
 
   const legacy = Boolean(value.legacy);

@@ -1,3 +1,4 @@
+import { usePageSize } from "@/shared/hooks/usePageSize";
 import { type ReactNode, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -177,8 +178,8 @@ export function DocumentList<T>({
   const [status, setStatus] = useState("");
   const [warehouse, setWarehouse] = useState("");
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = usePageSize("DocumentList", 20);
   const [debouncedSearch, setDebouncedSearch] = useState("");
-  const PAGE_SIZE = 20;
 
   // Now that the box searches the server, a request per keystroke would be a request
   // per keystroke. A quarter second is under the pause between words.
@@ -213,13 +214,13 @@ export function DocumentList<T>({
   // search box only ever searched what had already been fetched, and row 201 was
   // invisible with no way to reach it.
   const { data, isLoading, error } = useQuery({
-    queryKey: [queryKey, "page", filters, page],
-    queryFn: () => fetch({ ...filters, page, size: PAGE_SIZE }),
+    queryKey: [queryKey, "page", filters, page, pageSize],
+    queryFn: () => fetch({ ...filters, page, size: pageSize }),
   });
 
   const pageRows = data?.items ?? [];
   const total = data?.total ?? 0;
-  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
   // Status counts come from the server's own COUNT: ask for one row in that status
   // and read `total`. Exact at any queue depth, filtered and permission-scoped by the
@@ -465,6 +466,8 @@ export function DocumentList<T>({
         page={page}
         totalPages={totalPages}
         onPageChange={setPage}
+          pageSize={pageSize}
+          onPageSizeChange={(size) => { setPageSize(size); setPage(1); }}
       />
 
       <ConfirmModal

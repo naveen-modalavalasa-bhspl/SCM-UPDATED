@@ -1,3 +1,4 @@
+import { usePageSize } from "@/shared/hooks/usePageSize";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
@@ -39,6 +40,7 @@ const qty = (value: string | number) => Number(value ?? 0).toLocaleString();
 export default function PurchaseReturnsPage() {
   const navigate = useNavigate();
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = usePageSize("PurchaseReturnsPage", 20);
   const [search, setSearch] = useState("");
   // Where the material came from, which is the question the buying desk actually asks
   // about a purchase return — our own upper-tier stock going back, a branch pushing
@@ -52,12 +54,12 @@ export default function PurchaseReturnsPage() {
   });
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["returns", "purchase", { page, search, source }],
-    queryFn: () => returnsApi.purchaseReturns({ page, size: 20, search, source }),
+    queryKey: ["returns", "purchase", { page, search, source }, pageSize],
+    queryFn: () => returnsApi.purchaseReturns({ page, size: pageSize, search, source }),
   });
 
   const rows = data?.items ?? [];
-  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / (data?.size || 20)));
+  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / pageSize));
 
   const columns: Column<PurchaseReturn>[] = [
     {
@@ -205,6 +207,8 @@ export default function PurchaseReturnsPage() {
         page={page}
         totalPages={totalPages}
         onPageChange={setPage}
+        pageSize={pageSize}
+        onPageSizeChange={(size) => { setPageSize(size); setPage(1); }}
         empty={
           <EmptyState
             title="No purchase returns yet"

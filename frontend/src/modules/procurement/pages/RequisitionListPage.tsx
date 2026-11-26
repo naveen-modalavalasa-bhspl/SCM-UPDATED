@@ -1,3 +1,4 @@
+import { usePageSize } from "@/shared/hooks/usePageSize";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Can, Card, ErrorBanner, FilterBar, FilterMenu, PageHeader, ResponsiveList, StatusPill, type Column } from "@/shared/components";
@@ -26,7 +27,6 @@ export const money = (n?: number | null) =>
     minimumFractionDigits: 2, maximumFractionDigits: 2,
   })}`;
 
-const SIZE = 20;
 
 /**
  * The requisition register — what procurement wants to buy.
@@ -43,6 +43,7 @@ export function RequisitionListPage() {
   // strip above applies them, the Overview links straight into them, and a filtered
   // register is a link somebody can paste to a colleague.
   const { get, getBool, set, clear, page, setPage, activeCount } = useUrlFilters();
+  const [pageSize, setPageSize] = usePageSize("RequisitionListPage", 20);
   const status = get("status");
   // Project and raiser, filtered in the browser over the page in hand — the endpoint
   // takes neither, and these are the two things a buyer narrows by after status.
@@ -54,12 +55,12 @@ export function RequisitionListPage() {
   const debouncedSearch = useDebouncedValue(search);
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["requisitions", status, debouncedSearch, pendingForMe, page],
+    queryKey: ["requisitions", status, debouncedSearch, pendingForMe, page, pageSize],
     queryFn: () => requisitionApi.list({
       status: status || undefined,
       search: debouncedSearch || undefined,
       pending_for_me: pendingForMe || undefined,
-      page, size: SIZE,
+      page, size: pageSize,
     }),
   });
 
@@ -73,7 +74,7 @@ export function RequisitionListPage() {
   const rows = all.filter((r) =>
     (!project || r.project_name === project)
     && (!raiser || r.created_by_name === raiser));
-  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / SIZE));
+  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / pageSize));
 
   const columns: Column<ReqListRow>[] = [
     {
@@ -178,6 +179,8 @@ export function RequisitionListPage() {
           page={page}
           totalPages={totalPages}
           onPageChange={setPage}
+          pageSize={pageSize}
+          onPageSizeChange={(size) => { setPageSize(size); setPage(1); }}
           empty={
             pendingForMe
               ? "Nothing is waiting for your signature."

@@ -4065,7 +4065,7 @@ async def decision_options(db: AsyncSession, return_id: int, user=None) -> dict:
     _item_ids = [line.item_id for line in lines]
     _vendor_q = select(Vendor).join(VendorItem, VendorItem.vendor_id == Vendor.id).where(
         VendorItem.item_id.in_(_item_ids), Vendor.is_active.is_(True)
-    ).order_by(VendorItem.is_preferred.desc(), Vendor.name).limit(200) if _item_ids else select(Vendor).where(Vendor.is_active.is_(True)).order_by(Vendor.name).limit(200)
+    ).order_by(VendorItem.is_preferred.desc(), Vendor.name).limit(5000) if _item_ids else select(Vendor).where(Vendor.is_active.is_(True)).order_by(Vendor.name).limit(5000)
     _rows = (await db.execute(_vendor_q)).scalars().all()
     # No fallback to all 200 - that made every return show Amara Raja as the only
     # (first alphabetically) vendor. If the item has no vendor link, return empty

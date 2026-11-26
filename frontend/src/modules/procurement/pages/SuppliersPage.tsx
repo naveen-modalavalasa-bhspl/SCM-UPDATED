@@ -1,3 +1,4 @@
+import { usePageSize } from "@/shared/hooks/usePageSize";
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -15,7 +16,6 @@ import {
 import { Landmark, ReceiptText } from "lucide-react";
 import type { Supplier, SupplierInput } from "../types";
 
-const SIZE = 20;
 const KEY = ["suppliers"];
 const SUMMARY_KEY = ["suppliers", "summary"];
 
@@ -84,6 +84,7 @@ const clean = (form: SupplierInput): SupplierInput =>
  */
 export function SuppliersPage() {
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = usePageSize("SuppliersPage", 20);
   const [search, setSearch] = useState("");
   // Which slice the KPI strip has narrowed to. Client-side over the page already
   // loaded: these are flags on the row, not parameters the list endpoint takes, and
@@ -102,12 +103,12 @@ export function SuppliersPage() {
   const [confirmOff, setConfirmOff] = useState<Supplier | null>(null);
 
   const { data, isLoading, error } = useQuery({
-    queryKey: [...KEY, page, search],
+    queryKey: [...KEY, page, search, pageSize],
     // active_only: a removed supplier leaves the register rather than sitting in it
     // greyed out, where pressing Remove looks like it did nothing. The row is not
     // deleted — its RFQs, quotes and orders keep their vendor.
     queryFn: () => supplierRegisterApi.list({
-      page, size: SIZE, search: search.trim() || undefined, active_only: true,
+      page, size: pageSize, search: search.trim() || undefined, active_only: true,
     }),
   });
   const { data: summary } = useQuery({
@@ -460,8 +461,10 @@ export function SuppliersPage() {
           keyOf={(r) => r.id}
           loading={isLoading}
           page={page}
-          totalPages={Math.max(1, Math.ceil((data?.total ?? 0) / SIZE))}
+          totalPages={Math.max(1, Math.ceil((data?.total ?? 0) / pageSize))}
           onPageChange={setPage}
+          pageSize={pageSize}
+          onPageSizeChange={(size) => { setPageSize(size); setPage(1); }}
           empty="No suppliers yet — add the vendors you buy from."
           renderCard={(r) => (
             <div className="space-y-3">

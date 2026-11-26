@@ -1,3 +1,4 @@
+import { usePageSize } from "@/shared/hooks/usePageSize";
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -13,7 +14,6 @@ import { fmtDate } from "@/shared/datetime";
 import { logisticsVendorApi } from "../api";
 import type { LogisticsVendor, LogisticsVendorInput } from "../transportTypes";
 
-const SIZE = 20;
 const KEY = ["logistics-vendors"];
 const SUMMARY_KEY = ["logistics-vendors", "summary"];
 
@@ -86,6 +86,7 @@ const clean = (form: LogisticsVendorInput): LogisticsVendorInput =>
  */
 export function LogisticsVendorsPage() {
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = usePageSize("LogisticsVendorsPage", 20);
   const [search, setSearch] = useState("");
   // Which slice of the register the KPI strip has narrowed to. Client-side over the
   // page already loaded: these are flags on the row, not parameters the list endpoint
@@ -96,13 +97,13 @@ export function LogisticsVendorsPage() {
   const [confirmOff, setConfirmOff] = useState<LogisticsVendor | null>(null);
 
   const { data, isLoading, error } = useQuery({
-    queryKey: [...KEY, page, search],
+    queryKey: [...KEY, page, search, pageSize],
     // active_only: a removed partner leaves the register. It was still listed, greyed
     // to INACTIVE, so pressing Remove looked like it had done nothing. The row is not
     // deleted — deactivate_partner keeps it and its shipments' history — it just stops
     // being one of the partners this screen is about.
     queryFn: () => logisticsVendorApi.list({
-      page, size: SIZE, search: search.trim() || undefined, active_only: true,
+      page, size: pageSize, search: search.trim() || undefined, active_only: true,
     }),
   });
   const { data: summary } = useQuery({
@@ -457,8 +458,10 @@ export function LogisticsVendorsPage() {
           keyOf={(r) => r.id}
           loading={isLoading}
           page={page}
-          totalPages={Math.max(1, Math.ceil((data?.total ?? 0) / SIZE))}
+          totalPages={Math.max(1, Math.ceil((data?.total ?? 0) / pageSize))}
           onPageChange={setPage}
+          pageSize={pageSize}
+          onPageSizeChange={(size) => { setPageSize(size); setPage(1); }}
           empty="No logistics vendors yet — add the providers you ship with."
           renderCard={(r) => (
             <div className="space-y-3">

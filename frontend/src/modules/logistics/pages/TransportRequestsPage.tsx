@@ -1,3 +1,4 @@
+import { usePageSize } from "@/shared/hooks/usePageSize";
 import { useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
@@ -19,8 +20,6 @@ import {
 import type { ProviderBoardRow as TRListRow, TransportSummary } from "../transportTypes";
 import { legDestination } from "../components/manifestView";
 import { TONE_MINT } from "@/shared/components/tones";
-
-const SIZE = 20;
 
 const MODES = [
   { value: "", label: "All modes" },
@@ -103,6 +102,7 @@ export function TransportRequestsPage() {
   const [direction, setDirection] = useState("");
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = usePageSize("TransportRequestsPage", 20);
   const onlyReturns = direction === "RETURN";
 
   const { data: summary } = useQuery({
@@ -111,18 +111,18 @@ export function TransportRequestsPage() {
   });
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["transport", status, mode, direction, search, page],
+    queryKey: ["transport", status, mode, direction, search, page, pageSize],
     queryFn: () => transportApi.list({
       status: status || undefined,
       mode: mode || undefined,
       source_type: direction || undefined,
       search: search.trim() || undefined,
-      page, size: SIZE,
+      page, size: pageSize,
     }),
   });
 
   const rows = data?.items ?? [];
-  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / SIZE));
+  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / pageSize));
 
   const columns: Column<TRListRow>[] = [
     {
@@ -356,6 +356,8 @@ export function TransportRequestsPage() {
           page={page}
           totalPages={totalPages}
           onPageChange={setPage}
+          pageSize={pageSize}
+          onPageSizeChange={(size) => { setPageSize(size); setPage(1); }}
           empty={
             onlyReturns && !status && !mode && !search
               ? "No return legs yet."

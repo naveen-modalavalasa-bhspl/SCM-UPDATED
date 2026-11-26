@@ -1743,6 +1743,12 @@ class IssueItemWrite(CombinationIn):
 
 class IssueWrite(OrgScopeIn):
     issue_type: IssueType = IssueType.DIRECT
+    # The `updated_at` the form was opened on (QA-5 BUG_006). On an edit, a save from
+    # a copy that is no longer the latest — the same issue saved meanwhile from another
+    # window, another PC or another person — is refused with a 409 that says so,
+    # instead of silently overwriting their work or failing half-way. Optional: a
+    # caller that does not send it keeps the old last-write-wins behaviour.
+    expected_updated_at: datetime | None = None
     issue_date: date
     indent_id: int | None = None
     picking_id: int | None = None
