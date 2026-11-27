@@ -51,3 +51,10 @@ log_queries_not_using_indexes = 0
 # cascade into pool exhaustion, which presents as a total outage rather than as one
 # slow screen. 30s is far above any legitimate interactive query here.
 max_execution_time = 30000
+
+# A row-lock wait gives up BEFORE nginx does (proxy_read_timeout 60s). At MySQL's
+# default of 50 s, a save queued behind another plus its own work crossed 60 s, and the
+# user got nginx's bare "System error" instead of the 409 "record is being updated —
+# try again", which is the true and actionable answer. (max_execution_time above covers
+# SELECTs only; it never stops an UPDATE waiting on a lock.)
+innodb_lock_wait_timeout = 20

@@ -230,6 +230,20 @@ class Manufacturer(Base):
     is_active = Column(Boolean, nullable=False, default=True)
 
 
+class VehicleType(Base):
+    """A kind of vehicle the company runs its own loads in (2026-11-20) — Tata Ace,
+    Bolero Pickup, Eicher 14 ft. Picked on an own-vehicle dispatch. Capacity is
+    optional and informational: what one of these carries, by weight and by volume."""
+    __tablename__ = "mst_vehicle_types"
+    id = pk()
+    code = Column(String(10), unique=True, nullable=False)
+    name = Column(String(200), nullable=False)
+    description = Column(String(300), nullable=True)
+    capacity_kg = Column(Numeric(12, 2), nullable=True)
+    capacity_cbm = Column(Numeric(12, 3), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+
 class DosageForm(Base):
     __tablename__ = "mst_dosage_forms"
     id = pk()
@@ -353,6 +367,13 @@ class Vendor(Base):
     pan = Column(String(20), nullable=True)
     payment_terms_days = Column(Integer, nullable=True)
     credit_limit = Column(Numeric(16, 2), nullable=True)
+    # Where we pay them (2026-11-23) — required on every supplier a buyer adds.
+    bank_name = Column(String(150), nullable=True)
+    bank_account_no = Column(String(30), nullable=True)
+    ifsc_code = Column(String(11), nullable=True)
+    # Same state as us: TRUE = CGST + SGST, FALSE = IGST. NULL = never said, which
+    # falls back to comparing the two GSTINs' state codes (the rule before this).
+    is_same_state = Column(Boolean, nullable=True)
     rating = Column(Numeric(4, 2), nullable=True)
     is_approved = Column(Boolean, nullable=False, default=False)
     is_blacklisted = Column(Boolean, nullable=False, default=False)
@@ -598,6 +619,9 @@ class Packaging(Base):
     length_cm = Column(Numeric(10, 2), nullable=True)
     width_cm = Column(Numeric(10, 2), nullable=True)
     height_cm = Column(Numeric(10, 2), nullable=True)
+    # How big the container is, in the words the floor uses (2026-11-20, MoM point 16):
+    # SMALL / MEDIUM / LARGE / EXTRA_LARGE (`shared.enums.ContainerSize`). Optional.
+    size_class = Column(String(20), nullable=True)
     # TARE: what the container weighs empty. Gross weight is on the item's rung.
     weight_kg = Column(Numeric(12, 3), nullable=True)
 

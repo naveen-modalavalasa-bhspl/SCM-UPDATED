@@ -20,7 +20,7 @@ import { PAYMENT_STAGES, planPayload, planProblem } from "../paymentPlan";
 export function VendorItemsTab({ items }: { items: Option[] }) {
   const vendors = useQuery({
     queryKey: ["masters", "vendors", "all"],
-    queryFn: () => mastersApi.vendors.list({ size: 300 }).then((r) => r.items),
+    queryFn: () => mastersApi.vendors.listAll(),
   });
   const vendorOpts: Option[] = (vendors.data ?? [])
     .map((v) => ({ value: v.id, label: `${v.code} — ${v.name}` }));
@@ -60,8 +60,7 @@ export function VendorItemsTab({ items }: { items: Option[] }) {
           </div>
         </div>
       )}
-      fetchList={(search) => mastersApi.vendorItems.list({ search, size: 200 })
-        .then((p) => p.items)}
+      fetchList={(search) => mastersApi.vendorItems.listAll({ search })}
       fields={[
         { key: "vendor_id", label: "Vendor", type: "select", required: true,
           options: vendorOpts },
@@ -149,8 +148,7 @@ export function PaymentTermsTab() {
           <Active on={r.is_active} />
         </div>
       )}
-      fetchList={(search) => mastersApi.paymentTerms.list({ search, size: 300 })
-        .then((p) => p.items)}
+      fetchList={(search) => mastersApi.paymentTerms.listAll({ search })}
       fields={[
         { key: "name", label: "Term name", required: true, maxLength: 150,
           placeholder: "e.g. 20% advance, balance in 4 monthly instalments", half: true },
@@ -184,7 +182,7 @@ export function PaymentTermsTab() {
 export function VendorCategoriesTab() {
   const vendors = useQuery({
     queryKey: ["masters", "vendors", "all"],
-    queryFn: () => mastersApi.vendors.list({ size: 300 }).then((r) => r.items),
+    queryFn: () => mastersApi.vendors.listAll(),
   });
   const vendorOpts: Option[] = (vendors.data ?? []).map((v) => ({
     value: v.id, label: `${v.code} · ${v.name}` }));
@@ -205,7 +203,7 @@ export function VendorCategoriesTab() {
           <Active on={r.is_active} />
         </div>
       )}
-      fetchList={() => mastersApi.vendorCategories.list({ size: 300 }).then((p) => p.items)}
+      fetchList={() => mastersApi.vendorCategories.listAll()}
       fields={[
         { key: "name", label: "Name", required: true, maxLength: 150 },
         { key: "code", label: "Code", required: true },
@@ -228,7 +226,7 @@ export function VendorCategoriesTab() {
 export function VendorsTab() {
   const categories = useQuery({
     queryKey: ["masters", "vendor-categories", "options"],
-    queryFn: () => mastersApi.vendorCategories.list({ size: 300 }).then((p) => p.items),
+    queryFn: () => mastersApi.vendorCategories.listAll(),
   });
   const categoryOpts: Option[] = (categories.data ?? []).filter((c) => c.is_active)
     .map((c) => ({ value: c.id, label: c.name }));
@@ -253,7 +251,7 @@ export function VendorsTab() {
           <div className="text-xs text-muted">{r.contact_person ?? "—"} · {r.phone ?? "—"}</div>
         </div>
       )}
-      fetchList={(search) => mastersApi.vendors.list({ search, size: 100 }).then((p) => p.items)}
+      fetchList={(search) => mastersApi.vendors.listAll({ search })}
       fields={[
         { key: "code", label: "Vendor code", required: true, maxLength: 8,
           hint: "A number of 6 to 8 digits, e.g. 100245.",

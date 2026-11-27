@@ -1,3 +1,4 @@
+import { usePageSize } from "@/shared/hooks/usePageSize";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
@@ -10,8 +11,6 @@ import { SelectAllBar } from "../components/SelectAllBar";
 import { PickBox, PickedTag, pickRevision } from "../components/PickBox";
 import { money } from "./RequisitionListPage";
 import type { ReqListRow } from "../types";
-
-const SIZE = 50;
 
 /**
  * Pick the requisitions that go on a sheet.
@@ -31,6 +30,7 @@ export function PurchaseConsolidationFormPage() {
     title: "", period_label: "", remarks: "",
   });
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = usePageSize("PurchaseConsolidationFormPage", 50);
   // Selected here only for requisitions older than organisations. Anything newer carries
   // its own, and those are what the card shows the moment one is ticked.
   const [selection, setSelection] = useState<DocNumberValue>({
@@ -38,8 +38,8 @@ export function PurchaseConsolidationFormPage() {
   });
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["consolidation-candidates", page],
-    queryFn: () => consolidationApi.candidates({ page, size: SIZE }),
+    queryKey: ["consolidation-candidates", page, pageSize],
+    queryFn: () => consolidationApi.candidates({ page, size: pageSize }),
   });
 
   // Every candidate id, so "select all" can mean ALL of them rather than the fifty on
@@ -67,7 +67,7 @@ export function PurchaseConsolidationFormPage() {
   });
 
   const rows = data?.items ?? [];
-  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / SIZE));
+  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / pageSize));
   const picked = rows.filter((r) => chosen.includes(r.id));
   const pickedValue = picked.reduce((sum, r) => sum + Number(r.estimated_value ?? 0), 0);
   // The sheet takes the organisation of the requisitions on it, and the project of the
@@ -221,6 +221,8 @@ export function PurchaseConsolidationFormPage() {
           page={page}
           totalPages={totalPages}
           onPageChange={setPage}
+          pageSize={pageSize}
+          onPageSizeChange={(size) => { setPageSize(size); setPage(1); }}
           empty="Nothing to consolidate — every approved requisition is already on a sheet."
           renderCard={(r) => (
             <div className={`-m-1 flex items-start gap-2 rounded-xl p-1 transition-colors ${

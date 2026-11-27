@@ -1,16 +1,17 @@
+import { getAllPages } from "@/shared/api/fetchAll";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Copy } from "lucide-react";
 import { Card, DocumentNumberCard, ErrorBanner, Field, FormActions, Input, PageHeader, Select, useToast } from "@/shared/components";
 import { Button } from "../components/ActionButton";
-import { api } from "@/shared/api/client";
 import { fmtDate, todayIst } from "@/shared/datetime";
 import { poApi } from "../api";
 import { blankLine, LinePicker, type DraftLine } from "../components/LinePicker";
 import {
   blankPOHeader, POHeaderFields, poHeaderPayload, poMissingAddresses, type POHeaderValue,
 } from "../components/POHeaderFields";
+import { PODeliverTo } from "../components/PODeliverTo";
 import type { POCopyTemplate } from "../types";
 import { money } from "./RequisitionListPage";
 import { toPayload } from "@/shared/packing";
@@ -41,6 +42,7 @@ function headerFromCopy(t: POCopyTemplate): POHeaderValue {
 const linesFromCopy = (t: POCopyTemplate): DraftLine[] => t.lines.length
   ? t.lines.map((line) => ({
     item_id: line.item_id, item_code: line.item_code, item_name: line.item_name,
+    description: line.item_description ?? undefined,
     uom_code: line.uom_code, quantity: String(line.quantity), rate: String(line.rate),
     tax_percent: String(line.tax_percent),
     combo: comboFrom(line),
@@ -117,9 +119,7 @@ export function POFormPage() {
       // Material suppliers only. The vendor master holds the logistics partners too —
       // a carrier IS a vendor — but a purchase order for goods is never placed on a
       // courier, and the transport leg has its own document.
-      api.get<{ items: MasterVendor[] }>("/api/vendors", {
-        params: { size: 200, is_active: true, kind: "MATERIAL" },
-      }).then((r) => r.data.items),
+      getAllPages<MasterVendor>("/api/vendors", { is_active: true, kind: "MATERIAL" }),
   });
   // The copied vendor may sit outside the one page of the master the Select holds;
   // without its own option the box would render empty while a vendor is chosen.
@@ -157,7 +157,7 @@ export function POFormPage() {
       poApi.create({
         vendor_id: Number(vendorId),
         expected_date: expectedDate || null,
-        ...poHeaderPayload(header),
+        ...poHeaderPayload(header, { delivery: true }),
         lines: lines
           .filter((line) => line.item_id !== "" && Number(line.quantity) > 0)
           .map((line) => ({
@@ -203,6 +203,19 @@ export function POFormPage() {
     }
     if (totals.discount > totals.sub) {
       setProblem("The discount is more than the order sub-total.");
+      return;
+    }
+    // Where it is delivered: a warehouse and one of its shipping addresses. A copy of
+    // an older order may carry only the text, which the server accepts.
+    if (header.warehouseId === "" || header.warehouseId === undefined) {
+      if (!(copied && header.shipping_address.trim())) {
+        setTriedBooking(true);
+        setProblem("Pick the delivery warehouse and one of its shipping addresses.");
+        return;
+      }
+    } else if (!header.shippingAddressId || !header.shipping_address.trim()) {
+      setTriedBooking(true);
+      setProblem("Choose one of the warehouse's shipping addresses — it is printed on the order.");
       return;
     }
     // BUG_SCM_016 — the server refuses these too; said here first, by name.
@@ -303,6 +316,15 @@ export function POFormPage() {
             showInvalid={triedBooking}
             orderTotal={totals.grand}
             onChange={(patch) => setHeader((current) => ({ ...current, ...patch }))}
+            shippingSlot={
+              <PODeliverTo required showInvalid={triedBooking}
+                value={{
+                  warehouseId: header.warehouseId ?? "", warehouseName: header.warehouseName ?? "",
+                  shippingAddressId: header.shippingAddressId ?? null,
+                  shipping_address: header.shipping_address,
+                }}
+                onChange={(patch) => setHeader((current) => ({ ...current, ...patch }))} />
+            }
           />
         </div>
 

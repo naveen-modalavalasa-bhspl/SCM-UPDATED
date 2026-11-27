@@ -8,6 +8,7 @@ is the whole guard and every function filters on the carrier id taken from the t
 Same arrangement the supplier portal already uses.
 """
 from datetime import date
+from decimal import Decimal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse
@@ -255,6 +256,30 @@ async def dispatch_consignment(body: QuickDispatchIn,
                                db: AsyncSession = Depends(get_db),
                                user=Depends(require_permission(perms.TRANSPORT_CREATE))):
     return await service.dispatch_consignment(db, body, user)
+
+
+# Own vehicle (2026-11-20): the vehicle types for its dropdown, and its odometer.
+@transport_router.get("/vehicle-types")
+async def list_vehicle_types(db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(perms.TRANSPORT_VIEW))):
+    return await service.vehicle_types(db)
+
+
+@transport_router.post("/{tr_id:int}/odometer", response_model=TROut)
+async def record_odometer(tr_id: int, reading: str = Form(...), value: Decimal = Form(...),
+                          file: UploadFile | None = File(None),
+                          db: AsyncSession = Depends(get_db),
+                          user=Depends(require_permission(perms.TRANSPORT_TRACK))):
+    return await service.record_odometer(db, tr_id, reading, value, file, user)
+
+
+# The gate pass number the Dispatch press will issue, shown before it is pressed.
+# A preview: nothing is drawn, and the number given on the press may be later.
+@transport_router.get("/dispatch-number/preview")
+async def preview_dispatch_number(project_name: str | None = None, tr_id: int | None = None,
+                                  db: AsyncSession = Depends(get_db),
+                                  user=Depends(require_permission(perms.TRANSPORT_CREATE))):
+    return await service.preview_dispatch_no(db, project_name, tr_id)
 
 
 @transport_router.get("/dispatch-policy")

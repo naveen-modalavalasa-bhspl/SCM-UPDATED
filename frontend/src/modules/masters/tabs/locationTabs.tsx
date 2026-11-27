@@ -1,9 +1,12 @@
 import { mastersApi } from "../api";
 import { MasterCrud } from "../components/MasterCrud";
-import type { Option } from "../components/MasterCrud";
+import type { Option, Values } from "../components/MasterCrud";
 import type { MasterWarehouse, Project } from "../types";
 import type { Column } from "@/shared/components";
 import { Active, Code, ReadOnlyTab } from "./common";
+import {
+  addressesProblem, defaultLine, readAddresses, ShippingAddressesEditor,
+} from "../components/ShippingAddressesEditor";
 import { WAREHOUSE_TYPES } from "./constants";
 
 
@@ -21,6 +24,7 @@ export function WarehousesTab({ facilities }: { facilities: Option[] }) {
   return (
     <MasterCrud<MasterWarehouse>
       title="Warehouse" queryKey="warehouses" searchable managePerm="master.location.manage"
+      modalSize="3xl"
       columns={columns}
       renderCard={(r) => (
         <div className="space-y-1">
@@ -33,7 +37,7 @@ export function WarehousesTab({ facilities }: { facilities: Option[] }) {
           </div>
         </div>
       )}
-      fetchList={(search) => mastersApi.warehouses.list({ search, size: 100 }).then((p) => p.items)}
+      fetchList={(search) => mastersApi.warehouses.listAll({ search })}
       fields={[
         { key: "code", label: "Code", required: true, maxLength: 50,
           pattern: /^[A-Za-z0-9-]+$/,
@@ -51,7 +55,21 @@ export function WarehousesTab({ facilities }: { facilities: Option[] }) {
           },
         },
         { key: "facility_id", label: "Facility", type: "select", options: facilities },
-        { key: "address", label: "Address" },
+        {
+          key: "__addresses", label: "Shipping addresses", type: "custom",
+          render: (ctx) => <ShippingAddressesEditor {...ctx} />,
+          validate: (_raw, all) => (all.__addresses_loaded === true ? addressesProblem(readAddresses(all)) : null),
+          // Saved as one set with the warehouse; the default's line is mirrored onto
+          // the single address older screens read. Not loaded → both left as they are.
+          payload: (all): Values => {
+            if (all.__addresses_loaded !== true) return { address: all.address ?? null };
+            const list = readAddresses(all);
+            return {
+              address: list.length ? defaultLine(list) : (all.address ?? null),
+              shipping_addresses: list as unknown as Values[string],
+            };
+          },
+        },
         {
           key: "is_bin_managed",
           label: "Bin managed",
@@ -63,9 +81,11 @@ export function WarehousesTab({ facilities }: { facilities: Option[] }) {
       // A new warehouse starts as MAIN, and a main store keeps storage locations by
       // default — the same rule as Warehouse > Masters (`WarehouseForm`).
       emptyForm={{ code: "", name: "", warehouse_type: "MAIN", facility_id: null,
-                   address: "", is_bin_managed: true, is_active: true }}
+                   address: "", is_bin_managed: true, is_active: true,
+                   __id: null, __addresses: "[]", __addresses_loaded: true }}
       toForm={(r) => ({ code: r.code, name: r.name, warehouse_type: r.warehouse_type,
         facility_id: r.facility_id ?? null, address: r.address ?? "",
+        __id: r.id, __addresses: "[]", __addresses_loaded: false,
         is_bin_managed: r.warehouse_type === "MAIN" ? true : r.is_bin_managed,
         is_active: r.is_active })}
       bulk={mastersApi.warehouses} usage={mastersApi.warehouses.usage}
@@ -98,7 +118,7 @@ export function ProjectsTab() {
       </div>
       <ReadOnlyTab<Project>
         title="Projects"
-        fetchList={() => mastersApi.projects.list({ size: 300 }).then((p) => p.items)}
+        fetchList={() => mastersApi.projects.listAll()}
         columns={[
           { key: "code", header: "Code", render: (r) => <Code>{r.code}</Code> },
           { key: "name", header: "Name", render: (r) => r.name },

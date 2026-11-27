@@ -26,6 +26,7 @@ import {
 } from "../api";
 import type { StockBalanceItem, StockDetail, StockGroupRow, StockLot } from "../types";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
+import { LotWarrantyCell, lotWarrantySentence } from "./warrantyCell";
 import { TONE_BLUE } from "@/shared/components/tones";
 
 /** Value columns read off stk_balance.valuation_rate / stock_value. Both are 0 across
@@ -406,7 +407,7 @@ export function StockBalanceView() {
   const exportCsv = () => {
     const header = ["Item Code", "Item Name", "Category", "Warehouse", "Bin", "Batch",
                     "Expiry", "Available", "Reserved", "Serials", "IMEIs",
-                    "Asset / consumable codes", "Rate", "Value"];
+                    "Asset / consumable codes", "Warranty", "Rate", "Value"];
     const cell = (v: any) => {
       if (v == null) return '""';
       const s = String(v).replace(/"/g, '""');
@@ -421,6 +422,7 @@ export function StockBalanceView() {
       unitsOf(r)?.serials.join(" | ") || serialOf(r),
       unitsOf(r)?.imeis.join(" | "),
       unitsOf(r)?.codes.join(" | ") || (r.asset_code ?? r.consumable_code),
+      lotWarrantySentence(unitsOf(r)?.warranty, unitsOf(r)?.count ?? 0) ?? "",
       r.valuation_rate, r.total_value,
     ]);
     const csv = [header, ...body].map((line) => line.map(cell).join(",")).join("\n");
@@ -548,6 +550,17 @@ export function StockBalanceView() {
             title={r.item_name}
           />
         );
+      },
+    },
+    {
+      // The warranty each unit brought in on its GRN (MoM point 25): how many of the
+      // lot's units have one, and how many end within 30 days or have ended.
+      key: "warranty",
+      header: "Warranty",
+      hideOnNarrow: true,
+      render: (r) => {
+        const units = unitsOf(r);
+        return <LotWarrantyCell warranty={units?.warranty} units={units?.count ?? 0} />;
       },
     },
     {
@@ -771,6 +784,8 @@ export function StockBalanceView() {
             { value: "20", label: "20 per page" },
             { value: "50", label: "50 per page" },
             { value: "100", label: "100 per page" },
+            { value: "200", label: "200 per page" },
+            { value: "500", label: "500 per page" },
           ]}
         />
         {/* Same reason as the tile: with no reorder level anywhere the filter can only

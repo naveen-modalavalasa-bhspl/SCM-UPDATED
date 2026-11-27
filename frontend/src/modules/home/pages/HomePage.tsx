@@ -85,7 +85,46 @@ function SectionLabel({ children }: { children: string }) {
   );
 }
 
+const HIGHLIGHT_TONE: Record<string, string> = {
+  red: "border-bad/40 bg-bad-bg text-bad hover:border-bad",
+  amber: "border-warn/40 bg-warn-bg text-warn hover:border-warn",
+};
+
+/** A card with highlighted lines (2026-11-20): the figure, then each line as its own
+ *  link — a link inside a link is not allowed, so this card is a box of three. */
+function KpiCardWithHighlights({ item }: { item: HomeKpi }) {
+  const urgent = item.highlights!.some((h) => h.tone === "red");
+  return (
+    <div className={`flex min-h-44 flex-col rounded-2xl border bg-content1 p-4 shadow-sm transition hover:shadow-md ${
+      urgent ? "border-bad/40 ring-1 ring-bad/20" : "border-line"}`}>
+      <Link to={item.href} className="group block rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-brand/50">
+        <div className="flex items-center gap-3">
+          <IconBadge icon={item.icon} toneName={item.tone} />
+          <span className="text-[11px] font-semibold uppercase leading-tight text-ink-500">{item.label}</span>
+        </div>
+        <div className="mt-4 text-3xl font-bold tabular text-ink">{item.value}</div>
+        <div className={`mt-1 text-xs font-medium ${tone(item.detail_tone).text}`}>{item.detail}</div>
+      </Link>
+      <div className="mt-2.5 space-y-1.5">
+        {item.highlights!.map((h) => (
+          <Link key={h.href} to={h.href} title={h.hint}
+                className={`flex min-h-8 items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] font-semibold transition ${HIGHLIGHT_TONE[h.tone] ?? HIGHLIGHT_TONE.amber}`}>
+            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${h.tone === "red" ? "animate-pulse bg-bad" : "bg-warn"}`} aria-hidden />
+            <span className="min-w-0 flex-1 truncate">{h.text}</span>
+            <ArrowRight className="h-3 w-3 shrink-0" aria-hidden />
+          </Link>
+        ))}
+      </div>
+      <Link to={item.href} className="group mt-auto inline-flex items-center gap-2 pt-3 text-xs font-semibold text-brand">
+        View all
+        <ArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
+      </Link>
+    </div>
+  );
+}
+
 function KpiCard({ item }: { item: HomeKpi }) {
+  if (item.highlights?.length) return <KpiCardWithHighlights item={item} />;
   return (
     <Link
       to={item.href}

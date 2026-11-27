@@ -55,6 +55,39 @@ class Warehouse(Base):
 Index("ix_whs_warehouses_active", Warehouse.is_active)
 
 
+class WarehouseAddress(Base):
+    """One SHIPPING address of a warehouse (2026-11-23) — a warehouse can receive at
+    several gates or docks. One is the default; its text is mirrored onto
+    `Warehouse.address`, so everything that reads the single address (the Delivery
+    Challan's godown, labels) reads the default. Picked on an RFQ and a PO, whose own
+    `shipping_address` text keeps what was chosen even if this row is edited later.
+    Never deleted once saved — a retired address goes inactive."""
+    __tablename__ = "whs_warehouse_addresses"
+    id = pk()
+    warehouse_id = Column(ForeignKey("whs_warehouses.id", ondelete="CASCADE"),
+                          index=True, nullable=False)
+    label = Column(String(100), nullable=False)
+    address = Column(String(500), nullable=False)
+    city = Column(String(100), nullable=True)
+    state = Column(String(100), nullable=True)
+    pincode = Column(String(10), nullable=True)
+    contact_name = Column(String(150), nullable=True)
+    contact_phone = Column(String(20), nullable=True)
+    is_default = Column(Boolean, nullable=False, default=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = created_at_col()
+
+
+def address_text(row) -> str:
+    """The address as it is printed on an RFQ or a PO: the street line, then
+    city – pincode, state, then who to ask for at the gate."""
+    place = ", ".join(p for p in (
+        " – ".join(p for p in (row.city, row.pincode) if p), row.state) if p)
+    contact = " · ".join(p for p in (row.contact_name, row.contact_phone) if p)
+    return "\n".join(p for p in (row.address.strip(), place,
+                                  f"Contact: {contact}" if contact else "") if p)
+
+
 # The storage types that mean "you can put stock here and pick it from here", as the
 # system is BORN. Anything else in the tree — a block, a floor, a lane, a rack, a shelf
 # — is structure you walk past on the way to a bin, not somewhere stock is counted.

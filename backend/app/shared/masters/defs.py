@@ -18,6 +18,7 @@ from app.shared.limits import MAX_BATCH_IDS
 from app.platform.hcm.models import HcmDepartment, HcmEmployee, HcmFacility, HcmOffice
 from app.platform.rbac import permissions as perms
 from app.shared.enums import (
+    ContainerSize,
     ItemScope,
     AuditAction, CARRIER_VENDOR_TYPES, SHIPMENT_ADDRESS_WAREHOUSE_TYPES,
     AttributeDataType, CategoryTagType, UomClass,
@@ -32,6 +33,7 @@ from app.shared.models.master import (
     CategoryTag, DosageForm, Feature, GeneralName, HsnCode, Item, ItemCategory,
     ItemClass, ItemComponent, ItemGroup, ItemPackaging, ItemSubClass, Manufacturer,
     PackHierarchy, Packaging, PaymentTerm, Project, Spec, Uom, UomConversion, Vendor, VendorItem,
+    VehicleType,
     VendorCategory, VendorCategoryMember,
 )
 from app.shared.models.warehouse import Bin, StorageType, Warehouse
@@ -627,6 +629,9 @@ class WarehouseIn(BaseModel):
     # means arrivals here go through Material Inward -> GRN -> QC before they count.
     requires_inward: bool | None = None
     is_active: bool = True
+    #: The warehouse's shipping addresses (2026-11-23), saved with it as one set —
+    #: None leaves them as they are. See `shared/masters/warehouse_addresses.py`.
+    shipping_addresses: list[dict] | None = Field(default=None, max_length=50)
 
 
 def warehouse_kind_filter(request, stmt):
@@ -679,10 +684,16 @@ async def apply_warehouse(db: AsyncSession, w: Warehouse, data: WarehouseIn) -> 
     if data.incharge_id is not None and incharge is None:
         raise ValidationError("In-charge: that employee does not exist. Pick one from the list.")
 
-    for key, value in data.model_dump().items():
+    for key, value in data.model_dump(exclude={"shipping_addresses"}).items():
         setattr(w, key, value)
     w.facility_name = facility.name if facility else None
     w.incharge_name = incharge.full_name if incharge else None
+    if data.shipping_addresses is not None:
+        from app.shared.masters import warehouse_addresses
+        if w.id is None:
+            db.add(w)
+            await db.flush()
+        await warehouse_addresses.save(db, w, data.shipping_addresses)
     # A facility knows its office, so the office follows from it unless set explicitly.
     if facility is not None and data.office_id is None:
         w.office_id = facility.office_id
@@ -1682,6 +1693,18 @@ async def save_brand_item_mapping(db: AsyncSession, data: BrandItemMappingIn,
             "brands": len(brand_rows), "items": len(items)}
 
 
+class VehicleTypeIn(NamedCodeIn):
+    """Logistics › Masters › Vehicle Types (2026-11-20)."""
+    capacity_kg: Decimal | None = Field(default=None, ge=0)
+    capacity_cbm: Decimal | None = Field(default=None, ge=0)
+
+
+def vehicle_type_out(row: VehicleType) -> dict:
+    return {**named_code_out(row),
+            "capacity_kg": float(row.capacity_kg) if row.capacity_kg is not None else None,
+            "capacity_cbm": float(row.capacity_cbm) if row.capacity_cbm is not None else None}
+
+
 def named_code_out(row) -> dict:
     return {"id": row.id, "code": row.code, "name": row.name,
             "description": getattr(row, "description", None),
@@ -2009,6 +2032,15 @@ class PackagingIn(BaseModel):
     """
     code: str = Field(min_length=1, max_length=50, pattern=r"^[A-Za-z0-9-]+$")
     name: str
+    #: Small / Medium / Large / Extra large (2026-11-20) — the size people call it by.
+    size_class: ContainerSize | None = None
+
+    @field_validator("size_class", mode="before")
+    @classmethod
+    def blank_size_is_none(cls, value):
+        # The form's "no size" option is an empty string; it means "not stated".
+        return None if isinstance(value, str) and not value.strip() else value
+
     # All three or none: two sides describe nothing a slotting check can use, and a
     # half-measured container is why a bin check has to say "not measured" rather than
     # quietly assume the missing side away.
@@ -2048,6 +2080,7 @@ def _num(value):
 
 def packaging_out(p: Packaging) -> dict:
     return {"id": p.id, "code": p.code, "name": p.name,
+            "size_class": p.size_class,
             "length_cm": _num(p.length_cm), "width_cm": _num(p.width_cm),
             "height_cm": _num(p.height_cm), "weight_kg": _num(p.weight_kg),
             # Derived, never stored — three sides and a cube that can disagree is a bug
@@ -3250,6 +3283,12 @@ MASTERS: list[MasterDef] = [
               serialize=named_code_out, search_cols=("name", "code"),
               apply=named_code_apply(Manufacturer, "A manufacturer"),
               usage=((*USED_BY_ITEMS, "manufacturer_id"), ("Brand mappings", "mst_brand_manufacturers", "manufacturer_id"),)),
+
+    MasterDef(path="vehicle-types", name="Vehicle type", model=VehicleType,
+              schema=VehicleTypeIn, manage_perm=perms.MASTER_VEHICLE_TYPE_MANAGE,
+              serialize=vehicle_type_out, search_cols=("name", "code"),
+              apply=named_code_apply(VehicleType, "A vehicle type"),
+              usage=(("Shipments", "lgs_transport_requests", "vehicle_type_id"),)),
 
     MasterDef(path="dosage-forms", name="Dosage form", model=DosageForm,
               schema=NamedCodeIn, manage_perm=perms.MASTER_ITEM_MANAGE,

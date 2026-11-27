@@ -102,10 +102,24 @@ const inr = (value: number) =>
  * has been waiting more than three days, red only when a due date has actually
  * passed. A queue where every row is red says nothing about what to do first.
  */
+/** Stuck: the last rung, waited past the escalation limit — nobody above to take it. */
+export const isStuck = (row: PendingApproval) =>
+  Boolean(row.is_final_rung) && (row.waiting_hours ?? 0) >= (row.escalate_after_hours ?? 24);
+/** Waiting past the attention mark (12 h) — still moving, but worth a look. */
+export const needsAttention = (row: PendingApproval) =>
+  (row.waiting_hours ?? 0) >= (row.attention_hours ?? 12);
+
 function age(row: PendingApproval) {
   const days = daysSince(row.waiting_since);
-  const text = days === null ? "—" : days === 0 ? "Today" : `${days}d`;
+  const hours = row.waiting_hours;
+  const text = days === null ? "—" : days === 0
+    ? (hours != null && hours >= 1 ? `${Math.floor(hours)} h` : "Today") : `${days}d`;
+  if (isStuck(row)) return { text, note: "Stuck at final approval", tone: "bg-bad text-white" };
   if (overdue(row)) return { text, note: "Past due", tone: "bg-bad-bg text-bad" };
+  if (needsAttention(row)) {
+    return { text, note: row.is_final_rung ? "Final approval" : `Moves up at ${row.escalate_after_hours ?? 24} h`,
+             tone: "bg-warn-bg text-warn" };
+  }
   if ((days ?? 0) > 3) return { text, note: null, tone: "bg-warn-bg text-warn" };
   return { text, note: null, tone: "bg-neutral-bg text-neutral" };
 }
@@ -152,10 +166,11 @@ function Chip({
   active: boolean;
   onClick: () => void;
   title?: string;
-  tone?: "brand" | "danger";
+  tone?: "brand" | "danger" | "warn";
   children: ReactNode;
 }) {
-  const on = tone === "danger" ? "border-bad/40 bg-bad-bg text-bad" : FILTER_TOGGLE_ON;
+  const on = tone === "danger" ? "border-bad/40 bg-bad-bg text-bad"
+    : tone === "warn" ? "border-warn/40 bg-warn-bg text-warn" : FILTER_TOGGLE_ON;
   return (
     <button
       type="button"
@@ -209,6 +224,11 @@ export function ApprovalsPage() {
      every render would fight the user's own clicks. */
   const [docType, setDocType] = useState(() => params.get("doc_type") ?? "");
   const [pastDueOnly, setPastDueOnly] = useState(() => params.get("overdue") === "1");
+  // Opened from the Home card's highlighted lines (2026-11-20).
+  const [waitFilter, setWaitFilter] = useState<"" | "attention" | "stuck">(() => {
+    const asked = params.get("waiting");
+    return asked === "attention" || asked === "stuck" ? asked : "";
+  });
   const [raisedRange, setRaisedRange] = useState<RaisedRange>("");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
@@ -220,7 +240,7 @@ export function ApprovalsPage() {
   const size = 20;
   const serverWindow = raisedWindow(raisedRange, dateFrom, dateTo);
   const queryFilters = {
-    search: search.trim(), doc_type: docType, overdue_only: pastDueOnly, sort,
+    search: search.trim(), doc_type: docType, overdue_only: pastDueOnly, sort, waiting: waitFilter,
     scope: activeScope,
     raised_from: serverWindow && Number.isFinite(serverWindow[0]) ? new Date(serverWindow[0]).toISOString() : undefined,
     raised_to: serverWindow && Number.isFinite(serverWindow[1]) ? new Date(serverWindow[1]).toISOString() : undefined,
@@ -237,7 +257,7 @@ export function ApprovalsPage() {
     queryFn: () => approvalsApi.pendingAll(activeScope),
   });
   const queue = useMemo(() => queueQuery.data ?? [], [queueQuery.data]);
-  useEffect(() => setPage(1), [dateFrom, dateTo, docType, pastDueOnly, raisedRange, search, sort, activeScope]);
+  useEffect(() => setPage(1), [dateFrom, dateTo, docType, pastDueOnly, waitFilter, raisedRange, search, sort, activeScope]);
   const all = useMemo(() => query.data?.items ?? [], [query.data?.items]);
   const types = useMemo(() => approvalTypeCounts(queue), [queue]);
   const rows = useMemo(() => {
@@ -246,6 +266,8 @@ export function ApprovalsPage() {
     return all.filter((row) => {
       if (docType && displayDocType(row) !== docType) return false;
       if (pastDueOnly && !overdue(row)) return false;
+      if (waitFilter === "stuck" && !isStuck(row)) return false;
+      if (waitFilter === "attention" && !needsAttention(row)) return false;
       const waiting = msOf(row.waiting_since);
       if (window && (Number.isNaN(waiting) || waiting < window[0] || waiting >= window[1])) return false;
       return !term || [row.doc_no, row.summary, row.requested_by_name, row.current_stage_name]
@@ -264,7 +286,7 @@ export function ApprovalsPage() {
       if (sort === "value") return Number(b.amount ?? 0) - Number(a.amount ?? 0);
       return waited(a) - waited(b);
     });
-  }, [all, dateFrom, dateTo, docType, pastDueOnly, raisedRange, search, sort]);
+  }, [all, dateFrom, dateTo, docType, pastDueOnly, waitFilter, raisedRange, search, sort]);
 
   const setSelected = (row: PendingApproval) => nav(approvalDocumentPath(row));
 
@@ -421,8 +443,8 @@ export function ApprovalsPage() {
 
   const pastDue = queue.filter(overdue).length;
   const oldest = Math.max(0, ...queue.map((row) => daysSince(row.waiting_since) ?? 0));
-  const filtered = Boolean(search || docType || pastDueOnly || raisedRange);
-  const clear = () => { setSearch(""); setDocType(""); setPastDueOnly(false); setRaisedRange(""); setDateFrom(""); setDateTo(""); setSort("newest"); setPage(1); };
+  const filtered = Boolean(search || docType || pastDueOnly || waitFilter || raisedRange);
+  const clear = () => { setSearch(""); setDocType(""); setPastDueOnly(false); setWaitFilter(""); setRaisedRange(""); setDateFrom(""); setDateTo(""); setSort("newest"); setPage(1); };
 
   if (params.get("view") === "reports") {
     return <>
@@ -598,6 +620,22 @@ export function ApprovalsPage() {
           title="Show only what is past its due date"
         >
           <TriangleAlert className="h-4 w-4" /> Past due
+        </Chip>
+        <Chip
+          active={waitFilter === "attention"}
+          tone="warn"
+          onClick={() => setWaitFilter(waitFilter === "attention" ? "" : "attention")}
+          title="Waiting longer than the attention mark — moves up the ladder at the escalation limit"
+        >
+          <AlarmClock className="h-4 w-4" /> Waiting over 12 h
+        </Chip>
+        <Chip
+          active={waitFilter === "stuck"}
+          tone="danger"
+          onClick={() => setWaitFilter(waitFilter === "stuck" ? "" : "stuck")}
+          title="At the last approval and past the escalation limit — nobody above to move it to"
+        >
+          <TriangleAlert className="h-4 w-4" /> Stuck at final
         </Chip>
         {filtered && <Button variant="ghost" onClick={clear}><X className="h-4 w-4" /> Clear all</Button>}
         {raisedRange === "custom" && <div className="flex w-full flex-wrap items-center gap-2">

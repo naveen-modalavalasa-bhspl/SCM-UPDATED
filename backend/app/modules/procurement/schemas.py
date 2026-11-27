@@ -55,6 +55,10 @@ class POHeaderIn(BaseModel):
     logistics_terms: str | None = None
     billing_address: str | None = None
     shipping_address: str | None = None
+    #: Where the order is delivered (2026-11-23): a warehouse and one of its shipping
+    #: addresses. Required on a PO typed by hand; editable while the PO is a draft.
+    warehouse_id: int | None = None
+    shipping_address_id: int | None = None
     # None means "say nothing about this", not zero. They defaulted to 0, which made
     # a payload that simply omitted them indistinguishable from one asking for no
     # discount — so every save that did not carry them reset both to zero. An explicit
@@ -357,6 +361,10 @@ class POOut(OrgScopeOut):
     logistics_terms: str | None = None
     billing_address: str | None = None
     shipping_address: str | None = None
+    shipping_address_id: int | None = None
+    #: Where the order is delivered (2026-11-23).
+    warehouse_id: int | None = None
+    warehouse_name: str | None = None
     current_approver_name: str | None = None
     # Who the approval engine is ACTUALLY waiting on right now, read live at request
     # time. `current_approver_name` beside it is a snapshot written at submit and at
@@ -427,6 +435,9 @@ class POCopyLineOut(CombinationOut):
     item_id: int
     item_code: str | None = None
     item_name: str | None = None
+    # The item master's own description, so the copy says what each line IS — a PO
+    # line has no description column of its own (QA-5 BUG_0012).
+    item_description: str | None = None
     uom_code: str | None = None
     quantity: float
     rate: float
@@ -619,6 +630,9 @@ class RFQCreate(BaseModel):
     fiscal_year: str | None = None
     due_date: date | None = None
     terms: str | None = None
+    #: One of the warehouse's shipping addresses (2026-11-23) — required before sending.
+    shipping_address_id: int | None = None
+    shipping_address: str | None = None
     # None means "use the default" — see shared/evaluation.method_of. Validated in the
     # service against the shared catalogue, never against a list kept here.
     evaluation_method: str | None = None
@@ -657,6 +671,8 @@ class RFQUpdate(BaseModel):
     due_date: date | None = None
     terms: str | None = None
     warehouse_id: int | None = None
+    shipping_address_id: int | None = None
+    shipping_address: str | None = None
     project_id: int | None = None
     department_id: int | None = None
     company_name: str | None = None
@@ -764,6 +780,9 @@ class RFQOut(RFQListRow):
     consolidation_id: int | None = None
     consolidation_no: str | None = None
     warehouse_id: int | None = None
+    #: Where the goods are delivered (2026-11-23) — shown to the suppliers too.
+    shipping_address: str | None = None
+    shipping_address_id: int | None = None
     warehouse_name: str | None = None
     project_id: int | None = None
     project_name: str | None = None
@@ -1201,6 +1220,13 @@ class VendorProfileOut(BaseModel):
     city: str | None = None
     state: str | None = None
     gstin: str | None = None
+    # Where we pay them (2026-11-23). Shown to the supplier, never editable by them:
+    # a change of bank account is the classic invoice-fraud route, so it goes through
+    # the buyer.
+    bank_name: str | None = None
+    bank_account_no: str | None = None
+    ifsc_code: str | None = None
+    is_same_state: bool | None = None
 
 
 class VendorAccountOut(BaseModel):
@@ -1588,6 +1614,13 @@ class SupplierCreate(BaseModel):
     gstin: str | None = None
     pan: str | None = None
     payment_terms_days: int | None = Field(default=None, ge=0, le=365)
+    #: Where we pay them — required (2026-11-23); checked in `suppliers.bank_problems`.
+    bank_name: str = Field(default="", max_length=150)
+    bank_account_no: str = Field(default="", max_length=30)
+    ifsc_code: str = Field(default="", max_length=15)
+    #: Same state as us: CGST + SGST when True, IGST when False. None = work it out
+    #: from the two GSTINs.
+    is_same_state: bool | None = None
     #: Name them and let them in, in one press. A supplier with no account cannot
     #: answer the RFQ they are about to be sent.
     issue_login: bool = True
@@ -1609,6 +1642,10 @@ class SupplierUpdate(BaseModel):
     gstin: str | None = None
     pan: str | None = None
     payment_terms_days: int | None = Field(default=None, ge=0, le=365)
+    bank_name: str | None = Field(default=None, max_length=150)
+    bank_account_no: str | None = Field(default=None, max_length=30)
+    ifsc_code: str | None = Field(default=None, max_length=15)
+    is_same_state: bool | None = None
     is_active: bool | None = None
     is_blacklisted: bool | None = None
 
@@ -1629,6 +1666,16 @@ class SupplierOut(BaseModel):
     state: str | None = None
     gstin: str | None = None
     payment_terms_days: int | None = None
+    bank_name: str | None = None
+    ifsc_code: str | None = None
+    bank_account_masked: str | None = None
+    #: The whole number — only on the single read the edit form makes.
+    bank_account_no: str | None = None
+    has_bank_details: bool = False
+    #: CGST + SGST when True, IGST when False.
+    is_same_state: bool | None = None
+    #: The switch was never set; `is_same_state` is the GSTIN rule's answer.
+    same_state_inferred: bool = False
     is_active: bool
     is_approved: bool
     is_blacklisted: bool

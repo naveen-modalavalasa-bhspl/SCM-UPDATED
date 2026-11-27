@@ -8,6 +8,7 @@ import { Image as ImageIcon, Plus, Search } from "lucide-react";
 
 import {
   Button, Can, Field, Input, ResponsiveList, Select, useToast, type Column,
+  usePageSize,
 } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { ladderCaption, usePackOptions } from "@/shared/packing";
@@ -272,7 +273,8 @@ export function ItemMasterTab() {
   const qc = useQueryClient();
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
-  useEffect(() => setPage(1), [search]);
+  const [pageSize, setPageSize] = usePageSize("masters.items", MASTER_PAGE_SIZE);
+  useEffect(() => setPage(1), [search, pageSize]);
   const [editing, setEditing] = useState<MasterItem | null | undefined>(undefined);
   const [form, setForm] = useState<Form>(empty);
   const [tab, setTab] = useState<ItemSection>("Basic");
@@ -291,39 +293,37 @@ export function ItemMasterTab() {
     setForm((current) => ({ ...current, [key]: value }));
 
   const items = useQuery({
-    queryKey: ["masters", "items", search, page],
-    queryFn: () => mastersApi.items.list({ search, page, size: MASTER_PAGE_SIZE }),
+    queryKey: ["masters", "items", search, page, pageSize],
+    queryFn: () => mastersApi.items.list({ search, page, size: pageSize }),
   });
   const categories = useQuery({
     queryKey: ["masters", "categories", "all"],
-    queryFn: () => mastersApi.categories.list({ size: 300 }).then((r) => r.items),
+    queryFn: () => mastersApi.categories.listAll(),
   });
   const uoms = useQuery({ queryKey: ["masters", "uom"], queryFn: mastersApi.uom.listAll });
   const general = useQuery({
     queryKey: ["masters", "general-names"],
-    queryFn: () => mastersApi.generalNames.list({ size: 300 }).then((r) => r.items),
+    queryFn: () => mastersApi.generalNames.listAll(),
   });
   // Brands and manufacturers left the item form — they are mapped centrally
   // on the Brand Item Mapping screen. The form keeps their ids in state only
   // so an edit of an older branded item still saves what it was created with.
   const classes = useQuery({
     queryKey: ["masters", "item-classes", "all"],
-    queryFn: () => mastersApi.itemClasses.list({ size: 300 }).then((r) => r.items),
+    queryFn: () => mastersApi.itemClasses.listAll(),
   });
   const subclasses = useQuery({
     queryKey: ["masters", "item-subclasses", form.item_class_id],
-    queryFn: () => mastersApi.itemSubClasses.list({
-      item_class_id: Number(form.item_class_id), size: 300,
-    }).then((r) => r.items),
+    queryFn: () => mastersApi.itemSubClasses.listAll({ item_class_id: Number(form.item_class_id) }),
     enabled: Boolean(form.item_class_id),
   });
   const hsn = useQuery({
     queryKey: ["masters", "hsn-codes", "all"],
-    queryFn: () => mastersApi.hsnCodes.list({ size: 500 }).then((r) => r.items),
+    queryFn: () => mastersApi.hsnCodes.listAll(),
   });
   const dosage = useQuery({
     queryKey: ["masters", "dosage-forms"],
-    queryFn: () => mastersApi.dosageForms.list({ size: 300 }).then((r) => r.items),
+    queryFn: () => mastersApi.dosageForms.listAll(),
   });
   const departments = useQuery({
     queryKey: ["masters", "departments", "ownership-options"],
@@ -341,9 +341,7 @@ export function ItemMasterTab() {
       const categoryIds = [level1, level2, String(form.category_id)]
         .filter(Boolean);
       const pages = await Promise.all(categoryIds.map((categoryId) =>
-        mastersApi.categoryTags.list({
-          category_id: Number(categoryId), size: 200,
-        }).then((r) => r.items)));
+        mastersApi.categoryTags.listAll({ category_id: Number(categoryId) })));
       const inherited = new Map<string, MasterCategoryTag>();
       for (const page of pages) {
         for (const tag of page) inherited.set(`${tag.tag_type}:${tag.tag_id}`, tag);
@@ -461,9 +459,7 @@ export function ItemMasterTab() {
           setDraftBrands([]);
         }
         if (form.has_components && draftComponents.length) {
-          const existing = await mastersApi.itemComponents.list({
-            item_id: saved.id, size: 200, include_inactive: true,
-          }).then((r) => r.items);
+          const existing = await mastersApi.itemComponents.listAll({ item_id: saved.id, include_inactive: true });
           const firstLine = Math.max(0, ...existing.map((line) => line.line_no)) + 1;
           for (const [index, component] of draftComponents.entries()) {
             await mastersApi.itemComponents.create({
@@ -557,7 +553,7 @@ export function ItemMasterTab() {
         const idx = productGroups.indexOf(row);
         return (
           <span className="tabular-nums text-muted font-medium text-xs">
-            {(page - 1) * MASTER_PAGE_SIZE + (idx >= 0 ? idx : 0) + 1}
+            {(page - 1) * pageSize + (idx >= 0 ? idx : 0) + 1}
           </span>
         );
       },
@@ -593,7 +589,6 @@ export function ItemMasterTab() {
       render: (row) => row.representative.is_active ? "Active" : "Inactive" },
   ];
 
-
   return (
     <div>
       <div className="mb-4 flex gap-3">
@@ -615,7 +610,8 @@ export function ItemMasterTab() {
                queryKey="items" label="Items" />
       <ResponsiveList data={productGroups} loading={items.isLoading}
         page={page} onPageChange={setPage}
-        totalPages={Math.ceil((items.data?.total ?? 0) / MASTER_PAGE_SIZE)}
+        totalPages={Math.ceil((items.data?.total ?? 0) / pageSize)}
+        pageSize={pageSize} onPageSizeChange={setPageSize}
         keyOf={(row) => row.key} columns={columns}
         onRowClick={canManage ? (group) => openEdit(group.representative) : undefined}
         empty="No items found." renderCard={(group) => (
@@ -871,7 +867,7 @@ export function TagFields({ tags, values, onChange }: {
 }) {
   const attributes = useQuery({
     queryKey: ["masters", "attributes", "all"],
-    queryFn: () => mastersApi.attributes.list({ size: 300 }).then((r) => r.items),
+    queryFn: () => mastersApi.attributes.listAll(),
   });
   const set = (code: string, value: string) =>
     onChange({ ...values, [code]: value });
@@ -961,7 +957,7 @@ function DraftKitComponents({ itemId, values, onChange }: {
   const [remarks, setRemarks] = useState("");
   const items = useQuery({
     queryKey: ["masters", "items", "all"],
-    queryFn: () => mastersApi.items.list({ size: 300 }).then((r) => r.items),
+    queryFn: () => mastersApi.items.listAll(),
   });
   const selectedIds = new Set(values.map((line) => line.component_item_id));
   const itemRows = items.data ?? [];
@@ -1047,12 +1043,11 @@ function KitComponents({ itemId }: { itemId: number }) {
 
   const lines = useQuery({
     queryKey: ["masters", "item-components", itemId],
-    queryFn: () => mastersApi.itemComponents
-      .list({ item_id: itemId, size: 200 }).then((r) => r.items),
+    queryFn: () => mastersApi.itemComponents.listAll({ item_id: itemId }),
   });
   const items = useQuery({
     queryKey: ["masters", "items", "all"],
-    queryFn: () => mastersApi.items.list({ size: 300 }).then((r) => r.items),
+    queryFn: () => mastersApi.items.listAll(),
   });
   const add = useMutation({
     mutationFn: () => mastersApi.itemComponents.create({
@@ -1360,7 +1355,7 @@ function ItemPackagingLadder({ itemId, hierarchyId, hierarchyName, itemName, bas
   });
   const packages = useQuery({
     queryKey: ["masters", "packaging", "all"],
-    queryFn: () => mastersApi.packaging.list({ size: 200 }).then((r) => r.items),
+    queryFn: () => mastersApi.packaging.listAll(),
   });
 
   const activeRungs = (rungs.data ?? []).filter((rung) => rung.is_active);

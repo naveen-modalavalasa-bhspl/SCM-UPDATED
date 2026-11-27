@@ -1,3 +1,4 @@
+import { usePageSize } from "@/shared/hooks/usePageSize";
 import { forwardRef, useImperativeHandle, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
@@ -12,7 +13,6 @@ import { fmtDateTime, fmtRelative } from "@/shared/datetime";
 import type { Webhook } from "../types";
 
 /** Same page size as the applications list, so both tabs page at the same point. */
-const PAGE_SIZE = 20;
 
 /** Where one webhook lives. Its own address, so a row can be linked, opened in a
  *  second tab and returned to — the same as an application's. */
@@ -65,6 +65,7 @@ export const WebhooksPanel = forwardRef<WebhooksPanelHandle>(function WebhooksPa
   const [registering, setRegistering] = useState(false);
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = usePageSize("WebhooksPanel", 20);
 
   const list = useQuery({ queryKey: ["apis", "webhooks"], queryFn: webhooksApi.list });
 
@@ -81,8 +82,8 @@ export const WebhooksPanel = forwardRef<WebhooksPanelHandle>(function WebhooksPa
     ].join(" ").toLowerCase().includes(term));
   }, [list.data, search]);
 
-  const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
-  const shown = rows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+  const shown = rows.slice((page - 1) * pageSize, page * pageSize);
 
   // The row carries the same five facts an application's row carries, in the same
   // order: what it is, what it can reach, when it was last used, on whose terms, and
@@ -212,6 +213,8 @@ export const WebhooksPanel = forwardRef<WebhooksPanelHandle>(function WebhooksPa
         page={page}
         totalPages={totalPages}
         onPageChange={setPage}
+          pageSize={pageSize}
+          onPageSizeChange={(size) => { setPageSize(size); setPage(1); }}
         empty={
           <EmptyState
             title="Nothing is pushing into SCM yet"

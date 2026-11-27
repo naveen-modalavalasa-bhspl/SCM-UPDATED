@@ -1,3 +1,4 @@
+import { usePageSize } from "@/shared/hooks/usePageSize";
 import { useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
@@ -10,6 +11,8 @@ import {
   Select, StatusPill, type Column, type Tone,
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
+import { ScheduleDate } from "@/modules/warehouse";
+import { schedulePending } from "@/modules/warehouse/components/deliveryWindow";
 import { transportApi } from "../api";
 import {
   load, modeLabel, modeTint, money, nextMove, TR_STATUSES,
@@ -17,8 +20,6 @@ import {
 import type { ProviderBoardRow as TRListRow, TransportSummary } from "../transportTypes";
 import { legDestination } from "../components/manifestView";
 import { TONE_MINT } from "@/shared/components/tones";
-
-const SIZE = 20;
 
 const MODES = [
   { value: "", label: "All modes" },
@@ -101,6 +102,7 @@ export function TransportRequestsPage() {
   const [direction, setDirection] = useState("");
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = usePageSize("TransportRequestsPage", 20);
   const onlyReturns = direction === "RETURN";
 
   const { data: summary } = useQuery({
@@ -109,18 +111,18 @@ export function TransportRequestsPage() {
   });
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["transport", status, mode, direction, search, page],
+    queryKey: ["transport", status, mode, direction, search, page, pageSize],
     queryFn: () => transportApi.list({
       status: status || undefined,
       mode: mode || undefined,
       source_type: direction || undefined,
       search: search.trim() || undefined,
-      page, size: SIZE,
+      page, size: pageSize,
     }),
   });
 
   const rows = data?.items ?? [];
-  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / SIZE));
+  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / pageSize));
 
   const columns: Column<TRListRow>[] = [
     {
@@ -198,6 +200,20 @@ export function TransportRequestsPage() {
           </div>
         ) : <span className="text-muted">Not set</span>
       ),
+    },
+    {
+      key: "dispatch_on",
+      header: "Dispatch date",
+      hideOnNarrow: true,
+      // The day it actually left once it has; until then the planned date.
+      render: (r) => <ScheduleDate date={r.dispatched_at ?? r.expected_delivery_from}
+                                   pending={!r.dispatched_at && schedulePending(r.status).dispatch} />,
+    },
+    {
+      key: "deliver_by",
+      header: "Expected delivery",
+      render: (r) => <ScheduleDate date={r.expected_delivery}
+                                   pending={!r.delivered_at && schedulePending(r.status).delivery} />,
     },
     {
       key: "load",
@@ -340,6 +356,8 @@ export function TransportRequestsPage() {
           page={page}
           totalPages={totalPages}
           onPageChange={setPage}
+          pageSize={pageSize}
+          onPageSizeChange={(size) => { setPageSize(size); setPage(1); }}
           empty={
             onlyReturns && !status && !mode && !search
               ? "No return legs yet."

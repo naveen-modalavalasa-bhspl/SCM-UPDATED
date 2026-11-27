@@ -1,3 +1,4 @@
+import { fetchAllPages, asPage } from "@/shared/api/fetchAll";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -33,7 +34,7 @@ export function GroupsPage() {
 
   const groups = useQuery({
     queryKey: ["rbac", "groups"],
-    queryFn: () => rbacApi.groups.list({ size: 200 }),
+    queryFn: () => fetchAllPages(rbacApi.groups.list).then(asPage),
   });
   const roles = useQuery({ queryKey: ["rbac", "roles"], queryFn: rbacApi.roles });
   const hcmRoles = useQuery({ queryKey: ["rbac", "hcm-roles"], queryFn: rbacApi.hcmRoles });

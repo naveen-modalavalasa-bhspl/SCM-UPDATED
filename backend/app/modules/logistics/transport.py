@@ -72,6 +72,7 @@ from app.modules.logistics.models import (
 from app.modules.logistics.schemas import TRListRow, TROut
 from app.platform.settings.service import get_setting, write_audit
 from app.platform.settings import attachments
+from app.modules.logistics import own_vehicle
 from app.platform.workflow import engine, ladder
 # Read-only, and only for the activity ledger: the trail of who decided what is
 # the engine's to WRITE (rule 8) and every module's to read.
@@ -81,14 +82,16 @@ from app.shared.enums import ApprovalAction, AuditAction, DocType, InstanceStatu
 from app.shared.models.base import utcnow
 from app.shared.models.master import Vendor
 from app.shared.money import round_money
-from app.shared.numbering import next_number
+from app.shared.numbering import next_number, peek_next_number
 from app.shared.scope import scope_condition
 
 logger = logging.getLogger(__name__)
 
 AUDIT_ENTITY = "lgs_transport_requests"
 ZERO = Decimal("0")
-LOOKUP_LIMIT = 50
+# Every carrier in the master: a provider dropdown that stops at 50 hides the 51st
+# partner with nothing on screen saying so (QA-5). Carriers are a few hundred at most.
+LOOKUP_LIMIT = 2000
 MANUAL_COURIER_SETTING = "logistics.manual_courier_dispatch"
 THIRD_PARTY_VENDOR_SETTING = "logistics.send_third_party_to_vendor"
 
@@ -234,7 +237,29 @@ async def get_tr(db: AsyncSession, tr_id: int, user=None) -> TransportRequest:
         raise NotFoundError(f"Transport request {tr_id} not found")
     await _attach_package_quantities(db, doc)
     await _decorate_tr_missing_fields(db, doc)
+    if own_vehicle.is_own_vehicle(doc):
+        setattr(doc, "distance_travelled_km", own_vehicle.distance_km(doc))
+        setattr(doc, "odometer_photos", await own_vehicle.odometer_photos(db, doc.id))
     return doc
+
+
+async def record_odometer(db: AsyncSession, tr_id: int, reading: str, value, upload,
+                          user) -> TransportRequest:
+    """One of an own vehicle's two odometer readings, with its photo (2026-11-20)."""
+    doc = await get_tr(db, tr_id, user)
+    await own_vehicle.record_odometer(db, doc, reading, value, upload, user)
+    await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.tr_no,
+                      action=AuditAction.UPDATE, actor=user,
+                      after={"odometer_start": str(doc.odometer_start or ""),
+                             "odometer_end": str(doc.odometer_end or "")},
+                      summary=f"Odometer {reading.lower()} reading on {doc.tr_no}: {value} km")
+    await db.commit()
+    return await get_tr(db, tr_id, user)
+
+
+async def vehicle_types(db: AsyncSession) -> list[dict]:
+    """The active vehicle types, for the own-vehicle dropdown."""
+    return await own_vehicle.active_vehicle_types(db)
 
 
 def _package_quantity_key(row) -> tuple[str, object] | None:
@@ -789,8 +814,10 @@ def _raiser_view(doc: TransportRequest) -> dict:
         # No carrier to track on a hand-over or a company vehicle — the answer to
         # "where is it" there is a person and a phone number.
         "vehicle_number": doc.vehicle_number,
+        "destination_sac": doc.destination_sac,
         "driver_name": doc.driver_name, "driver_phone": doc.driver_phone,
         "handed_over_by_name": doc.handed_over_by_name,
+        "expected_delivery_from": doc.expected_delivery_from,
         "expected_delivery": doc.expected_delivery,
         "dispatched_at": doc.dispatched_at,
         "delivered_at": doc.delivered_at,
@@ -1755,7 +1782,9 @@ async def create_tr(db: AsyncSession, data, user) -> TransportRequest:
         contact_person=contact_p, contact_phone=contact_ph,
         distance_km=data.distance_km,
         project_id=data.project_id, project_name=data.project_name,
+        expected_delivery_from=data.expected_delivery_from,
         expected_delivery=data.expected_delivery, remarks=data.remarks,
+        destination_sac=(getattr(data, "destination_sac", None) or "").strip() or None,
         gate_pass_no=data.gate_pass_no,
         # The tracking handles, when the desk already holds them. A courier docket is
         # written on the booking slip at the counter, so asking for it again on a
@@ -1924,6 +1953,9 @@ async def dispatch_consignment(db: AsyncSession, data, user) -> TransportRequest
     data.carrier_id = chosen[0] if chosen else None
     doc = await create_tr(db, data, user)
     doc.mode = mode
+    # Own vehicle: its type and its crew (2026-11-20). Refused here, before the press
+    # spends a dispatch number, when the count and the names do not agree.
+    await own_vehicle.apply_arrangement(db, doc, data)
     # The press IS the dispatch, so its document is numbered here, not at the gate:
     # the outcome panel and the pass print it the moment this returns.
     await _assign_dispatch_no(db, doc)
@@ -2277,7 +2309,8 @@ async def update_tr(db: AsyncSession, tr_id: int, data, user) -> TransportReques
                   "from_warehouse_name", "from_warehouse_address",
                   "to_location_name", "delivery_address",
                   "contact_person", "contact_phone", "distance_km", "project_id",
-                  "project_name", "expected_delivery", "remarks", "vehicle_number",
+                  "project_name", "expected_delivery_from", "expected_delivery", "remarks",
+                  "vehicle_number", "destination_sac",
                   "driver_name", "driver_phone",
                   "driver_licence_no", "trip_reference",
                   "handed_over_by_name", "handed_over_employee_id",
@@ -2383,6 +2416,9 @@ async def update_tr(db: AsyncSession, tr_id: int, data, user) -> TransportReques
 
     if "lines" in fields_set:
         _apply_lines(doc, data.lines)
+
+    # Own vehicle: its type and its crew (2026-11-20), checked by `own_vehicle`.
+    await own_vehicle.apply_arrangement(db, doc, data)
 
     await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.tr_no,
                       action=AuditAction.UPDATE, actor=user, before=before,
@@ -3143,6 +3179,25 @@ def _text(value) -> str | None:
     return text or None
 
 
+async def preview_dispatch_no(db: AsyncSession, project_name: str | None = None,
+                              tr_id: int | None = None) -> dict:
+    """The gate pass number the Dispatch press WILL issue, before it is pressed
+    (2026-11-19) — the DSP number `_assign_dispatch_no` draws, read without drawing it.
+
+    A shipment that already carries a number answers with that number, `final`. Every
+    other answer is a preview: another desk dispatching first takes it and this one
+    gets the next, which is why it is labelled and never stored.
+    """
+    if tr_id:
+        doc = await db.get(TransportRequest, tr_id)
+        if doc is not None and (doc.gate_pass_no or "").strip():
+            return {"number": doc.gate_pass_no, "final": True}
+        if doc is not None and not project_name:
+            project_name = doc.project_name
+    number = await peek_next_number(db, DocType.DISPATCH.value, project=project_name)
+    return {"number": number, "final": False}
+
+
 async def _assign_dispatch_no(db: AsyncSession, doc: TransportRequest) -> None:
     """Give the dispatch its own document number — the gate pass — off the DISPATCH
     series (`BHS/104/2026-27/DSP0001`), unless the desk wrote one of its own.
@@ -3193,6 +3248,9 @@ async def _release(db: AsyncSession, doc: TransportRequest, data, user, *,
         # blank at submit has been answered by this point, and a consignment must never
         # leave the yard with nobody named as taking it.
         _check_mode_fields(doc)
+        # An own vehicle also leaves with its type, its crew and the odometer's start
+        # reading and photo (2026-11-20).
+        await own_vehicle.assert_can_release(db, doc)
 
         if doc.mode == TransportMode.DIRECT.value:
             _check_custody(doc)
@@ -3215,7 +3273,7 @@ async def _release(db: AsyncSession, doc: TransportRequest, data, user, *,
         if objection:
             raise ValidationError(objection)
     for field in ("lr_no", "docket_no", "tracking_url", "eway_bill_no",
-                  "gate_pass_no", "expected_delivery"):
+                  "gate_pass_no", "expected_delivery_from", "expected_delivery"):
         value = getattr(data, field, None)
         if value is not None:
             setattr(doc, field, value)
@@ -3365,6 +3423,9 @@ async def deliver_tr(db: AsyncSession, tr_id: int, data, user) -> TransportReque
     if doc.status not in (TransportStatus.IN_TRANSIT.value,
                           TransportStatus.READY.value):
         raise ValidationError(f"{doc.tr_no} is {doc.status.lower()}")
+
+    # An own vehicle is marked delivered with the odometer's end reading and photo.
+    await own_vehicle.assert_can_deliver(db, doc)
 
     # Arriving proves it left. Releasing first stamps the departure and hands the
     # warehouse its consignment back, which walking straight from READY to DELIVERED

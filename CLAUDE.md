@@ -1125,6 +1125,120 @@ on Stock Segregation > Lots carries Repack (amber when a pack is under its floor
 supplier portal's Profile > Packing tab (`GET /api/supplier/items/packing`) lists the
 hierarchies of the vendor's own mapped items only, scoped on the token.
 
+### Delivery Challan, dispatch dates, own vehicle, gate pass preview (2026-11-19/20)
+
+- **Delivery Challan** (`warehouse/delivery_challan.py`, `GET /api/warehouse/delivery-challan/
+  {tr_id}`, `transport.view`; screen `DeliveryChallanPrintPage`, button on the shipment).
+  ONE per DISPATCH, numbered with the dispatch (gate pass, DSP) number. Prints ONE table
+  (`lines`): Product name, Qty, HSN, Unit price, Amount — item + batch + price added up
+  across every consignment and package, with NO consignment, package or box numbers and
+  NO codes (asset, consumable, serial, IMEI) (decided 2026-11-20). Every line priced:
+  the line's rate, else the item master's purchase price ("†"). The note "Not for sale,
+  only for own consumption" is a faint SVG tile on the table's background, repeated
+  down it. Godown address = the SOURCE warehouse's master address. Read, never stored.
+- **Dispatch date and Expected delivery** are two named, required dates on a consignment
+  a person saves (`DispatchScheduleField`): `expected_delivery_from` = the planned
+  DISPATCH DATE, `expected_delivery` = when it should arrive (`e2a4c6b8d0f3`). The form's
+  own date is "Consignment date". Lists show both as columns (`ScheduleDate`, "2 days
+  late" only while still owed — `schedulePending`).
+- **Own vehicle** (`logistics/own_vehicle.py`, `f3b5d7c9e1a2`): a vehicle type from
+  Logistics › Masters › Vehicle Types (`mst_vehicle_types`, shared masters CRUD,
+  `master.vehicle_type.manage`, inherits `transport.create`); a crew — the count first,
+  then one card per person in `lgs_shipment_crew`, names + 10-digit mobiles, exactly one
+  driver (copied to `driver_name`/`driver_phone`), `crew_problems` = `crew.ts`; and the
+  odometer — START (before it leaves) and END (≥ START, after) via
+  `POST /api/transport/{id}/odometer`, each with a dial photo (`ODOMETER_START/END`
+  attachments). Release refuses without type, crew and START; the desk's "delivered"
+  refuses without END. Shipment page: `OwnVehicleTrip`; gate pass: "On board".
+- **Transfer card** (`TransferContextStrip`, `transferFacts.ts`): source → destination;
+  project OR department; SAC and vehicle only for an LIP.
+- **Gate pass number shown before the press**: `numbering.peek_next_number` behind
+  `GET /api/transport/dispatch-number/preview` — a preview; the press still draws.
+
+### MoM 2026-11-18 follow-ups: escalation, warranty, trays (2026-11-20)
+
+- **Approval escalation climbs the DOCUMENT'S ladder** (`platform/workflow/escalation.py`,
+  15-min job on the scheduler worker): 24 h at a rung → moved to the next rung of
+  `resolved_chain` (system ESCALATED row); at the LAST rung nothing moves — one urgent
+  `APPROVAL_STUCK` notification, pinned red in the bell, and "N stuck at final approval"
+  on the Home Approvals card; 12 h anywhere → amber "waiting over 12 h". Settings
+  `approvals.escalation.*`. The reminders job no longer escalates to the HCM manager.
+- **Warranty per received serial — in the Serial / IMEI popup** (`warehouse/warranty.py`,
+  `c6e8a0b2d4f7`, `e8a0c2d4f6b9`; screen `UnitCodesModal` + `WarrantyParts`, rules
+  `warrantyDraft.ts`, sheet `warrantyExcel.ts`). The popup asks first how it is given:
+  **BATCH** — one start/end/card no./card on the GRN LINE (`inb_receipt_items.warranty_*`)
+  covering every unit; **UNIT** — each row gets its own, one `inb_receipt_unit_warranties`
+  row per unit (keyed on the line + code, serial else IMEI). A unit's own row overrides
+  the batch's everywhere (`by_item`, `for_units`). Saved WHOLE per line:
+  `PUT /receipts/{id}/lines/{line}/warranty` (replaces the line's set; refused whole),
+  cards first via `POST /receipts/{id}/warranty-cards` (many at once). On a draft GRN
+  the popup keeps it in the form and `ReceiptForm.persistWarranties` saves it after the
+  GRN (codes must exist first); on a submitted GRN the popup saves it straight away.
+  Excel template/upload is checked whole in the browser — exactly the received quantity
+  of rows, no repeated code, real dates, never ending before starting — and card files
+  are matched by the sheet's file name or the code in the file name (`matchCards`). A
+  missing warranty WARNS, never refuses. Stock Balance reads it: each lot's tally on
+  `/serials/summary` (`warranty`) and each unit's on `/serials`.
+- **Trays on an issue pick** (`warehouse/issue_trays.py`, `out_issue_items.trays` JSON,
+  `d7f9b1c3e5a8`): tray no, qty, codes. Save: no repeated tray per pick, a code in one
+  tray, codes ≤ qty, sum ≤ pick. Submit and post: sum == pick. After approval
+  `PUT /issues/{id}/lines/{line}/trays`. A floor split hands each piece its share
+  (`split_for_pieces`: a code takes its tray to the piece holding it, then uncoded room
+  in tray order; a piece the trays cannot cover gets none rather than being stranded).
+  Served on the consignment source, the dispatch
+  (`line_trays`) and both acknowledgements (`TrayChips`); NEVER on the Delivery Challan.
+
+### QA-5 production bugs: every row, codes follow the quantity, stale saves (2026-11-26)
+
+- **A dropdown never stops at page 1.** `shared/api/fetchAll.ts` (`fetchAllPages`,
+  `getAllPages`, `asPage`) pages through 500 at a time (the server's `MAX_PAGE_SIZE`,
+  unchanged) up to 25,000 rows, and warns past that. Masters have `listAll`. Do NOT
+  "fix" a short list by raising `size:` — that is the defect (BUG_0013/14/16/17).
+  Only the first 100 matches are DRAWN (`optionWindow`, in `Select` and
+  `ItemCombobox`), with "Showing 100 of N — keep typing"; the chosen one stays in view.
+  Server pickers: `MASTER_LOOKUP_LIMIT` 5,000 / `DOCUMENT_LOOKUP_LIMIT` 1,000
+  (warehouse), carriers 2,000, vehicles 5,000, report filters 2,000.
+- **Rows per page** (BUG_0011): `usePageSize(screen)` + `ResponsiveList`
+  `pageSize`/`onPageSizeChange` (20/50/100/200/500, remembered per screen in the browser).
+- **Codes follow the quantity** (BUG_003/009): an asset / consumable pick tops up its
+  codes whenever its quantity changes, not only when its location is picked
+  (`onQuantityChanged`, `topUpCodes`, `codesTakenElsewhere`). Never takes a code another
+  pick of the item holds; keeps hand-swapped codes. Serial / IMEI still never auto-fill.
+- **A second batch on a GRN** (BUG_007): "Another batch" on a line (`withAnotherBatch`)
+  adds a sibling on the same PO line; the PO cap still adds the rows up.
+- **Stale saves** (BUG_006): `IssueWrite.expected_updated_at`; `update_issue` locks the
+  header and raises 409 when it moved (`_assert_issue_not_stale`), and stamps
+  `updated_at` itself. The form keeps unsaved edits through a re-read and shows
+  `ChangedElsewhereBanner`; our own actions re-read through `refreshIssue()`.
+- **Ledger "With"** (BUG_0015) is derived from each document's status
+  (`procurement/ledger.py` `_with`). **PO Copy** carries `item_description` (BUG_0012),
+  shown under every PO line (`LineDescription`).
+
+### Supplier bank + GST switch, shipping addresses, notifications (2026-11-23)
+
+- **Supplier bank details are MANDATORY** (`procurement/suppliers.bank_problems`: bank
+  name, account 9–18 digits typed twice on screen, IFSC `AAAA0XXXXXX`); the list serves
+  the account masked, `get_supplier` in full. The supplier portal shows them VIEW ONLY.
+  "Payment terms (days)" is off the form. `mst_vendors.is_same_state` (NULL = follow the
+  GSTIN): ON = CGST+SGST, OFF = IGST; no GSTIN defaults OFF. `vendor_tax_region` is the
+  one reader; a PO freezes its answer at submit (`tax_region_fixed`). Migration `f1b3d5a7c9e2`.
+- **Shipping addresses** (`whs_warehouse_addresses`, `shared/masters/warehouse_addresses.py`,
+  `a2c4e6f8b0d1`, `b4d6f8a0c2e3`): many per warehouse, one default, never deleted (left
+  out → inactive), the default mirrored onto `whs_warehouses.address`. Edited on BOTH
+  warehouse screens (`ShippingAddressesEditor`; Warehouse › Masters detail lists them).
+  RFQ: warehouse, then one of its addresses — required to submit. PO: carries the RFQ's;
+  a DRAFT may change it (`POAddressesTerms` → `PODeliverTo`); a direct PO picks warehouse +
+  address on the form. The document keeps the TEXT (editable, "edited for this document");
+  `warehouse_addresses.resolve` refuses an address of another warehouse.
+- **Notifications**: the bell polls the unread count every 10 s and reads the list only
+  when it rises; new rows (`notificationArrivals.arrivals`, by id — the first read only
+  sets the mark) open the panel AT ONCE, over an open dialog too (decided 2026-11-23),
+  and it stays open until closed — no timer. Over a dialog the panel's layer is marked
+  `data-react-aria-top-layer` and its `aria-hidden` lifted, or it is unreadable and
+  unreachable by role. Desktop pop-ups are a per-browser switch in the panel
+  (localStorage), shown on every arrival, tab in front or not; bursts over 3 collapse
+  to one; an urgent one stays until clicked.
+
 ### The outward leg (doc Phase D+E), under Logistics
 
 Logistics runs the whole outward leg, in the order it happens:

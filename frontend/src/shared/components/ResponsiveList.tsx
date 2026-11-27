@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { PAGE_SIZE_OPTIONS } from "../hooks/usePageSize";
 import {
   Table, TableHeader, TableColumn, TableBody, TableRow, TableCell, Spinner, Skeleton,
   Pagination,
@@ -27,6 +28,13 @@ interface Props<T> {
   page?: number;
   totalPages?: number;
   onPageChange?: (page: number) => void;
+  /** Rows per page, with a chooser beside the pager (20 / 50 / 100 / 200 / 500).
+   *  Pass both, from `usePageSize`; the caller asks the server for `pageSize` rows and
+   *  goes back to page 1 when it changes. Omitted, the list keeps its fixed size. */
+  pageSize?: number;
+  onPageSizeChange?: (size: number) => void;
+  /** Every row the list holds, for "Showing 51–100 of 983". Optional. */
+  totalRows?: number;
   /** Bump this when the CELLS must be rebuilt although `data` has not changed.
    *
    * HeroUI's Table is a react-stately collection: it caches the built rows against
@@ -43,20 +51,36 @@ interface Props<T> {
 export function ResponsiveList<T>({
   data, columns, renderCard, onRowClick, keyOf, loading, empty,
   page, totalPages, onPageChange, revision, editable = false,
+  pageSize, onPageSizeChange, totalRows,
 }: Props<T>) {
   const colByKey = Object.fromEntries(columns.map((c) => [c.key, c])) as Record<string, Column<T>>;
   const rowByKey = new Map(data.map((r) => [String(keyOf(r)), r]));
 
-  const pager = onPageChange && totalPages && totalPages > 1 ? (
-    <div className="flex w-full justify-center p-4">
-      <Pagination
-        isCompact
-        showControls
-        color="primary"
-        page={page ?? 1}
-        total={totalPages}
-        onChange={onPageChange}
-      />
+  const current = page ?? 1;
+  const sizeChooser = pageSize && onPageSizeChange ? (
+    <PageSizeChooser value={pageSize} onChange={onPageSizeChange} />
+  ) : null;
+  const showPager = Boolean(onPageChange && totalPages && totalPages > 1);
+  // "Showing 51–100 of 983" — only when the caller knows the total and there is a row.
+  const range = totalRows && pageSize && data.length
+    ? `${((current - 1) * pageSize + 1).toLocaleString()}–${Math.min(current * pageSize, totalRows).toLocaleString()} of ${totalRows.toLocaleString()}`
+    : null;
+  const pager = showPager || (sizeChooser && (totalRows ?? data.length) > PAGE_SIZE_OPTIONS[0]) ? (
+    <div className="flex w-full flex-wrap items-center justify-between gap-3 px-4 py-3">
+      <div className="flex min-h-11 items-center gap-3 text-xs text-muted">
+        {sizeChooser}
+        {range && <span className="tabular-nums" aria-live="polite">{range}</span>}
+      </div>
+      {showPager && (
+        <Pagination
+          isCompact
+          showControls
+          color="primary"
+          page={current}
+          total={totalPages!}
+          onChange={onPageChange!}
+        />
+      )}
     </div>
   ) : null;
 
@@ -187,5 +211,37 @@ export function ResponsiveList<T>({
         {pager}
       </div>
     </>
+  );
+}
+
+/** "Rows [20 50 100 200 500]" — a segmented control, one press per choice, so the
+ *  size a person is reading at is always on screen rather than hidden in a menu. */
+function PageSizeChooser({ value, onChange }: { value: number; onChange: (size: number) => void }) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="font-medium uppercase tracking-wide text-[10px]">Rows</span>
+      <div role="radiogroup" aria-label="Rows per page"
+           className="inline-flex rounded-xl border border-line bg-content2/60 p-0.5">
+        {PAGE_SIZE_OPTIONS.map((size) => {
+          const on = size === value;
+          return (
+            <button
+              key={size}
+              type="button"
+              role="radio"
+              aria-checked={on}
+              onClick={() => { if (!on) onChange(size); }}
+              className={`min-h-9 min-w-11 rounded-[10px] px-2 text-xs tabular-nums transition ${
+                on
+                  ? "bg-content1 font-semibold text-brand shadow-sm ring-1 ring-brand/30"
+                  : "text-muted hover:bg-content1/70 hover:text-body"
+              }`}
+            >
+              {size}
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }

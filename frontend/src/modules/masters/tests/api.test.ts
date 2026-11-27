@@ -65,7 +65,7 @@ describe("masters api", () => {
   it("projects are read-only: HCM owns them", () => {
     // The backend registers no write routes for projects, so offering create or
     // update here would only produce a 404 the user cannot act on.
-    expect(Object.keys(mastersApi.projects)).toEqual(["list"]);
+    expect(Object.keys(mastersApi.projects).sort()).toEqual(["list", "listAll"]);
   });
 
   it("uom offers the suggestion catalogue as well as plain CRUD", () => {

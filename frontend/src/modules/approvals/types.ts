@@ -8,6 +8,13 @@ export interface PendingApproval {
   requested_by_name?: string | null;
   amount?: number | null;
   waiting_since?: string | null;
+  /** Hours at THIS rung, whether it is the ladder's last rung, and the two limits
+   *  (2026-11-20, MoM point 2): amber past `attention_hours`, red when the final rung
+   *  has waited past `escalate_after_hours` (it cannot move up). */
+  waiting_hours?: number | null;
+  is_final_rung?: boolean;
+  attention_hours?: number;
+  escalate_after_hours?: number;
   due_at?: string | null;
   current_stage_name?: string | null;
   approver_name?: string | null;
@@ -745,4 +752,19 @@ export interface CycleLedger {
   };
   items: CycleLedgerItem[];
   indents: CycleLedgerIndent[];
+}
+
+
+/** The raising office's own shelf, per indent line (2026-11-20, MoM point 3). */
+export interface IndentOfficeStockLine {
+  line_id: number;
+  item_id: number;
+  balance?: number;
+  last_given?: { quantity: number; date?: string | null; ref_no?: string | null; ref_type?: string | null } | null;
+}
+export interface IndentOfficeStock {
+  point_id: number | null;
+  point_name: string | null;
+  has_point: boolean;
+  lines: IndentOfficeStockLine[];
 }

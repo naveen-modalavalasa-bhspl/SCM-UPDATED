@@ -102,7 +102,7 @@ export function SettingsPage() {
   const settings = useQuery({ queryKey: ["settings"], queryFn: settingsApi.get });
   const warehouses = useQuery({
     queryKey: ["settings", "warehouses"],
-    queryFn: () => mastersApi.warehouses.list({ size: 300 }).then((r) => r.items),
+    queryFn: () => mastersApi.warehouses.listAll(),
   });
   const save = useMutation({
     mutationFn: settingsApi.update,

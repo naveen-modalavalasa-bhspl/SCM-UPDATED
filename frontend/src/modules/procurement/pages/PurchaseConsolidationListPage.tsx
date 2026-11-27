@@ -1,3 +1,4 @@
+import { usePageSize } from "@/shared/hooks/usePageSize";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Can, Card, ErrorBanner, FilterBar, FilterMenu, PageHeader, ResponsiveList, StatusPill, type Column } from "@/shared/components";
@@ -9,7 +10,6 @@ import type { ConsolidationListRow } from "../types";
 import { ConsolidationKpis } from "../components/ProcurementKpis";
 import { useUrlFilters } from "../urlFilters";
 
-const SIZE = 20;
 
 /** Every filter this screen owns, so Clear knows what to drop. */
 const FILTER_KEYS = ["status", "search", "project", "pending_for_me"];
@@ -36,6 +36,7 @@ export function PurchaseConsolidationListPage() {
   const nav = useNavigate();
   // Filters live in the URL — see `../urlFilters`. The KPI strip above sets them.
   const { get, getBool, set, clear, page, setPage, activeCount } = useUrlFilters();
+  const [pageSize, setPageSize] = usePageSize("PurchaseConsolidationListPage", 20);
   const status = get("status");
   // The register had a status dropdown and NO search box at all, so finding one sheet
   // among a period's worth meant paging. Search and project are filtered in the
@@ -46,11 +47,11 @@ export function PurchaseConsolidationListPage() {
   const pendingForMe = getBool("pending_for_me");
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["consolidations", status, pendingForMe, page],
+    queryKey: ["consolidations", status, pendingForMe, page, pageSize],
     queryFn: () => consolidationApi.list({
       status: status || undefined,
       pending_for_me: pendingForMe || undefined,
-      page, size: SIZE,
+      page, size: pageSize,
     }),
   });
 
@@ -63,7 +64,7 @@ export function PurchaseConsolidationListPage() {
     (!project || r.project_name === project)
     && (!q || [r.cons_no, r.title, r.project_name, r.period_label, r.created_by_name]
       .some((f) => String(f ?? "").toLowerCase().includes(q))));
-  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / SIZE));
+  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / pageSize));
 
   const columns: Column<ConsolidationListRow>[] = [
     {
@@ -176,6 +177,8 @@ export function PurchaseConsolidationListPage() {
           page={page}
           totalPages={totalPages}
           onPageChange={setPage}
+          pageSize={pageSize}
+          onPageSizeChange={(size) => { setPageSize(size); setPage(1); }}
           empty={
             pendingForMe
               ? "Nothing is waiting for your signature."

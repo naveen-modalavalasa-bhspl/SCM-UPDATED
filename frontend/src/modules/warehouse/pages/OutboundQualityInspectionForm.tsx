@@ -5,7 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
 import { ArrowLeft, CheckCheck, CheckCircle2, Info, ScanLine } from "lucide-react";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
-import { LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
+import { LinesEditor, QtyInput, ReasonInput, type LineColumn } from "../components/LinesEditor";
 import { Lookup } from "../components/Lookup";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
@@ -704,11 +704,11 @@ export default function OutboundQualityInspectionForm({
     {
       key: "defect",
       header: "Rejection reason",
-      width: "w-36",
+      width: "min-w-[20rem] w-80",
       // Always shown: the save refuses a rejection without it, so hiding it under
       // 1024 px left a laptop inspector unable to reject anything.
       render: (l, i) => (
-        <TextInput
+        <ReasonInput
           ariaLabel={`Defect, line ${i + 1}`}
           value={l.rejection_reason ?? l.defect_type}
           disabled={locked || num(l.rejected_qty) === 0}

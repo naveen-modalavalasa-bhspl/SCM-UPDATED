@@ -3146,7 +3146,7 @@ describe("indent UI shell", () => {
       expect(headers[index]).toHaveClass("px-4", "align-middle", ...classes);
       expect(cells[index]).toHaveClass("px-4", "align-middle", ...classes);
     });
-    expect(within(cells[1]).getByText("Regular")).toBeInTheDocument();
+    expect(within(cells[1]).getByText("Interim indent")).toBeInTheDocument();
     expect(within(cells[2]).getByText(requester)).toHaveClass("block", "truncate");
     expect(within(cells[3]).getByText(department)).toHaveClass("block", "truncate");
     expect(within(cells[4]).getByText(region)).toHaveClass("block", "truncate");

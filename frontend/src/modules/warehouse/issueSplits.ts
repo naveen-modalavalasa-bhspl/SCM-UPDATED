@@ -779,6 +779,60 @@ export function trimUnits(line: IssueItemWrite, issued: number): string[] {
   return codes.length > keep ? codes.slice(0, keep) : codes;
 }
 
+/** Does this pick give asset / consumable codes — the system's own labels, which
+ *  the form fills by itself? A serial or an IMEI is read off the goods at the shelf
+ *  and is never pre-filled (CLAUDE.md, "Codes, QC and packing follow the issue LINE"). */
+export const fillsCodesItself = (line: Pick<IssueItemWrite, "tracking_type">) =>
+  line.tracking_type === "ASSET" || line.tracking_type === "CONSUMABLE";
+
+/** The codes OTHER picks of the same item on this document already hold. */
+export function codesTakenElsewhere(lines: IssueItemWrite[], index: number): Set<string> {
+  const itemId = lines[index]?.item_id;
+  const taken = new Set<string>();
+  lines.forEach((line, i) => {
+    if (i === index || !itemId || line.item_id !== itemId) return;
+    for (const code of line.serial_numbers ?? []) taken.add(code);
+  });
+  return taken;
+}
+
+/**
+ * A pick's codes once its quantity is known: what it already holds, kept, topped up
+ * oldest-first from `candidates` to exactly `need` (QA-5 BUG_003 / BUG_009).
+ *
+ * Before this the form filled codes only at the moment a pick's batch and location
+ * were chosen, and REPLACED whatever the pick held. Two defects came of it:
+ *
+ * - A second batch whose quantity was typed after its location was picked was never
+ *   filled — the location had been picked with nothing to issue yet — so it sat
+ *   short until a save, while the first batch looked complete.
+ * - The fill did not know about the item's OTHER picks. Two picks at one bay were both
+ *   handed the same oldest codes, the server could give each code to one pick only,
+ *   and on the next read the other pick had "unticked itself".
+ *
+ * So: never drop a code the pick already holds (the storekeeper may have swapped it in
+ * by hand), never take one another pick holds, and never go past `need`.
+ */
+export function topUpCodes(
+  current: string[],
+  need: number,
+  candidates: string[],
+  takenElsewhere: Set<string>,
+): string[] {
+  const want = Math.max(Math.trunc(need), 0);
+  const kept = current.filter((code) => !takenElsewhere.has(code)).slice(0, want);
+  if (kept.length >= want) return kept;
+  const have = new Set(kept);
+  const out = [...kept];
+  for (const code of candidates) {
+    if (out.length >= want) break;
+    if (!code || have.has(code) || takenElsewhere.has(code)) continue;
+    have.add(code);
+    out.push(code);
+  }
+  return out;
+}
+
 export type ProblemLevel = "error" | "warn";
 
 export interface SplitProblem {

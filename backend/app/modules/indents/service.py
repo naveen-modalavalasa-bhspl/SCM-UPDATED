@@ -199,7 +199,8 @@ VEHICLE_REGISTER_UNAVAILABLE_ERROR = (
     "The vehicle register is unavailable, so a vehicle cannot be attached right now. "
     "Save the indent without one and add it later."
 )
-VEHICLE_LOOKUP_LIMIT = 200
+# The whole register: a vehicle dropdown cut at 200 hides the rest (QA-5).
+VEHICLE_LOOKUP_LIMIT = 5000
 
 
 def _validate_indent_type(indent_type) -> str | None:

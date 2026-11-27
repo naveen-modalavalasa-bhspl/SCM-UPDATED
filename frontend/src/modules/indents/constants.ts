@@ -74,7 +74,9 @@ export const INDENT_LIST_TYPES: string[] = [INDENT_TYPE.REGULAR, INDENT_TYPE.MON
  * reclassify every request raised from today.
  */
 export const INDENT_TYPE_OPTIONS: { value: string; label: string }[] = [
-  { value: INDENT_TYPE.REGULAR, label: "Regular" },
+  // Shown as "Interim indent" (MoM 2026-11-18, point 1). The stored value stays
+  // REGULAR so every existing indent, filter, report and approval setup is untouched.
+  { value: INDENT_TYPE.REGULAR, label: "Interim indent" },
   { value: INDENT_TYPE.MONTHLY, label: "Monthly indent" },
 ];
 

@@ -32,16 +32,16 @@ export function ItemBrandsPanel({ itemId, draft, onDraft }: {
 
   const brands = useQuery({
     queryKey: ["masters", "brands", "all"],
-    queryFn: () => mastersApi.brands.list({ size: 500 }).then((r) => r.items.filter((b) => b.is_active)),
+    queryFn: () => mastersApi.brands.listAll().then((rows) => rows.filter((b) => b.is_active)),
   });
   const variants = useQuery({
     queryKey: ["masters", "brand-variants", "all"],
-    queryFn: () => mastersApi.brandVariants.list({ size: 500 }).then((r) => r.items.filter((v) => v.is_active)),
+    queryFn: () => mastersApi.brandVariants.listAll().then((rows) => rows.filter((v) => v.is_active)),
     enabled: !!itemId,
   });
   const models = useQuery({
     queryKey: ["masters", "brand-models", "all"],
-    queryFn: () => mastersApi.brandModels.list({ size: 500 }).then((r) => r.items.filter((m) => m.is_active)),
+    queryFn: () => mastersApi.brandModels.listAll().then((rows) => rows.filter((m) => m.is_active)),
     enabled: !!itemId,
   });
   const combos = useQuery({

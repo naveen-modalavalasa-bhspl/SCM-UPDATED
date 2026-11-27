@@ -1,3 +1,4 @@
+import { usePageSize } from "@/shared/hooks/usePageSize";
 import { useState } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import {
@@ -33,8 +34,6 @@ import type {
  * row carries the route its OWNING module already gates, which is what keeps this
  * screen from becoming a second door onto files the other modules scope carefully.
  */
-
-const PAGE_SIZE = 25;
 
 const KIND_META: Record<AttachmentFileKind, {
   icon: typeof ImageIcon; label: string; tint: string;
@@ -92,6 +91,7 @@ export function AttachmentsReportPage() {
   const [kind, setKind] = useState<"" | AttachmentFileKind>("");
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = usePageSize("AttachmentsReportPage", 25);
   const [open, setOpen] = useState<AttachmentDocument | null>(null);
   const [viewing, setViewing] = useState<{ files: AttachmentFile[]; at: number } | null>(null);
 
@@ -104,7 +104,7 @@ export function AttachmentsReportPage() {
     queryKey: attachmentKeys.summary(entityType),
     queryFn: () => getAttachmentSummary(entityType || undefined),
   });
-  const query = { entity_type: entityType, kind, search, page, size: PAGE_SIZE };
+  const query = { entity_type: entityType, kind, search, page, size: pageSize };
   const rows = useQuery({
     queryKey: attachmentKeys.rows(query),
     queryFn: () => getAttachmentRows(query),
@@ -112,7 +112,7 @@ export function AttachmentsReportPage() {
   });
 
   const items = rows.data?.items ?? [];
-  const totalPages = Math.max(1, Math.ceil((rows.data?.total ?? 0) / PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil((rows.data?.total ?? 0) / pageSize));
 
   /** Reset to page 1 whenever the question changes — page 4 of a different filter is
    *  a blank screen that looks like "no files". */
@@ -240,6 +240,8 @@ export function AttachmentsReportPage() {
             page={page}
             totalPages={totalPages}
             onPageChange={setPage}
+          pageSize={pageSize}
+          onPageSizeChange={(size) => { setPageSize(size); setPage(1); }}
             empty={
               <p className="p-10 text-center text-sm text-muted">
                 No document in view carries a file{kind ? " of that kind" : ""}

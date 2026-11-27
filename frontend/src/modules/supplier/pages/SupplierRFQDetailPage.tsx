@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, History } from "lucide-react";
+import { MapPin } from "lucide-react";
 import {
   Card, ConfirmModal, DocumentScopeStrip, ErrorBanner, Field, Input, StatusPill, Textarea, useToast,
 } from "@/shared/components";
@@ -370,6 +371,15 @@ export function SupplierRFQDetailPage() {
             </div>
             <StatusPill status={quote?.status ?? rfq.status} />
           </div>
+          {/* Where the goods are to be delivered (2026-11-23) — quote with it in mind. */}
+          {rfq.shipping_address && (
+            <div className="mt-4 border-t border-line pt-4">
+              <span className="mb-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted">
+                <MapPin className="h-3.5 w-3.5" aria-hidden /> Deliver to
+              </span>
+              <p className="whitespace-pre-line text-sm text-body">{rfq.shipping_address}</p>
+            </div>
+          )}
           {rfq.terms && (
             <div className="mt-4 border-t border-line pt-4">
               <span className="block mb-1 text-xs font-semibold uppercase tracking-wider text-muted">

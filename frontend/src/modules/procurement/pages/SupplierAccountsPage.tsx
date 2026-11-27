@@ -1,3 +1,4 @@
+import { usePageSize } from "@/shared/hooks/usePageSize";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Card, ErrorBanner, Input, PageHeader, ResponsiveList, StatusPill, useToast, type Column } from "@/shared/components";
@@ -13,8 +14,6 @@ interface MasterVendor {
   name: string;
 }
 
-const SIZE = 20;
-
 /**
  * Who outside the company can sign in.
  *
@@ -26,11 +25,12 @@ export function SupplierAccountsPage() {
   const toast = useToast();
   const queryClient = useQueryClient();
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = usePageSize("SupplierAccountsPage", 20);
   const [search, setSearch] = useState("");
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["supplier-accounts", page],
-    queryFn: () => supplierAccountApi.list({ page, size: SIZE }),
+    queryKey: ["supplier-accounts", page, pageSize],
+    queryFn: () => supplierAccountApi.list({ page, size: pageSize }),
   });
 
   const { data: vendors = [] } = useQuery({
@@ -165,8 +165,10 @@ export function SupplierAccountsPage() {
           keyOf={(r) => r.vendor_id}
           loading={isLoading}
           page={page}
-          totalPages={Math.max(1, Math.ceil((data?.total ?? 0) / SIZE))}
+          totalPages={Math.max(1, Math.ceil((data?.total ?? 0) / pageSize))}
           onPageChange={setPage}
+          pageSize={pageSize}
+          onPageSizeChange={(size) => { setPageSize(size); setPage(1); }}
           empty="No supplier logins yet."
           renderCard={(r) => (
             <div className="space-y-1.5">

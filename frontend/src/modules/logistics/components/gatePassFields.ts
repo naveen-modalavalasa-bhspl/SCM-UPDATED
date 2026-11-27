@@ -13,6 +13,7 @@
  * changes what it shows without anybody editing this file.
  */
 import { fmtDate } from "@/shared/datetime";
+import { vehicleWithSac } from "./vehicleLabel";
 import { money } from "./modeCopy";
 import type { ModeRule } from "../transportTypes";
 
@@ -84,6 +85,10 @@ export function carryingValue(
   if (!answered(raw)) return null;
   if (field === "freight_amount") return money(Number(raw));
   if (field === "expected_delivery") return fmtDate(String(raw));
+  // The vehicle carries the destination's SAC beside it (2026-11-20).
+  if (field === "vehicle_number") {
+    return vehicleWithSac(String(raw), (doc as { destination_sac?: string | null } | null)?.destination_sac);
+  }
   return String(raw);
 }
 

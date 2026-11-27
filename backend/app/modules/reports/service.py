@@ -24,8 +24,10 @@ CONTROL_PARAMS = {"page", "size", "search", "date_from", "date_to", "sort", "dir
                   "cols"}
 
 # A DISTINCT over a whole ledger feeds a dropdown, not a report — cap it so a
-# million-row stk_ledger cannot build a million-option select.
-MAX_FILTER_OPTIONS = 300
+# million-row stk_ledger cannot build a million-option select. 2,000 is past every
+# master a filter reads (QA-5: 300 cut the warehouse filter at a third of the network);
+# the dropdown draws the first matches and searches the rest.
+MAX_FILTER_OPTIONS = 2000
 
 # An export is one file a person opens in Excel, not a data dump.
 MAX_EXPORT_ROWS = 20_000

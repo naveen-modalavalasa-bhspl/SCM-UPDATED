@@ -1,3 +1,4 @@
+import { fetchAllPages, asPage } from "@/shared/api/fetchAll";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
@@ -48,7 +49,7 @@ export default function Warehouses() {
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["wh-warehouses", applied],
-    queryFn: () => listWarehouses({ size: 200, ...(applied ? { search: applied } : {}) }),
+    queryFn: () => fetchAllPages(listWarehouses, applied ? { search: applied } : {}).then(asPage),
     placeholderData: (previous) => previous,
   });
 

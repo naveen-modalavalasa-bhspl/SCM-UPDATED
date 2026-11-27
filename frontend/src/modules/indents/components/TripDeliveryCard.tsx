@@ -1,5 +1,6 @@
 import { Link } from "react-router-dom";
 import { CardBody } from "@heroui/react";
+import { vehicleWithSac } from "@/modules/indents/displayFormat";
 import { Card } from "@/shared/components";
 import { CheckCircle2, MapPin, Phone, Truck } from "lucide-react";
 import { fmtDate, fmtDateTime } from "@/shared/datetime";
@@ -83,7 +84,7 @@ export function TripDeliveryCard({ indentId, shipments }: {
               <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-sm sm:grid-cols-4">
                 <Fact label="From" value={leg.from_warehouse_name} />
                 <Fact label="Carrier" value={leg.carrier_name ?? (leg.vehicle_number ? "Company vehicle" : null)} />
-                <Fact label="Vehicle" value={leg.vehicle_number} mono />
+                <Fact label="Vehicle" value={vehicleWithSac(leg.vehicle_number, leg.destination_sac)} mono />
                 <Fact label="Tracking no." value={leg.lr_no ?? leg.docket_no} mono />
                 <Fact label="Left on" value={leg.dispatched_at ? fmtDateTime(leg.dispatched_at) : leg.departure_date ? `Planned ${fmtDate(leg.departure_date)}` : null} />
                 <Fact label="Delivered" value={leg.stop_delivered_at ? fmtDateTime(leg.stop_delivered_at) : null} />

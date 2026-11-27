@@ -1,3 +1,4 @@
+import { usePageSize } from "@/shared/hooks/usePageSize";
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
@@ -12,8 +13,6 @@ import type { RFQListRow } from "@/modules/procurement/types";
 import { useDebouncedValue } from "@/shared/hooks/useDebouncedValue";
 import { VENDOR_RFQ_STATUS_OPTIONS, vendorRfqLabel } from "../status";
 
-const SIZE = 20;
-
 /** What this vendor has been asked to quote on. The list is already filtered
  *  server-side to their own invitations — there is no "all RFQs" to fall back to. */
 export function SupplierRFQListPage() {
@@ -23,6 +22,7 @@ export function SupplierRFQListPage() {
   // Debounce the search input to avoid spamming the API on every keystroke
   const debouncedSearch = useDebouncedValue(search);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = usePageSize("SupplierRFQListPage", 20);
 
   // Automatically reset to the first page whenever the search or filter changes
   useEffect(() => {
@@ -30,11 +30,11 @@ export function SupplierRFQListPage() {
   }, [debouncedSearch, status]);
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["supplier-rfqs", debouncedSearch, status, page],
+    queryKey: ["supplier-rfqs", debouncedSearch, status, page, pageSize],
     queryFn: () => supplierApi.rfqs({
       search: debouncedSearch || undefined,
       status: status || undefined,
-      page, size: SIZE,
+      page, size: pageSize,
     }),
   });
 
@@ -132,8 +132,10 @@ export function SupplierRFQListPage() {
           loading={isLoading}
           onRowClick={(r) => nav(`/supplier/rfqs/${r.id}`)}
           page={page}
-          totalPages={Math.max(1, Math.ceil((data?.total ?? 0) / SIZE))}
+          totalPages={Math.max(1, Math.ceil((data?.total ?? 0) / pageSize))}
           onPageChange={setPage}
+          pageSize={pageSize}
+          onPageSizeChange={(size) => { setPageSize(size); setPage(1); }}
           empty={
             <div className="flex flex-col items-center justify-center py-16 text-center">
               <div className="mb-4 rounded-full bg-surface-2 p-6 ring-8 ring-surface-2/50">

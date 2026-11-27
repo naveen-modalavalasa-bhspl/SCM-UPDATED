@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.dependencies import get_current_user
 from app.core.throttle import caller_address
-from app.platform.auth import service
+from app.platform.auth import bavya_sso, service
 from app.platform.auth.schemas import (
     MeOut,
     PasswordChangeIn,
@@ -23,6 +23,23 @@ async def login(request: Request, form: OAuth2PasswordRequestForm = Depends(),
                 db: AsyncSession = Depends(get_db)):
     _, token = await service.authenticate(db, form.username, form.password,
                                           client_ip=caller_address(request))
+    return TokenOut(access_token=token)
+
+
+@router.post("/bavya-sso", response_model=TokenOut, include_in_schema=False)
+async def bavya_sso_sign_in(request: Request, db: AsyncSession = Depends(get_db)):
+    """Sign in with a one-time pass from bhsdb.in, body {"ticket": "..."}.
+
+    Answers exactly what /login answers. 401 for a bad, expired or reused pass, 403 when
+    the pass names no active, unlocked account, 404 while BAVYA_SSO_PUBLIC_KEY is unset.
+    Deliberately not rate-limited. The edge `limit_req` that guards /login
+    (frontend/nginx.conf) keys on an address that, behind the host proxy, is the same
+    for every caller, so joining it would let a morning login rush lock the Director
+    out. The in-app per-address throttle /login has is not needed either: nothing here
+    is a bcrypt, and nothing touches the database until the pass's signature has
+    checked out. See `bavya_sso.py`.
+    """
+    token = await bavya_sso.sign_in(db, await bavya_sso.read_ticket(request))
     return TokenOut(access_token=token)
 
 

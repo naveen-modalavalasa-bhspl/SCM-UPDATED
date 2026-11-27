@@ -8,6 +8,7 @@ import {
 import { Plus, Search } from "lucide-react";
 import {
   Button, Can, Field, Input, ResponsiveList, Select, type Column,
+  usePageSize,
 } from "@/shared/components";
 import { BulkBar } from "./BulkBar";
 import { alerts } from "@/modules/alerts";
@@ -241,8 +242,9 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [sortKey, setSortKey] = useState("");
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = usePageSize(`masters.${p.queryKey}`, MASTER_PAGE_SIZE);
   // A new search or sort starts again at page 1, or a narrowed list sits on an empty page.
-  useEffect(() => setPage(1), [search, sortKey]);
+  useEffect(() => setPage(1), [search, sortKey, pageSize]);
 
   // loadError is surfaced, never swallowed. Defaulting a failed list to [] made a
   // broken request look like an empty master, which hid a 422 on every tab that asked
@@ -325,7 +327,7 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
     : data;
 
   /** Current page slice — shared between the S.No renderer (needs indexOf) and the list. */
-  const pageSlice = sorted.slice((page - 1) * MASTER_PAGE_SIZE, page * MASTER_PAGE_SIZE);
+  const pageSlice = sorted.slice((page - 1) * pageSize, page * pageSize);
 
   /** S.No prepended to every master list. Absolute across pages so page 2 starts at 26. */
   const snoColumn: Column<T> = {
@@ -336,7 +338,7 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
       const idx = pageSlice.indexOf(row);
       return (
         <span className="tabular-nums text-muted font-medium text-xs">
-          {(page - 1) * MASTER_PAGE_SIZE + (idx >= 0 ? idx : 0) + 1}
+          {(page - 1) * pageSize + (idx >= 0 ? idx : 0) + 1}
         </span>
       );
     },
@@ -587,8 +589,11 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
         <ResponsiveList
           data={pageSlice}
           page={page}
-          totalPages={Math.ceil(sorted.length / MASTER_PAGE_SIZE)}
+          totalPages={Math.ceil(sorted.length / pageSize)}
           onPageChange={setPage}
+          pageSize={pageSize}
+          onPageSizeChange={setPageSize}
+          totalRows={sorted.length}
           loading={isLoading}
           keyOf={(r) => r.id}
           columns={columnsWithSno}

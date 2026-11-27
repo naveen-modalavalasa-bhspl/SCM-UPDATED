@@ -49,6 +49,36 @@ const TIME_OPTS: Intl.DateTimeFormatOptions = {
 export const fmtDate = (value?: string | number | Date | null, dash = "—") =>
   parseIst(value)?.toLocaleDateString("en-IN", DATE_OPTS) ?? dash;
 
+/**
+ * A delivery WINDOW, read the way a person says it: "22 – 25 Nov 2026", "28 Nov –
+ * 2 Dec 2026", "30 Dec 2026 – 3 Jan 2027". One end missing prints the other alone
+ * ("by 25 Nov 2026" when only the end is known — every window saved before there was
+ * a start); both missing prints `dash`.
+ */
+export function fmtDateRange(
+  from?: string | number | Date | null,
+  to?: string | number | Date | null,
+  dash = "—",
+): string {
+  const a = parseIst(from);
+  const b = parseIst(to);
+  if (!a && !b) return dash;
+  if (!a) return `by ${fmtDate(b)}`;
+  if (!b) return `from ${fmtDate(a)}`;
+  const fullA = fmtDate(a);
+  const fullB = fmtDate(b);
+  if (fullA === fullB) return fullA;
+  // Compared in IST, not in the browser's zone, like every other date here.
+  const part = (d: Date, o: Intl.DateTimeFormatOptions) =>
+    d.toLocaleDateString("en-IN", { ...o, timeZone: IST });
+  const sameYear = part(a, { year: "numeric" }) === part(b, { year: "numeric" });
+  const sameMonth = sameYear && part(a, { month: "numeric" }) === part(b, { month: "numeric" });
+  const head = sameMonth
+    ? part(a, { day: "2-digit" })
+    : sameYear ? part(a, { day: "2-digit", month: "short" }) : fullA;
+  return `${head} – ${fullB}`;
+}
+
 export const fmtTime = (value?: string | number | Date | null, dash = "—") =>
   parseIst(value)?.toLocaleTimeString("en-IN", TIME_OPTS) ?? dash;
 

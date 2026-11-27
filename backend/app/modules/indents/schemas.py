@@ -492,6 +492,9 @@ class AcknowledgementLineRow(CombinationOut):
     #: Issued in BOXES (2026-10-26): {code, pack_name, quantity} per box. The site
     #: checks these boxes; no code per piece is asked for.
     box_codes: list[dict] = Field(default_factory=list)
+    #: The trays it was put into at the issue desk (MoM point 14):
+    #: {tray_no, quantity, codes, issue_no}.
+    trays: list[dict] = Field(default_factory=list)
     dispatched_quantity: float
     received_quantity: float
     #: Reached the requester and was not accepted (2026-11-06). Counted as arrived, so it

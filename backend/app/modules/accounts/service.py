@@ -477,7 +477,9 @@ async def record_payment(db: AsyncSession, data, user) -> dict:
     if milestone is None:
         raise ValidationError("That milestone is not on this order's payment terms.")
     if data.invoice_attachment_id:
-        await po_documents.po_document_file(db, po.id, data.invoice_attachment_id)
+        # Only that the invoice is this order's — a payment names it, it does not
+        # download it, so a file missing from the upload folder must not refuse it.
+        await po_documents.assert_po_document(db, po.id, data.invoice_attachment_id)
 
     sums = await _payment_sums(db, [po.id])
     stage = next(m for m in _milestones(po, sums, None, ist_today())

@@ -68,6 +68,7 @@ from app.shared.models.warehouse import Warehouse
 from app.shared.scope import scope_condition
 
 logger = logging.getLogger(__name__)
+from app.shared.masters import warehouse_addresses
 from app.shared.enums import (
     CARRIER_VENDOR_TYPES, SHIPMENT_ADDRESS_WAREHOUSE_TYPES,
     AuditAction, ConsolidationStatus, DespatchNoteStatus, DespatchStatus, DocType, IndentStatus,
@@ -172,6 +173,23 @@ async def _apply_po_booking(db: AsyncSession, po: PurchaseOrder, data) -> None:
         po.project_id = po.project_name = None
 
 
+async def _apply_po_shipping(db: AsyncSession, po: PurchaseOrder, data) -> None:
+    """The warehouse an order is delivered to and which of its shipping addresses
+    (2026-11-23). Changing the warehouse drops an address that belonged to the old one.
+    The address TEXT stays the buyer's to edit; a blank one takes the address's own."""
+    warehouse_id = getattr(data, "warehouse_id", None)
+    address_id = getattr(data, "shipping_address_id", None)
+    if warehouse_id and warehouse_id != po.warehouse_id:
+        po.warehouse_id = warehouse_id
+        po.warehouse_name, _ = await _place_names(db, warehouse_id, None)
+        if address_id is None:
+            po.shipping_address_id = None
+    if address_id:
+        po.shipping_address, po.shipping_address_id = await warehouse_addresses.resolve(
+            db, po.warehouse_id, address_id, getattr(data, "shipping_address", None),
+            where="Shipping address")
+
+
 async def _apply_po_header(db: AsyncSession, po: PurchaseOrder, data) -> None:
     """Write the header a caller typed onto the order — terms, addresses, project.
 
@@ -183,6 +201,7 @@ async def _apply_po_header(db: AsyncSession, po: PurchaseOrder, data) -> None:
     overwritten when the caller actually chose one — the indent or the RFQ behind the
     order already put its own project on it, and an untouched field must not wipe that.
     """
+    await _apply_po_shipping(db, po, data)
     project_id = getattr(data, "project_id", None)
     department_id = getattr(data, "department_id", None)
     # A project OR a department, never both (2026-11-04). Choosing one takes the
@@ -356,6 +375,17 @@ def tax_region(company_gstin: str | None, vendor_gstin: str | None) -> str:
     return "INTER"
 
 
+def vendor_tax_region(vendor, company_gstin: str | None) -> str:
+    """INTRA or INTER for one supplier (2026-11-23). The supplier's own "same state as
+    us" switch decides when it has been set; a supplier nobody has said it for (NULL)
+    falls back to comparing the two GSTINs' state codes, which is the rule every older
+    supplier was taxed by — so setting nothing changes nothing."""
+    same = getattr(vendor, "is_same_state", None)
+    if same is not None:
+        return "INTRA" if same else "INTER"
+    return tax_region(company_gstin, getattr(vendor, "gstin", None))
+
+
 async def _attach_po_tax_context(db: AsyncSession, po) -> None:
     """Tell the order which tax applies and split each line's tax into it.
 
@@ -372,7 +402,16 @@ async def _attach_po_tax_context(db: AsyncSession, po) -> None:
     the order.
     """
     company_gstin = await _company_gstin(db)
-    region = tax_region(company_gstin, po.vendor_gstin)
+    # A draft follows the supplier's switch; a submitted order keeps the split it was
+    # submitted with (`tax_region_fixed`), so editing a supplier never moves the tax on
+    # an order already in approval or issued.
+    fixed = getattr(po, "tax_region_fixed", None)
+    if fixed and po.status != POStatus.DRAFT.value:
+        region = fixed
+    else:
+        vendor = await db.get(Vendor, po.vendor_id) if getattr(po, "vendor_id", None) else None
+        region = (vendor_tax_region(vendor, company_gstin) if vendor is not None
+                  else tax_region(company_gstin, po.vendor_gstin))
     po.tax_region = region
     po.company_gstin = company_gstin
     for line in po.items:
@@ -594,6 +633,13 @@ async def create_po(db: AsyncSession, data: POCreate, user) -> PurchaseOrder:
     later that it was raised by hand. Everything else is unchanged: DRAFT on arrival,
     the same PO ladder, the same permission.
     """
+    # Where it is delivered (2026-11-23): a warehouse chosen means one of ITS shipping
+    # addresses, or the address typed out. The form asks for both; an order with no
+    # warehouse still needs the address text, which `_assert_po_addresses` checks.
+    if getattr(data, "warehouse_id", None) and not getattr(data, "shipping_address_id", None) \
+            and not (getattr(data, "shipping_address", None) or "").strip():
+        raise ValidationError(
+            "Pick one of the delivery warehouse's shipping addresses — it is printed on the order.")
     if not data.lines:
         raise ValidationError("A purchase order must have at least one line")
     _assert_po_addresses(getattr(data, "billing_address", None),
@@ -750,6 +796,7 @@ async def copy_po_template(db: AsyncSession, po_id: int, user) -> dict:
             continue
         lines.append({
             "item_id": item.id, "item_code": item.code, "item_name": item.name,
+            "item_description": (item.description or "").strip() or None,
             "uom_code": item.uom_code or line.uom_code,
             "quantity": float(line.quantity), "rate": float(line.rate),
             "tax_percent": float(item.tax_percent if item.tax_percent is not None
@@ -972,6 +1019,11 @@ async def create_po_from_quotation(db: AsyncSession, quotation_id: int,
         office_id=getattr(user, "office_id", None),
         facility_id=None,
         facility_name=rfq.warehouse_name,
+        # Delivered where the tender said (2026-11-23); editable while the PO is a draft.
+        warehouse_id=rfq.warehouse_id,
+        warehouse_name=rfq.warehouse_name,
+        shipping_address=rfq.shipping_address,
+        shipping_address_id=rfq.shipping_address_id,
         project_id=rfq.project_id,
         project_name=rfq.project_name,
         status=POStatus.DRAFT.value,
@@ -1449,6 +1501,10 @@ async def submit_po(db: AsyncSession, po_id: int, user) -> PurchaseOrder:
     if po.status != POStatus.DRAFT.value:
         raise ValidationError(f"Cannot submit a PO in {po.status} status")
     _assert_po_addresses(po.billing_address, po.shipping_address)
+    # The tax split is fixed from here on (2026-11-23).
+    vendor = await db.get(Vendor, po.vendor_id)
+    po.tax_region_fixed = (vendor_tax_region(vendor, await _company_gstin(db))
+                           if vendor is not None else None)
     instance = await engine.start(db, DocType.PO.value, po.id,
                                   context={"total_amount": float(po.total_amount),
                                            # The ORDER's project, not the buyer's. The
@@ -3693,6 +3749,11 @@ async def create_rfq(db: AsyncSession, data: RFQCreate, user) -> RFQ:
         warehouse_name=warehouse_name or getattr(source, "warehouse_name", None),
         project_id=project_id,
         project_name=project_name or getattr(source, "project_name", None),
+        # Where the goods are delivered (2026-11-23) — one of the warehouse's shipping
+        # addresses; required before the RFQ is sent, shown to every supplier.
+        **dict(zip(("shipping_address", "shipping_address_id"), await warehouse_addresses.resolve(
+            db, warehouse_id, getattr(data, "shipping_address_id", None),
+            getattr(data, "shipping_address", None), where="Shipping address"))),
         # Carried from the source, or typed on the form when the RFQ is raised cold —
         # a tender with no requisition behind it still has to say who is buying.
         # The older HCM department, only ever from an older source. A new one is below.
@@ -4115,6 +4176,16 @@ async def update_rfq(db: AsyncSession, rfq_id: int, data: RFQUpdate, user) -> RF
     if data.warehouse_id is not None or data.project_id is not None:
         rfq.warehouse_name, rfq.project_name = await _place_names(
             db, rfq.warehouse_id, rfq.project_id, keep_id=kept_warehouse_id)
+    # The shipping address (2026-11-23): a new warehouse drops the old one's address.
+    if rfq.warehouse_id != kept_warehouse_id and getattr(data, "shipping_address_id", None) is None:
+        rfq.shipping_address_id = None
+        rfq.shipping_address = None
+    if getattr(data, "shipping_address_id", None):
+        rfq.shipping_address, rfq.shipping_address_id = await warehouse_addresses.resolve(
+            db, rfq.warehouse_id, data.shipping_address_id, data.shipping_address,
+            where="Shipping address")
+    elif getattr(data, "shipping_address", None) is not None and rfq.shipping_address_id:
+        rfq.shipping_address = (data.shipping_address or "").strip() or rfq.shipping_address
     if organised:
         # Stated as empty means take it off, which the older PATCH rule cannot say.
         if "project_id" in booking and data.project_id is None:
@@ -4320,6 +4391,9 @@ async def submit_rfq(db: AsyncSession, rfq_id: int, user) -> RFQ:
         raise ValidationError(f"Cannot submit an RFQ in {rfq.status} status")
     if not rfq.vendors:
         raise ValidationError("Add at least one vendor before sending an RFQ out")
+    if not (rfq.shipping_address or "").strip():
+        raise ValidationError(
+            "Pick the shipping address the goods are delivered to — the suppliers quote against it.")
     instance = await engine.start(db, DocType.RFQ.value, rfq.id,
                                   context={"vendor_count": rfq.vendor_count,
                                            # The RFQ's project, not the buyer's — see
@@ -6344,7 +6418,7 @@ async def _attach_tax_context(db: AsyncSession, quote: Quotation) -> dict[int, d
     """
     vendor = await db.get(Vendor, quote.vendor_id)
     company_gstin = await _company_gstin(db)
-    region = tax_region(company_gstin, getattr(vendor, "gstin", None))
+    region = vendor_tax_region(vendor, company_gstin)
     ceilings = await _hsn_ceilings(db, [line.item_id for line in quote.items])
     # What the tender actually asked for. Read here rather than trusted off the quote:
     # `QuotationItem.quantity` is the vendor's answer and may be short of the request.

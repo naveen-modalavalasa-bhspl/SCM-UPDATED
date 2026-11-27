@@ -16,7 +16,7 @@ vendor was called in March.
 """
 from sqlalchemy import (
     JSON, BigInteger, Boolean, Column, Date, DateTime, ForeignKey, Index, Integer,
-    Numeric, String, Text,
+    Numeric, String, Text, UniqueConstraint,
 )
 from sqlalchemy.orm import relationship, synonym
 
@@ -226,8 +226,56 @@ class ReceiptItem(CombinationMixin, Base):
     declared_pack_breakdown = Column(JSON, nullable=True)
     pack_breakdown = Column(JSON, nullable=True)
     despatch_note_item_id = Column(BigInteger, nullable=True)
+    # How this line's units carry a warranty (2026-11-21): BATCH — one warranty for every
+    # unit, held here; UNIT — each unit its own (`inb_receipt_unit_warranties`); NULL —
+    # nothing stated. In BATCH mode a unit's own row still overrides the batch's.
+    warranty_mode = Column(String(10), nullable=True)
+    warranty_start = Column(Date, nullable=True)
+    warranty_end = Column(Date, nullable=True)
+    warranty_card_no = Column(String(100), nullable=True)
+    warranty_attachment_id = Column(BigInteger, nullable=True)
 
     receipt = relationship("Receipt", back_populates="items")
+
+
+class ReceiptUnitWarranty(Base):
+    """`inb_receipt_unit_warranties` — the warranty of ONE unit received on a GRN
+    (MoM 2026-11-18, point 25).
+
+    Keyed on the GRN line and the unit's code (its serial, else its IMEI), because at
+    the gate the unit is a string on `inb_receipt_items.serial_numbers` — the
+    `whs_serial_numbers` row is minted later, at putaway. Every later reader (a scan,
+    the stock balance) finds the warranty by item + code, so nothing on the unit path
+    had to change.
+
+    The card itself is a `sys_attachments` row (entity `GRN_WARRANTY`, the receipt's
+    id). One document may cover many units — "same warranty for all" is one upload and
+    one row per unit pointing at it.
+    """
+    __tablename__ = "inb_receipt_unit_warranties"
+
+    id = pk()
+    receipt_id = Column(ForeignKey("inb_receipts.id", ondelete="CASCADE"),
+                        index=True, nullable=False)
+    receipt_item_id = Column(ForeignKey("inb_receipt_items.id", ondelete="CASCADE"),
+                             index=True, nullable=False)
+    item_id = Column(BigInteger, nullable=False)
+    unit_code = Column(String(100), nullable=False)
+    serial_number = Column(String(100), nullable=True)
+    imei = Column(String(50), nullable=True)
+    start_date = Column(Date, nullable=False)
+    end_date = Column(Date, nullable=False)
+    card_no = Column(String(100), nullable=True)
+    attachment_id = Column(BigInteger, nullable=True)
+    created_by_id = soft_fk()
+    created_by_name = Column(String(200), nullable=True)
+    created_at = created_at_col()
+    updated_at = updated_at_col()
+
+    __table_args__ = (
+        UniqueConstraint("receipt_item_id", "unit_code", name="uq_inb_warranty_unit"),
+        Index("ix_inb_warranty_item_code", "item_id", "unit_code"),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -556,6 +604,11 @@ class MaterialIssueLine(CombinationMixin, Base):
     pack_hierarchy_id = Column(BigInteger, nullable=True)
     pack_breakdown = Column(JSON, nullable=True)
     break_bulk = Column(Boolean, nullable=False, default=False)
+    # Trays (MoM 2026-11-18, point 14): which tray each part of this pick goes into —
+    # [{"tray_no": "T-04", "quantity": 5, "codes": ["SN1", ...]}]. On the LINE, because
+    # lines are rewritten on every save and a tray means nothing without its pick.
+    # Rules in `issue_trays.py`; never printed on the Delivery Challan.
+    trays = Column(JSON, nullable=True)
 
     issue = relationship("MaterialIssue", back_populates="items")
 
@@ -615,6 +668,10 @@ class Dispatch(Base):
     total_weight_kg = Column(QTY, nullable=False, default=0)
     total_value = Column(MONEY, nullable=False, default=0)
 
+    # The delivery WINDOW (2026-11-19): `expected_delivery_from` is its start and
+    # `expected_delivery` its end — the end keeps the old column so every reader that
+    # sorts or compares on it keeps its meaning. A row written before this has no start.
+    expected_delivery_from = Column(Date, nullable=True)
     expected_delivery = Column(Date, nullable=True)
     delivered_at = Column(DateTime, nullable=True)
     acknowledged_by_name = Column(String(200), nullable=True)
@@ -1242,12 +1299,19 @@ class SerialNumber(Base):
     # margin — 773k rows against 94 stock balances — and `item_id` alone is worth
     # almost nothing on it (23 distinct items). These two are the shapes every unit
     # lookup actually has; without them opening one material issue took 26 seconds.
-    # The `remarks` prefix index is created by `d4e5f6a7b8c9` in raw SQL: the column
-    # is 500 wide and MySQL will only index the front of it.
+    # `remarks` is a PREFIX index (the column is 500 wide; every reservation stamp is
+    # far shorter than 80). Migration `c7b8a9d0e1f2` builds it in raw SQL, but a
+    # database made by bootstrap is stamped at head and never runs that migration —
+    # bootstrap only builds the indexes the MODEL declares. Without it, every issue
+    # save's "release this issue's units" UPDATE scanned all ~773k unit rows and,
+    # under REPEATABLE READ, LOCKED every one of them until commit: saves ran past
+    # nginx's 60 s and every other issue save queued behind them (1205 -> 409).
+    # Same name as the migration's, so a database that has it is left alone.
     __table_args__ = (
         Index("ix_whs_serial_stock_lookup",
               "item_id", "warehouse_id", "status", "is_active", "batch_id", "bin_id"),
         Index("ix_whs_serial_point_item", "item_id", "warehouse_id", "is_active"),
+        Index("ix_whs_serial_remarks", "remarks", mysql_length={"remarks": 80}),
     )
 
 

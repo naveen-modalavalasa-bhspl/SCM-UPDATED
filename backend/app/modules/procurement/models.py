@@ -84,6 +84,16 @@ class PurchaseOrder(OrgScopeColumns, Base):
     logistics_terms = Column(Text, nullable=True)
     billing_address = Column(Text, nullable=True)
     shipping_address = Column(Text, nullable=True)
+    # The tax split the order was SUBMITTED with (INTRA / INTER, 2026-11-23). A draft
+    # follows the supplier's "same state" switch; once submitted the split is fixed.
+    tax_region_fixed = Column(String(10), nullable=True)
+    # Which warehouse shipping address was picked (2026-11-23); the text above keeps
+    # what was chosen even if that address is edited later.
+    shipping_address_id = soft_fk()
+    # Where the order is delivered (2026-11-23): picked on a direct PO, carried from
+    # the RFQ otherwise. Its shipping addresses are what the PO offers.
+    warehouse_id = soft_fk()
+    warehouse_name = Column(String(200), nullable=True)
 
     status = Column(String(30), nullable=False, index=True)
     sub_total = Column(Numeric(16, 2), nullable=False, default=0)
@@ -375,6 +385,10 @@ class RFQ(OrgScopeColumns, Base):
 
     warehouse_id = soft_fk()
     warehouse_name = Column(String(200), nullable=True)   # snapshot
+    # Where the goods are to be delivered (2026-11-23): one of the warehouse's shipping
+    # addresses, picked on the form — required — and shown to the supplier.
+    shipping_address = Column(Text, nullable=True)
+    shipping_address_id = soft_fk()
     project_id = soft_fk()
     project_name = Column(String(200), nullable=True)     # snapshot
     # Carried from the requisition where there is one, typed on the form where there

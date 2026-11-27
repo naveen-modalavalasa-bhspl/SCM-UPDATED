@@ -1,4 +1,5 @@
 import { PackQty, hierarchyOf, packable, usePackOptions } from "@/shared/packing";
+import { TrayChips } from "@/modules/indents/components/TrayChips";
 import { IssuePickPacking } from "../components/IssuePickPacking";
 import { memo, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { flushSync } from "react-dom";
@@ -27,6 +28,9 @@ import {
   issueTransferContext,
 } from "../api";
 import { TransferContextStrip } from "../components/TransferContextStrip";
+import { DispatchScheduleField } from "../components/DispatchScheduleField";
+import { deliveryWindowIssue, deliveryWindowMissing } from "../components/deliveryWindow";
+import { showsVehicleAndSac } from "../components/transferFacts";
 import { fmtMoney, fmtQty, num, today } from "../format";
 import type {
   ConsignmentPackageItemWrite,
@@ -410,6 +414,7 @@ export default function ConsignmentForm() {
     lr_no: "",
     eway_bill_no: "",
     freight_amount: null,
+    expected_delivery_from: null,
     expected_delivery: null,
     remarks: "",
     packages: [],
@@ -453,6 +458,7 @@ export default function ConsignmentForm() {
       lr_no: doc.lr_no ?? "",
       eway_bill_no: doc.eway_bill_no ?? "",
       freight_amount: doc.freight_amount ?? null,
+      expected_delivery_from: doc.expected_delivery_from ?? null,
       expected_delivery: doc.expected_delivery ?? null,
       remarks: doc.remarks ?? "",
       packages: [],
@@ -702,6 +708,9 @@ export default function ConsignmentForm() {
   });
   // A transfer goes where its STR / STO was approved to: the consignment cannot be
   // re-addressed on the way. A plain indent or direct issue may still be forwarded.
+  // Vehicle and SAC belong to an LIP only (2026-11-19): read off the destination's
+  // tier as the server serves it; unknown keeps both, as before.
+  const vehicleAndSac = showsVehicleAndSac(transferContext);
   const lockedDestination = !!transferContext?.destination_warehouse_id
     && (transferContext.kind === "STR" || transferContext.kind === "STO");
   useEffect(() => {
@@ -890,7 +899,11 @@ export default function ConsignmentForm() {
   const formIssues = useMemo(() => {
     const issues: string[] = [];
     if (!form.issue_id) issues.push(sourceMode === "multiple" ? "Add at least one material issue." : "Select a material issue.");
-    if (!form.expected_delivery) issues.push("Enter expected delivery.");
+    const windowMissing = deliveryWindowMissing(form.expected_delivery_from, form.expected_delivery);
+    if (windowMissing) issues.push(windowMissing);
+    const windowIssue = deliveryWindowIssue(
+      form.expected_delivery_from, form.expected_delivery, form.dispatch_date);
+    if (windowIssue) issues.push(windowIssue);
     packages.forEach((pkg, index) => {
       packageErrors(pkg, index).forEach((message) => issues.push(`${pkg.package_no || `Package ${index + 1}`}: ${message}`));
       if (!pkg.locked) issues.push(`${pkg.package_no || `Package ${index + 1}`}: Lock the package before saving.`);
@@ -903,7 +916,7 @@ export default function ConsignmentForm() {
     selectedSerials.duplicates.forEach((serial) => issues.push(`${serial} is selected in more than one package.`));
     return Array.from(new Set(issues));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allocation, form.expected_delivery, form.issue_id, lineProgress, packages, selectedSerials, sourceMode]);
+  }, [allocation, form.expected_delivery, form.expected_delivery_from, form.dispatch_date, form.issue_id, lineProgress, packages, selectedSerials, sourceMode]);
 
   const totals = {
     packages: packages.length,
@@ -1284,7 +1297,7 @@ export default function ConsignmentForm() {
           status={doc.status}
           from={originName}
           to={destination}
-          sac={destinationSac}
+          sac={vehicleAndSac ? destinationSac : null}
           issues={consignmentIssues}
           packages={doc.total_packages}
           quantity={num(doc.total_qty)}
@@ -1353,7 +1366,7 @@ export default function ConsignmentForm() {
             <Select value={form.dispatch_type} onChange={(value) => setForm((f) => ({ ...f, dispatch_type: value }))}
                     options={DISPATCH_TYPES} isDisabled={locked} />
           </Field>
-          <Field label="Date">
+          <Field label="Consignment date">
             {/* Read-only on the logistics door: the date the consignment goes out is
                 the warehouse's to set, and logistics only carries the leg after it. */}
             <Input type="date" value={form.dispatch_date} disabled={locked || inLogistics}
@@ -1407,22 +1420,31 @@ export default function ConsignmentForm() {
           )}
           {/* Comes with the material issue, like the destination beside it: the code
               belongs to the office the consignment is addressed to, so picking the
-              issue fills it and nothing on this screen sets it. */}
-          <Field label="Service area code (SAC)">
-            <Input
-              value={destinationSac ?? (destination ? "No service area code for this office" : "—")}
-              disabled
+              issue fills it and nothing on this screen sets it. Only an LIP carries
+              one (2026-11-19) — for an MDP or a warehouse the box is left out rather
+              than shown empty. */}
+          {vehicleAndSac && (
+            <Field label="Service area code (SAC)">
+              <Input
+                value={destinationSac ?? (destination ? "No service area code for this office" : "—")}
+                disabled
+              />
+            </Field>
+          )}
+          {/* Dispatch date and Expected delivery (2026-11-20): two named dates, both
+              required. Floors are the consignment date, not today: a consignment can be
+              back-dated. Two columns wide, so the pair reads as one plan. */}
+          <div className="lg:col-span-2">
+            <DispatchScheduleField
+              dispatch={form.expected_delivery_from}
+              delivery={form.expected_delivery}
+              consignmentDate={form.dispatch_date}
+              disabled={locked}
+              onChange={({ dispatch, delivery }) => setForm((f) => ({
+                ...f, expected_delivery_from: dispatch, expected_delivery: delivery,
+              }))}
             />
-          </Field>
-          <Field label="Expected delivery" required>
-            {/* Goods cannot arrive before they leave. `min` is the dispatch date, not
-                today: a consignment can be back-dated, and its delivery date has to
-                stay consistent with whatever date it actually went out on. */}
-            <Input type="date" value={form.expected_delivery ?? ""} disabled={locked}
-                   aria-required="true"
-                   min={form.dispatch_date || undefined}
-                   onChange={(event) => setForm((f) => ({ ...f, expected_delivery: event.target.value || null }))} />
-          </Field>
+          </div>
           {/* How it travels (mode, carrier) and who moves it (vehicle, driver, LR,
               the delivery address) are the warehouse's half of the document: derived
               from, or written against, the material issue. The logistics door shows
@@ -1442,9 +1464,11 @@ export default function ConsignmentForm() {
               </Field>
               {/* Not editable: nothing on this screen chooses a vehicle — the number is
                   read off the issue or the destination office's name. See `vehicleOf`. */}
-              <Field label="Vehicle">
-                <Input value={vehicleNumber || "—"} disabled />
-              </Field>
+              {vehicleAndSac && (
+                <Field label="Vehicle">
+                  <Input value={vehicleNumber || "—"} disabled />
+                </Field>
+              )}
               <Field label="Driver">
                 <Input value={form.driver_name ?? ""} disabled={locked}
                        onChange={(event) => setForm((f) => ({ ...f, driver_name: event.target.value }))} />
@@ -1551,6 +1575,8 @@ export default function ConsignmentForm() {
                                 <div className="font-mono text-xs font-semibold text-ink">{line.item_code ?? line.item_id}</div>
                                 <div className="max-w-[260px] truncate text-xs text-muted">{line.item_name ?? "—"}</div>
                                 <CombinationTag value={line} className="mt-1" />
+                                {/* The trays it was put into at the issue desk (MoM point 14). */}
+                                <TrayChips trays={line.trays} uom={line.uom_code} className="mt-1" />
                               {source && !doc && <QcTag line={line} />}
                               </td>
                               <td className="px-3 py-2"><BatchPlace line={line} /></td>

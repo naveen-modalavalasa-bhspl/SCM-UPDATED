@@ -62,7 +62,12 @@ export function GatePassPrintPage() {
   const rule = modes.data?.find((m) => m.value === doc.mode);
   const gatePassNo = doc.gate_pass_no || `GP/${doc.consignment_no ?? doc.tr_no}`;
 
-  const carrying: PrintField[] = carryingFields(rule, doc).map((field) => ({
+  // An own vehicle names everyone on board, each with their own ID, under "On board"
+  // (2026-11-20) — the single custody ID rows would only print empty here.
+  const ownVehicle = doc.mode === "OWN_VEHICLE";
+  const carrying: PrintField[] = carryingFields(rule, doc)
+    .filter((field) => !(ownVehicle && (field === "handed_over_employee_id" || field === "handed_over_aadhaar")))
+    .map((field) => ({
     label: CARRYING_LABEL[field],
     value: dash(carryingValue(field, doc)),
   }));
@@ -139,6 +144,9 @@ export function GatePassPrintPage() {
         { label: "Consignment", value: dash(doc.consignment_no), mono: true },
         { label: "Carriage", value: carriageLabel(doc.carriage_mode) },
         { label: "Arrangement", value: modeLabel(doc.mode) },
+        // The day it actually left once it has; until then the planned date.
+        { label: "Dispatch date", value: doc.dispatched_at ? fmtDate(doc.dispatched_at)
+          : doc.expected_delivery_from ? fmtDate(doc.expected_delivery_from) : "—" },
         { label: "Expected delivery", value: doc.expected_delivery ? fmtDate(doc.expected_delivery) : "—" },
       ]}
       blocks={[
@@ -169,6 +177,21 @@ export function GatePassPrintPage() {
            a courier or third-party leg, the desk on the two we drive ourselves. WHICH
            boxes appear belongs to the mode, not to this page. */
         { title: "Who is carrying it", fields: carrying },
+        // Own vehicle (2026-11-20): the type, and everyone on board — the gate checks
+        // each face against this list before the vehicle leaves.
+        ...(doc.mode === "OWN_VEHICLE" && (doc.crew?.length || doc.vehicle_type_name) ? [{
+          title: `On board${doc.crew?.length ? ` · ${doc.crew.length}` : ""}`,
+          columns: 2 as const,
+          fields: [
+            ...(doc.vehicle_type_name ? [{ label: "Vehicle type", value: doc.vehicle_type_name }] : []),
+            ...(doc.odometer_start != null
+              ? [{ label: "Odometer at start", value: `${doc.odometer_start.toLocaleString("en-IN")} km` }] : []),
+            ...(doc.crew ?? []).map((person) => ({
+              label: person.role === "DRIVER" ? "Driver" : `Helper ${person.sequence}`,
+              value: [person.name, person.phone, person.id_number].filter(Boolean).join(" · "),
+            })),
+          ],
+        }] : []),
       ]}
       columns={columns}
       items={items.map((line) => {

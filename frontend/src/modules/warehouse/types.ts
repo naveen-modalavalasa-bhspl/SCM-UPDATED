@@ -1,3 +1,5 @@
+import type { IssueTray } from "@/modules/indents/types";
+export type { IssueTray } from "@/modules/indents/types";
 import type { ScopedDoc } from "@/shared/useDocNumberScope";
 import type { CombinationValue } from "@/shared/combination";
 /**
@@ -178,6 +180,7 @@ export interface WarehouseWrite {
   is_bin_managed: boolean;
   requires_inward?: boolean | null;
   is_active: boolean;
+  shipping_addresses?: unknown[];
 }
 
 /**
@@ -1406,6 +1409,8 @@ export interface ApprovalEvent {
 
 /** `out_issue_items`. */
 export interface IssueItem extends CombinationValue {
+  /** The trays this pick went into (MoM point 14). */
+  trays?: IssueTray[] | null;
   /** On a SPLIT parent: the floor piece and line that carry this line now (2026-11-11). */
   piece_issue_id?: number | null;
   piece_issue_no?: string | null;
@@ -1594,6 +1599,8 @@ export interface SerialScopeCounts {
 export type CodeScopeLevel = "exact" | "batch" | "point";
 
 export interface IssueItemWrite extends CombinationValue {
+  /** The trays this pick goes into, in order (MoM point 14). */
+  trays?: IssueTray[] | null;
   id?: number;
   indent_item_id?: number | null;
   item_id: number;
@@ -1684,6 +1691,8 @@ export interface StockAvailability {
 }
 
 export interface IssueWrite {
+  /** The `updated_at` an edit was made against (QA-5 BUG_006). */
+  expected_updated_at?: string | null;
   /** Whose paper it is on (2026-11-09); null on an issue older than organisations. */
   organization_id?: number | null;
   organization_name?: string | null;
@@ -1719,9 +1728,16 @@ export interface TransferContext {
   str_no?: string | null;
   sto_no?: string | null;
   indent_no?: string | null;
+  from_warehouse_id?: number | null;
   from_warehouse_name?: string | null;
+  from_warehouse_code?: string | null;
+  from_warehouse_type?: string | null;
   destination_warehouse_id?: number | null;
   destination_warehouse_name?: string | null;
+  destination_warehouse_type?: string | null;
+  /** True only for an LIP: the one rung that runs a vehicle and carries an SAC.
+   *  Null when no point resolves — both are then shown, as before. */
+  destination_needs_vehicle_and_sac?: boolean | null;
   destination_office_name?: string | null;
   sac?: string | null;
   department_name?: string | null;
@@ -1829,6 +1845,8 @@ export interface Dispatch {
   total_packages: number;
   total_weight_kg: number;
   total_value: number;
+  /** The planned DISPATCH DATE (2026-11-20); `expected_delivery` is when it should arrive. */
+  expected_delivery_from?: string | null;
   expected_delivery?: string | null;
   delivered_at?: string | null;
   acknowledged_by_name?: string | null;
@@ -1852,6 +1870,8 @@ export interface Dispatch {
   line_packs?: DispatchLinePacks[];
   /** Carton › box for each package code it carries (2026-10-28). */
   box_paths?: Record<string, PackPathRef[]>;
+  /** {issue line id: its trays} — once per line (MoM point 14). */
+  line_trays?: Record<string, IssueTray[]>;
 }
 
 export interface DispatchLinePacks {
@@ -1989,6 +2009,8 @@ export interface DispatchWrite {
   lr_no?: string | null;
   eway_bill_no?: string | null;
   freight_amount?: number | null;
+  /** The planned DISPATCH DATE (2026-11-20); `expected_delivery` is when it should arrive. */
+  expected_delivery_from?: string | null;
   expected_delivery?: string | null;
   remarks?: string | null;
   items: DispatchItemWrite[];
@@ -2073,12 +2095,16 @@ export interface ConsignmentWrite {
   lr_no?: string | null;
   eway_bill_no?: string | null;
   freight_amount?: number | null;
+  /** The planned DISPATCH DATE (2026-11-20); `expected_delivery` is when it should arrive. */
+  expected_delivery_from?: string | null;
   expected_delivery?: string | null;
   remarks?: string | null;
   packages: ConsignmentPackageWrite[];
 }
 
 export interface IssueDispatchSourceItem extends DispatchItemWrite {
+  /** The trays the storekeeper put this pick into (MoM point 14). */
+  trays?: IssueTray[];
   /** Issued in PACKAGES (2026-10-26): each package the line sends on and what it
    *  carries after outward QC. A carton names which of them it holds. */
   box_codes?: { code: string; quantity: number; name?: string | null; path?: PackPathRef[] | null }[];
@@ -3622,4 +3648,85 @@ export interface BoxLabel {
   printed_at?: string | null;
   printed_by_name?: string | null;
   created_at?: string | null;
+}
+
+/* Warranty per received unit on a GRN (MoM 2026-11-18, point 25). */
+export interface UnitWarranty {
+  id: number;
+  start_date: string;
+  end_date: string;
+  card_no?: string | null;
+  attachment_id?: number | null;
+  document_name?: string | null;
+  /** ACTIVE, EXPIRING (inside 30 days) or EXPIRED. */
+  status: "ACTIVE" | "EXPIRING" | "EXPIRED" | "NONE";
+  days_left?: number | null;
+  status_text: string;
+  added_by_name?: string | null;
+  added_at?: string | null;
+}
+
+export interface WarrantyUnit {
+  code: string;
+  serial_number?: string | null;
+  imei?: string | null;
+  /** Its warranty as it stands: its own, else its batch's. */
+  warranty?: UnitWarranty | null;
+  /** UNIT (its own), BATCH (the batch's), or none. */
+  source?: "UNIT" | "BATCH" | null;
+}
+
+export interface WarrantyLine {
+  receipt_item_id: number;
+  line_no?: number | null;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  batch_no?: string | null;
+  /** How the warranty is given (2026-11-21): one for the batch, one per piece, or none. */
+  mode?: "BATCH" | "UNIT" | null;
+  /** The batch's own warranty, in BATCH mode. */
+  batch?: UnitWarranty | null;
+  units: WarrantyUnit[];
+  covered: number;
+  total: number;
+}
+
+export interface WarrantyDocument {
+  id: number;
+  file_name: string;
+  file_size?: number | null;
+  uploaded_by_name?: string | null;
+  created_at?: string | null;
+}
+
+export interface ReceiptWarranties {
+  receipt_id: number;
+  grn_no?: string | null;
+  lines: WarrantyLine[];
+  covered: number;
+  total: number;
+  editable: boolean;
+  documents: WarrantyDocument[];
+}
+
+export interface WarrantyInput {
+  receipt_item_id: number;
+  codes: string[];
+  start_date: string;
+  end_date: string;
+  card_no?: string | null;
+  file?: File | null;
+  attachment_id?: number | null;
+}
+
+/** PUT /receipts/{id}/lines/{line}/warranty — a line's warranties, whole. */
+export interface LineWarrantyIn {
+  mode: "BATCH" | "UNIT" | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  card_no?: string | null;
+  attachment_id?: number | null;
+  units: { code: string; start_date?: string | null; end_date?: string | null;
+           card_no?: string | null; attachment_id?: number | null }[];
 }

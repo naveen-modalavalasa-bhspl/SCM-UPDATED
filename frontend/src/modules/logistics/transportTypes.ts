@@ -78,9 +78,12 @@ export interface RaiserTracking {
   docket_no?: string | null;
   tracking_url?: string | null;
   vehicle_number?: string | null;
+  destination_sac?: string | null;
   driver_name?: string | null;
   driver_phone?: string | null;
   handed_over_by_name?: string | null;
+  /** The planned DISPATCH DATE (2026-11-20); `expected_delivery` is when it should arrive. */
+  expected_delivery_from?: string | null;
   expected_delivery?: string | null;
   dispatched_at?: string | null;
   delivered_at?: string | null;
@@ -172,6 +175,7 @@ export interface Consignment {
   to_warehouse_id?: number | null;
   to_warehouse_name?: string | null;
   destination_office_id?: number | null;
+  destination_office_sac?: string | null;
   destination_office_name?: string | null;
   customer_name?: string | null;
   vendor_name?: string | null;
@@ -191,6 +195,8 @@ export interface Consignment {
   driver_phone?: string | null;
   lr_no?: string | null;
   eway_bill_no?: string | null;
+  /** The planned DISPATCH DATE (2026-11-20); `expected_delivery` is when it should arrive. */
+  expected_delivery_from?: string | null;
   expected_delivery?: string | null;
   total_items: number;
   total_qty: number;
@@ -208,6 +214,7 @@ export interface ConsignmentLine {
   package_id?: number | null;
   item_id: number;
   item_code?: string | null;
+  issue_item_id?: number | null;
   item_name?: string | null;
   uom_code?: string | null;
   batch_no?: string | null;
@@ -234,6 +241,8 @@ export interface ConsignmentDetail extends Consignment {
   packages: ConsignmentPackage[];
   /** Each issue line's packs, once per line (2026-10-22) — the rows are per unit. */
   line_packs?: ConsignmentLinePacks[];
+  /** {issue line id: its trays} (MoM point 14). */
+  line_trays?: Record<string, import("@/modules/indents/types").IssueTray[]>;
 }
 
 export interface ConsignmentLinePacks {
@@ -865,6 +874,20 @@ export interface TransportRequest extends ScopedDoc {
   carrier_reference?: string | null;
   carrier_confirmed_by_name?: string | null;
   vehicle_number?: string | null;
+  destination_sac?: string | null;
+  /** Own vehicle (2026-11-20): the kind of vehicle and who travels with it. */
+  vehicle_type_id?: number | null;
+  vehicle_type_name?: string | null;
+  crew_count?: number | null;
+  crew?: CrewMember[];
+  odometer_start?: number | null;
+  odometer_start_at?: string | null;
+  odometer_start_by_name?: string | null;
+  odometer_end?: number | null;
+  odometer_end_at?: string | null;
+  odometer_end_by_name?: string | null;
+  distance_travelled_km?: number | null;
+  odometer_photos?: Record<"ODOMETER_START" | "ODOMETER_END", OdometerPhoto[]> | null;
   driver_name?: string | null;
   driver_phone?: string | null;
   driver_licence_no?: string | null;
@@ -879,6 +902,8 @@ export interface TransportRequest extends ScopedDoc {
   tracking_url?: string | null;
   eway_bill_no?: string | null;
   gate_pass_no?: string | null;
+  /** The planned DISPATCH DATE (2026-11-20); `expected_delivery` is when it should arrive. */
+  expected_delivery_from?: string | null;
   expected_delivery?: string | null;
   dispatched_at?: string | null;
   dispatched_by_name?: string | null;
@@ -934,6 +959,8 @@ export interface TRListRow {
   lr_no?: string | null;
   docket_no?: string | null;
   tracking_url?: string | null;
+  /** The planned DISPATCH DATE (2026-11-20); `expected_delivery` is when it should arrive. */
+  expected_delivery_from?: string | null;
   expected_delivery?: string | null;
   dispatched_at?: string | null;
   delivered_at?: string | null;
@@ -1099,6 +1126,8 @@ export interface TRInput {
   distance_km?: number | null;
   project_id?: number | null;
   project_name?: string | null;
+  /** The planned DISPATCH DATE (2026-11-20); `expected_delivery` is when it should arrive. */
+  expected_delivery_from?: string | null;
   expected_delivery?: string | null;
   remarks?: string | null;
   /** Written on the dispatch screen, when the pass is already in hand. The dispatch
@@ -1116,6 +1145,10 @@ export interface TRInput {
   manual_courier_name?: string | null;
   carrier_reference?: string | null;
   vehicle_number?: string | null;
+  destination_sac?: string | null;
+  vehicle_type_id?: number | null;
+  crew_count?: number | null;
+  crew?: CrewMemberInput[] | null;
   driver_name?: string | null;
   driver_phone?: string | null;
   driver_licence_no?: string | null;
@@ -1241,4 +1274,141 @@ export interface ActivityType {
   value: string;
   label: string;
   is_exception: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Delivery Challan (2026-11-19) — `GET /api/warehouse/delivery-challan/{tr_id}`.
+// One per DISPATCH, numbered with the dispatch (gate pass) number; one block per
+// consignment on the truck, one per package inside it. Money and quantities arrive
+// as decimal strings.
+// ---------------------------------------------------------------------------
+export interface ChallanParty {
+  id?: number | null;
+  name?: string | null;
+  code?: string | null;
+  address?: string | null;
+  contact_person?: string | null;
+  contact_phone?: string | null;
+}
+
+export interface ChallanLine {
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  batch_no?: string | null;
+  expiry_date?: string | null;
+  hsn_code?: string | null;
+  quantity: string | number;
+  unit_price: string | number;
+  /** LINE: the consignment's own rate; ITEM_MASTER: the item's purchase price. */
+  price_source: "LINE" | "ITEM_MASTER" | "NONE";
+  amount: string | number;
+  codes: string[];
+}
+
+export interface ChallanPackage {
+  id: number | null;
+  sequence: number;
+  package_no?: string | null;
+  package_type?: string | null;
+  weight_kg?: string | number | null;
+  volume_cbm?: string | number | null;
+  dimensions_cm?: (string | number | null)[] | null;
+  is_fragile: boolean;
+  is_temp_controlled: boolean;
+  lines: ChallanLine[];
+  total_qty: string | number;
+  total_amount: string | number;
+}
+
+export interface ChallanConsignment {
+  dispatch_id: number;
+  consignment_no: string;
+  consignment_date?: string | null;
+  status: string;
+  source: ChallanParty;
+  destination: ChallanParty;
+  project_name?: string | null;
+  expected_delivery_from?: string | null;
+  expected_delivery?: string | null;
+  package_count: number;
+  weight_kg?: string | number | null;
+  volume_cbm?: string | number | null;
+  packages: ChallanPackage[];
+  total_qty: string | number;
+  total_amount: string | number;
+}
+
+export interface DeliveryChallan {
+  tr_id: number;
+  tr_no: string;
+  dc_no?: string | null;
+  dc_date?: string | null;
+  status: string;
+  mode: string;
+  carriage_mode?: string | null;
+  is_trip: boolean;
+  trip_no?: string | null;
+  godown: ChallanParty;
+  ship_to: ChallanParty[];
+  vehicle_number?: string | null;
+  destination_sac?: string | null;
+  driver_name?: string | null;
+  driver_phone?: string | null;
+  carrier_name?: string | null;
+  lr_no?: string | null;
+  docket_no?: string | null;
+  eway_bill_no?: string | null;
+  expected_delivery_from?: string | null;
+  expected_delivery?: string | null;
+  project_name?: string | null;
+  remarks?: string | null;
+  consignments: ChallanConsignment[];
+  /** What the challan prints: the whole load in one table, no codes (2026-11-20). */
+  lines?: ChallanLine[];
+  /** The day it left (or, before it has, the planned dispatch date). */
+  dispatch_date?: string | null;
+  vehicle_type_name?: string | null;
+  totals: {
+    consignments: number;
+    packages: number;
+    quantity: string | number;
+    amount: string | number;
+    weight_kg?: string | number | null;
+    volume_cbm?: string | number | null;
+  };
+}
+
+
+// ---------------------------------------------------------------------------
+// Own vehicle (2026-11-20): vehicle types, crew and odometer.
+// ---------------------------------------------------------------------------
+export type CrewRole = "DRIVER" | "HELPER";
+
+export interface CrewMemberInput {
+  role: CrewRole;
+  name: string;
+  phone: string;
+  id_number?: string | null;
+  employee_id?: number | null;
+}
+
+export interface CrewMember extends CrewMemberInput {
+  id: number;
+  sequence: number;
+}
+
+export interface OdometerPhoto {
+  id: number;
+  file_name: string;
+  uploaded_at?: string | null;
+}
+
+export interface VehicleTypeOption {
+  id: number;
+  code: string;
+  name: string;
+  capacity_kg?: number | null;
+  capacity_cbm?: number | null;
 }

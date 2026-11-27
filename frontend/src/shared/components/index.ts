@@ -27,7 +27,7 @@ export { ToastProvider, useToast, type ToastInput, type ToastContent } from "./T
 export { describeError, errorMessage, isAnnouncedGlobally } from "@/shared/api/errors";
 export type { Notice, NoticeLevel } from "@/shared/api/errors";
 export { useAction } from "./useAction";
-export { PrintTemplate, PrintPanel, SectionTitle } from "./PrintTemplate";
+export { PrintTemplate, PrintPanel, SectionTitle, Th as PrintTh, PRINT_TONE } from "./PrintTemplate";
 export type { PrintTemplateProps, PrintField, PrintBlock, PrintColumn } from "./PrintTemplate";
 export {
   COMPANY_FALLBACK, resolveCompany, useCompanyProfile, companyProfileKey,
@@ -66,3 +66,5 @@ export {
   PackageCheckModal, packGroups, packMix, packPathLabel, shortPackCode,
   type InnerCheck, type PackageCheck, type PackageToCheck,
 } from "./PackageCheckModal";
+export { optionWindow, moreMatchesLabel, OPTION_DRAW_LIMIT } from "./optionWindow";
+export { usePageSize, PAGE_SIZE_OPTIONS } from "../hooks/usePageSize";

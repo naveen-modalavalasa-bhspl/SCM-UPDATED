@@ -89,16 +89,7 @@ async def authenticate(db: AsyncSession, username: str, password: str,
             f"login:ip:{client_ip}", settings.LOGIN_RATE_PER_MINUTE):
         raise AuthenticationError(TOO_MANY_ATTEMPTS, code="RATE_LIMITED")
 
-    employee_id = int(username) if username.strip().isdigit() else None
-    employee = (await db.execute(
-        select(HcmEmployee).where(
-            or_(
-                HcmEmployee.id == employee_id if employee_id is not None else False,
-                HcmEmployee.emp_code == username,
-                HcmEmployee.email == username,
-            )
-        )
-    )).scalars().first()
+    employee = await find_login_employee(db, username)
     # One sentence for every way a sign-in can fail — no such employee, a retired
     # one, no credential row, a wrong password. Saying which would tell somebody
     # probing the form that an account exists, which is exactly the half of the
@@ -109,7 +100,7 @@ async def authenticate(db: AsyncSession, username: str, password: str,
     cred = await db.get(UserCredential, employee.id)
     # Checked BEFORE the hash: a locked account must not go on paying for a bcrypt per
     # attempt, or the lockout stops the guessing and not the load it causes.
-    if cred is not None and cred.locked_until and cred.locked_until > utcnow():
+    if is_locked(cred):
         raise AuthenticationError(
             ACCOUNT_LOCKED.format(minutes=settings.LOGIN_LOCKOUT_MINUTES),
             code="ACCOUNT_LOCKED")
@@ -119,6 +110,36 @@ async def authenticate(db: AsyncSession, username: str, password: str,
             await _register_failure(db, cred)
         raise AuthenticationError(BAD_CREDENTIALS, code="INVALID_CREDENTIALS")
 
+    await record_sign_in(db, cred)
+    return employee, await issue_token(db, employee)
+
+
+# The pieces of a password sign-in that do not involve the password. Split out
+# (2026-10-15) so the Bavya SSO pass (`bavya_sso.py`) finds the account, applies the
+# lock and starts the session with exactly these functions rather than copies of them.
+
+async def find_login_employee(db: AsyncSession, username: str) -> HcmEmployee | None:
+    """The employee a sign-in name names: the numeric id, the employee code or the
+    email address. Whether they may sign in is the caller's question."""
+    employee_id = int(username) if username.strip().isdigit() else None
+    return (await db.execute(
+        select(HcmEmployee).where(
+            or_(
+                HcmEmployee.id == employee_id if employee_id is not None else False,
+                HcmEmployee.emp_code == username,
+                HcmEmployee.email == username,
+            )
+        )
+    )).scalars().first()
+
+
+def is_locked(cred: UserCredential | None) -> bool:
+    """Locked by too many bad passwords, and the lock has not yet run out."""
+    return bool(cred is not None and cred.locked_until and cred.locked_until > utcnow())
+
+
+async def record_sign_in(db: AsyncSession, cred: UserCredential) -> None:
+    """A successful sign-in's side effects on the credential row. Commits."""
     cred.last_login_at = utcnow()
     # A sign-in that works is what clears the count — otherwise a user who fumbles
     # their password twice a day is locked out by the end of the week.
@@ -126,12 +147,14 @@ async def authenticate(db: AsyncSession, username: str, password: str,
     cred.locked_until = None
     await db.commit()
 
+
+async def issue_token(db: AsyncSession, employee: HcmEmployee) -> str:
+    """The access token a sign-in hands back, under the employee's default position."""
     position = await rbac_service.get_default_position(db, employee.id)
-    token = create_access_token(
+    return create_access_token(
         subject=employee.id,
         extra={"position_id": position["id"] if position else None},
     )
-    return employee, token
 
 
 async def build_me(db: AsyncSession, user: HcmEmployee) -> dict:

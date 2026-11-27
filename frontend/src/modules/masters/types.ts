@@ -81,6 +81,12 @@ export interface NamedMaster {
   is_active: boolean;
 }
 
+/** Logistics › Masters › Vehicle Types (2026-11-20). */
+export interface VehicleTypeMaster extends NamedMaster {
+  capacity_kg?: number | null;
+  capacity_cbm?: number | null;
+}
+
 export interface MasterBrandManufacturer {
   id: number;
   brand_id: number;
@@ -348,6 +354,8 @@ export interface MasterPackaging {
   id: number;
   code: string;
   name: string;
+  /** SMALL / MEDIUM / LARGE / EXTRA_LARGE (2026-11-20). */
+  size_class?: string | null;
   /** The outer bounding box, empty. All three or none. */
   length_cm?: number | null;
   width_cm?: number | null;

@@ -12,6 +12,8 @@ const ACTION_TONE: Record<string, string> = {
   REJECTED: "bg-bad-bg text-bad",
   RETURNED: "bg-warn-bg text-warn",
   DELEGATED: "bg-info-bg text-info",
+  // Moved up the ladder by the system after waiting too long (2026-11-20).
+  ESCALATED: "bg-warn-bg text-warn",
 };
 
 /** What happened before this desk, as a timeline: the ladder is a sequence, and a

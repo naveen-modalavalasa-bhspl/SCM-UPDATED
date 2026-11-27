@@ -67,6 +67,7 @@ const APPROVAL_VERB: Record<string, string> = {
   DELEGATED: "delegated",
   FALLBACK: "routed by fallback",
   MOVED: "moved to another approval chain",
+  ESCALATED: "escalated to the next level",
 };
 
 /**

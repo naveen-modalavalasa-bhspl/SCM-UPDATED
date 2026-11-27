@@ -1,3 +1,4 @@
+import { usePageSize } from "@/shared/hooks/usePageSize";
 import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -10,6 +11,8 @@ import {
   type Column, type KpiTileSpec,
 } from "@/shared/components";
 import { fmtDate, fmtTime } from "@/shared/datetime";
+import { ScheduleDate } from "@/modules/warehouse";
+import { schedulePending } from "@/modules/warehouse/components/deliveryWindow";
 import { consignmentApi, transportApi, tripApi } from "../api";
 import {
   carriageLabel, carriageTint, load, modeLabel, modeTint, money, nextMove,
@@ -18,8 +21,6 @@ import { SearchField } from "../components/SearchField";
 import type {
   Consignment, ConsignmentLink, TransportRequest, TRListRow,
 } from "../transportTypes";
-
-const SIZE = 20;
 
 /**
  * ADDED 2026-09-07: the return legs this desk has to move.
@@ -111,6 +112,7 @@ export function DispatchPage() {
   const qc = useQueryClient();
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = usePageSize("DispatchPage", 20);
   // Which queue the tiles have narrowed the page to. Client-side because these are
   // states of the SHIPMENT (`links`), not of the consignment the endpoint pages over —
   // there is no `?status=` on the dispatch queue that would mean this.
@@ -123,7 +125,7 @@ export function DispatchPage() {
   const [returnPage, setReturnPage] = useState(1);
 
   const { data, isLoading, error, isFetching: queueFetching } = useQuery({
-    queryKey: ["lgs-dispatch-queue", search, page],
+    queryKey: ["lgs-dispatch-queue", search, page, pageSize],
     queryFn: () => consignmentApi.list({
       // Both rungs a consignment can be ready on. PACKED is one that never needed a
       // release signature; APPROVED is one that was sent for release and got it. Only
@@ -131,7 +133,7 @@ export function DispatchPage() {
       // vanish off this queue — released, and then unreachable from the screen that
       // exists to dispatch it.
       status: "PACKED,APPROVED",
-      search: search.trim() || undefined, page, size: SIZE,
+      search: search.trim() || undefined, page, size: pageSize,
     }),
     // A poll must never blank the board it is refreshing: keeping the previous page
     // on screen is what makes ten-second refreshes invisible instead of a flicker.
@@ -184,12 +186,12 @@ export function DispatchPage() {
     data: returns, isLoading: returnsLoading, error: returnsError,
     isFetching: returnsFetching,
   } = useQuery({
-    queryKey: ["lgs-dispatch-returns", search, returnPage],
+    queryKey: ["lgs-dispatch-returns", search, returnPage, pageSize],
     queryFn: () => transportApi.list({
       source_type: "RETURN",
       status: RETURN_ALL,
       search: search.trim() || undefined,
-      page: returnPage, size: SIZE,
+      page: returnPage, size: pageSize,
     }),
     placeholderData: keepPreviousData,
     refetchInterval: LIVE_MS,
@@ -322,6 +324,19 @@ export function DispatchPage() {
           </div>
         </div>
       ),
+    },
+    {
+      key: "dispatch_on",
+      header: "Dispatch date",
+      hideOnNarrow: true,
+      render: (row) => <ScheduleDate date={row.expected_delivery_from}
+                                     pending={schedulePending(row.status).dispatch} />,
+    },
+    {
+      key: "deliver_by",
+      header: "Expected delivery",
+      render: (row) => <ScheduleDate date={row.expected_delivery}
+                                     pending={schedulePending(row.status).delivery} />,
     },
     {
       key: "load",
@@ -659,8 +674,10 @@ export function DispatchPage() {
           loading={isLoading}
           onRowClick={open}
           page={page}
-          totalPages={Math.max(1, Math.ceil((data?.total ?? 0) / SIZE))}
+          totalPages={Math.max(1, Math.ceil((data?.total ?? 0) / pageSize))}
           onPageChange={setPage}
+          pageSize={pageSize}
+          onPageSizeChange={(size) => { setPageSize(size); setPage(1); }}
           empty="Nothing packed and waiting to go out."
           renderCard={(row) => {
             const link = linkOf(row);
@@ -719,7 +736,7 @@ export function DispatchPage() {
               ? dispatchLeg(row)
               : nav(`/logistics/shipments/${row.id}`))}
             page={returnPage}
-            totalPages={Math.max(1, Math.ceil((returns?.total ?? 0) / SIZE))}
+            totalPages={Math.max(1, Math.ceil((returns?.total ?? 0) / pageSize))}
             onPageChange={setReturnPage}
             empty="No return legs yet."
             renderCard={(row) => (

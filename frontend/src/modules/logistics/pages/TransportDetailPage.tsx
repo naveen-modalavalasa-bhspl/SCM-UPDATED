@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
-  AlertTriangle, ArrowRight, Camera, CheckCircle2, Clock, Download, FileText,
+  AlertTriangle, ArrowRight, Camera, CheckCircle2, Clock, Download, FileText, ScrollText,
   MapPin, PhoneCall, Warehouse,
 } from "lucide-react";
 import {
@@ -20,6 +20,8 @@ import {
 } from "../components/HandoverCustody";
 import type { CustodyValue, PersonKind } from "../components/HandoverCustody";
 import { ShipmentTimeline } from "../components/ShipmentTimeline";
+import { OwnVehicleTrip } from "../components/OwnVehicleTrip";
+import { vehicleWithSac } from "../components/vehicleLabel";
 import { ManifestTable } from "../components/ManifestTable";
 import { TripRouteStrip, TripStopsPanel } from "../components/TripStops";
 import { TONE_APPROVE, TONE_REJECT, TONE_SUBMIT, TONE_YELLOW } from "@/shared/components/tones";
@@ -253,7 +255,17 @@ export function TransportDetailPage() {
               <Button variant="secondary" className={TONE_YELLOW}
                 onClick={() => window.open(
                   `/logistics/shipments/${doc.id}/gate-pass`, "_blank", "noopener")}>
-                <FileText className="h-4 w-4" /> PDF
+                <FileText className="h-4 w-4" /> Gate pass
+              </Button>
+            )}
+            {/* The Delivery Challan: the whole load, consignment by consignment and
+                package by package, numbered with this dispatch. Same pastel PDF tone
+                as the pass beside it — both are paper that leaves with the truck. */}
+            {doc.status !== "DRAFT" && (
+              <Button variant="secondary" className={TONE_YELLOW}
+                onClick={() => window.open(
+                  `/logistics/shipments/${doc.id}/delivery-challan`, "_blank", "noopener")}>
+                <ScrollText className="h-4 w-4" /> Delivery Challan
               </Button>
             )}
 
@@ -678,14 +690,18 @@ export function TransportDetailPage() {
           <div className="mt-1 divide-y divide-line/70">
             <Section title="Reference" rows={[
               ["Against indent", doc.indent_no],
-              ["Needed by", fmtDate(doc.expected_delivery, "")],
+              ["Dispatch date", doc.dispatched_at
+                ? fmtDateTime(doc.dispatched_at, "")
+                : fmtDate(doc.expected_delivery_from, "")],
+              ["Expected delivery", fmtDate(doc.expected_delivery, "")],
             ]} />
             <Section title="Carrier & vehicle" rows={[
               ["Carrier", doc.carrier_name],
               ["Booking ref", doc.carrier_reference],
               ["Carrier accepted", fmtDateTime(doc.carrier_accepted_at, "")],
               ["Confirmed by the desk", doc.carrier_confirmed_by_name],
-              ["Vehicle", doc.vehicle_number],
+              ["Vehicle", vehicleWithSac(doc.vehicle_number, doc.destination_sac)],
+              ["Vehicle type", doc.vehicle_type_name],
               ["Driver", doc.driver_name],
               // Filled by the carrier when they acknowledged the award on a tender,
               // and by the desk on a leg it settled itself. Same columns either way.
@@ -738,6 +754,8 @@ export function TransportDetailPage() {
         </Card>
 
         <div className="space-y-4">
+          {/* Own vehicle (2026-11-20): the crew and the odometer at both ends. */}
+          {doc.mode === "OWN_VEHICLE" && <OwnVehicleTrip doc={doc} />}
           <ShipmentTimeline trId={doc.id} events={doc.events} status={doc.status} />
         </div>
       </div>

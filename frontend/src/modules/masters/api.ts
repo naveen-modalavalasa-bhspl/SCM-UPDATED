@@ -1,6 +1,7 @@
 import type { ContainerUsage } from "@/shared/packing";
 import type { ContainerUsageView } from "./types";
 import { api } from "@/shared/api/client";
+import { getAllPages } from "@/shared/api/fetchAll";
 import type { Paginated } from "@/shared/types";
 import type {
   MasterVendorCategory, MasterPaymentTerm,
@@ -13,7 +14,7 @@ import type {
   MasterItemPackaging, MasterItemSpec, MasterPackHierarchy, MasterPackaging, MasterSpec,
   MasterUom, MasterUomConversion, MasterVendor, MasterVendorItem, PackagingBreakdown,
   MasterWarehouse, Project, RefRow, UomClass, UomSuggestion,
-  MasterBrandManufacturer, MasterGeneralName, MasterItemSubClass, NamedMaster,
+  MasterBrandManufacturer, MasterGeneralName, MasterItemSubClass, NamedMaster, VehicleTypeMaster,
   MasterBrandModel, MasterBrandVariant,
   MasterBrandItemMapping, BrandItemMappingSources, MasterItemCombination,
 } from "./types";
@@ -155,6 +156,9 @@ function crud<T>(path: string) {
   const slug = path.replace("/api/", "");
   return {
     list: (p: ListParams = {}) => page<T>(path, p),
+    /** Every row, paged through 500 at a time — for dropdowns and the master screens,
+     *  which must never stop at the first page (QA-5 BUG_0013/14/16/17). */
+    listAll: (p: ListParams = {}) => getAllPages<T>(path, p),
     create: (body: Partial<T>) => api.post<T>(path, body).then((r) => r.data),
     update: (id: number, body: Partial<T>) =>
       api.put<T>(`${path}/${id}`, body).then((r) => r.data),
@@ -232,13 +236,18 @@ export const mastersApi = {
   bins: crud<MasterBin>("/api/bins"),
   // HCM owns projects, so the backend registers only the list route (see
   // shared/masters/defs.py). There is nothing here to create or edit.
-  projects: { list: (p: ListParams = {}) => page<Project>("/api/projects", p) },
+  projects: {
+    list: (p: ListParams = {}) => page<Project>("/api/projects", p),
+    listAll: (p: ListParams = {}) => getAllPages<Project>("/api/projects", p),
+  },
   brands: crud<MasterBrand>("/api/brands"),
   brandVariants: crud<MasterBrandVariant>("/api/brand-variants"),
   brandModels: crud<MasterBrandModel>("/api/brand-models"),
   manufacturers: crud<NamedMaster>("/api/manufacturers"),
   generalNames: crud<MasterGeneralName>("/api/general-names"),
   dosageForms: crud<NamedMaster>("/api/dosage-forms"),
+  /** Logistics › Masters › Vehicle Types (2026-11-20). */
+  vehicleTypes: crud<VehicleTypeMaster>("/api/vehicle-types"),
   /** What a unit measures (Count, Weight ...). A master since 2026-10-01. */
   /** How suppliers are grouped (Glassware, Reagents ...). */
   vendorCategories: crud<MasterVendorCategory>("/api/vendor-categories"),
@@ -424,7 +433,5 @@ export const mastersApi = {
    *  reaching into that module's client would couple the two, so this is a plain
    *  fetch through the shared HTTP client instead. */
   userGroups: () =>
-    api.get<Paginated<{ id: number; code: string; name: string }>>(
-      "/api/rbac/groups", { params: { size: 300 } },
-    ).then((r) => r.data.items),
+    getAllPages<{ id: number; code: string; name: string }>("/api/rbac/groups"),
 };

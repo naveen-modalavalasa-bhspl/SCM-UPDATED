@@ -110,6 +110,9 @@ class ApprovalAction(str, Enum):
     # Written for each step a document did NOT wait on because its raiser holds a later
     # step of the chain (workflow.engine._skip_stages_below_raiser). Not a decision.
     SKIPPED = "SKIPPED"
+    # Written by the system when an approval waited past the escalation limit and moved
+    # to the next rung of the document's own ladder (workflow.escalation). Not a decision.
+    ESCALATED = "ESCALATED"
 
 
 class StockDirection(str, Enum):
@@ -939,3 +942,11 @@ class PackChangeStatus(str, Enum):
     PENDING = "PENDING"
     ACCEPTED = "ACCEPTED"
     DECLINED = "DECLINED"
+
+
+class ContainerSize(str, Enum):
+    """How big a container type is, in the floor's words (2026-11-20, MoM point 16)."""
+    SMALL = "SMALL"
+    MEDIUM = "MEDIUM"
+    LARGE = "LARGE"
+    EXTRA_LARGE = "EXTRA_LARGE"

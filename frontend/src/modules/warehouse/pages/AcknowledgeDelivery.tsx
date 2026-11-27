@@ -1,3 +1,4 @@
+import { fetchAllPages } from "@/shared/api/fetchAll";
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
@@ -46,7 +47,7 @@ export default function AcknowledgeDelivery() {
    * more than 100 consignments a genuinely inbound one could simply fall off the end. */
   const { data: open = [] } = useQuery({
     queryKey: ["wh-dispatches-inbound"],
-    queryFn: async () => (await listDispatches({ size: 100, inbound: true })).items,
+    queryFn: () => fetchAllPages(listDispatches, { inbound: true }),
   });
 
   const { data: doc, isLoading, error } = useQuery({

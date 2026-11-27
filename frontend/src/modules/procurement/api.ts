@@ -623,6 +623,11 @@ export const supplierRegisterApi = {
     api.get<Paginated<Supplier>>(SUPPLIERS, { params }).then((r) => r.data),
   create: (data: SupplierInput) =>
     api.post<Supplier>(SUPPLIERS, data).then((r) => r.data),
+  /** One supplier with its WHOLE bank account number — for the edit form only. */
+  get: (id: number) => api.get<Supplier>(`${SUPPLIERS}/${id}`).then((r) => r.data),
+  /** Our GSTIN's state code, to say "same state as us" as their GSTIN is typed. */
+  taxHome: () => api.get<{ company_gstin: string | null; state_code: string | null }>(
+    `${SUPPLIERS}/tax-home`).then((r) => r.data),
   update: (id: number, data: Partial<SupplierInput> & {
     is_active?: boolean; is_blacklisted?: boolean;
   }) => api.put<Supplier>(`${SUPPLIERS}/${id}`, data).then((r) => r.data),
@@ -672,4 +677,20 @@ export const procurementDemandPoolKeys = {
   stages: () => ['procurement', 'demand-pool', 'stages'] as const,
   pool: (params: Record<string, unknown> = {}) =>
     ['procurement', 'demand-pool', params] as const,
+};
+
+
+/* -------------------------------------------- warehouse shipping addresses (2026-11-23) */
+export interface ShippingAddressOption {
+  id: number; warehouse_id: number; label: string; address: string;
+  city?: string | null; state?: string | null; pincode?: string | null;
+  contact_name?: string | null; contact_phone?: string | null;
+  is_default: boolean; is_active: boolean;
+  /** As printed on an RFQ or a PO. */
+  text: string;
+}
+export const shippingAddressesApi = {
+  forWarehouse: (warehouseId: number) =>
+    api.get<ShippingAddressOption[]>(`/api/procurement/warehouse-addresses/${warehouseId}`)
+      .then((r) => r.data),
 };

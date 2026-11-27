@@ -26,6 +26,7 @@ from app.core.dependencies import (
 )
 from app.core.pagination import Page, PageParams
 from app.modules.procurement import po_documents, quote_otp, service, stats, suppliers
+from app.shared.masters import warehouse_addresses
 from app.modules.procurement.schemas import (
     POCorrectionIn,
     PackChangeDecisionIn, POLinePackingIn,
@@ -1258,6 +1259,16 @@ async def cancel_consolidation(cons_id: int, body: ActionIn,
 # `suppliers._supplier` refuses any vendor row whose type is a carrier, so this
 # permission can never reach a transport provider's record or their password. Nothing
 # here enters a workflow: an account is not a document and has no approval ladder.
+# A warehouse's shipping addresses (2026-11-23) — the dropdown on an RFQ and a PO, and
+# the list on the warehouse master.
+@ledger_api.get("/warehouse-addresses/{warehouse_id}", response_model=list[dict])
+async def warehouse_shipping_addresses(
+        warehouse_id: int, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission_or(perms.RFQ_VIEW, perms.PO_VIEW,
+                                           perms.MASTER_LOCATION_MANAGE))):
+    return await warehouse_addresses.list_for(db, warehouse_id)
+
+
 supplier_register = APIRouter(prefix="/api/suppliers", tags=["suppliers"])
 
 
@@ -1267,6 +1278,14 @@ async def supplier_type_options(
     """Served, not duplicated in the screen - a type the form offers that the register
     then filters out would create a supplier the page cannot show."""
     return suppliers.supplier_types()
+
+
+# Our own GSTIN and its state code (2026-11-23), so the supplier form can say "same
+# state as us" the moment their GSTIN is typed.
+@supplier_register.get("/tax-home", response_model=dict)
+async def supplier_tax_home(db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(perms.VENDOR_PORTAL_MANAGE))):
+    return await suppliers.tax_home(db)
 
 
 @supplier_register.get("/summary", response_model=dict)

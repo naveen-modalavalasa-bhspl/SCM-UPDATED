@@ -1,3 +1,4 @@
+import { fetchAllPages, asPage } from "@/shared/api/fetchAll";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -591,7 +592,7 @@ function NewStoSheet({ onClose, onCreated }: { onClose: () => void; onCreated: (
   const { data: warehouses = [] } = useQuery({ queryKey: ["warehouses"], queryFn: getWarehouses });
   const stock = useQuery({
     queryKey: ["stock-transfer", "source-stock", fromId],
-    queryFn: () => getStockBalances({ warehouse_id: Number(fromId), size: 500 } as any),
+    queryFn: () => fetchAllPages(getStockBalances, { warehouse_id: Number(fromId) }).then(asPage),
     enabled: !!fromId,
   });
   // Where this point may send to is SERVED — same level, same parent, in scope — so

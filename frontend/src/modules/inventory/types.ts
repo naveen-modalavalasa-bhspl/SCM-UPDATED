@@ -224,6 +224,17 @@ export interface SerialSummaryRow {
   consumable_codes?: string[];
   asset_count?: number;
   consumable_count?: number;
+  /** Of the lot's units, how many have a warranty from their GRN (MoM point 25), how
+   *  many end within 30 days or have ended, and the soonest end still to come. */
+  warranty?: LotWarranty;
+}
+
+export interface LotWarranty {
+  covered: number;
+  active: number;
+  expiring: number;
+  expired: number;
+  next_end: string | null;
 }
 
 /** One physical unit: GET /api/warehouse/serials (list) and .../serials/lookup (one). */
@@ -251,6 +262,13 @@ export interface UnitRow {
   consumable_code: string | null;
   status: string | null;
   remarks?: string | null;
+  /** The warranty from the GRN it arrived on (MoM point 25). */
+  warranty_start?: string | null;
+  warranty_end?: string | null;
+  warranty_card_no?: string | null;
+  warranty_status?: "NONE" | "ACTIVE" | "EXPIRING" | "EXPIRED";
+  warranty_days_left?: number | null;
+  warranty_text?: string | null;
   /** Only on a lookup: the text that found it. */
   matched?: string;
 }

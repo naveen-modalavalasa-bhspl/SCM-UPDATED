@@ -1,3 +1,4 @@
+import { usePageSize } from "@/shared/hooks/usePageSize";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -32,7 +33,6 @@ const CLOSING = [
   { value: "30", label: "Next 30 days" },
 ];
 
-const SIZE = 20;
 
 /** Every filter this screen owns, so Clear knows what to drop. */
 const FILTER_KEYS = ["status", "search", "closing", "pending_for_me", "ready_to_award"];
@@ -52,6 +52,7 @@ export function RFQListPage() {
 
   // Filters live in the URL — see `../urlFilters`. The KPI strip above sets them.
   const { get, getBool, set, clear, page, setPage, activeCount } = useUrlFilters();
+  const [pageSize, setPageSize] = usePageSize("RFQListPage", 20);
   // SCM_0058: which half of the screen is showing. Held in the URL, same reason
   // every other filter here is — a link into "Approved Requisitions" has to land on
   // that tab, not on the RFQ register.
@@ -71,13 +72,13 @@ export function RFQListPage() {
   const [unfreezeReason, setUnfreezeReason] = useState("");
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["rfqs", status, debouncedSearch, pendingForMe, readyToAward, page],
+    queryKey: ["rfqs", status, debouncedSearch, pendingForMe, readyToAward, page, pageSize],
     queryFn: () => rfqApi.list({
       status: status || undefined,
       search: debouncedSearch || undefined,
       pending_for_me: pendingForMe || undefined,
       ready_to_award: readyToAward || undefined,
-      page, size: SIZE,
+      page, size: pageSize,
     }),
     enabled: tab === "rfqs",
   });
@@ -86,8 +87,8 @@ export function RFQListPage() {
   // opened it from the Requisitions register and pressed Create RFQ. This is that
   // same press's second doorway, not a new document or a new approval.
   const candidates = useQuery({
-    queryKey: ["rfq-candidates", page],
-    queryFn: () => rfqApi.candidates({ page, size: SIZE }),
+    queryKey: ["rfq-candidates", page, pageSize],
+    queryFn: () => rfqApi.candidates({ page, size: pageSize }),
     enabled: tab === "approved-requisitions",
   });
 
@@ -128,7 +129,7 @@ export function RFQListPage() {
     limit.setDate(limit.getDate() + Number(closing));
     return due >= today && due <= limit;
   });
-  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / SIZE));
+  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / pageSize));
 
   // SCM_0173: "Pending with" only means something while an RFQ is in approval. On a
   // draft, a tender out with vendors or an award it can only ever read "—", so the
@@ -259,7 +260,7 @@ export function RFQListPage() {
     },
   ];
   const candidateRows = candidates.data?.items ?? [];
-  const candidateTotalPages = Math.max(1, Math.ceil((candidates.data?.total ?? 0) / SIZE));
+  const candidateTotalPages = Math.max(1, Math.ceil((candidates.data?.total ?? 0) / pageSize));
 
   return (
     <div>
@@ -325,6 +326,8 @@ export function RFQListPage() {
               page={page}
               totalPages={candidateTotalPages}
               onPageChange={setPage}
+          pageSize={pageSize}
+          onPageSizeChange={(size) => { setPageSize(size); setPage(1); }}
               empty="Nothing approved is waiting to go out for quotation."
               renderCard={(r) => (
                 <div className="space-y-1.5">
@@ -373,6 +376,8 @@ export function RFQListPage() {
           page={page}
           totalPages={totalPages}
           onPageChange={setPage}
+          pageSize={pageSize}
+          onPageSizeChange={(size) => { setPageSize(size); setPage(1); }}
           empty={
             pendingForMe
               ? "Nothing is waiting for your signature."

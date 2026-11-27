@@ -1,3 +1,4 @@
+import { usePageSize } from "@/shared/hooks/usePageSize";
 import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -88,9 +89,9 @@ export function StockAdjustmentsView() {
     setSearchParams(next, { replace: true });
   };
 
-  const PAGE_SIZE = 25;
+  const [pageSize, setPageSize] = usePageSize("StockAdjustmentsView", 25);
   const { data, isLoading } = useQuery({
-    queryKey: ["stock-adjustments", status, search, warehouseFilter, reasonFilter, dateFrom, dateTo, page],
+    queryKey: ["stock-adjustments", status, search, warehouseFilter, reasonFilter, dateFrom, dateTo, page, pageSize],
     queryFn: () => listStockAdjustments({
       status: status || undefined,
       search: search || undefined,
@@ -99,12 +100,12 @@ export function StockAdjustmentsView() {
       date_from: dateFrom || undefined,
       date_to: dateTo || undefined,
       page,
-      size: PAGE_SIZE,
+      size: pageSize,
     }),
   });
   const rows: StockAdjustment[] = data?.items ?? [];
   const total: number = data?.total ?? 0;
-  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const refresh = () => qc.invalidateQueries({ queryKey: ["stock-adjustments"] });
   const fail = (e: any) => setError(e?.response?.data?.error ?? "The action failed");
 
@@ -260,6 +261,8 @@ export function StockAdjustmentsView() {
           page={page}
           totalPages={totalPages}
           onPageChange={(p) => setFilter("page", p > 1 ? String(p) : "")}
+          pageSize={pageSize}
+          onPageSizeChange={(size) => { setPageSize(size); setFilter("page", ""); }}
           data={rows}
           columns={columns}
           keyOf={(r) => r.id}

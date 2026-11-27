@@ -2488,6 +2488,20 @@ async def pending_for_user(db, user, doc_types: list[str] | None = None) -> list
     return [_pending_row(row) for row in rows]
 
 
+async def pending_ageing_for_user(db, user, doc_types: list[str] | None = None) -> dict:
+    """How long this login's queue has been waiting (2026-11-20): how many have waited
+    past the attention mark (12 h), and how many sit at their FINAL rung past the
+    escalation limit (24 h) — nobody above to move them to. Same conditions as the
+    counts below, so the card can never disagree with the list."""
+    from app.platform.workflow import escalation
+
+    conditions = _pending_conditions(user, doc_types)
+    other_hat = await other_hat_condition(db, user, doc_types)
+    if other_hat is not None:
+        conditions.append(other_hat)
+    return await escalation.ageing_counts(db, conditions)
+
+
 async def pending_counts_for_user(db, user,
                                   doc_types: list[str] | None = None) -> tuple[int, int]:
     """How many are waiting on this login, and how many of those are overdue.

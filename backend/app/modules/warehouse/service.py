@@ -36,7 +36,9 @@ from sqlalchemy.orm import aliased, selectinload
 from app.core.database import SessionLocal
 from app.core.config import settings
 
-from app.core.exceptions import AppException, NotFoundError, PermissionError_, ValidationError
+from app.core.exceptions import (
+    AppException, ConflictError, NotFoundError, PermissionError_, ValidationError,
+)
 from app.core.pagination import PageParams, paginate
 from app.core.dependencies import via_scoped_grant
 from app.platform.rbac.permissions import INDENT_VIEW
@@ -84,6 +86,7 @@ from app.platform.workflow import ladder as wf_ladder
 from app.platform.workflow.models import Action as WfAction
 from app.platform.workflow.models import Instance as WfInstance
 from app.modules.inventory.service import warehouse_ids_for_user
+from app.shared.masters import warehouse_addresses
 from app.shared.scope import scope_condition
 from app.shared.enums import (
     ApprovalAction, AuditAction, DespatchNoteStatus, DocType, IndentStatus,
@@ -97,13 +100,14 @@ from app.shared.models.combination import COMBINATION_COLUMNS
 from app.shared.masters import combinations
 from app.shared.masters import packs as master_packs
 from app.modules.warehouse import box_codes
+from app.modules.warehouse import issue_trays
 from app.modules.inventory.allocations import combo_dict, combo_key
 from app.shared.models.warehouse import Bin, Warehouse
 from app.shared.numbering import next_number
 from app.shared import packing as shared_packing
 from app.shared.masters.packs import ladders as pack_ladders_for
 from app.modules.warehouse import packing as wh_packing
-from app.shared.time import now as ist_now, today as ist_today
+from app.shared.time import now as ist_now, to_ist, today as ist_today
 from app.shared.limits import UNIT_MINT_CHUNK, limit as unit_limit
 
 logger = logging.getLogger(__name__)
@@ -536,7 +540,7 @@ async def create_warehouse(db: AsyncSession, data: s.WarehouseWrite, user) -> Wa
     if existing:
         raise ValidationError(f"Warehouse code {data.code} is already in use")
 
-    values = data.model_dump()
+    values = data.model_dump(exclude={"shipping_addresses"})
     if (data.warehouse_type or "").strip().upper() == "MAIN":
         values["is_bin_managed"] = True
     if data.latitude is not None:
@@ -545,6 +549,8 @@ async def create_warehouse(db: AsyncSession, data: s.WarehouseWrite, user) -> Wa
     wh = Warehouse(**values)
     db.add(wh)
     await db.flush()
+    if data.shipping_addresses is not None:
+        await warehouse_addresses.save(db, wh, data.shipping_addresses)
     await write_audit(db, entity="whs_warehouses", entity_id=wh.id, entity_no=wh.code,
                       action=AuditAction.CREATE, actor=user, after=data.model_dump(mode="json"))
     await db.commit()
@@ -557,7 +563,7 @@ async def update_warehouse(db: AsyncSession, warehouse_id: int, data: s.Warehous
     wh = await _get(db, Warehouse, warehouse_id, "Warehouse")
     if (data.warehouse_type or "").strip().upper() == "MAIN":
         data.is_bin_managed = True
-    before = {c: getattr(wh, c) for c in data.model_dump()}
+    before = {c: getattr(wh, c) for c in data.model_dump(exclude={"shipping_addresses"})}
 
     if data.code != wh.code:
         clash = await db.scalar(
@@ -577,8 +583,10 @@ async def update_warehouse(db: AsyncSession, warehouse_id: int, data: s.Warehous
     moved = (_d(wh.latitude) != _d(data.latitude) or _d(wh.longitude) != _d(data.longitude)
              or (wh.latitude is None) != (data.latitude is None))
     starts_keeping_locations = not wh.is_bin_managed and data.is_bin_managed
-    for field, value in data.model_dump().items():
+    for field, value in data.model_dump(exclude={"shipping_addresses"}).items():
         setattr(wh, field, value)
+    if data.shipping_addresses is not None:
+        await warehouse_addresses.save(db, wh, data.shipping_addresses)
     # Only a coordinate somebody actually TYPED is a verified pin. The form sends the
     # stored pair back on every save, and relabelling a gazetteer match as MANUAL
     # because a name was corrected would promote a guess to the planner's highest
@@ -8937,7 +8945,12 @@ async def _reserve_issue_serials(
     db: AsyncSession,
     issue: m.MaterialIssue,
     inputs: list[s.IssueItemWrite],
+    *,
+    only_line_ids: set[int] | None = None,
 ) -> None:
+    """Hold the units each line names. `only_line_ids` limits it to those lines;
+    every other line is left exactly as the database holds it (its entry in
+    `inputs` is then ignored) — see `set_issue_serials`."""
     # Every line carries its own stamp, so a unit held for line 3 is never read as
     # line 5's. See _issue_line_serial_marker.
     markers = {line.id: _issue_line_serial_marker(issue.id, line.id)
@@ -8945,6 +8958,8 @@ async def _reserve_issue_serials(
     line_no_by_marker = {markers[line.id]: line.line_no for line in issue.items}
     unpicked = await _lines_without_source(db, issue)
     for line, data in zip(issue.items, inputs, strict=True):
+        if only_line_ids is not None and line.id not in only_line_ids:
+            continue
         marker = markers[line.id]
         item = await _item_snapshot(db, line.item_id)
         serials = [value.strip() for value in (data.serial_numbers or []) if value.strip()]
@@ -9048,9 +9063,14 @@ async def _reserve_issue_serials(
                 m.SerialNumber.serial_number.in_(values))
 
         rows = []
+        # `populate_existing`: a locking read returns the LATEST committed row, but
+        # SQLAlchemy hands back an object already in the session without refreshing
+        # it — so a unit another request held a moment ago could still read as free
+        # (or the reverse) off the copy loaded when this issue was opened.
         for names in _in_chunks(serials):
             rows.extend((await db.execute(
                 stmt.where(_named(names)).with_for_update()
+                .execution_options(populate_existing=True)
             )).scalars().all())
 
         by_key: dict[str, m.SerialNumber] = {}
@@ -11336,6 +11356,9 @@ async def _apply_issue_lines(db: AsyncSession, issue: m.MaterialIssue,
             pack_hierarchy_id=line_packs[index - 1][0],
             pack_breakdown=line_packs[index - 1][1],
             break_bulk=bool(getattr(line, "break_bulk", False)),
+            trays=issue_trays.clean(
+                line.trays, issued=issued, label=f"Line {index} ({item.code})",
+                line_codes=[*(line.serial_numbers or []), *(line.imei_numbers or [])]),
             **line_combos[index - 1],
         ))
     _issue_totals(issue)
@@ -12857,9 +12880,126 @@ async def _apply_direct_issue_scope(db: AsyncSession, issue, data, user) -> None
                              "out_issues", user)
 
 
+def _stamp_second(value: datetime) -> datetime:
+    """One instant as the column stores it: naive IST (`app/shared/time.py`), whole
+    seconds. MySQL DATETIME keeps no fraction while the copy just written in Python
+    does, and a client may send the value back with an offset — compared raw, every
+    save straight after another would read as stale."""
+    return (to_ist(value) or value).replace(microsecond=0)
+
+
+async def _assert_issue_not_stale(db: AsyncSession, issue: m.MaterialIssue,
+                                  expected: datetime | None) -> None:
+    """Refuse a save made from a copy of the issue that is no longer the latest.
+
+    QA-5 BUG_006: one login open on two PCs, both on the same material issue. Each save
+    rewrote every line from its own copy, so the second undid the first without a
+    word, and two saves landing together raced each other into lock waits and
+    half-applied holds — the "intermittent error" and the slowness. The header row is
+    LOCKED here first, so two saves of one issue queue rather than interleave, and the
+    second is then told plainly what happened.
+    """
+    current = (await db.execute(
+        select(m.MaterialIssue.updated_at)
+        .where(m.MaterialIssue.id == issue.id)
+        .with_for_update())).scalar_one()
+    if expected is None or current is None:
+        return
+    if _stamp_second(current) == _stamp_second(expected):
+        return
+    when = _stamp_second(current).strftime("%d %b %Y, %I:%M %p")
+    raise ConflictError(
+        f"{issue.issue_no} was saved again after you opened it — from another window, "
+        f"another computer or by someone else (at {when}). Nothing of yours has been "
+        f"saved. Reload the issue to see the latest, then make your change again.",
+        title="Changed in another window",
+    )
+
+
+# ---- one write per issue at a time, and how long each step took (2026-11-26) ------
+#
+# Save, Submit, Approve and Issue-from-stock on ONE issue all rewrite the same unit,
+# box and reservation rows. Two of them at once (a second click while the first is
+# still running, Submit pressed during a Save — Submit saves first — or a second tab)
+# used to meet half-way through, on `whs_serial_numbers`, and the later one sat in a
+# lock wait until MySQL gave up after 50 s: a 409 "record is being updated", or nginx's
+# 60 s "System error", with nothing saved and nothing said about why.
+#
+# Each of them now claims the issue's HEADER row first, with NOWAIT: the second request
+# is refused at once with a sentence naming the document, before it has touched a unit.
+
+_MYSQL_LOCK_NOWAIT = 3572      # "lock(s) could not be acquired immediately and NOWAIT is set"
+_MYSQL_LOCK_WAIT_TIMEOUT = 1205
+
+# A write slower than this logs each of its steps — the only way to tell WHICH part of
+# a save is slow on the live data, which no test database reproduces.
+SLOW_ISSUE_WRITE_SECONDS = 5.0
+
+
+async def _claim_issue_for_write(db: AsyncSession, issue_id: int, *,
+                                 wait: bool = False) -> None:
+    """Lock `out_issues` row `issue_id` for this transaction, or refuse at once.
+
+    `wait=True` queues behind the holder instead (up to innodb_lock_wait_timeout) —
+    for the serial picker, whose saves are small and arrive line after line while
+    the storekeeper works down the issue; refusing every second one would be a
+    screen nobody could use.
+    """
+    try:
+        found = (await db.execute(
+            select(m.MaterialIssue.id).where(m.MaterialIssue.id == issue_id)
+            .with_for_update(nowait=not wait)
+        )).scalar_one_or_none()
+    except DBAPIError as exc:
+        args = getattr(getattr(exc, "orig", None), "args", None) or ()
+        if args and args[0] in (_MYSQL_LOCK_NOWAIT, _MYSQL_LOCK_WAIT_TIMEOUT):
+            try:   # a plain read takes no lock; the name only makes the sentence clearer
+                issue_no = (await db.execute(select(m.MaterialIssue.issue_no).where(
+                    m.MaterialIssue.id == issue_id))).scalar_one_or_none()
+            except Exception:                 # noqa: BLE001 -- never worse than the refusal
+                issue_no = None
+            raise ConflictError(
+                f"{issue_no or 'This issue'} is being saved by another request right now "
+                "(a second click, another tab, or another user). Wait a few seconds for "
+                "it to finish, then reload the page and try again.") from exc
+        raise
+    if found is None:
+        raise NotFoundError(f"Issue {issue_id} not found")
+
+
+class _StepTimer:
+    """Times the steps of one issue write; logs them only when the whole was slow."""
+
+    def __init__(self, what: str, issue_id: int):
+        import time
+        self._now = time.perf_counter
+        self.what, self.issue_id = what, issue_id
+        self.start = self.last = self._now()
+        self.steps: list[tuple[str, float]] = []
+
+    def mark(self, step: str) -> None:
+        now = self._now()
+        self.steps.append((step, now - self.last))
+        self.last = now
+
+    def done(self, issue_no: str | None = None, lines: int | None = None) -> None:
+        total = self._now() - self.start
+        if total < SLOW_ISSUE_WRITE_SECONDS:
+            return
+        slowest = sorted(self.steps, key=lambda s: s[1], reverse=True)
+        logger.warning(
+            "slow %s of issue %s (%s, %s lines): %.1fs — %s", self.what, self.issue_id,
+            issue_no, lines, total,
+            ", ".join(f"{name} {secs:.2f}s" for name, secs in slowest))
+
+
 async def update_issue(db: AsyncSession, issue_id: int, data: s.IssueWrite, user) -> m.MaterialIssue:
+    await _claim_issue_for_write(db, issue_id)
+    timer = _StepTimer("save", issue_id)
     issue = await get_issue(db, issue_id)
+    timer.mark("load")
     _guard(issue.status, {IssueStatus.DRAFT.value}, "edit", "issue")
+    await _assert_issue_not_stale(db, issue, data.expected_updated_at)
     # The same rule as on create. An STO's own issue is exempt: the transfer order is
     # its request, and names the destination itself.
     from app.modules.inventory.models import StockTransferOrder
@@ -12927,31 +13067,42 @@ async def update_issue(db: AsyncSession, issue_id: int, data: s.IssueWrite, user
                                        exclude_issue_id=issue.id)
         await _guard_network_own_stock(db, data.items, data.indent_id, wh.id,
                                        exclude_issue_id=issue.id)
+    timer.mark("header + guards")
     await _clear_issue_serial_reservations(db, issue.id)
+    timer.mark("release held units/boxes")
     await _apply_issue_lines(db, issue, data.items)
+    timer.mark("write lines")
     # The edit that matters most on this screen: a storekeeper who moves a line onto
     # the bay the goods are actually in moves inventory's hold with it, and frees the
     # bay he has left. See `_realign_issue_reservations`.
     await _realign_issue_reservations(db, issue, user)
     await _hold_direct_issue_stock(db, issue, user)
+    timer.mark("stock holds")
     # Then the same floor gate `create_issue` applies, in the same place: a repointed
     # line may only land on a bay this user's position actually covers.
     await _assert_issue_floor_access(db, issue, user)
     await _reserve_issue_serials(db, issue, data.items)
+    timer.mark("hold units/boxes/codes")
     # A coded pack leaves whole unless the line says break bulk (2026-10-08).
     await wh_packing.assert_issue_packs(db, issue, await _issue_units_by_line(db, issue),
                                         user)
+    timer.mark("pack check")
     if issue.direction == IssueDirection.IN.value and issue.original_issue_id:
         original = await get_issue(db, issue.original_issue_id)
         _validate_issue_return(issue, original)
     if picking:
         _validate_picking_issue(issue, picking)
+    # Stamped by hand: a save that changed only lines leaves the header columns as they
+    # were, `onupdate` never fires, and the next stale copy would pass the check above.
+    issue.updated_at = utcnow()
     await db.flush()
 
     await write_audit(db, entity="out_issues", entity_id=issue.id, entity_no=issue.issue_no,
                       action=AuditAction.UPDATE, actor=user, before=before,
                       after={"total_qty": str(issue.total_qty)})
     await db.commit()
+    timer.mark("flush + commit")
+    timer.done(issue.issue_no, len(data.items or []))
     return await get_issue(db, issue_id)
 
 
@@ -13248,10 +13399,12 @@ async def submit_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue
     configured it falls back rather than stranding the document (rule 8), which is why
     a failure to start is logged and the document still moves.
     """
+    await _claim_issue_for_write(db, issue_id)
     issue = await get_issue(db, issue_id)
     _guard(issue.status, {IssueStatus.DRAFT.value}, "submit", "issue")
     if not issue.items:
         raise ValidationError("An issue with no lines has nothing to approve")
+    issue_trays.assert_complete(issue)
     # A stock transfer (an STO's issue, or one serving an STR) names who carries or
     # receives it, exactly as a direct issue does (2026-11-02). Checked at submit, not
     # on save: the STO's own draft is written by its approval hook with nobody named.
@@ -13395,6 +13548,8 @@ async def _plan_floor_split(db: AsyncSession, parent) -> tuple[dict, list]:
             "bin_id": bin_id, "bin_code": node.get("code") or line.bin_code,
             "batch_id": batch_id, "batch_no": batch_no, "expiry_date": expiry,
             "qty": qty,
+            # Which parent pick this slice is cut from — its trays follow (2026-11-20).
+            "parent_line_id": getattr(line, "id", None),
             # The parent line's own rate, so a child is valued exactly as the parent.
             "rate": line.rate,
             "combination": combinations.carry(line),
@@ -13569,6 +13724,8 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
     sequence = int(await db.scalar(
         select(func.count()).select_from(m.MaterialIssue)
         .where(m.MaterialIssue.parent_issue_id == parent.id)) or 0)
+    #: {id(piece line): the parent pick it was cut from}, for the trays below.
+    source_of: dict[int, int] = {}
     for floor_id, bucket in by_floor.items():
         sequence, child_no = await _next_child_issue_no(db, parent.issue_no, sequence)
         child = m.MaterialIssue(
@@ -13603,7 +13760,7 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
             created_by_name=getattr(user, "full_name", None),
         )
         for number, spec in enumerate(bucket["lines"], start=1):
-            child.items.append(m.MaterialIssueLine(
+            child.items.append(piece_line := m.MaterialIssueLine(
                 line_no=number,
                 indent_item_id=spec["indent_item_id"],
                 item_id=spec["item_id"], item_code=spec["item_code"],
@@ -13627,6 +13784,7 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
                 # approved, not any brand of the item.
                 **spec["combination"],
             ))
+            source_of[id(piece_line)] = spec.get("parent_line_id")
         _issue_totals(child)
         db.add(child)
         created.append(child)
@@ -13642,7 +13800,22 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
         indent_id=parent.indent_id, project_id=parent.project_id,
         warehouse_id=parent.warehouse_id,
         items=[line for child in created for line in child.items]), user)
-    await _hand_codes_to_floor_pieces(db, parent, created)
+    kept = await _hand_codes_to_floor_pieces(db, parent, created)
+    # The parent's trays go with the stock (MoM point 14): each piece line takes the
+    # trays its own codes are in, then its share of the uncoded room, in tray order.
+    by_parent: dict[int, list] = {}
+    for child in created:
+        for line in child.items:
+            by_parent.setdefault(source_of.get(id(line)), []).append(line)
+    for parent_line in parent.items:
+        pieces = by_parent.get(parent_line.id) or []
+        if not parent_line.trays or not pieces:
+            continue
+        shares = issue_trays.split_for_pieces(parent_line.trays, [
+            {"qty": line.issued_qty, "codes": kept.get(id(line), [])} for line in pieces])
+        for line, share in zip(pieces, shares):
+            line.trays = share
+    await db.flush()
     for child in created:
         # A direct parent's hold, re-taken piece by piece (see the release above).
         await _hold_direct_issue_stock(db, child, user)
@@ -13694,7 +13867,7 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
 
 
 async def _hand_codes_to_floor_pieces(db: AsyncSession, parent: m.MaterialIssue,
-                                      pieces: list[m.MaterialIssue]) -> None:
+                                      pieces: list[m.MaterialIssue]) -> dict[int, list[str]]:
     """Give each floor piece the unit codes for its own quantity (2026-10-13).
 
     The pieces are written straight to the table and never passed through
@@ -13734,6 +13907,8 @@ async def _hand_codes_to_floor_pieces(db: AsyncSession, parent: m.MaterialIssue,
     await db.flush()
 
     used: set[str] = set()
+    #: {id(piece line): the parent's codes it kept} — what decides its trays.
+    kept: dict[int, list[str]] = {}
     for piece in pieces:
         inputs = []
         for line in piece.items:
@@ -13743,6 +13918,7 @@ async def _hand_codes_to_floor_pieces(db: AsyncSession, parent: m.MaterialIssue,
                     and where.get(c) == (int(line.item_id), int(line.batch_id or 0),
                                          int(line.bin_id or 0))][:want]
             used.update(mine)
+            kept[id(line)] = mine
             inputs.append(s.IssueItemWrite(
                 item_id=line.item_id, indent_item_id=line.indent_item_id,
                 requested_qty=_d(line.requested_qty), issued_qty=_d(line.issued_qty),
@@ -13751,6 +13927,7 @@ async def _hand_codes_to_floor_pieces(db: AsyncSession, parent: m.MaterialIssue,
                 serial_numbers=mine))
         await _reserve_issue_serials(db, piece, inputs)
     await db.flush()
+    return kept
 
 
 async def _next_child_issue_no(db: AsyncSession, parent_no: str,
@@ -13838,6 +14015,7 @@ async def act_on_issue(
     db: AsyncSession, issue_id: int, action: str, comments: str, user,
 ) -> m.MaterialIssue:
     """Apply an approval decision and keep the warehouse document in sync."""
+    await _claim_issue_for_write(db, issue_id)
     issue = await get_issue(db, issue_id)
     _guard(
         issue.status, {IssueStatus.PENDING_APPROVAL.value},
@@ -14013,7 +14191,18 @@ async def set_issue_serials(db: AsyncSession, issue_id: int,
     open, because that is decided at the shelf. `update_issue` cannot do this: it
     is DRAFT-only by design, and post_issue refuses an incomplete serial set, so an
     approved serialized issue had no way to reach ISSUED at all.
+
+    ONLY the lines named in `data` are touched (2026-11-26). It used to free every
+    line's units and re-hold them all from the copy it had just read — so two saves a
+    few seconds apart (Keyboard, then Hematology, each saved while the other was still
+    running) each wrote back the OTHER line as it was before: the second save read the
+    Keyboard line with no serial yet, freed the serial the first save had just held,
+    and re-held "nothing" for it. Only the last line saved kept its serial, and
+    Issue from stock then refused the issue (WHI0352, 2026-11-26). Now a save frees and
+    holds its own lines and never reads or writes the rest, and saves of one issue
+    queue behind each other on the header row.
     """
+    await _claim_issue_for_write(db, issue_id, wait=True)
     issue = await get_issue(db, issue_id)
     _guard(issue.status, {IssueStatus.DRAFT.value, IssueStatus.APPROVED.value},
            "capture serials on", "issue")
@@ -14028,8 +14217,10 @@ async def set_issue_serials(db: AsyncSession, issue_id: int,
         raise ValidationError(
             f"Line {sorted(unknown)[0]} is not on {issue.issue_no}")
 
-    # _reserve_issue_serials zips strictly against issue.items, so every line is
-    # restated — the ones not being edited keep the serials already reserved.
+    # _reserve_issue_serials zips strictly against issue.items, so every line gets an
+    # entry; only the edited ones (`only_line_ids`) are read. The rest are restated
+    # for shape and ignored — they keep whatever the database holds for them.
+    edited = set(by_line)
     inputs = [
         s.IssueItemWrite(
             item_id=line.item_id,
@@ -14051,15 +14242,46 @@ async def set_issue_serials(db: AsyncSession, issue_id: int,
         )
         for line in issue.items
     ]
-    await _clear_issue_serial_reservations(db, issue.id)
-    await _reserve_issue_serials(db, issue, inputs)
+    await _clear_issue_serial_reservations(db, issue.id, line_ids=edited)
+    await _reserve_issue_serials(db, issue, inputs, only_line_ids=edited)
     await wh_packing.assert_issue_packs(db, issue, await _issue_units_by_line(db, issue),
                                         user)
 
+    # The edited lines only: they are the ones this request decided anything about.
     await write_audit(db, entity="out_issues", entity_id=issue.id,
                       entity_no=issue.issue_no, action=AuditAction.UPDATE, actor=user,
                       after={"serials": {str(line.id): getattr(line, "serial_numbers", [])
-                                         for line in issue.items}})
+                                         for line in issue.items if line.id in edited}})
+    await db.commit()
+    return await get_issue(db, issue.id)
+
+
+async def set_issue_line_trays(db: AsyncSession, issue_id: int, line_id: int,
+                               trays: list, user) -> m.MaterialIssue:
+    """Put one pick into trays (MoM point 14) without rewriting the document — on a
+    draft, or once approved by whoever issues it, until it is posted."""
+    issue = await get_issue(db, issue_id)
+    _guard(issue.status, {IssueStatus.DRAFT.value, IssueStatus.APPROVED.value},
+           "change the trays on", "issue")
+    if issue.is_stock_posted:
+        raise ValidationError(f"{issue.issue_no} has already been posted — its trays are fixed.")
+    if issue.status == IssueStatus.APPROVED.value:
+        await _assert_issue_holder(db, issue, user)
+    line = next((row for row in issue.items if row.id == line_id), None)
+    if line is None:
+        raise NotFoundError(f"That line is not on {issue.issue_no}")
+    codes = [*(getattr(line, "serial_numbers", None) or []),
+             *(getattr(line, "unit_keys", None) or []),
+             *(getattr(line, "imei_numbers", None) or [])]
+    before = line.trays
+    line.trays = issue_trays.clean(
+        trays, issued=line.issued_qty, label=f"Line {line.line_no} ({line.item_code})",
+        line_codes=codes)
+    await write_audit(db, entity="out_issues", entity_id=issue.id, entity_no=issue.issue_no,
+                      action=AuditAction.UPDATE, actor=user,
+                      summary=f"Trays set on line {line.line_no}: "
+                              + (", ".join(issue_trays.tray_numbers(line.trays)) or "none"),
+                      before={"trays": before}, after={"trays": line.trays})
     await db.commit()
     return await get_issue(db, issue.id)
 
@@ -14256,6 +14478,7 @@ async def _post_issue_core(db: AsyncSession, issue_id: int, user) -> m.MaterialI
     if issue.is_stock_posted:
         raise ValidationError(f"{issue.issue_no} has already been posted")
     await _assert_issue_holder(db, issue, user)
+    issue_trays.assert_complete(issue)
     # Expiry and FEFO, re-read at the moment the goods LEAVE (2026-10-13). The save
     # checked them, but approval can take days: a picked batch may have expired since,
     # or a GRN may have brought in one that expires earlier. Same check as the save,
@@ -14593,8 +14816,13 @@ async def _post_issue_core(db: AsyncSession, issue_id: int, user) -> m.MaterialI
 
 async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
     """Issue one approved issue from stock: `_post_issue_core`, then commit."""
+    await _claim_issue_for_write(db, issue_id)
+    timer = _StepTimer("issue-from-stock", issue_id)
     await _post_issue_core(db, issue_id, user)
+    timer.mark("checks + stock moves + codes + packs")
     await db.commit()
+    timer.mark("commit")
+    timer.done()
     return await get_issue(db, issue_id)
 
 
@@ -15878,7 +16106,7 @@ async def direct_issues_for_recipient(db: AsyncSession, user, *, search: str | N
         "can_acknowledge": issue.status in _DIRECT_ACK_OPEN,
         "lines": [{"item_code": line.item_code, "item_name": line.item_name,
                    "uom_code": line.uom_code, "batch_no": line.batch_no,
-                   "issued_qty": line.issued_qty}
+                   "issued_qty": line.issued_qty, "trays": line.trays or []}
                   for line in issue.items if _d(line.issued_qty) > 0],
     } for issue in issues]
 
@@ -15941,7 +16169,7 @@ async def stock_transfer_issues_for_receiver(
             "can_acknowledge": issue.status in _DIRECT_ACK_OPEN,
             "lines": [{"item_code": line.item_code, "item_name": line.item_name,
                        "uom_code": line.uom_code, "batch_no": line.batch_no,
-                       "issued_qty": line.issued_qty}
+                       "issued_qty": line.issued_qty, "trays": line.trays or []}
                       for line in issue.items if _d(line.issued_qty) > 0],
             "sto_id": order.id if order else None,
             "sto_no": order.sto_no if order else None,
@@ -16141,6 +16369,8 @@ async def direct_issue_receipt(db: AsyncSession, issue_id: int, user) -> dict:
             "item_id": line.item_id,
             "item_code": line.item_code, "item_name": line.item_name,
             "uom_code": line.uom_code,
+            # The trays it was put into at the issue desk (MoM point 14).
+            "trays": [{**tray, "issue_no": issue.issue_no} for tray in (line.trays or [])],
             **combinations.carry(line),
             "approved_quantity": float(sent),
             "issued_quantity": float(sent),
@@ -17094,10 +17324,36 @@ async def get_dispatch(db: AsyncSession, dispatch_id: int, user=None) -> m.Dispa
     # that travels with the truck says what the stickers say.
     ctx = await box_codes.pack_context(db, [row.box_code for row in dispatch.items if row.box_code])
     setattr(dispatch, "box_paths", {code: c["path"] for code, c in ctx.items()})
+    setattr(dispatch, "line_trays", await issue_trays.by_issue_line(
+        db, [row.issue_item_id for row in dispatch.items]))
     setattr(dispatch, "public_scan_token", public_label_token("d", dispatch.id))
     for package in dispatch.packages:
         setattr(package, "public_scan_token", public_label_token("p", package.id))
     return await _decorate_dispatch_destination(db, dispatch)
+
+
+def _guard_delivery_window(dispatch_date, start, end, *, required: bool) -> None:
+    """The consignment's two dates (2026-11-20): `start` is the planned DISPATCH DATE
+    (`expected_delivery_from`), `end` the EXPECTED DELIVERY (`expected_delivery`).
+
+    A consignment a person saves states both (`required`); the other write paths may
+    state either or neither, and whatever IS stated must make sense: neither before the
+    consignment date, and delivery never before dispatch.
+    """
+    if required and (start is None or end is None):
+        missing = " and ".join(name for name, value in
+                               (("the dispatch date", start),
+                                ("the expected delivery date", end)) if value is None)
+        raise ValidationError(f"Enter {missing}.")
+    if start is not None and dispatch_date is not None and start < dispatch_date:
+        raise ValidationError(
+            f"The dispatch date ({start:%d %b %Y}) cannot be before the consignment date "
+            f"({dispatch_date:%d %b %Y}).")
+    if start is not None and end is not None and end < start:
+        raise ValidationError(
+            f"Expected delivery ({end:%d %b %Y}) cannot be before the dispatch date "
+            f"({start:%d %b %Y}).")
+    _guard_expected_delivery(dispatch_date, end)
 
 
 def _guard_expected_delivery(dispatch_date, expected_delivery) -> None:
@@ -17418,7 +17674,8 @@ async def _build_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -
                 "indent — the goods are already there. Acknowledge the issue instead "
                 "of raising a consignment, or pick a destination to forward it on."
             )
-    _guard_expected_delivery(data.dispatch_date, data.expected_delivery)
+    _guard_delivery_window(data.dispatch_date, data.expected_delivery_from,
+                           data.expected_delivery, required=False)
     vendor = await db.get(Vendor, data.vendor_id) if data.vendor_id else None
     _, destination_office_name = await _issue_destination(db, issue)
     project_id, project_name = await _consignment_project(db, issue, data.project_id)
@@ -17464,6 +17721,7 @@ async def _build_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -
         lr_no=data.lr_no,
         eway_bill_no=data.eway_bill_no,
         freight_amount=data.freight_amount,
+        expected_delivery_from=data.expected_delivery_from,
         expected_delivery=data.expected_delivery,
         status=DispatchStatus.PACKED.value,
         remarks=data.remarks,
@@ -17484,6 +17742,10 @@ async def _build_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -
 
 
 async def create_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -> m.Dispatch:
+    # A person raising a consignment states the whole delivery window; the automatic
+    # one cut at picking (`_build_consignment` direct) has nobody to ask and states none.
+    _guard_delivery_window(data.dispatch_date, data.expected_delivery_from,
+                           data.expected_delivery, required=True)
     dispatch = await _build_consignment(db, data, user)
     await db.commit()
     return await get_dispatch(db, dispatch.id)
@@ -17507,7 +17769,8 @@ async def update_consignment(db: AsyncSession, dispatch_id: int, data: s.Consign
     wh = await _warehouse(db, issue.warehouse_id)
     to_wh = await _consignment_destination(db, issues, data, wh)
     mr_by_issue = {row.id: _single_mr(await _issue_mr_sources(db, row)) for row in issues}
-    _guard_expected_delivery(data.dispatch_date, data.expected_delivery)
+    _guard_delivery_window(data.dispatch_date, data.expected_delivery_from,
+                           data.expected_delivery, required=True)
     vendor = await db.get(Vendor, data.vendor_id) if data.vendor_id else None
     _, destination_office_name = await _issue_destination(db, issue)
 
@@ -17542,6 +17805,7 @@ async def update_consignment(db: AsyncSession, dispatch_id: int, data: s.Consign
     dispatch.lr_no = data.lr_no
     dispatch.eway_bill_no = data.eway_bill_no
     dispatch.freight_amount = data.freight_amount
+    dispatch.expected_delivery_from = data.expected_delivery_from
     dispatch.expected_delivery = data.expected_delivery
     dispatch.remarks = data.remarks
 
@@ -17565,7 +17829,8 @@ async def create_dispatch(db: AsyncSession, data: s.DispatchWrite, user) -> m.Di
         raise ValidationError("A dispatch with no lines has nothing to send")
 
     to_wh = await db.get(Warehouse, data.to_warehouse_id) if data.to_warehouse_id else None
-    _guard_expected_delivery(data.dispatch_date, data.expected_delivery)
+    _guard_delivery_window(data.dispatch_date, data.expected_delivery_from,
+                           data.expected_delivery, required=False)
 
     vendor = await db.get(Vendor, data.vendor_id) if data.vendor_id else None
     ref_issue = None
@@ -17627,6 +17892,7 @@ async def create_dispatch(db: AsyncSession, data: s.DispatchWrite, user) -> m.Di
         driver_name=data.driver_name, driver_phone=data.driver_phone,
         lr_no=data.lr_no, eway_bill_no=data.eway_bill_no,
         freight_amount=data.freight_amount,
+        expected_delivery_from=data.expected_delivery_from,
         expected_delivery=data.expected_delivery,
         status=DispatchStatus.DRAFT.value,
         remarks=data.remarks,
@@ -17692,6 +17958,7 @@ async def update_dispatch(db: AsyncSession, dispatch_id: int, data: s.DispatchWr
     dispatch.lr_no = data.lr_no
     dispatch.eway_bill_no = data.eway_bill_no
     dispatch.freight_amount = data.freight_amount
+    dispatch.expected_delivery_from = data.expected_delivery_from
     dispatch.expected_delivery = data.expected_delivery
     dispatch.remarks = data.remarks
 
@@ -24780,6 +25047,15 @@ async def list_serials(db: AsyncSession, params: PageParams, *, status: str | No
     page = await paginate(db, stmt.order_by(m.SerialNumber.id.desc()), params)
     hu_of = {row.id: row.handling_unit_id for row in page["items"]}
     page["items"] = await _decorate_serials(db, page["items"])
+    # Each unit's warranty as recorded on the GRN it arrived on (MoM point 25).
+    from app.modules.warehouse import warranty
+    covers = await warranty.by_item(
+        db, {row["item_id"] for row in page["items"]},
+        codes=[c for row in page["items"] for c in (row.get("serial_number"), row.get("imei"))])
+    for row in page["items"]:
+        cover = (covers.get((int(row["item_id"]), row.get("serial_number")))
+                 or covers.get((int(row["item_id"]), row.get("imei"))))
+        row.update(warranty.unit_fields(cover))
     # The PACKAGE each unit sits in (2026-10-26), so a lot reads as packages with
     # their codes inside them. One query for the page.
     hu_ids = {v for v in hu_of.values() if v}
@@ -24846,6 +25122,10 @@ async def serial_summary(db: AsyncSession, *, item_ids: list[int],
     # warehouse holds the same item in several bins. The caller indexes the result
     # from the most specific key it has down to item+warehouse, so a serial row that
     # has not been given a bin yet (most of the live data) still finds its lot.
+    # Warranties recorded on GRNs for these items (MoM point 25): each lot says how many
+    # of its units have one, and how many end within 30 days or have ended.
+    from app.modules.warehouse import warranty
+    covers = await warranty.by_item(db, tracked)
     grouped: dict[tuple, dict] = {}
     for (item_id, warehouse_id, bin_id, batch_id,
          serial, imei, asset, consumable) in (await db.execute(stmt)).all():
@@ -24858,8 +25138,12 @@ async def serial_summary(db: AsyncSession, *, item_ids: list[int],
             # a consumable code a column each, and one unit is only ever one of the two.
             "asset_codes": [], "consumable_codes": [],
             "asset_count": 0, "consumable_count": 0,
+            "warranty": warranty.lot_tally(),
         })
         bucket["count"] += 1
+        if covers and item_id in tracked:
+            warranty.count_into(bucket["warranty"],
+                                covers.get((item_id, serial)) or covers.get((item_id, imei)))
         # Five is enough to recognise the lot; the rest are behind the detail panel.
         if serial and item_id in tracked and len(bucket["serials"]) < 5:
             bucket["serials"].append(serial)
@@ -25900,6 +26184,21 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
     # Issued in BOXES (2026-10-26): the boxes each indent line went out in — the
     # receiving site checks boxes, never one code per piece.
     boxes_by_line: dict[int, list[dict]] = {}
+    # The trays each indent line was put into at the issue desk (MoM point 14), with
+    # the issue they came off — an indent served in rounds has trays from each.
+    trays_by_line: dict[int, list[dict]] = {}
+    if line_ids:
+        for issue_no, indent_line_id, trays in (await db.execute(
+                select(m.MaterialIssue.issue_no, m.MaterialIssueLine.indent_item_id,
+                       m.MaterialIssueLine.trays)
+                .join(m.MaterialIssue, m.MaterialIssue.id == m.MaterialIssueLine.issue_id)
+                .where(m.MaterialIssueLine.indent_item_id.in_(line_ids),
+                       m.MaterialIssueLine.trays.isnot(None),
+                       m.MaterialIssue.is_stock_posted.is_(True),
+                       m.MaterialIssue.direction == IssueDirection.OUT.value))).all():
+            for tray in trays or []:
+                trays_by_line.setdefault(int(indent_line_id), []).append(
+                    {**tray, "issue_no": issue_no})
     if line_ids:
         for issue_id, issue_line_id, indent_line_id in (await db.execute(
                 select(m.MaterialIssue.id, m.MaterialIssueLine.id,
@@ -25941,6 +26240,7 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
                 "issued_combinations": issued_combos.get(item.id, []),
                 # Issued in boxes: the box codes, each with what it carried.
                 "box_codes": line_boxes,
+                "trays": trays_by_line.get(item.id, []),
                 "approved_quantity": float(approved),
                 "issued_quantity": float(issued),
                 "dispatched_quantity": float(dispatched),
@@ -26680,7 +26980,21 @@ async def run_report(db: AsyncSession, key: str, *, warehouse_id: int | None = N
 # Options (lookups the forms need)
 # ---------------------------------------------------------------------------
 
-LOOKUP_LIMIT = 200
+# How many rows a picker is sent. These used to be one LOOKUP_LIMIT of 200, and a
+# dropdown that stops at row 200 hides item 201 with nothing on screen saying the list
+# was cut (QA-5, BUG_0013/16/17). Every option endpoint orders by an indexed column and
+# does its per-row work in memory over grouped reads, so a few thousand rows is one
+# short request; the dropdown draws only the first matches (`optionWindow`) and
+# filters the rest as the user types.
+#
+# Masters (items, vendors, bins, batches, people, projects, vehicles, carriers): all of
+# them — 5,000 is past every master on the live data (983 warehouses is the largest).
+MASTER_LOOKUP_LIMIT = 5000
+# Open documents (orders still owed, issues waiting, consignments inbound): these are
+# filtered to what is still actionable, so 1,000 open at once is already a backlog.
+DOCUMENT_LOOKUP_LIMIT = 1000
+# Kept for anything outside this module that imported the old name.
+LOOKUP_LIMIT = DOCUMENT_LOOKUP_LIMIT
 # One grouped consignment is one lorry-load of issues, not a batch job. Well past any
 # real delivery, and small enough that a save stays one short request.
 MAX_ISSUES_PER_CONSIGNMENT = 50
@@ -26780,7 +27094,7 @@ async def item_options(db: AsyncSession, search: str | None = None, *,
             # widening is how the picker got misleading in the first place.
             stmt = stmt.where(Item.id.in_(held.keys() or {0}))
 
-    rows = (await db.execute(stmt.order_by(Item.code).limit(LOOKUP_LIMIT))).scalars().all()
+    rows = (await db.execute(stmt.order_by(Item.code).limit(MASTER_LOOKUP_LIMIT))).scalars().all()
     # How many decimals each row's unit allows — the same rule `_apply_issue_lines`
     # enforces on save (SCM_0080). Served here so the issue form can stop a
     # fractional quantity being TYPED for a whole-unit item, rather than only
@@ -26812,7 +27126,7 @@ async def vendor_options(db: AsyncSession, search: str | None = None) -> list[di
     if search:
         like = f"%{search}%"
         stmt = stmt.where(or_(Vendor.code.ilike(like), Vendor.name.ilike(like)))
-    rows = (await db.execute(stmt.order_by(Vendor.name).limit(LOOKUP_LIMIT))).scalars().all()
+    rows = (await db.execute(stmt.order_by(Vendor.name).limit(MASTER_LOOKUP_LIMIT))).scalars().all()
     return [{"id": r.id, "code": r.code, "name": r.name} for r in rows]
 
 
@@ -26988,7 +27302,7 @@ async def bin_options(db: AsyncSession, warehouse_id: int, search: str | None = 
     if search:
         like = f"%{search}%"
         stmt = stmt.where(or_(Bin.code.ilike(like), Bin.name.ilike(like)))
-    rows = (await db.execute(stmt.distinct().order_by(Bin.code).limit(LOOKUP_LIMIT))).scalars().all()
+    rows = (await db.execute(stmt.distinct().order_by(Bin.code).limit(MASTER_LOOKUP_LIMIT))).scalars().all()
     index = await _location_index(db, warehouse_id)
     out = []
     for r in rows:
@@ -27039,7 +27353,7 @@ async def batch_options(
         stmt = stmt.where(Stock.bin_id == bin_id)
     rows = (await db.execute(
         stmt.order_by(m.Batch.expiry_date.is_(None), m.Batch.expiry_date)
-        .limit(LOOKUP_LIMIT)
+        .limit(MASTER_LOOKUP_LIMIT)
     )).scalars().all()
     return [{"id": row.id, "code": row.batch_no, "name": row.batch_no} for row in rows]
 
@@ -27179,7 +27493,7 @@ async def po_options(db: AsyncSession, search: str | None = None, warehouse_id: 
     if search:
         stmt = stmt.where(PurchaseOrder.po_no.ilike(f"%{search}%"))
     rows = (await db.execute(
-        stmt.order_by(PurchaseOrder.id.desc()).limit(LOOKUP_LIMIT))).all()
+        stmt.order_by(PurchaseOrder.id.desc()).limit(DOCUMENT_LOOKUP_LIMIT))).all()
     return [{"id": po_id, "code": po_no, "name": vendor_name or po_no}
             for po_id, po_no, vendor_name in rows]
 
@@ -27267,7 +27581,7 @@ async def receipt_options(
             m.Receipt.vendor_name.ilike(like),
         ))
     rows = (await db.execute(
-        stmt.order_by(m.Receipt.id.desc()).limit(LOOKUP_LIMIT))).scalars().all()
+        stmt.order_by(m.Receipt.id.desc()).limit(DOCUMENT_LOOKUP_LIMIT))).scalars().all()
     return [{
         "id": r.id,
         "code": (
@@ -27325,7 +27639,7 @@ async def incoming_dispatch_options(
             m.Dispatch.lr_no.ilike(like),
         ))
     rows = (await db.execute(
-        stmt.order_by(m.Dispatch.id.desc()).limit(LOOKUP_LIMIT))).scalars().all()
+        stmt.order_by(m.Dispatch.id.desc()).limit(DOCUMENT_LOOKUP_LIMIT))).scalars().all()
     return [{
         "id": r.id,
         "code": r.dispatch_no,
@@ -27563,7 +27877,7 @@ async def indent_options(
         stmt = stmt.where(Reservation.warehouse_id == warehouse_id)
     if search:
         stmt = stmt.where(Indent.indent_no.ilike(f"%{search}%"))
-    rows = (await db.execute(stmt.order_by(Indent.id.desc()).limit(LOOKUP_LIMIT))).scalars().all()
+    rows = (await db.execute(stmt.order_by(Indent.id.desc()).limit(DOCUMENT_LOOKUP_LIMIT))).scalars().all()
     
     if warehouse_id is not None:
         peers = await _same_tier_warehouse_ids(db, warehouse_id)
@@ -27615,6 +27929,19 @@ async def issue_transfer_context(db: AsyncSession, issue_id: int) -> dict:
     point = await _requesting_point(db, issue)
     sto_no = getattr(issue, "sto_no", None)
     indent_type = getattr(issue, "indent_type", None)
+    # Where it goes, as a ROW, for its tier: only an LIP (the bottom rung) runs a
+    # vehicle and carries an SAC, so the card leaves both out for an MDP or a
+    # warehouse (2026-11-19). The same rule `_decorate_issue_destination` serves on
+    # the issue itself; None when no point resolves, which keeps both, as before.
+    target = point
+    sto_target_id = getattr(issue, "sto_to_warehouse_id", None)
+    if target is None and sto_target_id:
+        target = await db.get(Warehouse, sto_target_id)
+    needs_vehicle_and_sac = (
+        None if target is None
+        else stock_locations.tier_of(target.warehouse_type) == max(stock_locations.LocationTier))
+    # And where it comes FROM, so the card names both ends of the journey.
+    source = await db.get(Warehouse, issue.warehouse_id) if issue.warehouse_id else None
     kind = ("STR" if indent_type == _STR_INDENT_TYPE else "INDENT") if issue.indent_id         else ("STO" if sto_no else "DIRECT")
     return {
         "issue_id": issue.id, "issue_no": issue.issue_no,
@@ -27623,7 +27950,12 @@ async def issue_transfer_context(db: AsyncSession, issue_id: int) -> dict:
         "str_no": issue.indent_no if kind == "STR" else getattr(issue, "sto_str_no", None),
         "sto_no": sto_no,
         "indent_no": issue.indent_no if kind == "INDENT" else None,
-        "from_warehouse_name": issue.warehouse_name,
+        "from_warehouse_id": issue.warehouse_id,
+        "from_warehouse_name": issue.warehouse_name or getattr(source, "name", None),
+        "from_warehouse_code": getattr(source, "code", None),
+        "from_warehouse_type": getattr(source, "warehouse_type", None),
+        "destination_warehouse_type": getattr(target, "warehouse_type", None),
+        "destination_needs_vehicle_and_sac": needs_vehicle_and_sac,
         "destination_warehouse_id": getattr(point, "id", None)
             or getattr(issue, "sto_to_warehouse_id", None),
         "destination_warehouse_name": getattr(point, "name", None)
@@ -27694,7 +28026,7 @@ async def sto_issue_options(
                               StockTransferOrder.to_warehouse_name.ilike(like),
                               StockTransferOrder.str_no.ilike(like)))
     rows = (await db.execute(
-        stmt.order_by(StockTransferOrder.id.desc()).limit(LOOKUP_LIMIT))).all()
+        stmt.order_by(StockTransferOrder.id.desc()).limit(DOCUMENT_LOOKUP_LIMIT))).all()
     return [{
         "id": order.id, "sto_no": order.sto_no,
         "kind": "STR" if order.str_id else "DIRECT", "str_no": order.str_no,
@@ -28058,7 +28390,7 @@ async def inspectable_issue_options(db: AsyncSession,
     if search:
         stmt = stmt.where(m.MaterialIssue.issue_no.ilike(f"%{search}%"))
     rows = (await db.execute(
-        stmt.order_by(m.MaterialIssue.id.desc()).limit(LOOKUP_LIMIT)
+        stmt.order_by(m.MaterialIssue.id.desc()).limit(DOCUMENT_LOOKUP_LIMIT)
     )).scalars().all()
     return [
         {
@@ -28164,7 +28496,7 @@ async def issue_options(db: AsyncSession, search: str | None = None, *,
     if search:
         stmt = stmt.where(m.MaterialIssue.issue_no.ilike(f"%{search}%"))
     rows = (await db.execute(
-        stmt.order_by(m.MaterialIssue.id.desc()).limit(LOOKUP_LIMIT)
+        stmt.order_by(m.MaterialIssue.id.desc()).limit(DOCUMENT_LOOKUP_LIMIT)
     )).scalars().all()
     if destination_warehouse_id:
         points = await _requesting_points(db, list(rows))
@@ -28203,7 +28535,7 @@ async def returnable_issue_options(
     if search:
         stmt = stmt.where(m.MaterialIssue.issue_no.ilike(f"%{search}%"))
     rows = (await db.execute(
-        stmt.order_by(m.MaterialIssue.id.desc()).limit(LOOKUP_LIMIT)
+        stmt.order_by(m.MaterialIssue.id.desc()).limit(DOCUMENT_LOOKUP_LIMIT)
     )).scalars().all()
     return [{
         "id": row.id,
@@ -28512,6 +28844,8 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
                 "tracking_type": (TrackingType.NONE.value if line.id in box_lines
                                   else getattr(line, "tracking_type", None)),
                 "box_codes": box_lines.get(line.id, []),
+                # The trays the storekeeper put this pick into (MoM point 14).
+                "trays": line.trays or [],
                 "requires_qc": bool(getattr(line, "requires_qc", False)),
                 # Snapshotted on the issue line at creation, so the packer sees what
                 # is actually in the carton rather than a blank the receiving point
@@ -28553,7 +28887,7 @@ async def employee_options(db: AsyncSession, search: str | None = None) -> list[
         stmt = stmt.where(or_(HcmEmployee.full_name.ilike(like),
                               HcmEmployee.emp_code.ilike(like)))
     rows = (await db.execute(
-        stmt.order_by(HcmEmployee.full_name).limit(LOOKUP_LIMIT))).scalars().all()
+        stmt.order_by(HcmEmployee.full_name).limit(MASTER_LOOKUP_LIMIT))).scalars().all()
     return [{"id": r.id, "code": r.emp_code, "name": r.full_name} for r in rows]
 
 
@@ -28783,14 +29117,14 @@ async def project_options(db: AsyncSession, search: str | None = None) -> list[d
     if search:
         like = f"%{search}%"
         stmt = stmt.where(or_(Project.code.ilike(like), Project.name.ilike(like)))
-    rows = (await db.execute(stmt.order_by(Project.name).limit(LOOKUP_LIMIT))).scalars().all()
+    rows = (await db.execute(stmt.order_by(Project.name).limit(MASTER_LOOKUP_LIMIT))).scalars().all()
     return [{"id": r.id, "code": r.code, "name": r.name} for r in rows]
 
 
 async def department_options(db: AsyncSession) -> list[dict]:
     from app.platform.hcm.models import HcmDepartment
     rows = (await db.execute(
-        select(HcmDepartment).order_by(HcmDepartment.name).limit(LOOKUP_LIMIT))).scalars().all()
+        select(HcmDepartment).order_by(HcmDepartment.name).limit(MASTER_LOOKUP_LIMIT))).scalars().all()
     return [{"id": r.id, "code": getattr(r, "code", None), "name": r.name} for r in rows]
 
 
@@ -28808,7 +29142,7 @@ async def vehicle_options(db: AsyncSession, search: str | None = None) -> list[d
            "ORDER BY vehicle_number LIMIT :limit")
     try:
         rows = (await db.execute(text(sql), {
-            "search": search, "like": f"%{search or ''}%", "limit": LOOKUP_LIMIT})).all()
+            "search": search, "like": f"%{search or ''}%", "limit": MASTER_LOOKUP_LIMIT})).all()
     except Exception:  # noqa: BLE001 - the table belongs to another team and may not exist yet
         logger.warning("trn_vehicles is not available; the vehicle dropdown will be empty")
         return []
@@ -28824,7 +29158,7 @@ async def carrier_options(db: AsyncSession, search: str | None = None) -> list[d
            "ORDER BY name LIMIT :limit")
     try:
         rows = (await db.execute(text(sql), {
-            "search": search, "like": f"%{search or ''}%", "limit": LOOKUP_LIMIT})).all()
+            "search": search, "like": f"%{search or ''}%", "limit": MASTER_LOOKUP_LIMIT})).all()
     except Exception:  # noqa: BLE001
         logger.warning("trn_carriers is not available; the carrier dropdown will be empty")
         return []
@@ -30206,3 +30540,28 @@ async def anywhere_in_reach(db: AsyncSession, request, user) -> bool:
 # Imported last: `trips` reaches back into this module for the gate-out and the
 # acknowledgement helpers, all of which are defined by this line.
 from app.modules.warehouse import trips as _trips  # noqa: E402,F401
+
+
+# ---------------------------------------------------------------------------
+# An issue moved up its approval ladder by the escalation sweep (2026-11-20)
+# ---------------------------------------------------------------------------
+async def _refresh_issue_after_escalation(db: AsyncSession, instance) -> None:
+    """The issue keeps a "waiting on" label; after the system moved it up a rung that
+    label names the new holders. Other documents read their approver off the engine."""
+    if not str(instance.doc_type or "").endswith("ISSUE"):
+        return
+    issue = await db.get(m.MaterialIssue, instance.doc_id)
+    if issue is None:
+        return
+    approvers = await engine.current_approvers(db, instance.doc_type, issue.id)
+    issue.current_approver_name = _approver_label(
+        approvers, await _approver_rank(db, instance.doc_type, issue.id))
+
+
+def _register_escalation_hook() -> None:
+    from app.platform.workflow import escalation
+    if _refresh_issue_after_escalation not in escalation.ON_ESCALATED:
+        escalation.ON_ESCALATED.append(_refresh_issue_after_escalation)
+
+
+_register_escalation_hook()

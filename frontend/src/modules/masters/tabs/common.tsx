@@ -1,3 +1,4 @@
+import { fetchAllPages } from "@/shared/api/fetchAll";
 import type { BulkApi, MasterUsage } from "../api";
 import { MasterCrud } from "../components/MasterCrud";
 import type { NamedMaster } from "../types";
@@ -33,7 +34,7 @@ export function NamedLookupTab({
     list: (p?: {
       search?: string; page?: number; size?: number; include_inactive?: boolean;
       [filter: string]: string | number | boolean | undefined;
-    }) => Promise<{ items: NamedMaster[] }>;
+    }) => Promise<{ items: NamedMaster[]; total?: number }>;
     create: (v: Partial<NamedMaster>) => Promise<NamedMaster>;
     update: (id: number, v: Partial<NamedMaster>) => Promise<NamedMaster>;
     deactivate: (id: number) => Promise<unknown>;
@@ -48,7 +49,7 @@ export function NamedLookupTab({
       { key: "active", header: "Status", render: (r) => <Active on={r.is_active} /> },
     ]}
     renderCard={(r) => <div><Code>{r.code}</Code><div>{r.name}</div></div>}
-    fetchList={(search) => api.list({ search, size: 300 }).then((r) => r.items)}
+    fetchList={(search) => fetchAllPages(api.list, { search })}
     fields={[{key:"code",label:"Code",required:true,...codeRule},
       {key:"name",label:"Name",required:true,maxLength:200},
       {key:"description",label:"Description",maxLength:300},

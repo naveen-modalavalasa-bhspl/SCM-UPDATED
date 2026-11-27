@@ -2,7 +2,8 @@ import { useEffect, useState, useMemo } from "react";
 import type { ButtonHTMLAttributes, InputHTMLAttributes, MouseEvent, ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { guardNumberKeys } from "../quantity";
-import { ArrowDownRight, ArrowLeft, ArrowUpRight } from "lucide-react";
+import { ArrowDownRight, ArrowLeft, ArrowUpRight, Search } from "lucide-react";
+import { moreMatchesLabel, optionWindow } from "./optionWindow";
 import {
   Autocomplete,
   AutocompleteItem,
@@ -397,13 +398,32 @@ function SearchableSelect({
     return options.filter((o) => o.label.toLowerCase().includes(q));
   }, [options, inputValue, typing]);
 
+  // Every option is searchable; only the first matches are DRAWN, so a master of a
+  // thousand rows opens as fast as one of ten. The chosen one always stays in view.
+  const drawn = useMemo(
+    () => optionWindow(filteredItems, (o) => selected !== null && String(o.value) === selected),
+    [filteredItems, selected],
+  );
+
   return (
     <div data-select-root className="contents">
       <Autocomplete
         {...(common as any)}
         placeholder={placeholder ?? "Type to search…"}
-        items={filteredItems}
+        items={drawn.shown}
         selectedKey={encodeKey(selected)}
+        listboxProps={{
+          emptyContent: "No matches",
+          bottomContent: drawn.hidden > 0 ? (
+            <div
+              className="sticky bottom-0 flex items-center gap-2 border-t border-line bg-content1/95 px-3 py-2 text-xs text-muted backdrop-blur"
+              aria-live="polite"
+            >
+              <Search className="h-3.5 w-3.5 shrink-0 text-brand" aria-hidden />
+              <span>{moreMatchesLabel(drawn.hidden, drawn.matched)}</span>
+            </div>
+          ) : undefined,
+        }}
         inputValue={inputValue}
         onInputChange={(text) => {
           setInputValue(text);

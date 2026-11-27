@@ -1,3 +1,4 @@
+import { fetchAllPages, asPage } from "@/shared/api/fetchAll";
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
@@ -431,7 +432,7 @@ export default function StockSegregation() {
 
   const batches = useQuery({
     queryKey: ["wh-batches"],
-    queryFn: () => listBatches({ size: 300 }),
+    queryFn: () => fetchAllPages(listBatches).then(asPage),
     enabled: tab === "batches",
   });
 

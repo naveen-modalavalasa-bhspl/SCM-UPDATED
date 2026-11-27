@@ -1,3 +1,4 @@
+import { getAllPages } from "@/shared/api/fetchAll";
 import { useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Field, Input, Select } from "@/shared/components";
@@ -52,6 +53,10 @@ export interface POHeaderValue {
   logistics_terms: string;
   billing_address: string;
   shipping_address: string;
+  /** The delivery warehouse and which of its shipping addresses (2026-11-23). */
+  warehouseId?: number | "";
+  warehouseName?: string;
+  shippingAddressId?: number | null;
   discount: string;
   freight: string;
 }
@@ -85,6 +90,9 @@ export const poHeaderFrom = (po: PurchaseOrder): POHeaderValue => ({
   logistics_terms: po.logistics_terms ?? "",
   billing_address: po.billing_address ?? "",
   shipping_address: po.shipping_address ?? "",
+  warehouseId: po.warehouse_id ?? "",
+  warehouseName: po.warehouse_name ?? "",
+  shippingAddressId: po.shipping_address_id ?? null,
   discount: String(po.discount_amount ?? 0),
   freight: String(po.freight_amount ?? 0),
 });
@@ -102,7 +110,11 @@ export const poHeaderFrom = (po: PurchaseOrder): POHeaderValue => ({
  * `discount` and `freight` are always sent: they are the form's own numbers, an empty
  * box genuinely means zero, and both columns are NOT NULL.
  */
-export const poHeaderPayload = (v: POHeaderValue): POHeader => ({
+export const poHeaderPayload = (v: POHeaderValue, opts: { delivery?: boolean } = {}): POHeader => ({
+  // The delivery warehouse and its address, only from a form that asks for them —
+  // a correction echoing an address since retired would be refused for it.
+  ...(opts.delivery && v.warehouseId
+    ? { warehouse_id: Number(v.warehouseId), shipping_address_id: v.shippingAddressId ?? null } : {}),
   project_id: v.projectId === "" ? null : Number(v.projectId),
   ...(v.legacy
     ? { department_id: v.projectId !== "" || v.departmentId === "" ? null : Number(v.departmentId) }
@@ -247,8 +259,10 @@ const TERM_FIELDS = [
  * edit, Edit draft, a correction and a new order — so they all read alike.
  */
 export function AddressesTermsCards({
-  value, onChange, editable, orderTotal, changed = [], editableNote,
+  value, onChange, editable, orderTotal, changed = [], editableNote, shippingSlot,
 }: {
+  /** Drawn in place of the shipping-address box: the warehouse + address picker. */
+  shippingSlot?: ReactNode;
   value: Pick<POHeaderValue, AddressTermKey | "paymentTermId">;
   onChange: (patch: Partial<POHeaderValue>) => void;
   editable: boolean;
@@ -261,8 +275,8 @@ export function AddressesTermsCards({
   const { data: terms = [] } = useQuery({
     queryKey: ["po-payment-terms"],
     queryFn: () =>
-      api.get<{ items: PaymentTermRow[] }>("/api/payment-terms", { params: { size: 300 } })
-        .then((r) => r.data.items.filter((t) => t.is_active)),
+      getAllPages<PaymentTermRow>("/api/payment-terms")
+        .then((rows) => rows.filter((t) => t.is_active)),
   });
   const pickedTerm = terms.find((t) => String(t.id) === String(value.paymentTermId));
 
@@ -321,7 +335,9 @@ export function AddressesTermsCards({
             {note}
           </div>
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            {ADDRESS_FIELDS.map((f) => box(f.key, f.label, f.placeholder, "ring-rose-100", "text-rose-700/80", 4))}
+            {ADDRESS_FIELDS.map((f) => (f.key === "shipping_address" && shippingSlot
+              ? <div key={f.key} className="min-w-0">{shippingSlot}</div>
+              : box(f.key, f.label, f.placeholder, "ring-rose-100", "text-rose-700/80", 4)))}
           </div>
         </div>
       </div>
@@ -405,8 +421,10 @@ export function AddressesTermsCards({
 
 export function POHeaderFields({
   value, onChange, disabled = false, showProject = true, orderTotal,
-  requireOne = false, showInvalid = false,
+  requireOne = false, showInvalid = false, shippingSlot,
 }: {
+  /** Replaces the shipping-address box (the warehouse + address picker). */
+  shippingSlot?: ReactNode;
   value: POHeaderValue;
   /** Project OR department is mandatory here (a hand-raised order). */
   requireOne?: boolean;
@@ -421,9 +439,7 @@ export function POHeaderFields({
   const { data: projects = [] } = useQuery({
     queryKey: ["po-projects"],
     queryFn: () =>
-      api.get<{ items: NamedRow[] }>("/api/projects", {
-        params: { size: 200, is_active: true },
-      }).then((r) => r.data.items),
+      getAllPages<NamedRow>("/api/projects", { is_active: true }),
   });
 
   const legacy = Boolean(value.legacy);
@@ -490,7 +506,7 @@ export function POHeaderFields({
 
       {/* Addresses and terms — the same cards the PO page shows (2026-10-26). */}
       <AddressesTermsCards value={value} onChange={onChange} editable={!disabled}
-                           orderTotal={orderTotal} />
+                           orderTotal={orderTotal} shippingSlot={shippingSlot} />
 
       {/* Document money. The sub-total and the tax are the sum of the lines and are
         * never typed; these two are applied to the order as a whole. */}

@@ -20,11 +20,12 @@ The four rungs of the buying chain, in the order they happen:
 quote answers, the quotation a PO was raised off — which is what makes the register
 readable as a chain rather than as four unrelated lists.
 """
-from sqlalchemy import String, Numeric, Select, cast, func, literal, select, union_all
+from sqlalchemy import String, Numeric, Select, case, cast, func, literal, select, union_all
 
 from app.modules.procurement.models import (
     PurchaseOrder, Quotation, RFQ, Requisition,
 )
+from app.shared.enums import POStatus, QuotationStatus, RFQStatus, RequisitionStatus
 
 #: The document kinds this register carries, in buying order. Served to the screen so
 #: the filter and the rows can never disagree about what exists.
@@ -74,6 +75,74 @@ def _row(kind: str, doc_id, doc_no, doc_date, party, project, title, status,
     )
 
 
+# ---------------------------------------------------------------------------
+# "With": who the document is waiting on RIGHT NOW (QA-5 BUG_0015)
+# ---------------------------------------------------------------------------
+# The column used to read `current_approver_name` and nothing else, which is set only
+# while a document is IN APPROVAL. A draft, an approved requisition waiting to be
+# tendered, an order out with the vendor and every quotation (hard-coded empty) all
+# read "—", so most of the register answered "with nobody". It is derived from the
+# status instead: the one fact that says whose move it is.
+
+PROCUREMENT_DESK = "Procurement desk"
+STORES = "Stores (to receive)"
+COMPARING = "Buyer (comparing quotes)"
+
+
+def _with(status, branches: dict, otherwise=None):
+    """CASE status WHEN ... THEN who. A terminal status falls through to `otherwise`
+    (NULL), which the screen draws as "—": a closed document is with nobody, and saying
+    so is correct, not a gap."""
+    whens = []
+    for statuses, who in branches.items():
+        for value in (statuses if isinstance(statuses, tuple) else (statuses,)):
+            whens.append((status == value.value, who))
+    return case(*whens, else_=otherwise)
+
+
+def _approver(column):
+    """In approval with no resolved approver still says so, rather than going blank."""
+    return func.coalesce(column, literal("Approver"))
+
+
+def _requisition_with():
+    return _with(Requisition.status, {
+        RequisitionStatus.DRAFT: Requisition.created_by_name,
+        RequisitionStatus.PENDING_APPROVAL: _approver(Requisition.current_approver_name),
+        (RequisitionStatus.APPROVED, RequisitionStatus.CONSOLIDATED): literal(PROCUREMENT_DESK),
+        RequisitionStatus.RFQ_RAISED: literal("Vendors (RFQ out)"),
+        RequisitionStatus.ORDERED: literal("Supplier (on order)"),
+    })
+
+
+def _rfq_with():
+    return _with(RFQ.status, {
+        (RFQStatus.DRAFT, RFQStatus.RETURNED_FOR_CORRECTION): RFQ.created_by_name,
+        RFQStatus.PENDING_APPROVAL: _approver(RFQ.current_approver_name),
+        RFQStatus.PUBLISHED: literal("Vendors (quoting)"),
+        RFQStatus.CLOSED: literal(COMPARING),
+        RFQStatus.AWARDED: func.coalesce(RFQ.awarded_vendor_name, literal(PROCUREMENT_DESK)),
+    })
+
+
+def _quotation_with():
+    return _with(Quotation.status, {
+        QuotationStatus.DRAFT: Quotation.vendor_name,
+        (QuotationStatus.SUBMITTED, QuotationStatus.REVISED): literal(COMPARING),
+        QuotationStatus.ACCEPTED: literal("Buyer (raise PO)"),
+    })
+
+
+def _po_with():
+    return _with(PurchaseOrder.status, {
+        (POStatus.DRAFT, POStatus.RETURNED_FOR_CORRECTION): PurchaseOrder.created_by_name,
+        (POStatus.SUBMITTED, POStatus.PENDING_APPROVAL): _approver(PurchaseOrder.current_approver_name),
+        POStatus.APPROVED: func.coalesce(PurchaseOrder.created_by_name, literal(PROCUREMENT_DESK)),
+        (POStatus.SENT_TO_VENDOR, POStatus.ACCEPTED_BY_SUPPLIER): PurchaseOrder.vendor_name,
+        POStatus.PARTIALLY_RECEIVED: literal(STORES),
+    })
+
+
 def source() -> Select:
     """The whole buying trail as one SELECT, newest first.
 
@@ -86,20 +155,20 @@ def source() -> Select:
         Requisition.project_name, Requisition.project_name,
         Requisition.department_name, Requisition.status,
         Requisition.estimated_value, Requisition.source_mr_no,
-        Requisition.current_approver_name,
+        _requisition_with(),
     )
     rfqs = _row(
         "RFQ", RFQ.id, RFQ.rfq_no, RFQ.rfq_date,
         RFQ.project_name, RFQ.project_name, RFQ.title, RFQ.status,
         # An enquiry carries no money: asking is not committing.
-        literal(None), RFQ.requisition_no, RFQ.current_approver_name,
+        literal(None), RFQ.requisition_no, _rfq_with(),
     )
     quotations = _row(
         "QUOTATION", Quotation.id, Quotation.quotation_no, Quotation.quotation_date,
         Quotation.vendor_name, literal(None), Quotation.vendor_ref_no,
         Quotation.status, Quotation.grand_total, Quotation.rfq_no,
         # A quote waits on the buyer comparing it, not on an approval ladder.
-        literal(None),
+        _quotation_with(),
     )
     orders = _row(
         "PO", PurchaseOrder.id, PurchaseOrder.po_no, PurchaseOrder.po_date,
@@ -109,7 +178,7 @@ def source() -> Select:
         # quotation, straight off a requisition, or straight off an indent.
         func.coalesce(PurchaseOrder.quotation_no, PurchaseOrder.requisition_no,
                       PurchaseOrder.indent_no),
-        PurchaseOrder.current_approver_name,
+        _po_with(),
     )
     return union_all(requisitions, rfqs, quotations, orders)
 

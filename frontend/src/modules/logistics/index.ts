@@ -36,6 +36,7 @@ export { TripConsolePage } from "./pages/TripConsolePage";
 /** The gate pass that press produces, as paper. Mounted outside the app shell in
  *  `App.tsx`, so printing gives the pass and not the sidebar around it. */
 export { GatePassPrintPage } from "./pages/GatePassPrintPage";
+export { DeliveryChallanPrintPage } from "./pages/DeliveryChallanPrintPage";
 export { TransportRequestsPage } from "./pages/TransportRequestsPage";
 export { TransportFormPage } from "./pages/TransportFormPage";
 export { TransportDetailPage } from "./pages/TransportDetailPage";
@@ -54,6 +55,7 @@ export { LogisticsActivityPage } from "./pages/LogisticsActivityPage";
  *  whichever menu it hangs from. The old `/settings/logistics-vendors` path still
  *  resolves to this same screen. */
 export { LogisticsVendorsPage } from "./pages/LogisticsVendorsPage";
+export { LogisticsMastersPage } from "./pages/LogisticsMastersPage";
 
 export { CarrierLayout } from "./portal/CarrierLayout";
 export { CarrierLoginPage } from "./portal/CarrierLoginPage";

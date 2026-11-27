@@ -115,7 +115,7 @@ export function ItemGroupsTab({ items }: { items: Option[] }) {
           </div>
         )}
         fetchList={(search) =>
-          mastersApi.itemGroups.list({ search, size: 500 }).then((p) => p.items)}
+          mastersApi.itemGroups.listAll({ search })}
         fields={[
           { key: "group_id", label: "User group", type: "select", options: groupOpts,
             required: true },
@@ -181,7 +181,7 @@ export function BomsTab({ projects }: { projects: Option[] }) {
             <div className="text-xs"><Validity row={r} /></div>
           </div>
         )}
-        fetchList={(search) => mastersApi.boms.list({ search, size: 200 }).then((p) => p.items)}
+        fetchList={(search) => mastersApi.boms.listAll({ search })}
         fields={[
           { key: "code", label: "Code", required: true, maxLength: 50,
             pattern: /^[A-Za-z0-9-]+$/,
@@ -229,7 +229,7 @@ export function BomGroupsTab() {
   const mayManage = can("master.bom.manage");
   const boms = useQuery({
     queryKey: ["masters", "boms", "all"],
-    queryFn: () => mastersApi.boms.list({ size: 300 }).then((p) => p.items),
+    queryFn: () => mastersApi.boms.listAll(),
     enabled: mayManage,
   });
   const profiles = useQuery({
@@ -292,7 +292,7 @@ export function BomGroupsTab() {
           </div>
         )}
         fetchList={(search) =>
-          mastersApi.bomGroups.list({ search, size: 300 }).then((p) => p.items)}
+          mastersApi.bomGroups.listAll({ search })}
         fields={[
           { key: "profile_key", label: "Job profile", type: "select",
             options: profileOpts, required: true,
@@ -349,16 +349,15 @@ export function BomLines() {
   const [error, setError] = useState<string | null>(null);
   const boms = useQuery({
     queryKey: ["masters", "boms", "all"],
-    queryFn: () => mastersApi.boms.list({ size: 300 }).then((p) => p.items),
+    queryFn: () => mastersApi.boms.listAll(),
   });
   const items = useQuery({
     queryKey: ["masters", "items", "all"],
-    queryFn: () => mastersApi.items.list({ size: 300 }).then((p) => p.items),
+    queryFn: () => mastersApi.items.listAll(),
   });
   const existingItems = useQuery({
     queryKey: ["masters", "bom-items-" + bomId, ""],
-    queryFn: () => mastersApi.bomItems
-      .list({ bom_id: Number(bomId), size: 300 }).then((p) => p.items),
+    queryFn: () => mastersApi.bomItems.listAll({ bom_id: Number(bomId) }),
     enabled: Boolean(bomId),
   });
   const bomOpts: Option[] = (boms.data ?? [])
@@ -539,8 +538,7 @@ export function BomLines() {
               <div className="text-xs text-muted">{r.quantity} {r.uom_code}</div>
             </div>
           )}
-          fetchList={() => mastersApi.bomItems
-            .list({ bom_id: Number(bomId), size: 300 }).then((p) => p.items)}
+          fetchList={() => mastersApi.bomItems.listAll({ bom_id: Number(bomId) })}
           fields={[
             { key: "item_id", label: "Item", type: "select", options: itemOpts,
               required: true },

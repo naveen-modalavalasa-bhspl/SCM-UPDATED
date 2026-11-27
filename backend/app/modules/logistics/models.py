@@ -223,6 +223,24 @@ class TransportRequest(OrgScopeColumns, Base):
 
     # Own vehicle.
     vehicle_number = Column(String(50), nullable=True)
+    # The destination office's service area code, copied from the consignment when the
+    # leg is raised (2026-11-20, MoM point 4) so every paper that names the vehicle can
+    # name the SAC beside it. Snapshot; never updated by sync.
+    destination_sac = Column(String(30), nullable=True)
+    # What KIND of vehicle (2026-11-20): `mst_vehicle_types`, with its name snapshotted.
+    vehicle_type_id = Column(BigInteger, index=True, nullable=True)
+    vehicle_type_name = Column(String(200), nullable=True)
+    # How many people travel with an own-vehicle load; one `lgs_shipment_crew` row each.
+    crew_count = Column(Integer, nullable=True)
+    # The vehicle's odometer when it left and when it was back (km), each with the time
+    # it was read and who read it. The photos are shipment attachments (ODOMETER_START /
+    # ODOMETER_END). Distance travelled is end − start, derived, never stored.
+    odometer_start = Column(Numeric(12, 1), nullable=True)
+    odometer_start_at = Column(DateTime, nullable=True)
+    odometer_start_by_name = Column(String(200), nullable=True)
+    odometer_end = Column(Numeric(12, 1), nullable=True)
+    odometer_end_at = Column(DateTime, nullable=True)
+    odometer_end_by_name = Column(String(200), nullable=True)
     driver_name = Column(String(200), nullable=True)
     driver_phone = Column(String(30), nullable=True)
     # Who was behind the wheel. A courier books at a published rate and a tender is
@@ -254,6 +272,8 @@ class TransportRequest(OrgScopeColumns, Base):
     tracking_url = Column(String(500), nullable=True)
     eway_bill_no = Column(String(50), nullable=True)
 
+    # The delivery window, copied from the consignment: start and end (2026-11-19).
+    expected_delivery_from = Column(Date, nullable=True)
     expected_delivery = Column(Date, nullable=True)
     # The dispatch leg, merged into this document rather than kept on a second one.
     # The warehouse consignment says what was packed; from the moment it is handed to
@@ -299,6 +319,11 @@ class TransportRequest(OrgScopeColumns, Base):
         "ShipmentEvent", back_populates="request",
         cascade="all, delete-orphan", lazy="selectin",
         order_by="ShipmentEvent.event_at",
+    )
+    crew = relationship(
+        "ShipmentCrew", back_populates="request",
+        cascade="all, delete-orphan", lazy="selectin",
+        order_by="ShipmentCrew.sequence",
     )
 
 
@@ -576,6 +601,27 @@ class CarrierQuote(Base):
 
 Index("ix_lgs_quote_tr_carrier", CarrierQuote.tr_id, CarrierQuote.carrier_id,
       unique=True)
+
+
+class ShipmentCrew(Base):
+    """`lgs_shipment_crew` — the people travelling with an own-vehicle load
+    (2026-11-20): one row per person, the driver among them. Rewritten whole each time
+    the desk saves the crew; written only while the shipment has not left."""
+    __tablename__ = "lgs_shipment_crew"
+
+    id = pk()
+    tr_id = Column(ForeignKey("lgs_transport_requests.id", ondelete="CASCADE"),
+                   index=True, nullable=False)
+    sequence = Column(Integer, nullable=False, default=1)
+    role = Column(String(20), nullable=False)          # CrewRole
+    name = Column(String(200), nullable=False)
+    phone = Column(String(20), nullable=False)
+    # An employee code for our own people, an ID proof number (Aadhaar, licence) for
+    # anyone else. Free text: the gate checks it against the card in the person's hand.
+    id_number = Column(String(50), nullable=True)
+    employee_id = Column(BigInteger, index=True, nullable=True)   # soft FK to hcm_employees
+
+    request = relationship("TransportRequest", back_populates="crew")
 
 
 class ShipmentEvent(Base):

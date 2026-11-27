@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { getAllPages } from "@/shared/api/fetchAll";
 import { useQuery } from "@tanstack/react-query";
 import { Field, Select } from "@/shared/components";
 import { ItemCombobox } from "@/modules/indents/components/ItemCombobox";
@@ -124,7 +124,6 @@ export function OrgFields({
   /** Raised before organisations: the old fields, and nothing new is asked. */
   legacy?: boolean;
 }) {
-  const [warehouseQuery, setWarehouseQuery] = useState("");
   const company = useCompanyName();
 
   // `kind=SHIPMENT_ADDRESS` narrows 983 stocking points to the warehouses a purchase
@@ -132,23 +131,18 @@ export function OrgFields({
   // screen only says what it is asking for. The same rule is enforced again on save,
   // because a narrowed dropdown is a courtesy and a hand-made POST never sees it.
   const { data: warehouses = [], isLoading: loadingWarehouses } = useQuery({
-    queryKey: ["org-warehouses", warehouseQuery],
+    // Every one of them, paged through — the box filters as the buyer types. A first
+    // page of 50 left every other delivery warehouse unreachable (QA-5).
+    queryKey: ["org-warehouses", "all"],
     queryFn: () =>
-      api.get<{ items: NamedRow[] }>("/api/warehouses", {
-        params: {
-          search: warehouseQuery || undefined, size: 50, is_active: true,
-          kind: "SHIPMENT_ADDRESS",
-        },
-      }).then((r) => r.data.items),
+      getAllPages<NamedRow>("/api/warehouses", { is_active: true, kind: "SHIPMENT_ADDRESS" }),
   });
 
   const { data: projects = [] } = useQuery({
     queryKey: ["org-projects"],
     enabled: legacy,
     queryFn: () =>
-      api.get<{ items: NamedRow[] }>("/api/projects", {
-        params: { size: 200, is_active: true },
-      }).then((r) => r.data.items),
+      getAllPages<NamedRow>("/api/projects", { is_active: true }),
   });
 
   // Departments are deduplicated by name: HCM has 2,118 rows and hundreds share one.
@@ -202,14 +196,13 @@ export function OrgFields({
             the document. The LABEL is all that changed — `warehouseId` on the wire and
             `warehouse_id` in the database are untouched, so nothing already reading
             either has to know. */}
-        <Field label="Shipment Address" hint="Warehouses only — not LIP or MDP field points.">
+        <Field label="Delivery warehouse" hint="Warehouses only — its shipping addresses are offered below.">
           <ItemCombobox
             value={value.warehouseId}
             options={warehouseOptions}
             isLoading={loadingWarehouses}
-            onQueryChange={setWarehouseQuery}
             onChange={(v) => onChange({ warehouseId: v })}
-            placeholder="Search shipment addresses…"
+            placeholder="Search warehouses…"
           />
         </Field>
 

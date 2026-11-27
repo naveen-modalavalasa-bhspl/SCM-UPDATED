@@ -9,6 +9,10 @@ import { Lookup } from "../../components/Lookup";
 import { createWarehouse, employeeOptions, getWarehouse, updateWarehouse } from "../../api";
 import type { WarehouseWrite } from "../../types";
 import { usePointLabel } from "../../usePointLabel";
+import {
+  addressesProblem, defaultLine, readAddresses, ShippingAddressesEditor,
+} from "@/modules/masters/components/ShippingAddressesEditor";
+import type { Values } from "@/modules/masters/components/MasterCrud";
 
 /**
  * Create or edit a warehouse.
@@ -69,6 +73,10 @@ export default function WarehouseForm() {
   const [touched, setTouched] = useState(false);
   // Once the user flips "Bin managed" themselves, a type change no longer overrides it.
   const [binChosen, setBinChosen] = useState(false);
+  // The shipping addresses, held the way the shared editor keeps them (2026-11-23).
+  const [ship, setShip] = useState<Values>(() => ({
+    __id: editing ? Number(id) : null, __addresses: "[]", __addresses_loaded: !editing,
+  }));
 
   const { data: existing, isLoading } = useQuery({
     queryKey: ["wh-warehouse", id],
@@ -112,15 +120,23 @@ export default function WarehouseForm() {
 
   const save = useMutation({
     mutationFn: () => {
+      const loaded = ship.__addresses_loaded === true;
+      const list = readAddresses(ship);
       const payload = {
         ...form,
         is_bin_managed: form.warehouse_type === "MAIN" ? true : form.is_bin_managed,
+        // The default's line stays on the warehouse's single address, which the
+        // Delivery Challan and labels read.
+        ...(loaded ? { shipping_addresses: list, address: list.length ? defaultLine(list) : form.address } : {}),
       };
       return editing ? updateWarehouse(Number(id), payload) : createWarehouse(payload);
     },
     onSuccess: (saved) => {
       qc.invalidateQueries({ queryKey: ["wh-warehouses"] });
       qc.invalidateQueries({ queryKey: ["wh-warehouse", String(saved.id)] });
+      qc.invalidateQueries({ queryKey: ["warehouse-addresses", saved.id] });
+      // Re-read the addresses so the new ones carry their ids into the next save.
+      setShip({ __id: saved.id, __addresses: "[]", __addresses_loaded: false });
       nav(`/warehouse/masters/warehouses/${saved.id}`);
     },
   });
@@ -128,9 +144,10 @@ export default function WarehouseForm() {
   const codeError = touched && !form.code.trim() ? "A code is required." : undefined;
   const nameError = touched && !form.name.trim() ? "A name is required." : undefined;
 
+  const shipProblem = ship.__addresses_loaded === true ? addressesProblem(readAddresses(ship)) : null;
   const submit = () => {
     setTouched(true);
-    if (!form.code.trim() || !form.name.trim()) return;
+    if (!form.code.trim() || !form.name.trim() || shipProblem) return;
     save.mutate();
   };
 
@@ -197,14 +214,10 @@ export default function WarehouseForm() {
               placeholder="Pick a storekeeper"
             />
           </Field>
-          <div className="sm:col-span-2">
-            <Field label="Address">
-              <Input
-                value={form.address ?? ""}
-                onChange={(e) => set("address", e.target.value)}
-                placeholder="Street, city, pin"
-              />
-            </Field>
+          <div className="sm:col-span-2 lg:col-span-3">
+            <ShippingAddressesEditor values={ship}
+              patch={(next) => setShip((v) => ({ ...v, ...next }))}
+              error={touched && shipProblem ? shipProblem : undefined} />
           </div>
           <Field label="Latitude" hint="Verified gate coordinate used by Smart Load Planner.">
             <Input

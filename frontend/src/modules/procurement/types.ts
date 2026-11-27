@@ -108,6 +108,9 @@ export interface PurchaseOrder extends OrgScope {
   logistics_terms?: string | null;
   billing_address?: string | null;
   shipping_address?: string | null;
+  shipping_address_id?: number | null;
+  warehouse_id?: number | null;
+  warehouse_name?: string | null;
   current_approver_name?: string | null;
   /** Who the approval engine is waiting on RIGHT NOW, read live by the server.
    *  Prefer this over `current_approver_name`, which is a snapshot taken at submit
@@ -233,6 +236,8 @@ export interface POHeader {
   logistics_terms?: string | null;
   billing_address?: string | null;
   shipping_address?: string | null;
+  warehouse_id?: number | null;
+  shipping_address_id?: number | null;
   discount_amount?: number;
   freight_amount?: number;
 }
@@ -266,6 +271,8 @@ export interface POCopyTemplate extends POHeader {
     item_id: number;
     item_code?: string | null;
     item_name?: string | null;
+    /** The item master's description (QA-5 BUG_0012). */
+    item_description?: string | null;
     uom_code?: string | null;
     quantity: number;
     rate: number;
@@ -566,6 +573,9 @@ export interface RFQListRow extends OrgScope {
 }
 
 export interface RFQ extends RFQListRow {
+  /** Where the goods are delivered (2026-11-23) — shown to the suppliers too. */
+  shipping_address?: string | null;
+  shipping_address_id?: number | null;
   requisition_id?: number | null;
   requisition_no?: string | null;
   /** Set when the RFQ is buying against a consolidated sheet rather than one
@@ -964,6 +974,10 @@ export interface VendorProfile {
   city?: string | null;
   state?: string | null;
   gstin?: string | null;
+  bank_name?: string | null;
+  bank_account_no?: string | null;
+  ifsc_code?: string | null;
+  is_same_state?: boolean | null;
 }
 
 /* ------------------------------------------------------- Vendor despatch note */
@@ -1716,6 +1730,16 @@ export interface Supplier {
   state?: string | null;
   gstin?: string | null;
   payment_terms_days?: number | null;
+  bank_name?: string | null;
+  ifsc_code?: string | null;
+  bank_account_masked?: string | null;
+  /** The whole number — only on the single read the edit form makes. */
+  bank_account_no?: string | null;
+  has_bank_details?: boolean;
+  /** CGST + SGST when true, IGST when false. */
+  is_same_state?: boolean | null;
+  /** Never set; `is_same_state` is the GSTIN rule's answer. */
+  same_state_inferred?: boolean;
   is_active: boolean;
   is_approved: boolean;
   is_blacklisted: boolean;
@@ -1742,6 +1766,11 @@ export interface SupplierInput {
   gstin?: string | null;
   pan?: string | null;
   payment_terms_days?: number | null;
+  bank_name?: string | null;
+  bank_account_no?: string | null;
+  ifsc_code?: string | null;
+  /** null = work it out from the GSTINs. */
+  is_same_state?: boolean | null;
   issue_login?: boolean;
   username?: string | null;
 }

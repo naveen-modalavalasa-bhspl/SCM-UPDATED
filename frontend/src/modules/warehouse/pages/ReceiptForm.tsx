@@ -9,9 +9,10 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, ArrowLeft, Boxes, CheckCircle2, FileText, ScanLine, Send } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Boxes, CheckCircle2, FileText, Layers, ScanLine, Send, ShieldCheck } from "lucide-react";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
-import { DateInput, LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
+import { withAnotherBatch } from "../receiptBatches";
+import { DateInput, LinesEditor, QtyInput, ReasonInput, TextInput, type LineColumn } from "../components/LinesEditor";
 import { ReceiptLinePacking } from "../components/ReceiptLinePacking";
 import {
   type PackEntry, PackQty, baseOf, checkFrom, checkSummary, expandPacks, greedy, hierarchyOf,
@@ -21,13 +22,17 @@ import { Lookup } from "../components/Lookup";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { ReceiptLinkedDocuments } from "../components/LinkedDocuments";
 import { ReceiptRoutingPanel } from "../components/ReceiptRouting";
-import { UnitCodesModal } from "../components/UnitCodesModal";
+import { UnitCodesModal, type UnitCodeSave } from "../components/UnitCodesModal";
+import {
+  covered as warrantyCovered, draftFromServer, pendingFiles, toPayload, unitCodes,
+  type LineWarrantyDraft,
+} from "../components/warrantyDraft";
 import {
   completeReceipt, convertReceiptToGrn, createReceipt, forwardArrival,
   despatchNoteOptions, dispatchReceiptSource, gateEntryOptions, getDespatchPrefill,
   getPoLines, getReceipt, getReceiptRouting, incomingDispatchOptions, itemOptions, poOptions,
   receiptScope, routeParkedReceipt, submitReceipt, myWarehouseOptions, updateReceipt,
-  uploadAttachment, vendorOptions,
+  uploadAttachment, vendorOptions, receiptWarranties, saveLineWarranty, uploadWarrantyCards,
 } from "../api";
 
 import { fmtMoney, fmtQty, num, rate2, today } from "../format";
@@ -488,6 +493,69 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
   /** Snapshot labels for lines loaded from the server, so the grid needs no joins. */
   const savedLine = (index: number) => doc?.items?.[index];
 
+  /* ---- Warranty per batch or per piece, captured in the Serial / IMEI popup
+   * (2026-11-21). Drafts are kept per LINE INDEX, loaded from the server for a saved
+   * GRN, and saved after the GRN itself — the cards need the GRN to exist, and the
+   * codes the warranties hang on must be saved first. A submitted GRN's codes are
+   * fixed, so there the popup saves its warranty straight away. */
+  const [warrantyDrafts, setWarrantyDrafts] = useState<Record<number, LineWarrantyDraft>>({});
+  const warrantyQ = useQuery({
+    queryKey: ["wh-receipt-warranties", doc?.id],
+    queryFn: () => receiptWarranties(doc!.id),
+    enabled: isGrn && !!doc?.id,
+  });
+  useEffect(() => {
+    if (!warrantyQ.data || !doc) return;
+    setWarrantyDrafts((current) => {
+      const next = { ...current };
+      (doc.items ?? []).forEach((item, index) => {
+        if (next[index]?.dirty) return;
+        const line = warrantyQ.data!.lines.find((l) => l.receipt_item_id === item.id);
+        if (line) next[index] = draftFromServer(line);
+      });
+      return next;
+    });
+  }, [warrantyQ.data, doc]);
+  const lineCodes = (line: ReceiptItemWrite) => unitCodes(line.serial_numbers, line.imei_numbers);
+
+  /** Upload the cards picked in the browser, then save each changed line's warranty. */
+  const persistWarranties = async (saved: Receipt, drafts = warrantyDrafts,
+                                   lines = form.items): Promise<void> => {
+    const dirty = Object.entries(drafts).filter(([, d]) => d?.dirty)
+      .map(([index, draft]) => ({ index: Number(index), draft }));
+    if (!dirty.length || !isGrn) return;
+    const files = [...new Set(dirty.flatMap(({ draft }) => pendingFiles(draft)))];
+    const fileIds = new Map<File, number>();
+    for (let at = 0; at < files.length; at += 100) {
+      const chunk = files.slice(at, at + 100);
+      const docs = await uploadWarrantyCards(saved.id, chunk);
+      chunk.forEach((file, i) => { if (docs[i]) fileIds.set(file, docs[i].id); });
+    }
+    const items = [...(saved.items ?? [])].sort((a, b) => (a.line_no ?? 0) - (b.line_no ?? 0));
+    for (const { index, draft } of dirty) {
+      const item = items[index];
+      if (!item) continue;
+      await saveLineWarranty(saved.id, item.id, toPayload(draft, lineCodes(lines[index] ?? item as never), fileIds));
+    }
+    setWarrantyDrafts((current) => {
+      const next = { ...current };
+      for (const { index } of dirty) if (next[index]) next[index] = { ...next[index], dirty: false };
+      return next;
+    });
+    await qc.invalidateQueries({ queryKey: ["wh-receipt-warranties", saved.id] });
+  };
+  /** The popup's warranties into the form's drafts; returns the merged set. */
+  const keepWarranties = (updates: UnitCodeSave[]) => {
+    const merged = { ...warrantyDrafts };
+    for (const u of updates) if (u.warranty) merged[u.index] = u.warranty;
+    setWarrantyDrafts(merged);
+    return merged;
+  };
+  const errorText = (error: unknown) => {
+    const e = error as { response?: { data?: { error?: string } }; message?: string };
+    return e?.response?.data?.error ?? e?.message ?? "The warranty could not be saved.";
+  };
+
   const gateEntry = useMutation({
     mutationFn: (receiptId: number) => getReceipt(receiptId),
     onSuccess: (source) => {
@@ -858,6 +926,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         await uploadAttachment("RECEIPT", saved.id, file, "INWARD");
       }
       setStagedFiles([]);
+      // Then the warranties typed in the Serial / IMEI popups, and their cards.
+      await persistWarranties(saved);
       return saved;
     },
     onSuccess: (saved: Receipt) => {
@@ -887,7 +957,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       // box cleared since the last save fails on the server's parser rather than here.
       if (!locked) validateQuantities();
       validateSerialLines();
-      if (!locked) await updateReceipt(Number(id), withScope());
+      if (!locked) await persistWarranties(await updateReceipt(Number(id), withScope()));
       return what === "submit" ? submitReceipt(Number(id)) : completeReceipt(Number(id));
     },
     onSuccess: (result, what) => {
@@ -1061,6 +1131,14 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     const more = lineProblems.size > 1 ? ` (${lineProblems.size - 1} more line${lineProblems.size === 2 ? "" : "s"} to fix)` : "";
     return `Line ${index + 1}${code ? ` · ${code}` : ""}: ${message}${more}`;
   })();
+
+  /** One item, a second batch (QA-5 BUG_007) — see `withAnotherBatch`. */
+  const addBatchOf = (index: number) => setForm((current) => {
+    const poItemId = current.items[index]?.po_item_id;
+    const owed = poItemId && poState
+      ? num(poState.lines.find((p) => p.po_item_id === poItemId)?.pending_qty) : 0;
+    return { ...current, items: withAnotherBatch(current.items, index, owed) };
+  });
 
   /** Fold a duplicate line into the earlier one — its packs and its codes as well as
    *  its quantity. Summing only the quantity left the packs describing the first line
@@ -1350,13 +1428,27 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       width: "min-w-[18rem] w-72",
       hideOnNarrow: true,
       render: (l, i) => (
-        <TextInput
-          ariaLabel={`Batch, line ${i + 1}`}
-          value={l.batch_no}
-          disabled={locked || !isGrn}
-          placeholder="Batch no"
-          onChange={(v) => patchLine(i, { batch_no: v })}
-        />
+        <div className="space-y-1.5">
+          <TextInput
+            ariaLabel={`Batch, line ${i + 1}`}
+            value={l.batch_no}
+            disabled={locked || !isGrn}
+            placeholder="Batch no"
+            onChange={(v) => patchLine(i, { batch_no: v })}
+          />
+          {/* A consignment's batches are the sender's: they arrive as they left. */}
+          {!locked && isGrn && !fromConsignment && !!l.item_id && (
+            <button
+              type="button"
+              onClick={() => addBatchOf(i)}
+              title="The same item arrived in another batch — add a row for it under this one"
+              className="inline-flex min-h-9 items-center gap-1.5 rounded-lg px-2 text-xs font-medium text-brand transition hover:bg-brand/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
+            >
+              <Layers className="h-3.5 w-3.5" aria-hidden />
+              Another batch
+            </button>
+          )}
+        </div>
       ),
     },
     {
@@ -1392,10 +1484,10 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     {
       key: "reason",
       header: "Rejection reason",
-      width: "min-w-[16rem] w-64",
+      width: "min-w-[20rem] w-80",
       hideOnNarrow: true,
       render: (l, i) => (
-        <TextInput
+        <ReasonInput
           ariaLabel={`Rejection reason, line ${i + 1}`}
           value={l.rejection_reason}
           disabled={locked || !isGrn || num(l.rejected_qty) === 0}
@@ -1451,9 +1543,23 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
             <span className={`inline-flex items-center gap-1 text-xs font-bold tabular ${
               complete ? "text-ok" : done > 0 ? "text-warn" : "text-brand"}`}>
               {complete ? <CheckCircle2 className="h-3.5 w-3.5" /> : <ScanLine className="h-3.5 w-3.5" />}
-              {locked ? "View" : complete ? "Done" : "Scan"} {done}/{units}
+              {locked ? (isGrn && canFile && doc?.status !== "CANCELLED" ? "View · warranty" : "View") : complete ? "Done" : "Scan"} {done}/{units}
             </span>
             <span className="text-[10px] font-medium text-muted">{what}</span>
+            {isGrn && (() => {
+              // The line's warranty, said where its serials are (2026-11-21).
+              const draft = warrantyDrafts[i];
+              const cov = warrantyCovered(draft, lineCodes(l));
+              const full = units > 0 && cov >= units;
+              return (
+                <span className={`mt-0.5 inline-flex items-center gap-1 text-[10px] font-bold ${
+                  full ? "text-ok" : cov ? "text-warn" : "text-muted"}`}>
+                  <ShieldCheck className="h-3 w-3" aria-hidden />
+                  {draft?.mode === "BATCH" && cov ? "Batch warranty" : `Warranty ${cov}/${units}`}
+                  {draft?.dirty && <span className="font-medium text-brand">· unsaved</span>}
+                </span>
+              );
+            })()}
           </button>
         );
       },
@@ -1966,18 +2072,34 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
               serials: line.serial_numbers ?? [],
               imeis: line.imei_numbers ?? [],
             }))}
-            onSave={(updates) => setForm((current) => ({
-              ...current,
-              items: current.items.map((line, index) => {
-                const update = updates.find((u) => u.index === index);
-                if (!update) return line;
-                return {
-                  ...line,
-                  ...(update.serial_numbers ? { serial_numbers: update.serial_numbers } : {}),
-                  ...(update.imei_numbers ? { imei_numbers: update.imei_numbers } : {}),
-                };
-              }),
-            }))}
+            onSave={(updates) => {
+              setForm((current) => ({
+                ...current,
+                items: current.items.map((line, index) => {
+                  const update = updates.find((u) => u.index === index);
+                  if (!update) return line;
+                  return {
+                    ...line,
+                    ...(update.serial_numbers ? { serial_numbers: update.serial_numbers } : {}),
+                    ...(update.imei_numbers ? { imei_numbers: update.imei_numbers } : {}),
+                  };
+                }),
+              }));
+              keepWarranties(updates);
+            }}
+            warranty={isGrn ? {
+              editable: canFile && doc?.status !== "CANCELLED",
+              drafts: warrantyDrafts,
+              // A submitted GRN's codes are fixed: its warranty is saved from the popup.
+              persist: locked && doc ? async (updates) => {
+                const merged = keepWarranties(updates);
+                try {
+                  await persistWarranties(doc, merged);
+                } catch (error) {
+                  throw new Error(errorText(error));
+                }
+              } : undefined,
+            } : undefined}
           />
         );
       })()}

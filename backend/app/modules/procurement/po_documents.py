@@ -38,6 +38,18 @@ async def list_po_documents(db: AsyncSession, po_id: int) -> list:
             if (a.doc_category or "").upper() in _CATEGORIES]
 
 
+async def assert_po_document(db: AsyncSession, po_id: int, attachment_id: int) -> None:
+    """The document is filed against THIS order — the record only, never the bytes.
+
+    For a caller that only POINTS at a document (a payment naming the invoice it
+    settles). Opening the file here made such a save fail with a 404 whenever the
+    stored file was missing from this server's upload folder, although nothing was
+    being downloaded (2026-11-19).
+    """
+    await attachments.require_attachment(
+        db, attachment_id, entity_type=PO_ATTACHMENT_ENTITY, entity_id=po_id)
+
+
 async def po_document_file(db: AsyncSession, po_id: int, attachment_id: int):
     await attachments.require_attachment(
         db, attachment_id, entity_type=PO_ATTACHMENT_ENTITY, entity_id=po_id)

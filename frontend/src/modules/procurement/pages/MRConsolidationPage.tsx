@@ -1,3 +1,4 @@
+import { usePageSize } from "@/shared/hooks/usePageSize";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -15,8 +16,6 @@ const PRIORITIES = [
   { value: "HIGH", label: "High" },
   { value: "URGENT", label: "Urgent" },
 ];
-
-const SIZE = 50;
 
 /**
  * Fold several approved material requests into one requisition.
@@ -47,11 +46,12 @@ export function MRConsolidationPage() {
   const [requiredDate, setRequiredDate] = useState("");
   const [remarks, setRemarks] = useState("");
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = usePageSize("MRConsolidationPage", 50);
   const [problem, setProblem] = useState<string | null>(null);
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["mr-candidates", page],
-    queryFn: () => requisitionApi.mrCandidates({ page, size: SIZE }),
+    queryKey: ["mr-candidates", page, pageSize],
+    queryFn: () => requisitionApi.mrCandidates({ page, size: pageSize }),
   });
 
   // Every candidate id, so "select all" can mean ALL of them rather than the twenty on
@@ -63,7 +63,7 @@ export function MRConsolidationPage() {
   });
 
   const rows = data?.items ?? [];
-  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / SIZE));
+  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / pageSize));
 
   const toggle = (id: number) =>
     setPicked((current) =>
@@ -227,6 +227,8 @@ export function MRConsolidationPage() {
           page={page}
           totalPages={totalPages}
           onPageChange={setPage}
+          pageSize={pageSize}
+          onPageSizeChange={(size) => { setPageSize(size); setPage(1); }}
           empty="No approved material requests are waiting. Ones already on a requisition do not appear here."
           renderCard={(r) => (
             <div className={`-m-1 flex items-start gap-2 rounded-xl p-1 transition-colors ${
