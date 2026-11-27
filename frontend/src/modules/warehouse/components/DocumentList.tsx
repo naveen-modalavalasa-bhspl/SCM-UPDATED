@@ -123,6 +123,11 @@ export interface DocumentListProps<T> {
   warehouseOptionsScope?: "visible" | "all";
   /** Width and flex behaviour of the free-text search box. */
   searchClassName?: string;
+  /** How many rows one page holds. Twenty is right for a queue that grows without
+   *  limit; a register that holds a handful of rows wants them all on one page, with
+   *  no pager under them, so it asks for the server's own ceiling (500) and the pager
+   *  disappears the moment the rows fit — `<Pagination>` is drawn only past one page. */
+  pageSize?: number;
   /**
    * Clearing abandoned drafts.
    *
@@ -167,6 +172,7 @@ export function DocumentList<T>({
   warehouseFilter = true,
   warehouseOptionsScope = "visible",
   searchClassName,
+  pageSize: initialPageSize,
   onDelete,
   canDelete,
   deletePermission,
@@ -178,7 +184,7 @@ export function DocumentList<T>({
   const [status, setStatus] = useState("");
   const [warehouse, setWarehouse] = useState("");
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = usePageSize("DocumentList", 20);
+  const [pageSize, setPageSize] = usePageSize("DocumentList", initialPageSize ?? 20);
   const [debouncedSearch, setDebouncedSearch] = useState("");
 
   // Now that the box searches the server, a request per keystroke would be a request

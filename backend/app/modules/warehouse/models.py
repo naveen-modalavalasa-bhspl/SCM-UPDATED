@@ -37,6 +37,8 @@ from app.modules.warehouse.enums import (
     PutawayStatus,
     PutawayType,
     QcStatus,
+    RejectionDirection,
+    RejectionOutcome as RejectionOutcomeState,
     ReceiptStatus,
     ReceiptType,
     ReturnStatus,
@@ -852,7 +854,7 @@ class DispatchEvent(Base):
 # Purchase returns
 # ---------------------------------------------------------------------------
 
-class PurchaseReturn(Base):
+class PurchaseReturn(OrgScopeColumns, Base):
     """`pro_returns`. Owned here rather than in procurement because the goods
     physically leave a warehouse, and it is the store that sends them back."""
     __tablename__ = "pro_returns"
@@ -860,6 +862,10 @@ class PurchaseReturn(Base):
     id = pk()
     return_no = Column(String(50), nullable=False, unique=True)
     return_date = Column(Date, nullable=False)
+    # Whose paper it is on (2026-11-12): copied from its GRN / PO, or selected on the
+    # number card for a manual return. The project goes into the number.
+    project_id = soft_fk()
+    project_name = Column(String(200), nullable=True)
 
     po_id = Column(BigInteger, nullable=True)
     po_no = Column(String(50), nullable=True)
@@ -1528,8 +1534,65 @@ class OutboundInspectionItem(CombinationMixin, Base):
     # was otherwise kept, {code: qty}. A package rejected whole is not in the
     # accepted codes at all.
     pack_rejections = Column(JSON, nullable=True)
+    # The REJECTED units, named every way the unit can be read and written by the
+    # server at save time (never by the client): [{code, kind, qty?}] where kind is
+    # serial / imei / asset / consumable / unit / box. `serial_numbers` above keeps
+    # the ACCEPTED half only, so the register of what was turned away does not have
+    # to re-derive it against the issue — the facts of the rejection travel with
+    # the line that found it.
+    rejected_codes = Column(JSON, nullable=True)
 
     inspection = relationship("OutboundInspection", back_populates="items")
+
+
+class RejectionOutcome(Base):
+    """`whs_rejection_outcomes` — what became of the goods a QC sheet turned away.
+
+    One row per rejected inspection LINE, written when the inspection completes
+    (inward `complete_inspection`, outward `_apply_outbound_inspection_result`) —
+    the same moment the verdict lands on the receipt or the material issue. Before
+    this a rejected unit went to `whs_serial_numbers` as MAINTENANCE and every path
+    stopped there: no screen listed it, no decision ever closed it.
+
+    The quantities and codes here are SNAPSHOTS of the inspection line, so the
+    register reads the same after the inspection row is edited or the issue closes.
+    The `outcome` is the only field a decision writes, plus who, when and why.
+    """
+    __tablename__ = "whs_rejection_outcomes"
+
+    id = pk()
+    inspection_id = Column(BigInteger, index=True, nullable=False)
+    inspection_item_id = Column(BigInteger, index=True, nullable=False)
+    inspection_no = Column(String(50), nullable=True)
+    direction = Column(String(20), nullable=False)          # RejectionDirection
+    issue_id = Column(BigInteger, index=True, nullable=True)  # outward: its material issue
+    receipt_id = Column(BigInteger, index=True, nullable=True)  # inward: its GRN
+
+    warehouse_id = Column(BigInteger, index=True, nullable=True)
+    warehouse_name = Column(String(200), nullable=True)
+
+    item_id = Column(BigInteger, index=True, nullable=False)
+    item_code = Column(String(50), nullable=True)
+    item_name = Column(String(300), nullable=True)
+    uom_code = Column(String(20), nullable=True)
+    batch_no = Column(String(50), nullable=True)
+
+    rejected_qty = Column(QTY, nullable=False, default=0)
+    rejection_reason = Column(String(100), nullable=True)
+    # [{code, kind, qty?}] — every identifier the rejection turned away, kind-named
+    # so a register can group serials, IMEIs, asset and consumable codes apart.
+    unit_codes = Column(JSON, nullable=True)
+
+    outcome = Column(String(30), nullable=False, default=RejectionOutcomeState.PENDING.value)
+    outcome_by_id = Column(BigInteger, nullable=True)
+    outcome_by_name = Column(String(200), nullable=True)
+    outcome_at = Column(DateTime, nullable=True)
+    outcome_remarks = Column(String(500), nullable=True)
+    # The document that carried the decision out — the purchase return, the
+    # replacement GRN, the disposal note.
+    outcome_doc_no = Column(String(50), nullable=True)
+
+    created_at = created_at_col()
 
 # --------------------------------------------------------------------------- #
 # Where these documents keep their "waiting on" snapshot.

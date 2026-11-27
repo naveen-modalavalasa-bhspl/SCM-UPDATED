@@ -1,6 +1,8 @@
 from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.shared.org_scope_schemas import OrgScopeIn, OrgScopeOut
 from app.shared.limits import (  # request-size guards, see the module
     Annotated, BatchIds, DocumentLines, MAX_BATCH_IDS,
 )
@@ -134,7 +136,10 @@ class TRLineIn(BaseModel):
     remarks: str | None = None
 
 
-class TRCreate(BaseModel):
+class TRCreate(OrgScopeIn):
+    """The number card's selection rides on `OrgScopeIn` (2026-11-12): a request raised
+    on its own from the Transport form picks organisation, project or department and
+    year. Every automatic caller sends none of them and keeps its old numbering."""
     mode: str
     #: ROAD / RAIL / AIR / SEA — what it travels ON, a separate question from the
     #: arrangement above. Optional so an older caller still works: the service falls
@@ -344,7 +349,7 @@ class ActivityRow(BaseModel):
     to_name: str | None = None
 
 
-class TROut(BaseModel):
+class TROut(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
     #: A multi-drop trip's stops, when this shipment carries one (`source_type TRIP`).
     #: Filled by the carrier portal (`transport._trip_brief`) — that is where a stop
@@ -436,11 +441,14 @@ class TROut(BaseModel):
     requested_by_name: str | None = None
     created_at: datetime
     items: list[TRItemOut] = []
+    #: The consignment's cartons, each counted once (SCM_0130) — what the gate counts.
+    #: Null on a leg raised with no consignment behind it.
+    consignment_package_total: int | None = None
     quotes: list[QuoteOut] = []
     events: list[EventOut] = []
 
 
-class TRListRow(BaseModel):
+class TRListRow(OrgScopeOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     tr_no: str

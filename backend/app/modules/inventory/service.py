@@ -38,7 +38,7 @@ from app.shared.scope import rung_for, scope_condition
 from app.shared.enums import (
     AdjustmentReason, ApprovalAction, AuditAction, DocType, IndentStatus,
     InstanceStatus, MRStatus,
-    Priority, RefType, ReservationStatus, ScopeRung, StockDirection, UserRole as RoleCode,
+    Priority, RequisitionStatus, RefType, ReservationStatus, ScopeRung, StockDirection, UserRole as RoleCode,
 )
 from app.shared.models.base import utcnow
 from app.shared.models.master import Item, Project, Uom
@@ -1517,6 +1517,7 @@ async def get_mr(db: AsyncSession, mr_id: int, user=None) -> MaterialRequest:
     )).scalar_one_or_none()
     if not mr:
         raise NotFoundError(f"Material request {mr_id} not found")
+    await _attach_mr_with(db, [mr])
     # The RUNG the request is sitting on, not the person holding it. A name answers
     # "who signs next"; the screen's badge asks "where is this", and the ladder rung is
     # what an approver recognises across five regions holding the same post. Read off
@@ -1641,6 +1642,85 @@ async def mark_mrs_received(db: AsyncSession,
     return closed
 
 
+# Requisitions that no longer carry an MR's demand: a rejected or cancelled one lets
+# the MR go back to waiting, so it must not be named as where the MR is.
+_DEAD_REQUISITION_STATUSES = (RequisitionStatus.REJECTED.value,
+                              RequisitionStatus.CANCELLED.value)
+
+
+def mr_with(status: str, *, pending: list[str] | None = None,
+            approver: str | None = None, raiser: str | None = None,
+            requisitions: list[str] | None = None) -> tuple[str, str | None]:
+    """WHERE a material request is, as (who, what is happening) — SCM_0155.
+
+    The register's "With" column read `current_approver_name`, a snapshot that exists
+    only while a request is in approval and is cleared the moment it is approved, so
+    every request past approval — the ones procurement is actually working — read
+    "—". This answers for every status, in the words the desk uses:
+
+        PENDING_APPROVAL   "Anita Rao"     · "Waiting for approval"
+        APPROVED           "Procurement"   · "On REQ0012" / "Waiting for a requisition"
+        ORDERED            "Procurement"   · "Ordered · REQ0012"
+        RECEIVED           "Completed"     · "Goods received"
+
+    Pure: the caller reads the approval queue and the requisitions, once per page.
+    """
+    names = ", ".join(pending or []) or approver
+    reqs = ", ".join(requisitions or [])
+    if status == MRStatus.DRAFT.value:
+        return raiser or "Raiser", "Draft — not sent yet"
+    if status == MRStatus.PENDING_APPROVAL.value:
+        return names or "Approver", "Waiting for approval"
+    if status == MRStatus.RETURNED_FOR_CORRECTION.value:
+        return approver or raiser or "Raiser", "Sent back for a fix"
+    if status == MRStatus.APPROVED.value:
+        return "Procurement", (f"On {reqs}" if reqs else "Waiting for a requisition")
+    if status == MRStatus.ORDERED.value:
+        return "Procurement", (f"Ordered · {reqs}" if reqs else "Ordered")
+    if status == MRStatus.RECEIVED.value:
+        return "Completed", "Goods received"
+    if status == MRStatus.REJECTED.value:
+        return "—", "Rejected"
+    if status == MRStatus.CANCELLED.value:
+        return "—", "Cancelled"
+    return names or "—", None
+
+
+async def _attach_mr_with(db: AsyncSession, rows) -> None:
+    """`mr_with` for a screenful, in two reads: the live approval queue (the engine's
+    batch call, never one query per row) and the requisitions each MR feeds.
+
+    Procurement sits AFTER inventory in the chain (rule 5), so its tables are read by
+    raw SQL, the way this module already reads `ind_indent_items`. Both doors are
+    read: `pro_requisition_sources` (an MR folded into a requisition with others) and
+    the older one-to-one `pro_requisitions.source_mr_id`.
+    """
+    rows = list(rows or [])
+    if not rows:
+        return
+    ids = [row.id for row in rows]
+    waiting = await engine.pending_approver_names(db, DocType.MR.value, ids)
+    feeds: dict[int, list[str]] = {}
+    params = {"ids": ids, "dead": list(_DEAD_REQUISITION_STATUSES)}
+    for sql in (
+        "SELECT s.mr_id AS mr_id, r.req_no AS req_no FROM pro_requisition_sources s "
+        "JOIN pro_requisitions r ON r.id = s.requisition_id "
+        "WHERE s.mr_id IN :ids AND r.status NOT IN :dead",
+        "SELECT r.source_mr_id AS mr_id, r.req_no AS req_no FROM pro_requisitions r "
+        "WHERE r.source_mr_id IN :ids AND r.status NOT IN :dead",
+    ):
+        for row in (await db.execute(text(sql).bindparams(
+                bindparam("ids", expanding=True), bindparam("dead", expanding=True)),
+                params)).mappings().all():
+            names = feeds.setdefault(int(row["mr_id"]), [])
+            if row["req_no"] and row["req_no"] not in names:
+                names.append(row["req_no"])
+    for row in rows:
+        row.with_text, row.with_note = mr_with(
+            row.status, pending=waiting.get(row.id), approver=row.current_approver_name,
+            raiser=row.requested_by_name, requisitions=feeds.get(row.id))
+
+
 async def list_mrs(db: AsyncSession, params: PageParams, status: str | None = None,
                    indent_id: int | None = None, user=None) -> dict:
     stmt = select(MaterialRequest)
@@ -1654,7 +1734,9 @@ async def list_mrs(db: AsyncSession, params: PageParams, status: str | None = No
         stmt = stmt.where(MaterialRequest.status == status)
     if indent_id is not None:
         stmt = stmt.where(MaterialRequest.indent_id == indent_id)
-    return await paginate(db, stmt.order_by(MaterialRequest.created_at.desc()), params)
+    page = await paginate(db, stmt.order_by(MaterialRequest.created_at.desc()), params)
+    await _attach_mr_with(db, page.get("items"))
+    return page
 
 
 async def create_mr_from_shortfall(db: AsyncSession, indent_id: int | None,
@@ -1738,8 +1820,13 @@ async def _raise_mr(db: AsyncSession, indent_id: int | None, indent_no: str | No
     `act_on_mr` is approving two different shapes and the ladder only governs one
     of them.
     """
+    from app.platform.doc_numbering import scope as org_scope
+    # A direct request's number follows its number card (2026-11-12): `number_args`
+    # is what `create_mr_manual` resolved from the selection. Everything else keeps the
+    # numbering it always had.
     mr = MaterialRequest(
-        mr_no=await next_number(db, "mr", project=ctx.get("project_name")),
+        mr_no=await next_number(db, "mr", **(ctx.get("number_args")
+                                             or {"project": ctx.get("project_name")})),
         mr_date=utcnow().date(),
         indent_id=indent_id, indent_no=indent_no,
         requested_by_id=getattr(user, "id", None),
@@ -1755,6 +1842,8 @@ async def _raise_mr(db: AsyncSession, indent_id: int | None, indent_no: str | No
         remarks=ctx.get("remarks") or (
             f"Raised automatically for {indent_no}" if indent_no else None),
     )
+    if ctx.get("org_scope"):
+        org_scope.stamp_with_project(mr, ctx["org_scope"])
     db.add(mr)
     await db.flush()
 
@@ -1939,9 +2028,33 @@ async def create_mr_manual(db: AsyncSession, data: dict, user) -> MaterialReques
     # Named from the master, so the number and the snapshot cannot disagree. The
     # login's own name stands in only when the project IS the login's and the master
     # has no row for it — a mirror that has not been loaded must not blank the name.
+    # The number card on the direct form (2026-11-12): a project picked there is the
+    # request's own. An MR raised against an indent keeps the INDENT's project — the
+    # card is not on the allocation screen, and the indent already said whose it is.
+    if not indent_id and data.get("project_id"):
+        project_id = data["project_id"]
     project_name = await _project_name_of(db, project_id)
     if project_name is None and project_id == getattr(user, "project_id", None):
         project_name = getattr(user, "project_name", None)
+
+    # Organisation, project or department, and year → the number. Selected on the
+    # card, else the default organisation with the project worked out above. None when
+    # there is no organisation to use or nothing to number it under: the request then
+    # keeps the numbering it always had rather than being refused.
+    from app.platform.doc_numbering import scope as org_scope
+    department_only = bool(data.get("org_department_id")) and not data.get("project_id")
+    selection = SimpleNamespace(
+        organization_id=data.get("organization_id"),
+        org_department_id=data.get("org_department_id"),
+        project_id=None if department_only else project_id,
+        fiscal_year=data.get("fiscal_year"))
+    scope = None
+    if selection.organization_id or selection.project_id or selection.org_department_id:
+        scope = await org_scope.resolve_free(db, selection)
+    if scope and department_only:
+        # Picked a department, which clears the project on the card: the MR is the
+        # department's, not the login's project's.
+        project_id, project_name = None, None
 
     resolved = []
     for line in lines:
@@ -1972,6 +2085,8 @@ async def create_mr_manual(db: AsyncSession, data: dict, user) -> MaterialReques
         "priority": data.get("priority"),
         "required_by": data.get("required_by"),
         "remarks": data.get("remarks"),
+        "org_scope": scope,
+        "number_args": org_scope.args_of(scope) if scope else None,
         # Same key the automatic path passes, so the ladder resolves the raiser's
         # reporting line identically whichever door the request came through.
         "requester_position_id": getattr(user, "active_position_id", None),

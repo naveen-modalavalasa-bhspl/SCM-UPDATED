@@ -1,6 +1,6 @@
 import {
   Button, Can, ConfirmModal, DocumentScopeStrip, ErrorBanner, Field, Input, PackageCheckModal,
-  PageHeader, Select, StatusPill,
+  PageHeader, StatusPill,
 } from "@/shared/components";
 import {
   type PackEntry, baseOf, checkFrom, checkSummary, expandPacks, shrinkWithin, splitByCheck,
@@ -9,7 +9,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
-import { ArrowLeft, Boxes, FileText, Plus, ScanLine, Trash2 } from "lucide-react";
+import { ArrowLeft, Boxes, CheckCheck, FileText, ScanLine } from "lucide-react";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { LinesEditor, QtyInput, ReasonInput, type LineColumn } from "../components/LinesEditor";
 import { Lookup } from "../components/Lookup";
@@ -22,8 +22,9 @@ import {
   updateInspection, warehouseOptions,
 } from "../api";
 import { fmtQty, num, today } from "../format";
-import { deriveResult, qcRate, qcSentence, summarizeQc } from "../qcSummary";
+import { applyQcEdit, passIfUntouched, qcLineResult, qcRate, qcSentence, summarizeQc } from "../qcSummary";
 import { QcResultBadge, QcVerdictPanel, QcVerdictStrip } from "../components/QcVerdict";
+import { UnitReadingsSection, type UnitReading } from "../components/UnitReadingsSection";
 import { resolveAcceptedUnits } from "../qcUnits";
 import { alerts } from "@/modules/alerts";
 import { useAuth } from "@/shared/auth/AuthContext";
@@ -101,10 +102,12 @@ export default function QualityInspectionForm({
 
   /* The inspector is whoever is standing at the bench. Left at "pick one" it was a
    * list of every active employee in HCM with the person actually inspecting somewhere
-   * in it, so a signed inspection could carry anybody's name. Prefilled from the
-   * login and shown read-only (SCM_0097): the server records the signed-in user on
-   * create and keeps that inspector on every edit, so a picker here would only offer
-   * a choice the save ignores. */
+   * in it, so a signed inspection could carry anybody's name. Shown read-only from the
+   * login (SCM_0097): the server records the signed-in user when the sheet is saved
+   * and again when it is submitted, so a picker here would only offer a choice the
+   * save ignores. A draft auto-raised from a GRN carries NO inspector — the store
+   * keeper who submitted the GRN is not the person doing the check — so the field
+   * reads the signed-in user until the sheet is signed, then the recorded name. */
   const { me } = useAuth();
   const prefilledInspector = useRef(false);
   useEffect(() => {
@@ -181,7 +184,7 @@ export default function QualityInspectionForm({
   const delivery = grn ?? pulled;
 
   const deliveryMeta = useMemo(() => {
-    const byLine = new Map<number, { is_serial_tracked?: boolean, serials: string[], is_imei_tracked?: boolean, imeis: string[], packs: PackEntry[] | null, uom?: string | null }>();
+    const byLine = new Map<number, { is_serial_tracked?: boolean, serials: string[], is_imei_tracked?: boolean, imeis: string[], packs: PackEntry[] | null, uom?: string | null, received: number }>();
     for (const line of delivery?.items ?? []) {
       byLine.set(line.id, {
         is_serial_tracked: line.is_serial_tracked,
@@ -192,6 +195,9 @@ export default function QualityInspectionForm({
         packs: line.pack_breakdown?.some((e) => e.level > 0 && num(e.qty) > 0)
           ? line.pack_breakdown : null,
         uom: line.uom_code,
+        // What arrived on the GRN line: the cap on Inspected, and the figure shown
+        // beside a line that starts un-inspected at 0 (SCM_0124).
+        received: num(line.received_qty),
       });
     }
     return byLine;
@@ -285,16 +291,18 @@ export default function QualityInspectionForm({
           item_code: l.item_code,
           item_name: l.item_name,
           batch_no: l.batch_no,
-          inspected_qty: num(l.received_qty),
-          accepted_qty: num(l.received_qty),
+          // SCM_0124: UN-INSPECTED. Nothing is counted or accepted until the inspector
+          // says so; "Pass all un-inspected" does it in one press for a clean delivery.
+          inspected_qty: 0,
+          accepted_qty: 0,
           rejected_qty: 0,
           parameters: [],
-          result: "PASSED" as const,
+          result: "PENDING" as const,
           defect_type: null,
           rejection_reason: null,
           remarks: null,
-          serial_numbers: parseCodes(l.serial_numbers),
-          imei_numbers: parseCodes(l.imei_numbers),
+          serial_numbers: null,
+          imei_numbers: null,
         })),
       }));
       if (receipt.warehouse_name) setWarehouseName(receipt.warehouse_name);
@@ -322,24 +330,28 @@ export default function QualityInspectionForm({
   const set = <K extends keyof InspectionWrite>(key: K, value: InspectionWrite[K]) =>
     setForm((f) => ({ ...f, [key]: value }));
 
+  /** What arrived on a line's GRN line — Inspected never goes past it. */
+  const receivedOf = (line: InspectionItemWrite) =>
+    deliveryMeta.get(line.receipt_item_id ?? 0)?.received;
+
   const patchLine = (index: number, patch: Partial<InspectionItemWrite>) =>
     setForm((f) => ({
       ...f,
       items: f.items.map((l, i) => {
         if (i !== index) return l;
         const next = { ...l, ...patch };
-        const inspected = num(next.inspected_qty);
-        
-        let accepted = 0;
-        let rejected = 0;
-        
-        if (patch.rejected_qty !== undefined) {
-          rejected = Math.min(Math.max(num(patch.rejected_qty), 0), inspected);
-          accepted = Math.max(inspected - rejected, 0);
-        } else {
-          accepted = Math.min(Math.max(num(next.accepted_qty), 0), inspected);
-          rejected = Math.max(inspected - accepted, 0);
-        }
+        // SCM_0124: one rule for every edit (`applyQcEdit`) — typing Inspected alone
+        // never rejects anything, and the line stays Pending until it is accounted for.
+        const { inspected, accepted, rejected } = applyQcEdit(
+          { inspected: num(l.inspected_qty), accepted: num(l.accepted_qty),
+            rejected: num(l.rejected_qty) },
+          {
+            ...(patch.inspected_qty !== undefined ? { inspected: num(patch.inspected_qty) } : {}),
+            ...(patch.accepted_qty !== undefined ? { accepted: num(patch.accepted_qty) } : {}),
+            ...(patch.rejected_qty !== undefined ? { rejected: num(patch.rejected_qty) } : {}),
+          },
+          receivedOf(l),
+        );
 
         // A pack verdict that no longer adds up — the number was typed, or the serials
         // picked a different count — is dropped rather than sent: the server refuses
@@ -352,10 +364,9 @@ export default function QualityInspectionForm({
           accepted_qty: accepted,
           rejected_qty: rejected,
           ...(packsAgree ? {} : { accepted_pack_breakdown: null, rejected_pack_breakdown: null }),
-          // SCM_0164: the result FOLLOWS the split, always — the server derives it the
-          // same way on save. A hand-picked "Passed" over two rejected units was the
-          // line saying one thing and its quantities another.
-          result: deriveResult(inspected, accepted),
+          // SCM_0164 / 0124: the result FOLLOWS the numbers, as the server's does.
+          inspected_qty: inspected,
+          result: qcLineResult(inspected, accepted, rejected),
         };
       }),
     }));
@@ -365,7 +376,30 @@ export default function QualityInspectionForm({
    *  split is counted as what it is about to be, not as nothing; that is how the
    *  confirm dialog once announced "0 pass, 0 fail" over a sheet of accepted lines. */
   const resultOf = (line: InspectionItemWrite) =>
-    deriveResult(num(line.inspected_qty), num(line.accepted_qty));
+    qcLineResult(num(line.inspected_qty), num(line.accepted_qty), num(line.rejected_qty));
+
+  /** SCM_0124: a clean delivery is still one press, but a deliberate one — every line
+   *  nobody has touched becomes fully inspected and accepted; lines being worked stay. */
+  const splitOf = (line: InspectionItemWrite) => ({
+    inspected: num(line.inspected_qty), accepted: num(line.accepted_qty),
+    rejected: num(line.rejected_qty),
+  });
+  const untouchedLines = form.items.filter(
+    (line) => passIfUntouched(splitOf(line), receivedOf(line) ?? 0) !== null);
+  const passAllUntouched = () =>
+    setForm((f) => ({
+      ...f,
+      items: f.items.map((line) => {
+        const passed = passIfUntouched(splitOf(line), receivedOf(line) ?? 0);
+        return passed
+          ? { ...line, inspected_qty: passed.inspected, accepted_qty: passed.accepted,
+              rejected_qty: 0, result: "PASSED" as const,
+              // Every unit kept: left unnamed, the line resolves to all of them.
+              serial_numbers: null, imei_numbers: null,
+              accepted_pack_breakdown: null, rejected_pack_breakdown: null }
+          : line;
+      }),
+    }));
 
   /** Every total on this screen, by QUANTITY (SCM_0164 / 0165 / 0166) — the panel,
    *  the strip under the lines, the Document card and the confirm dialog all read it,
@@ -499,6 +533,22 @@ export default function QualityInspectionForm({
           </div>
         );
       },
+    },
+    {
+      key: "received",
+      header: "Received",
+      numeric: true,
+      width: "w-24",
+      // SCM_0124: what arrived, beside a line that starts un-inspected — so "0
+      // inspected" reads as "not checked yet", never as missing goods.
+      render: (l, i) => (
+        <span className="tabular text-sm text-body">
+          {fmtQty(receivedOf(l) ?? 0)}
+          <span className="ml-1 text-[11px] text-muted">
+            {savedLine(i)?.uom_code ?? deliveryMeta.get(l.receipt_item_id ?? 0)?.uom ?? ""}
+          </span>
+        </span>
+      ),
     },
     {
       key: "inspected",
@@ -643,10 +693,6 @@ export default function QualityInspectionForm({
 
   if (editing && isLoading) return <div className="py-16 text-center text-muted">Loading…</div>;
 
-  const params = paramsFor === null ? [] : form.items[paramsFor]?.parameters ?? [];
-  const setParams = (rows: InspectionParameter[]) =>
-    paramsFor !== null && patchLine(paramsFor, { parameters: rows });
-
   return (
     <div>
       <PageHeader
@@ -779,8 +825,11 @@ export default function QualityInspectionForm({
               placeholder="Warehouse"
             />
           </Field>
-          <Field label="Inspector">
-            <Input value={(editing ? doc?.inspector_name : me?.employee?.name) ?? "—"} disabled />
+          <Field
+            label="Inspector"
+            hint={locked ? "Recorded when this check was submitted." : "You — the signed-in user."}
+          >
+            <Input value={(locked ? doc?.inspector_name : me?.employee?.name) ?? "—"} disabled />
           </Field>
         </div>
       </Section>
@@ -794,7 +843,16 @@ export default function QualityInspectionForm({
         </div>
       )}
 
-      <Section title="Lines" hint="Each line's result follows its accepted and rejected quantities.">
+      <Section
+        title="Lines"
+        hint="Lines start un-inspected. Enter what you checked, then what you accept or reject — the result follows."
+        actions={!locked && untouchedLines.length > 0 ? (
+          <Button variant="soft" onClick={passAllUntouched}>
+            <CheckCheck aria-hidden className="h-4 w-4" />
+            Pass all un-inspected ({untouchedLines.length})
+          </Button>
+        ) : undefined}
+      >
         <LinesEditor
           rows={form.items}
           columns={columns}
@@ -816,73 +874,40 @@ export default function QualityInspectionForm({
 
       {paramsFor !== null && (
         <Section
-          title={`Readings — line ${paramsFor + 1}`}
-          hint="What was measured, and what it should have been."
+          title={`Per-unit readings — line ${paramsFor + 1}`}
+          hint="One row per accepted and per rejected quantity. The verdict on each row follows the line's split — record what was measured on that unit."
           actions={
-            <>
-              <Button
-                variant="subtle"
-                onClick={() => setParams([...params, { name: "", expected: "", observed: "", result: "PASS" }])}
-                disabled={locked}
-              >
-                <Plus className="h-4 w-4" /> Add reading
-              </Button>
-              <Button variant="ghost" onClick={() => setParamsFor(null)}>Close</Button>
-            </>
+            <Button variant="ghost" onClick={() => setParamsFor(null)}>Close</Button>
           }
         >
-          {params.length === 0 ? (
-            <p className="text-sm text-muted">No readings recorded for this line.</p>
-          ) : (
-            <div className="space-y-2">
-              {params.map((p, i) => (
-                <div key={i} className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_1fr_1fr_130px_44px]">
-                  <Input
-                    value={p.name}
-                    placeholder="Parameter"
-                    disabled={locked}
-                    onChange={(e) =>
-                      setParams(params.map((r, x) => (x === i ? { ...r, name: e.target.value } : r)))
-                    }
-                  />
-                  <Input
-                    value={p.expected ?? ""}
-                    placeholder="Expected"
-                    disabled={locked}
-                    onChange={(e) =>
-                      setParams(params.map((r, x) => (x === i ? { ...r, expected: e.target.value } : r)))
-                    }
-                  />
-                  <Input
-                    value={p.observed ?? ""}
-                    placeholder="Observed"
-                    disabled={locked}
-                    onChange={(e) =>
-                      setParams(params.map((r, x) => (x === i ? { ...r, observed: e.target.value } : r)))
-                    }
-                  />
-                  <Select
-                    value={p.result ?? "PASS"}
-                    onChange={(v) =>
-                      setParams(params.map((r, x) => (x === i ? { ...r, result: v as "PASS" | "FAIL" } : r)))
-                    }
-                    options={[{ value: "PASS", label: "Pass" }, { value: "FAIL", label: "Fail" }]}
-                    isDisabled={locked}
-                    ariaLabel={`Reading ${i + 1} result`}
-                  />
-                  <button
-                    type="button"
-                    aria-label={`Remove reading ${i + 1}`}
-                    disabled={locked}
-                    onClick={() => setParams(params.filter((_, x) => x !== i))}
-                    className="inline-flex h-11 w-11 items-center justify-center rounded-lg text-muted hover:text-bad"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
+          <UnitReadingsSection
+            acceptedQty={num(form.items[paramsFor]?.accepted_qty)}
+            rejectedQty={num(form.items[paramsFor]?.rejected_qty)}
+            tracked={isSerialTracked(paramsFor) || isImeiTracked(paramsFor)}
+            acceptedIdentifiers={
+              isImeiTracked(paramsFor)
+                ? resolvedImeis(paramsFor)
+                : resolvedSerials(paramsFor)
+            }
+            rejectedIdentifiers={
+              (() => {
+                const offered = isImeiTracked(paramsFor)
+                  ? availableImeis(paramsFor)
+                  : availableSerials(paramsFor);
+                if (!offered) return undefined;
+                const accepted = new Set(isImeiTracked(paramsFor)
+                  ? resolvedImeis(paramsFor)
+                  : resolvedSerials(paramsFor));
+                return offered.filter((s) => !accepted.has(s));
+              })()
+            }
+            identifierLabel={
+              isImeiTracked(paramsFor) ? "IMEI" : isSerialTracked(paramsFor) ? "Serial" : "Unit"
+            }
+            readings={(form.items[paramsFor]?.parameters ?? []) as UnitReading[]}
+            readOnly={locked}
+            onChange={(next) => patchLine(paramsFor, { parameters: next as InspectionParameter[] })}
+          />
         </Section>
       )}
 

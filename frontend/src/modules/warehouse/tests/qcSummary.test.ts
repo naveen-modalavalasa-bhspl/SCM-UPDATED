@@ -70,3 +70,39 @@ describe("the sentence and the tone", () => {
     expect(qcTone(summarizeQc([line(4, 0)]))).toBe("bad");
   });
 });
+
+import { applyQcEdit, passIfUntouched, qcLineResult } from "../qcSummary";
+
+describe("a QC line starts un-inspected — SCM_0124", () => {
+  const blank = { inspected: 0, accepted: 0, rejected: 0 };
+
+  it("is Pending until accepted + rejected account for what was inspected", () => {
+    expect(qcLineResult(0, 0, 0)).toBe("PENDING");
+    expect(qcLineResult(10, 0, 0)).toBe("PENDING");
+    expect(qcLineResult(10, 6, 0)).toBe("PENDING");
+    expect(qcLineResult(10, 10, 0)).toBe("PASSED");
+    expect(qcLineResult(10, 7, 3)).toBe("PARTIAL");
+    expect(qcLineResult(10, 0, 10)).toBe("FAILED");
+  });
+
+  it("counting alone never rejects anything", () => {
+    expect(applyQcEdit(blank, { inspected: 10 }, 10)).toEqual({ inspected: 10, accepted: 0, rejected: 0 });
+  });
+
+  it("typing accepted or rejected completes the split", () => {
+    const counted = { inspected: 10, accepted: 0, rejected: 0 };
+    expect(applyQcEdit(counted, { accepted: 8 })).toEqual({ inspected: 10, accepted: 8, rejected: 2 });
+    expect(applyQcEdit(counted, { rejected: 3 })).toEqual({ inspected: 10, accepted: 7, rejected: 3 });
+  });
+
+  it("re-counting a judged line keeps it judged; Inspected never passes what arrived", () => {
+    expect(applyQcEdit({ inspected: 10, accepted: 8, rejected: 2 }, { inspected: 6 }))
+      .toEqual({ inspected: 6, accepted: 6, rejected: 0 });
+    expect(applyQcEdit(blank, { inspected: 99 }, 10).inspected).toBe(10);
+  });
+
+  it("Pass all touches only lines nobody has worked", () => {
+    expect(passIfUntouched(blank, 10)).toEqual({ inspected: 10, accepted: 10, rejected: 0 });
+    expect(passIfUntouched({ inspected: 4, accepted: 0, rejected: 0 }, 10)).toBeNull();
+  });
+});

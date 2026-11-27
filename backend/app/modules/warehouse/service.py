@@ -60,7 +60,8 @@ from app.modules.warehouse.enums import (
     ConsignmentRefType, DispatchEventType, DispatchSourceType, DispatchStatus, DispatchType, InspectionResult, InspectionStatus,
     InspectionType, IssueDirection, IssueStatus, IssueType, PackageStatus,
     PickLineStatus,
-    PickingStatus, PutawayStatus, PutawayType, QcStatus, ReceiptStatus, ReceiptType,
+    PickingStatus, PutawayStatus, PutawayType, QcStatus, ReadingScope, ReceiptStatus, ReceiptType,
+    RejectionDirection, RejectionOutcome,
     PURCHASE_RETURN_PHASES,
     REPLACEMENT_DOCUMENT_META, REPLACEMENT_PHOTO_SUFFIXES,
     REQUIRED_REPLACEMENT_DOCUMENTS, ReplacementDocument,
@@ -1753,7 +1754,16 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
         # units nobody can ever tell apart. The message at least says how many
         # are short or extra and where, rather than a bare "exactly N" that sent
         # the gate hunting for which of several cartons was the one short.
-        if item.is_serial_tracked and len(serials) != int(received):
+        # 2026-11-13: STRICT ON THE GRN ONLY. At the gate (Material Inward) nobody has
+        # opened the cartons, so a guard records whatever serials they can read —
+        # none, some, all — and only MORE serials than units, a contradiction, is
+        # refused there. The GRN still names every unit before it saves or submits.
+        if at_gate and item.is_serial_tracked and len(serials) > int(received):
+            raise ValidationError(
+                f"Line {index}: {item.code} — {len(serials)} serial numbers for "
+                f"{int(received)} received units. Remove "
+                f"{len(serials) - int(received)} or correct the quantity.")
+        if not at_gate and item.is_serial_tracked and len(serials) != int(received):
             gap = int(received) - len(serials)
             what = (f"{gap} more serial number{'s' if gap != 1 else ''}"
                     if gap > 0
@@ -1808,10 +1818,21 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
                 f"Line {index}: IMEI-tracked quantity must be a whole number"
             )
         
-        if item.is_imei_tracked and len(imeis) != int(received):
+        # Same rule as serials: anything readable at the gate, never more than arrived;
+        # every unit on the GRN.
+        if at_gate and item.is_imei_tracked and len(imeis) > int(received):
             raise ValidationError(
-                f"Line {index}: Please provide exactly {int(received)} IMEI numbers for "
-                f"received units of {item.code}"
+                f"Line {index}: {item.code} — {len(imeis)} IMEI numbers for "
+                f"{int(received)} received units. Remove "
+                f"{len(imeis) - int(received)} or correct the quantity.")
+        if not at_gate and item.is_imei_tracked and len(imeis) != int(received):
+            gap = int(received) - len(imeis)
+            what = (f"{gap} more IMEI number{'s' if gap != 1 else ''}" if gap > 0
+                    else f"{-gap} too many IMEI number{'s' if -gap != 1 else ''}")
+            raise ValidationError(
+                f"Line {index}: {item.code} — {received} received units need "
+                f"{int(received)} IMEI numbers, and {len(imeis)} are entered on this "
+                f"line. Add {what} before saving."
             )
         if imeis:
             seen_for_item = seen_imeis_by_item.setdefault(item.id, set())
@@ -4322,6 +4343,33 @@ def _derive_result(inspected: Decimal, accepted: Decimal) -> str:
     return InspectionResult.PARTIAL.value
 
 
+def qc_split(inspected: Decimal, accepted_in, rejected_in, *,
+             rejected_sent: bool) -> tuple[Decimal, Decimal, bool]:
+    """A QC line's (accepted, rejected, judged) — the one rule for every QC sheet,
+    inward and outward (2026-11-13, SCM_0124).
+
+    A line starts UN-INSPECTED: inspected, accepted and rejected all 0. It is JUDGED
+    only once the inspector has accounted for everything inspected — accepted +
+    rejected = inspected. Until then it is still Pending, whatever is saved, and no
+    save may decide it: the old sheet seeded every line "fully accepted", so pressing
+    Save on a sheet nobody had looked at turned Pending into Pass.
+
+    `rejected_sent`: the client said how much it rejected. A caller that sends only an
+    accepted quantity means "the rest is rejected" — the rule before this — and is
+    read that way, so nothing outside the two QC forms changes.
+    """
+    inspected = max(_d(inspected), ZERO)
+    accepted = max(min(_d(accepted_in), inspected), ZERO)
+    if inspected <= ZERO:
+        return ZERO, ZERO, False
+    if not rejected_sent:
+        return accepted, inspected - accepted, True
+    rejected = max(_d(rejected_in), ZERO)
+    if accepted + rejected < inspected:
+        return accepted, min(rejected, inspected - accepted), False
+    return accepted, inspected - accepted, True
+
+
 def inspection_quantity_summary(lines) -> dict:
     """What an inspection found, by QUANTITY — SCM_0164 / 0165 / 0166.
 
@@ -4345,8 +4393,15 @@ def inspection_quantity_summary(lines) -> dict:
         inspected += line_inspected
         accepted += line_accepted
         rejected += _d(line.rejected_qty)
-        result = (line.result if line.result != InspectionResult.PENDING.value
-                  else _derive_result(line_inspected, line_accepted))
+        if line.result != InspectionResult.PENDING.value:
+            result = line.result
+        else:
+            # Judged off its own numbers by the save rule (`qc_split`): counted but not
+            # yet accounted for is still Pending, never a Fail (SCM_0124).
+            _a, _r, judged = qc_split(line_inspected, line_accepted, line.rejected_qty,
+                                      rejected_sent=True)
+            result = (_derive_result(line_inspected, line_accepted) if judged
+                      else InspectionResult.PENDING.value)
         counts[result] = counts.get(result, 0) + 1
     return {
         "inspected_qty": inspected,
@@ -4409,7 +4464,13 @@ async def _raise_inspection_for(
         vendor_id=receipt.vendor_id, vendor_name=receipt.vendor_name,
         inspection_type=InspectionType.INCOMING.value,
         status=InspectionStatus.DRAFT.value,
-        inspector_id=getattr(user, "id", None), inspector_name=_name(user),
+        # NOBODY has inspected yet. This draft is raised by whoever SUBMITTED the GRN
+        # — the store keeper at the gate — and stamping them here put the GRN's author
+        # on the sheet as its inspector, which is the name the QC screen then showed
+        # and the name that reached the report. The inspector is recorded by
+        # `update_inspection` (the person working the sheet) and again by
+        # `complete_inspection` (the person submitting it).
+        inspector_id=None, inspector_name=None,
     )
     values, _args = _carried_scope(receipt)
     if values is not None:
@@ -4423,10 +4484,11 @@ async def _raise_inspection_for(
             item_code=line.item_code, item_name=line.item_name, uom_code=line.uom_code,
             batch_no=line.batch_no,
             **combinations.carry(line),
-            inspected_qty=_d(line.received_qty), accepted_qty=_d(line.received_qty),
+            # SCM_0124: UN-INSPECTED — nothing counted, nothing accepted. Seeded "fully
+            # accepted", the first Save turned a sheet nobody had looked at into a Pass.
+            # The received quantity is the GRN line's own, and the form shows it beside.
+            inspected_qty=ZERO, accepted_qty=ZERO,
             rejected_qty=ZERO, result=InspectionResult.PENDING.value,
-            serial_numbers=list(line.serial_numbers) if line.serial_numbers else None,
-            imei_numbers=list(line.imei_numbers) if getattr(line, 'imei_numbers', None) else None,
         ))
     _inspection_totals(inspection)
     await db.flush()
@@ -4569,14 +4631,21 @@ async def _apply_inspection_lines(db: AsyncSession, inspection: m.Inspection,
                 f"{item.code}: {line.accepted_qty} accepted out of {inspected} "
                 f"inspected. Accepted cannot exceed inspected."
             )
-        accepted = min(_d(line.accepted_qty), inspected)
-        rejected = inspected - accepted
+        # SCM_0124: judged only once accepted + rejected account for what was inspected
+        # (`qc_split`); a pack verdict IS a judgement. Until then the line is Pending
+        # and none of the unit / reason checks below apply — there is nothing decided
+        # for them to check.
+        accepted, rejected, judged = qc_split(
+            inspected, line.accepted_qty, line.rejected_qty,
+            rejected_sent=("rejected_qty" in line.model_fields_set
+                           and accepted_packs is None and rejected_packs is None))
         # SCM_0164: the result FOLLOWS the split, always. A hand-picked "Passed" over a
         # line that rejected two units was saved as asked, so the sheet said passed
         # while the stock said two came back — and every total built on the result
         # disagreed with every total built on the quantities. No result a split could
         # be "overridden" to is anything but one of the two contradicting the other.
-        result = _derive_result(inspected, accepted)
+        result = (_derive_result(inspected, accepted) if judged
+                  else InspectionResult.PENDING.value)
         serials = [value.strip() for value in (line.serial_numbers or []) if value.strip()]
         if len(serials) != len(set(serials)):
             raise ValidationError(f"{item.code}: accepted serial numbers must be unique")
@@ -4612,17 +4681,17 @@ async def _apply_inspection_lines(db: AsyncSession, inspection: m.Inspection,
             raise ValidationError(
                 f"{item.code}: accepted quantity must be a whole number for IMEI tracked items"
             )
-        if item.is_serial_tracked and len(serials) != int(accepted):
+        if judged and item.is_serial_tracked and len(serials) != int(accepted):
             raise ValidationError(
                 f"{item.code}: choose exactly {int(accepted)} accepted serial numbers"
             )
-        if item.is_imei_tracked and len(imeis) != int(accepted):
+        if judged and item.is_imei_tracked and len(imeis) != int(accepted):
             raise ValidationError(
                 f"{item.code}: choose exactly {int(accepted)} accepted IMEI numbers"
             )
         reason = line.rejection_reason or line.defect_type
 
-        if rejected > ZERO and not (reason or "").strip():
+        if judged and rejected > ZERO and not (reason or "").strip():
             raise ValidationError(
                 f"{item.code}: a failed line needs a defect type — "
                 "'failed' with no reason cannot be put to a vendor.")
@@ -4715,9 +4784,14 @@ async def update_inspection(db: AsyncSession, inspection_id: int, data: s.Inspec
            {InspectionStatus.DRAFT.value, InspectionStatus.IN_PROGRESS.value},
            "edit", "inspection")
 
-    before = {"status": inspection.status, "failed_items": inspection.failed_items}
+    before = {"status": inspection.status, "failed_items": inspection.failed_items,
+              "inspector_name": inspection.inspector_name}
     inspection.inspection_date = data.inspection_date
-    # The inspector recorded at creation stands (SCM_0097): an edit never re-points it.
+    # The inspector is the person doing the check, not the person who raised the GRN
+    # this sheet hangs off (SCM_0097 as amended): whoever saves the sheet is recorded,
+    # and `complete_inspection` records the person who actually submits it.
+    inspection.inspector_id = getattr(user, "id", None)
+    inspection.inspector_name = _name(user)
     inspection.remarks = data.remarks
     inspection.status = InspectionStatus.IN_PROGRESS.value
 
@@ -4730,6 +4804,153 @@ async def update_inspection(db: AsyncSession, inspection_id: int, data: s.Inspec
                       after={"status": inspection.status, "failed_items": inspection.failed_items})
     await db.commit()
     return await get_inspection(db, inspection_id)
+
+
+async def _write_rejection_outcomes(
+    db: AsyncSession, inspection, direction: str, codes_by_item: dict[int, list[dict]],
+    *, receipt_id: int | None = None, issue_id: int | None = None,
+) -> None:
+    """The register of everything QC turned away (SCM_REJ).
+
+    One `whs_rejection_outcomes` row per rejected LINE, written the moment the verdict
+    lands. Before this a rejected unit went to `whs_serial_numbers` as MAINTENANCE
+    with a remark, and every path stopped there: no screen listed it, no decision ever
+    closed it, and the bulk quantity a sheet rejected surfaced nowhere at all.
+
+    The quantities and codes here are SNAPSHOTS of the inspection line, so the
+    register reads the same after the receipt line is rebuilt or the issue closes.
+    Idempotent: re-running the same verdict replaces this inspection's rows rather
+    than duplicating them.
+    """
+    await db.execute(delete(m.RejectionOutcome).where(
+        m.RejectionOutcome.inspection_id == inspection.id,
+        m.RejectionOutcome.direction == direction,
+    ))
+    for line in inspection.items:
+        rejected = _d(line.rejected_qty)
+        if rejected <= ZERO:
+            continue
+        db.add(m.RejectionOutcome(
+            inspection_id=inspection.id,
+            inspection_item_id=line.id,
+            inspection_no=inspection.inspection_no,
+            direction=direction,
+            receipt_id=receipt_id,
+            issue_id=issue_id,
+            warehouse_id=inspection.warehouse_id,
+            warehouse_name=inspection.warehouse_name,
+            item_id=line.item_id,
+            item_code=line.item_code,
+            item_name=line.item_name,
+            uom_code=line.uom_code,
+            batch_no=line.batch_no,
+            rejected_qty=rejected,
+            rejection_reason=line.defect_type,
+            unit_codes=codes_by_item.get(line.id),
+        ))
+    await db.flush()
+
+
+async def list_rejection_outcomes(
+    db: AsyncSession, *,
+    warehouse_id: int | None = None,
+    direction: str | None = None,
+    outcome: str | None = None,
+    item_id: int | None = None,
+    inspection_no: str | None = None,
+) -> list[m.RejectionOutcome]:
+    """The rejection register (SCM_REJ), read for Stock Segregation > QC Lifecycle.
+
+    Returns every row in scope — the register is short by nature (only lines a QC
+    sheet turned away) and the supervisor reads it end-to-end. Filters are optional
+    and combined; an unfiltered call is the whole register, which is what the
+    lifecycle subtab opens with.
+    """
+    stmt = select(m.RejectionOutcome).order_by(m.RejectionOutcome.created_at.desc())
+    if warehouse_id is not None:
+        stmt = stmt.where(m.RejectionOutcome.warehouse_id == warehouse_id)
+    if direction is not None:
+        stmt = stmt.where(m.RejectionOutcome.direction == direction)
+    if outcome is not None:
+        stmt = stmt.where(m.RejectionOutcome.outcome == outcome)
+    if item_id is not None:
+        stmt = stmt.where(m.RejectionOutcome.item_id == item_id)
+    if inspection_no is not None:
+        stmt = stmt.where(m.RejectionOutcome.inspection_no == inspection_no)
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def rejection_summary(db: AsyncSession, *,
+                            warehouse_id: int | None = None,
+                            direction: str | None = None) -> s.RejectionSummary:
+    """Counts and quantities by outcome, for the register's KPI tiles.
+
+    One GROUP BY over the rows in scope, never a page of rows counted in Python.
+    Quantities are summed as float because the summary is a tile, not a ledger: a
+    supervisor reads "12.5 kg pending", not "12.50000".
+    """
+    stmt = (select(m.RejectionOutcome.outcome,
+                   func.count().label("count"),
+                   func.sum(m.RejectionOutcome.rejected_qty).label("qty"))
+            .group_by(m.RejectionOutcome.outcome))
+    if warehouse_id is not None:
+        stmt = stmt.where(m.RejectionOutcome.warehouse_id == warehouse_id)
+    if direction is not None:
+        stmt = stmt.where(m.RejectionOutcome.direction == direction)
+    rows = (await db.execute(stmt)).all()
+    by_outcome: dict[str, int] = {}
+    qty_by_outcome: dict[str, float] = {}
+    total_qty = 0.0
+    for outcome, count, qty in rows:
+        by_outcome[outcome] = int(count or 0)
+        q = float(qty or 0)
+        qty_by_outcome[outcome] = q
+        total_qty += q
+    return s.RejectionSummary(by_outcome=by_outcome,
+                              qty_by_outcome=qty_by_outcome,
+                              total_qty=total_qty)
+
+
+async def decide_rejection_outcome(
+    db: AsyncSession, outcome_id: int, decision: s.RejectionDecisionIn, user,
+) -> m.RejectionOutcome:
+    """Close a rejection: PENDING -> DISPOSED / RETURNED_TO_VENDOR / RETURNED_TO_STOCK /
+    REPLACED. Terminal — a rejection is closed once, not reopened.
+
+    `decision.action` is the outcome enum value. `decision.doc_no` is the carrier
+    document (purchase return, replacement GRN, disposal note). Where the units are
+    serial-tracked, the future hook will also move `whs_serial_numbers` — for now the
+    register is the source of truth and `whs_serial_numbers` stays as the inspection
+    left it (MAINTENANCE).
+    """
+    outcome = await db.get(m.RejectionOutcome, outcome_id)
+    if outcome is None:
+        raise ValidationError("Rejection outcome not found")
+    if outcome.outcome != RejectionOutcome.PENDING.value:
+        raise ValidationError(
+            f"This rejection was already closed as {outcome.outcome}. "
+            "A rejection is closed once.")
+    valid = {e.value for e in RejectionOutcome if e != RejectionOutcome.PENDING}
+    if decision.action not in valid:
+        raise ValidationError(
+            f"Unknown decision '{decision.action}'. "
+            f"Choose one of {', '.join(sorted(valid))}.")
+    outcome.outcome = decision.action
+    outcome.outcome_by_id = getattr(user, "id", None)
+    outcome.outcome_by_name = _name(user)
+    outcome.outcome_at = utcnow()
+    outcome.outcome_remarks = decision.remarks
+    outcome.outcome_doc_no = decision.doc_no
+    await db.flush()
+    await write_audit(db, entity="whs_rejection_outcomes", entity_id=outcome.id,
+                      entity_no=outcome.inspection_no, action=AuditAction.UPDATE,
+                      actor=user, before={"outcome": RejectionOutcome.PENDING.value},
+                      after={"outcome": outcome.outcome,
+                             "doc_no": outcome.outcome_doc_no,
+                             "remarks": outcome.outcome_remarks})
+    await db.commit()
+    await db.refresh(outcome)
+    return outcome
 
 
 async def complete_inspection(db: AsyncSession, inspection_id: int, user) -> m.Inspection:
@@ -4750,6 +4971,10 @@ async def complete_inspection(db: AsyncSession, inspection_id: int, user) -> m.I
     if pending:
         raise ValidationError(
             f"{len(pending)} line(s) are still pending. Record a result on every line first.")
+
+    # The unit codes this sheet turned away, per inspection line — the rejection
+    # register reads them, never the receipt (which keeps only the accepted half).
+    rejected_codes_by_item: dict[int, list[dict]] = {}
 
     if inspection.receipt_id:
         receipt = await get_receipt(db, inspection.receipt_id)
@@ -4781,6 +5006,10 @@ async def complete_inspection(db: AsyncSession, inspection_id: int, user) -> m.I
             rejected_imeis = [
                 imei for imei in original_imeis if imei not in set(accepted_imeis)
             ]
+            if rejected_serials or rejected_imeis:
+                rejected_codes_by_item[verdict.id] = (
+                    [{"code": code, "kind": "serial"} for code in rejected_serials]
+                    + [{"code": code, "kind": "imei"} for code in rejected_imeis])
             line.accepted_qty = _d(verdict.accepted_qty)
             line.rejected_qty = _d(verdict.rejected_qty)
             line.qc_status = verdict.result
@@ -4835,6 +5064,17 @@ async def complete_inspection(db: AsyncSession, inspection_id: int, user) -> m.I
                 await _sync_receipt_source(db, receipt)
 
     inspection.status = InspectionStatus.COMPLETED.value
+    # The inspector of record is whoever SIGNS the sheet. A draft raised off a GRN
+    # carries no inspector; the last person to work it — the one pressing Complete —
+    # is the one whose name belongs on the printed report.
+    inspection.inspector_id = getattr(user, "id", None)
+    inspection.inspector_name = _name(user)
+
+    # Every line this sheet turned away enters the rejection register (SCM_REJ), one
+    # row per line, PENDING a decision on Stock Segregation > Rejected.
+    await _write_rejection_outcomes(
+        db, inspection, RejectionDirection.INWARD.value, rejected_codes_by_item,
+        receipt_id=inspection.receipt_id)
 
     await write_audit(db, entity="inb_inspections", entity_id=inspection.id,
                       entity_no=inspection.inspection_no, action=AuditAction.UPDATE, actor=user,
@@ -11942,6 +12182,13 @@ async def _issue_scope(db: AsyncSession, data, source) -> tuple[dict | None, dic
         if not org_scope.uses_org(source):
             return None, None
         values = {field: getattr(source, field, None) for field in org_scope.SCOPE_FIELDS}
+        # The PROJECT too (2026-11-13): the number is already drawn under the source's
+        # project (`number_args` below), so the issue must carry it — or its card reads
+        # "Not chosen here" over a number that plainly prints it. Only when the source
+        # names one: an STO / indent filed under a department leaves the issue's own.
+        if getattr(source, "project_id", None) or getattr(source, "project_name", None):
+            values["project_id"] = getattr(source, "project_id", None)
+            values["project_name"] = getattr(source, "project_name", None)
         # The year is the issue's own: picked on the form, else today's — never the
         # source's, which may be last year's.
         values["fiscal_year"] = org_scope.assert_fiscal_year(getattr(data, "fiscal_year", None))
@@ -14025,8 +14272,12 @@ async def _raise_outbound_inspection_for(
         warehouse_id=issue.warehouse_id,
         warehouse_name=issue.warehouse_name,
         status=InspectionStatus.DRAFT.value,
-        inspector_id=getattr(user, "id", None),
-        inspector_name=_name(user),
+        # As `_raise_inspection_for` says: this draft is raised by whoever POSTED the
+        # material issue, not by the inspector. Left empty until somebody works the
+        # sheet (`update_outbound_inspection`) or submits it
+        # (`complete_outbound_inspection`).
+        inspector_id=None,
+        inspector_name=None,
     )
     db.add(inspection)
     await db.flush()
@@ -14069,9 +14320,11 @@ async def _raise_outbound_inspection_for(
             item_code=line.item_code, item_name=line.item_name, uom_code=line.uom_code,
             batch_no=line.batch_no,
             **combinations.carry(line),
-            inspected_qty=_d(line.issued_qty), accepted_qty=_d(line.issued_qty),
+            # SCM_0124: UN-INSPECTED, as inward. The issued quantity and the units it
+            # sent are the issue line's own, read by the form beside each line.
+            inspected_qty=ZERO, accepted_qty=ZERO,
             rejected_qty=ZERO, result=InspectionResult.PENDING.value,
-            serial_numbers=line_serials if line_serials else None,
+            serial_numbers=None,
         ))
         
     _outbound_inspection_totals(inspection)
@@ -18621,10 +18874,14 @@ async def _create_manual_return(db: AsyncSession, data: s.ReturnWrite,
         vendor = await _match_manual_vendor(
             db, vendor_name, data.vendor_code, data.vendor_gstin)
     wh = await db.get(Warehouse, data.warehouse_id) if data.warehouse_id else None
+    # Whose paper it is on (2026-11-12): nothing before a manual return, so all of it
+    # is SELECTED on the number card. No card (an older client) → the old numbering.
+    scope_values, scope_args = await org_scope.carry_or_select(db, data, None)
 
     doc = m.PurchaseReturn(
         items=[],   # see create_issue: keeps _apply_*_lines()'s clear() off a lazy load
-        return_no=await next_number(db, WarehouseDocType.PURCHASE_RETURN.value),
+        return_no=await next_number(db, WarehouseDocType.PURCHASE_RETURN.value,
+                                    **(scope_args or {})),
         return_date=data.return_date,
         # No purchase transaction behind it — that is what makes it manual. The typed
         # number, if any, is kept as a reference and is never resolved to a document.
@@ -18641,6 +18898,8 @@ async def _create_manual_return(db: AsyncSession, data: s.ReturnWrite,
         created_by_id=getattr(user, "id", None), created_by_name=_name(user),
         **_manual_vendor_fields(data),
     )
+    if scope_values:
+        org_scope.stamp_with_project(doc, scope_values)
     db.add(doc)
     await db.flush()
 
@@ -18688,10 +18947,17 @@ async def create_return(db: AsyncSession, data: s.ReturnWrite, user) -> m.Purcha
     if (data.vendor_id or source_vendor_id) and vendor is None:
         raise NotFoundError(f"Vendor {data.vendor_id or source_vendor_id} not found")
     wh = await db.get(Warehouse, data.warehouse_id) if data.warehouse_id else None
+    # Whose paper it is on (2026-11-12): COPIED from the GRN, else the PO, whichever
+    # carries an organisation — the goods go back under the paper they came in on.
+    # Off an older GRN / PO with none, the number card selects it, as on a manual one.
+    source = next((paper for paper in (receipt, po)
+                   if paper is not None and org_scope.uses_org(paper)), None)
+    scope_values, scope_args = await org_scope.carry_or_select(db, data, source)
 
     doc = m.PurchaseReturn(
         items=[],   # see create_issue: keeps _apply_*_lines()'s clear() off a lazy load
-        return_no=await next_number(db, WarehouseDocType.PURCHASE_RETURN.value),
+        return_no=await next_number(db, WarehouseDocType.PURCHASE_RETURN.value,
+                                    **(scope_args or {})),
         return_date=data.return_date,
         po_id=data.po_id or (receipt.po_id if receipt else None) or (po.id if po else None),
         po_no=(po.po_no if po else None) or (receipt.po_no if receipt else None),
@@ -18705,6 +18971,8 @@ async def create_return(db: AsyncSession, data: s.ReturnWrite, user) -> m.Purcha
         status=ReturnStatus.DRAFT.value,
         created_by_id=getattr(user, "id", None), created_by_name=_name(user),
     )
+    if scope_values:
+        org_scope.stamp_with_project(doc, scope_values)
     db.add(doc)
     await db.flush()
 
@@ -22891,9 +23159,14 @@ async def purchase_return_source_detail(db: AsyncSession, *,
     warehouse_id = None
     warehouse_name = None
     source_no = ""
+    # The document the return's organisation is COPIED from, when it carries one
+    # (2026-11-12) — the same choice `create_return` makes, so the card shows locked
+    # exactly what the save will stamp.
+    paper = None
     # ---- GRN ----
     if source_type == "GRN":
         receipt = await _load(db, m.Receipt, source_id, "Purchase Invoice/GRN", m.Receipt.items)
+        paper = receipt
         source_no = receipt.grn_no
         purchase.grn_id = receipt.id
         purchase.grn_no = receipt.grn_no
@@ -22982,6 +23255,7 @@ async def purchase_return_source_detail(db: AsyncSession, *,
     elif source_type == "PO":
         from app.modules.procurement.models import PurchaseOrder, POItem
         po = await _get(db, PurchaseOrder, source_id, "Purchase Order")
+        paper = po
         source_no = po.po_no
         purchase.po_id = po.id
         purchase.po_no = po.po_no
@@ -23179,6 +23453,11 @@ async def purchase_return_source_detail(db: AsyncSession, *,
         "total_original_qty": total_orig,
         "total_previously_returned": total_prev,
         "total_returnable_qty": total_ret,
+        # Whose paper the return goes back on — null fields off an older source, which
+        # the number card then asks for (2026-11-12).
+        **({field: getattr(paper, field, None)
+            for field in (*org_scope.SCOPE_FIELDS, "project_id", "project_name")}
+           if paper is not None and org_scope.uses_org(paper) else {}),
     }
 
 
@@ -26971,6 +27250,67 @@ async def po_options(db: AsyncSession, search: str | None = None, warehouse_id: 
     from sqlalchemy import or_
     stmt = stmt.where(PurchaseOrder.vendor_status == POVendorStatus.ACCEPTED.value)
 
+    # And only orders the vendor has actually DISPATCHED (2026-11-13). An accepted
+    # order is a promise; a SUBMITTED despatch note is goods on a vehicle. Nothing can
+    # arrive at the gate that nobody has sent, so an accepted-but-undispatched order
+    # has no business in this dropdown.
+    #
+    # Read off the notes, never off a column: `DespatchStatus` is derived (see
+    # `_despatch_status_by_po`), because a delivery goes out in parts and a running
+    # total on the order would be a second place for the same fact to disagree with
+    # itself. DRAFT and CANCELLED notes are not despatches.
+    from app.modules.procurement.models import DespatchNote, DespatchNoteItem
+    from app.shared.enums import DespatchNoteStatus
+
+    # 1. Any SUBMITTED despatch note that has not yet been inwarded on an active receipt
+    unreceived_notes = (
+        select(DespatchNote.po_id)
+        .outerjoin(
+            m.Receipt,
+            (m.Receipt.despatch_note_id == DespatchNote.id)
+            & (m.Receipt.status != ReceiptStatus.CANCELLED.value)
+        )
+        .where(
+            DespatchNote.status == DespatchNoteStatus.SUBMITTED.value,
+            m.Receipt.id.is_(None)
+        )
+    )
+
+    # 2. Or orders where total quantity dispatched on submitted notes exceeds total quantity received
+    despatch_qty = (
+        select(
+            DespatchNote.po_id.label("po_id"),
+            func.coalesce(func.sum(DespatchNoteItem.despatched_qty), 0).label("qty")
+        )
+        .join(DespatchNoteItem, DespatchNoteItem.despatch_note_id == DespatchNote.id)
+        .where(DespatchNote.status == DespatchNoteStatus.SUBMITTED.value)
+        .group_by(DespatchNote.po_id)
+        .subquery()
+    )
+    received_po_qty = (
+        select(
+            m.Receipt.po_id.label("po_id"),
+            func.coalesce(func.sum(m.ReceiptItem.received_qty), 0).label("qty")
+        )
+        .join(m.ReceiptItem, m.ReceiptItem.receipt_id == m.Receipt.id)
+        .where(
+            m.Receipt.status != ReceiptStatus.CANCELLED.value,
+            m.Receipt.po_id.is_not(None)
+        )
+        .group_by(m.Receipt.po_id)
+        .subquery()
+    )
+    pending_despatched_orders = (
+        select(despatch_qty.c.po_id)
+        .outerjoin(received_po_qty, received_po_qty.c.po_id == despatch_qty.c.po_id)
+        .where(despatch_qty.c.qty > func.coalesce(received_po_qty.c.qty, 0))
+    )
+
+    stmt = stmt.where(or_(
+        PurchaseOrder.id.in_(unreceived_notes),
+        PurchaseOrder.id.in_(pending_despatched_orders)
+    ))
+
     # And only orders with something still to come.
     #
     # The status filter above is not enough on its own, for two reasons. An order
@@ -28334,6 +28674,7 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
         "issue_no": issue.issue_no,
         "issue_nos": [issue.issue_no],
         "warehouse_id": issue.warehouse_id,
+        "warehouse_name": issue.warehouse_name,
         "project_id": issue.project_id,
         "destination_office_id": getattr(issue, "destination_office_id", None),
         "destination_office_name": getattr(issue, "destination_office_name", None),
@@ -29540,10 +29881,15 @@ async def _apply_outbound_inspection_lines(db: AsyncSession, inspection: m.Outbo
                 f"{item.code}: {line.accepted_qty} accepted out of {inspected} "
                 f"inspected. Accepted cannot exceed inspected."
             )
-        accepted = min(_d(line.accepted_qty), inspected)
-        rejected = inspected - accepted
-        result = (line.result.value if line.result != InspectionResult.PENDING
-                  else _derive_result(inspected, accepted))
+        # SCM_0124: judged only once accepted + rejected account for what was inspected
+        # (`qc_split`), and the result then follows the split — the same rule as
+        # inward QC. Until then the line stays Pending and no unit, package or reason
+        # check applies: nothing has been decided for them to check.
+        accepted, rejected, judged = qc_split(
+            inspected, line.accepted_qty, line.rejected_qty,
+            rejected_sent="rejected_qty" in line.model_fields_set)
+        result = (_derive_result(inspected, accepted) if judged
+                  else InspectionResult.PENDING.value)
                   
         serials_data = line.serial_numbers or []
         if isinstance(serials_data, dict):
@@ -29580,7 +29926,9 @@ async def _apply_outbound_inspection_lines(db: AsyncSession, inspection: m.Outbo
         sent = units_by_line.get(line.issue_item_id or 0, set())
         boxes = boxes_by_line.get(line.issue_item_id or 0)
         pack_rejections: dict[str, float] = {}
-        if boxes:
+        if not judged:
+            serials = []
+        elif boxes:
             # Inspected by the PACKAGE (2026-10-26). Every unit rejected is said to
             # have come out of a named package: a package rejected whole is left out
             # of the accepted codes, and units rejected out of a package that is
@@ -29630,10 +29978,32 @@ async def _apply_outbound_inspection_lines(db: AsyncSession, inspection: m.Outbo
                 f"{label}: choose exactly {int(accepted)} accepted serial numbers")
 
         reason = line.rejection_reason or line.defect_type
-        if rejected > ZERO and not (reason or "").strip():
+        if judged and rejected > ZERO and not (reason or "").strip():
             raise ValidationError(
                 f"{label}: {rejected} rejected — enter a Rejection reason on this line "
                 "before saving")
+
+        # The REJECTED units, named the same way as the ACCEPTED half — the register
+        # of what this sheet turned away (SCM_REJ) reads them off the line, never the
+        # issue, so the rejection travels with the line that found it. Boxes name
+        # their box codes (a partial-rejected box is named with the qty rejected out
+        # of it); serial / IMEI / asset / consumable codes name themselves.
+        rejected_unit_codes: list[dict] = []
+        if judged and rejected > ZERO:
+            if boxes:
+                # A box rejected whole is one not in the kept list; a partial-rejected
+                # box contributes the qty rejected out of it.
+                for code, carries in boxes.items():
+                    if code not in serials:
+                        rejected_unit_codes.append(
+                            {"code": code, "kind": "box", "qty": float(carries)})
+                    elif (pack_rejections.get(code) or 0) > 0:
+                        rejected_unit_codes.append(
+                            {"code": code, "kind": "box",
+                             "qty": float(pack_rejections[code])})
+            elif sent:
+                for code in sorted(sent - set(serials)):
+                    rejected_unit_codes.append({"code": code, "kind": "unit"})
 
         inspection.items.append(m.OutboundInspectionItem(
             issue_item_id=line.issue_item_id,
@@ -29646,6 +30016,7 @@ async def _apply_outbound_inspection_lines(db: AsyncSession, inspection: m.Outbo
             result=result, defect_type=reason, remarks=line.remarks,
             serial_numbers={"accepted": serials} if serials else None,
             pack_rejections=pack_rejections or None,
+            rejected_codes=rejected_unit_codes or None,
         ))
     _outbound_inspection_totals(inspection)
 
@@ -29718,14 +30089,15 @@ async def update_outbound_inspection(db: AsyncSession, inspection_id: int, data:
            {InspectionStatus.DRAFT.value, InspectionStatus.IN_PROGRESS.value},
            "edit", "outbound inspection")
 
-    before = {"status": inspection.status, "failed_items": inspection.failed_items}
+    before = {"status": inspection.status, "failed_items": inspection.failed_items,
+              "inspector_name": inspection.inspector_name}
     inspection.inspection_date = data.inspection_date
-    # The inspector recorded at creation stands (SCM_0160, as SCM_0097 inward): an
-    # edit never re-points it. Only a sheet that somehow carries nobody is given the
-    # person editing it, so a signed check is never anonymous.
-    if inspection.inspector_id is None:
-        inspection.inspector_id = getattr(user, "id", None)
-        inspection.inspector_name = _name(user)
+    # SCM_0160, as SCM_0097 inward, as amended: the inspector is the person doing the
+    # check. The draft this sheet was raised from carries the ISSUE's poster, not an
+    # inspector, so whoever saves the sheet is recorded here, and
+    # `complete_outbound_inspection` records the person who submits it.
+    inspection.inspector_id = getattr(user, "id", None)
+    inspection.inspector_name = _name(user)
     inspection.remarks = data.remarks
     inspection.status = InspectionStatus.IN_PROGRESS.value
 
@@ -29769,6 +30141,26 @@ async def _apply_outbound_inspection_result(db: AsyncSession,
     issue.qc_status = _outbound_qc_verdict(
         passed=inspection.passed_items, failed=inspection.failed_items,
         lines=len(inspection.items), unchecked=unchecked)
+
+    # Every line this sheet turned away enters the rejection register (SCM_REJ), one
+    # row per line, PENDING a decision on Stock Segregation > Rejected. The direction
+    # is STOCK_TRANSFER when the inspection is the QC of a stock transfer's Material
+    # Issue, OUTWARD otherwise — so the register reads honestly about which door the
+    # goods went back through. `_write_rejection_outcomes` is idempotent, so a re-run
+    # after an edit replaces this inspection's rows instead of duplicating them.
+    direction = (RejectionDirection.STOCK_TRANSFER.value
+                 if getattr(inspection, "is_stock_transfer", False)
+                 else RejectionDirection.OUTWARD.value)
+    rejected_codes_by_item: dict[int, list[dict]] = {}
+    for line in inspection.items:
+        if _d(line.rejected_qty) <= ZERO:
+            continue
+        codes = list(line.rejected_codes or [])
+        rejected_codes_by_item[line.id] = codes
+    await _write_rejection_outcomes(
+        db, inspection, direction, rejected_codes_by_item,
+        issue_id=inspection.issue_id)
+
     return issue.qc_status
 
 
@@ -29854,6 +30246,13 @@ async def complete_outbound_inspection(db: AsyncSession, inspection_id: int, use
             )
 
     before = inspection.status
+    # The inspector of record is the person SIGNING the check, exactly as inward
+    # (`complete_inspection`): a sheet raised off a material issue carries the issue's
+    # poster, and the name on the printed report has to be the one that inspected it.
+    # Stamped before the approval branch, so a sheet sent for a signature keeps its
+    # inspector when an approver later applies the verdict.
+    inspection.inspector_id = getattr(user, "id", None)
+    inspection.inspector_name = _name(user)
     if await _outbound_inspection_approval_pending(db, inspection, user):
         # Now with its approvers. The issue keeps its PENDING qc_status until they sign.
         await write_audit(db, entity="whs_inspections", entity_id=inspection.id,

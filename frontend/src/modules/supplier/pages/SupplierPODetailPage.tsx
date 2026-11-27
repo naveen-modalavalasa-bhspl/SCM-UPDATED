@@ -3,14 +3,14 @@ import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle, ArrowLeft, Check, CheckCircle2, Copy, CreditCard, Layers, MapPin,
-  Package, Plus, Route, Send, Trash2, Truck, X, Building, Clock,
+  Package, Plus, Route, Send, Trash2, Truck, X, Building,
 } from "lucide-react";
 import { Accordion, AccordionItem } from "@heroui/react";
 import {
   Button, Card, DocumentScopeStrip, ErrorBanner, Field, Input, PageHeader, StatusPill, useToast,
 } from "@/shared/components";
 import { Stepper, type Step } from "@/shared/components/Stepper";
-import { fmtDate, fmtDateTime, todayIst } from "@/shared/datetime";
+import { fmtDate, todayIst } from "@/shared/datetime";
 import { supplierApi } from "@/modules/procurement/api";
 import type {
   DespatchLineWrite, DespatchNote, DespatchNoteWrite, VendorPOLine,
@@ -24,6 +24,7 @@ import {
   PackQty, greedyWithPartFor, laddersForUsage, packable, toPayload, type PackEntry, type PackHierarchy,
 } from "@/shared/packing";
 import { DespatchPacking } from "../components/DespatchPacking";
+import { DespatchNoteCard } from "../components/DespatchNoteCard";
 import {
   CombinationPicker, CombinationTag, SUPPLIER_COMBINATIONS, comboFrom, comboPayload, useCombinationOptions,
   type CombinationValue,
@@ -1101,46 +1102,13 @@ export function SupplierPODetailPage() {
         ) : (
           <ul className="divide-y divide-line">
             {po.despatch_notes.map((note) => (
-              <li key={note.id} className="flex flex-wrap items-center gap-3 p-4">
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                    <span className="font-mono text-sm font-semibold text-ink">{note.dn_no}</span>
-                    <StatusPill status={note.status} />
-                    <NoteStamp note={note} />
-                  </div>
-                  <p className="text-xs text-muted">
-                    {[note.invoice_no && `Invoice ${note.invoice_no}`,
-                      note.eway_bill_no && `E-way ${note.eway_bill_no}`,
-                      note.vehicle_no,
-                      `${note.items.length} line(s)`]
-                      .filter(Boolean).join(" · ")}
-                  </p>
-                  {note.items.filter((item) => item.pack_change_status
-                    && item.pack_change_status !== "NONE").map((item) => (
-                    <p key={item.id} className={`mt-1 inline-flex flex-wrap items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium ${
-                      item.pack_change_status === "PENDING" ? "bg-warn-bg text-warn"
-                        : item.pack_change_status === "ACCEPTED" ? "bg-ok-bg text-ok"
-                          : "bg-bad-bg text-bad"}`}>
-                      {item.item_code}: {item.ordered_pack_hierarchy_name} → {item.pack_hierarchy_name} —{" "}
-                      {item.pack_change_status === "PENDING" ? "waiting for the buyer"
-                        : item.pack_change_status === "ACCEPTED" ? "accepted by the buyer"
-                          : `declined${item.pack_change_note ? `: ${item.pack_change_note}` : ""}`}
-                    </p>
-                  ))}
-                </div>
-                {note.status === "DRAFT" && (
-                  <>
-                    <Button variant="subtle" onClick={() => startEdit(note)}>Edit</Button>
-                    <Button
-                      variant="danger"
-                      disabled={cancel.isPending}
-                      onClick={() => cancel.mutate(note.id)}
-                    >
-                      Cancel
-                    </Button>
-                  </>
-                )}
-              </li>
+              <DespatchNoteCard
+                key={note.id}
+                note={note}
+                onEdit={startEdit}
+                onCancel={(noteId) => cancel.mutate(noteId)}
+                cancelling={cancel.isPending}
+              />
             ))}
           </ul>
         )}
@@ -1149,26 +1117,3 @@ export function SupplierPODetailPage() {
   );
 }
 
-
-/** SCM_0162: WHEN a despatch note reached the status beside it.
- *
- *  A status with no time on it answers half the question a supplier is asked on the
- *  phone — "when did you send it?". Submitted reads `submitted_at`, the moment the
- *  note went to the buyer; a draft reads when it was last saved; a cancelled note
- *  reads its last change, which is the cancellation (nothing after it can edit it).
- *  A note submitted before `submitted_at` existed falls back to its creation time
- *  rather than printing nothing. */
-function NoteStamp({ note }: { note: DespatchNote }) {
-  const [verb, at] = note.status === "SUBMITTED"
-    ? ["Submitted on", note.submitted_at ?? note.created_at]
-    : note.status === "CANCELLED"
-      ? ["Cancelled on", note.updated_at ?? note.created_at]
-      : ["Last saved", note.updated_at ?? note.created_at];
-  if (!at) return null;
-  return (
-    <span className="inline-flex items-center gap-1 text-xs text-muted" title={`${verb} ${fmtDateTime(at)}`}>
-      <Clock aria-hidden className="h-3.5 w-3.5" />
-      {verb} <time dateTime={at} className="font-medium text-body tabular">{fmtDateTime(at)}</time>
-    </span>
-  );
-}

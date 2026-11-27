@@ -54,11 +54,69 @@ export function deriveResult(inspected: number, accepted: number): QcResult {
   return "PARTIAL";
 }
 
-/** A line's result: what it says, unless it still says PENDING — then its split. */
+/**
+ * A line's result from its three numbers (SCM_0124) — the server's `qc_split`.
+ *
+ * A line starts UN-INSPECTED (0 / 0 / 0) and stays Pending until accepted + rejected
+ * account for everything inspected. Only then does the split decide it. Seeded "fully
+ * accepted", the first Save turned a sheet nobody had looked at into a Pass.
+ */
+export function qcLineResult(inspected: number, accepted: number, rejected: number): QcResult {
+  if (inspected <= 0) return "PENDING";
+  if (accepted + rejected < inspected - 1e-9) return "PENDING";
+  return deriveResult(inspected, accepted);
+}
+
+/** A line's result: what it says, unless it still says PENDING — then its numbers. */
 export function lineResult(line: QcLineLike): QcResult {
   const stored = line.result as QcResult | null | undefined;
   if (stored && stored !== "PENDING") return stored;
-  return deriveResult(n(line.inspected_qty), n(line.accepted_qty));
+  return qcLineResult(n(line.inspected_qty), n(line.accepted_qty), n(line.rejected_qty));
+}
+
+export interface QcSplit { inspected: number; accepted: number; rejected: number }
+
+/**
+ * One edit to a QC line's numbers (SCM_0124), so typing never decides more than was typed.
+ *
+ * - Accepted typed → the rest of what was inspected is rejected: the split is complete.
+ * - Rejected typed → the rest is accepted.
+ * - Only Inspected typed → a line already judged keeps its accepted (capped) and the
+ *   rest rejected; a line still being judged keeps its numbers and stays Pending.
+ *   Counting 10 must not quietly reject 10.
+ *
+ * `max` caps Inspected at what arrived / was issued.
+ */
+export function applyQcEdit(
+  prev: QcSplit,
+  patch: { inspected?: number; accepted?: number; rejected?: number },
+  max?: number,
+): QcSplit {
+  const cap = (value: number, top: number) => Math.min(Math.max(value, 0), top);
+  const inspected = patch.inspected !== undefined
+    ? cap(patch.inspected, max ?? Number.POSITIVE_INFINITY)
+    : prev.inspected;
+  if (patch.accepted !== undefined) {
+    const accepted = cap(patch.accepted, inspected);
+    return { inspected, accepted, rejected: inspected - accepted };
+  }
+  if (patch.rejected !== undefined) {
+    const rejected = cap(patch.rejected, inspected);
+    return { inspected, accepted: inspected - rejected, rejected };
+  }
+  const wasJudged = prev.inspected > 0
+    && Math.abs(prev.accepted + prev.rejected - prev.inspected) < 1e-9;
+  const accepted = cap(prev.accepted, inspected);
+  return wasJudged
+    ? { inspected, accepted, rejected: inspected - accepted }
+    : { inspected, accepted, rejected: cap(prev.rejected, inspected - accepted) };
+}
+
+/** "Pass all un-inspected lines": what a line nobody has touched becomes — the whole
+ *  quantity inspected and accepted. A line already being worked is left alone. */
+export function passIfUntouched(prev: QcSplit, full: number): QcSplit | null {
+  const untouched = prev.inspected <= 0 && prev.accepted <= 0 && prev.rejected <= 0;
+  return untouched && full > 0 ? { inspected: full, accepted: full, rejected: 0 } : null;
 }
 
 export function summarizeQc(lines: readonly QcLineLike[]): QcSummary {

@@ -3,9 +3,10 @@ import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Boxes, Handshake, Package, Search, Truck, Users } from "lucide-react";
 import {
-  Button, Card, ErrorBanner, Field, Input, PageHeader, Select, useAction,
+  Button, Card, DocumentNumberCard, ErrorBanner, Field, Input, PageHeader, Select, useAction,
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
+import { useDocNumberScope } from "@/shared/useDocNumberScope";
 import { consignmentApi, indentLookupApi, transportApi } from "../api";
 import { headerFromConsignment, linesFromConsignment } from "../components/consignmentToLines";
 import {
@@ -210,6 +211,27 @@ export function TransportFormPage() {
   // `indent.view` — so the field stays a text box rather than becoming a dead dropdown.
   const canPickIndent = Boolean(indentOptions?.length);
 
+  // Whose paper the leg is on (2026-11-12): COPIED from the indent it moves when that
+  // indent carries an organisation — from a consignment, or picked below — else
+  // selected on the number card. Picking an indent by hand now also sends its id; the
+  // number alone gave the server nothing to copy from.
+  const pickedIndentId = !linked.indent_id
+    ? (indentOptions ?? []).find((row) => row.indent_no === header.indent_no)?.id ?? null
+    : null;
+  const scopeIndentId = linked.indent_id ?? pickedIndentId;
+  const { data: scopeIndent, isFetching: scopeIndentLoading } = useQuery({
+    queryKey: ["lgs-indent-scope", scopeIndentId],
+    queryFn: () => indentLookupApi.scope(scopeIndentId!),
+    enabled: Boolean(scopeIndentId) && !editing,
+  });
+  const numberScope = useDocNumberScope({
+    editing,
+    saved: existing,
+    carried: scopeIndentId && scopeIndent?.organization_id ? scopeIndent : null,
+    carriedLabel: scopeIndent?.indent_no,
+    sourceLoading: Boolean(scopeIndentId) && scopeIndentLoading,
+  });
+
   /** What is WRONG, as opposed to merely unfinished.
    *
    *  A malformed phone number or a delivery promised into the past is wrong whatever the
@@ -272,7 +294,9 @@ export function TransportFormPage() {
   }, [header, provider, lines, rule, isReturn]);
 
   const payload = (): TRInput => ({
+    ...numberScope.payload(),
     ...linked,
+    ...(pickedIndentId ? { indent_id: pickedIndentId } : {}),
     mode,
     // A return leg runs the other way (doc E7). `linked` carries the source of a leg
     // raised FROM a consignment, so this only ever overrides a leg raised by hand.
@@ -364,6 +388,18 @@ export function TransportFormPage() {
 
       <ErrorBanner error={loadError ?? consignmentError ?? save.error
         ?? saveAndSubmit.error} />
+
+      {!numberScope.older && (
+        <div className="mb-5">
+          <DocumentNumberCard
+            docType="transport_request" value={numberScope.value} exclusive
+            ready={numberScope.ready} locks={numberScope.locks} source={numberScope.source}
+            showInvalid={numberScope.touched}
+            savedNumber={editing ? existing?.tr_no ?? null : null}
+            onChange={numberScope.onChange}
+          />
+        </div>
+      )}
 
       {/* Which way the leg runs, asked FIRST and as a plain either/or.
           It was a link at the foot of section 3 reading "make this an outward leg",
