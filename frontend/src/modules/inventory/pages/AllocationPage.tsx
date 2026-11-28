@@ -126,23 +126,56 @@ export function AllocationPage() {
   useEffect(() => {
     if (!data) return;
     const seed: Record<number, Split[]> = {};
+    // One budget per (item, point) and per (item, point, combination), shared by every
+    // line of the indent (2026-11-28). The same item may be asked for twice — "G" and
+    // "Any brand" — and each line seeded on its own offered both of them the same
+    // units: 3 of G left, and the screen proposed 3 + 3, which the save refuses for the
+    // WHOLE indent. Named lines go first, because they can use only their own brand;
+    // an Any line then opens on what they left.
+    const pointLeft = new Map<string, number>();
+    const comboLeft = new Map<string, number>();
+    const pk = (line: AllocationProposalLine, wh: string) => `${line.item_id}|${wh}`;
+    const ck = (line: AllocationProposalLine, wh: string, combo?: CombinationValue) =>
+      `${line.item_id}|${wh}|${combinationKey(combo)}`;
     for (const line of data.lines) {
+      for (const w of line.warehouses) {
+        const wh = String(w.warehouse_id);
+        if (!pointLeft.has(pk(line, wh))) pointLeft.set(pk(line, wh), w.available_qty);
+        for (const c of w.combinations ?? []) {
+          if (!comboLeft.has(ck(line, wh, c))) comboLeft.set(ck(line, wh, c), c.available_qty);
+        }
+      }
+    }
+    const freeAt = (line: AllocationProposalLine, wh: string, combo?: CombinationValue) => {
+      const point = pointLeft.get(pk(line, wh)) ?? 0;
+      return picked(combo) ? Math.min(point, comboLeft.get(ck(line, wh, combo)) ?? 0) : point;
+    };
+    const ordered = [...data.lines].sort((a, b) => Number(named(b)) - Number(named(a)));
+    for (const line of ordered) {
       // An STR asked for one point (2026-11-04): open on it whenever it holds the item
       // and this login may draw from it. The storekeeper can still change it.
       const asked = data.str_source_warehouse_id
         ? line.warehouses.find((w) => w.warehouse_id === data.str_source_warehouse_id && w.available_qty > 0)
         : undefined;
+      const room = (w: { warehouse_id: number }) =>
+        freeAt(line, String(w.warehouse_id), named(line) ? askedFor(line) : undefined);
       const best = asked ?? [...line.warehouses]
-        .filter((w) => !isChainPoint(w) && w.available_qty > 0)
-        .sort((a, b) => b.available_qty - a.available_qty)[0];
+        .filter((w) => !isChainPoint(w) && room(w) > 0)
+        .sort((a, b) => room(b) - room(a))[0];
       const wh = best ? String(best.warehouse_id) : "";
       // A named line opens on what the indent asked for; an Any line on the
-      // combination the point holds most of.
-      const top = named(line) ? askedFor(line) : combosAt(line, wh)[0];
-      const suggested = Math.min(line.requested_qty,
-                                 !named(line) && top ? (top as { stock_qty?: number }).stock_qty ?? 0
-                                   : best?.available_qty ?? 0);
+      // combination the point still has most of once the lines above are served.
+      const top = named(line) ? askedFor(line)
+        : [...combosAt(line, wh)].sort((a, b) => freeAt(line, wh, b) - freeAt(line, wh, a))[0];
+      const suggested = Math.max(0, Math.min(line.requested_qty,
+        wh ? freeAt(line, wh, top) : 0));
       seed[line.indent_item_id] = [{ qty: String(suggested), wh, combo: top }];
+      if (wh && suggested > 0) {
+        pointLeft.set(pk(line, wh), (pointLeft.get(pk(line, wh)) ?? 0) - suggested);
+        if (picked(top)) {
+          comboLeft.set(ck(line, wh, top), (comboLeft.get(ck(line, wh, top)) ?? 0) - suggested);
+        }
+      }
     }
     setDecisions(seed);
   }, [data]);

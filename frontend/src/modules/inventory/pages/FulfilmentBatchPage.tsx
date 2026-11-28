@@ -103,7 +103,7 @@ export function FulfilmentBatchPage() {
       )}
 
       <p className="mb-3 text-sm text-muted">
-        One row per item, totalled across the whole cycle. Pick the shelf it comes from,
+        One row per item and brand ("Any brand" is its own row), totalled across the whole cycle. Pick the shelf it comes from,
         set how much to give, and adjust any indent's share by hand. The allocation
         itself is still written per indent, so every reservation and ledger row stays
         exactly where it always was.

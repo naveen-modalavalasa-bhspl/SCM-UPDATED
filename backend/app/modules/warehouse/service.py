@@ -7672,6 +7672,40 @@ async def _already_issued(db: AsyncSession, indent_id: int,
     return {item_id: _d(qty) for item_id, qty in rows}
 
 
+async def _already_issued_by_line(
+    db: AsyncSession, indent_id: int, warehouse_id: int,
+) -> tuple[dict[int, Decimal], dict[int, Decimal]]:
+    """What live issues from THIS point already cover, per INDENT LINE.
+
+    `_already_issued` answers per item, which is right for the caps (an indent's cap
+    is per item) and wrong for drafting: two lines of one item, different brands, are
+    two asks. Returns ({indent_item_id: qty}, {item_id: qty on lines naming no
+    indent line}) — the same scope and attribution as `_already_issued`.
+    """
+    from app.modules.indents.models import IndentItem
+
+    owner = func.coalesce(IndentItem.indent_id, m.MaterialIssue.indent_id)
+    rows = (await db.execute(
+        select(m.MaterialIssueLine.item_id, m.MaterialIssueLine.indent_item_id,
+               func.coalesce(func.sum(m.MaterialIssueLine.issued_qty), 0))
+        .join(m.MaterialIssue, m.MaterialIssue.id == m.MaterialIssueLine.issue_id)
+        .outerjoin(IndentItem, IndentItem.id == m.MaterialIssueLine.indent_item_id)
+        .where(owner == indent_id,
+               m.MaterialIssue.direction == IssueDirection.OUT.value,
+               m.MaterialIssue.status.notin_(DEAD_ISSUE_STATUSES),
+               m.MaterialIssue.warehouse_id == warehouse_id)
+        .group_by(m.MaterialIssueLine.item_id, m.MaterialIssueLine.indent_item_id)
+    )).all()
+    by_line: dict[int, Decimal] = defaultdict(Decimal)
+    unattributed: dict[int, Decimal] = defaultdict(Decimal)
+    for item_id, line_id, qty in rows:
+        if line_id:
+            by_line[int(line_id)] += _d(qty)
+        else:
+            unattributed[int(item_id)] += _d(qty)
+    return dict(by_line), dict(unattributed)
+
+
 async def _same_tier_warehouse_ids(db: AsyncSession, warehouse_id: int) -> list[int]:
     """Every point on the same rung of the chain as this one, itself included.
 
@@ -8140,28 +8174,33 @@ async def create_fulfilment_drafts_for_allocation(db: AsyncSession, alloc, user)
     Allocation lines are combined by item within a warehouse. A split allocation
     therefore yields one draft per site, each carrying its own lines.
     """
-    by_warehouse: dict[int, dict[int, dict]] = {}
+    # Combined per (item, INDENT LINE) within a warehouse, never per item alone
+    # (2026-11-28). One indent may ask for the same item on two lines — "any brand"
+    # beside "OXYDEEP", one brand beside another — and each line carries its own
+    # combination and its own reservation. Folding them into one item line dropped the
+    # `indent_item_id`, so the draft named no combination and could not see the
+    # indent's own hold: `_assert_issue_sources` read "can give 0" over stock this very
+    # allocation had just reserved, and the whole allocation was refused
+    # (BHS/NSRCPH-01/2026-27/MI-IND0001, cycle C2).
+    by_warehouse: dict[int, dict[tuple, dict]] = {}
     for line in alloc.items:
         qty = _d(line.quantity)
         if qty <= ZERO or not line.warehouse_id:
             continue
-        by_item = by_warehouse.setdefault(line.warehouse_id, {})
-        seen = by_item.get(line.item_id)
+        by_line = by_warehouse.setdefault(line.warehouse_id, {})
+        key = (int(line.item_id), int(line.indent_item_id or 0))
+        seen = by_line.get(key)
         if seen is None:
-            by_item[line.item_id] = {
+            by_line[key] = {
+                "item_id": int(line.item_id),
                 "qty": qty,
                 "requested": _d(line.requested_qty),
-                # Only carried when the item maps to exactly one indent line. A line
-                # split across warehouses would otherwise point every draft at the
-                # same indent line and double-count it on the fulfilment view.
                 "indent_item_id": line.indent_item_id,
                 "project_id": line.project_id,
             }
         else:
             seen["qty"] += qty
             seen["requested"] += _d(line.requested_qty)
-            if seen["indent_item_id"] != line.indent_item_id:
-                seen["indent_item_id"] = None
 
     # The person the goods are for is the one who raised the indent — the same answer
     # _issue_destination already falls back to. Filling it here means the draft opens
@@ -8198,13 +8237,21 @@ async def create_fulfilment_drafts_for_allocation(db: AsyncSession, alloc, user)
         # This is NOT specific to a self-approving ladder. A reopened allocation signed
         # by a real approver reaches the identical handoff through `act()`, and hit the
         # identical refusal.
-        already = await _already_issued(db, alloc.indent_id, warehouse_id)
-        outstanding: dict[int, dict] = {}
-        for item_id, v in lines.items():
-            left = _d(v["qty"]) - already.get(item_id, ZERO)
+        by_line_issued, unattributed = await _already_issued_by_line(
+            db, alloc.indent_id, warehouse_id)
+        outstanding: dict[tuple, dict] = {}
+        for key, v in lines.items():
+            left = _d(v["qty"]) - by_line_issued.get(int(v["indent_item_id"] or 0), ZERO)
+            # An older issue line that named no indent line (drafted before the lines
+            # were kept apart) is netted off this item's lines in order.
+            spare = unattributed.get(v["item_id"], ZERO)
+            if left > ZERO and spare > ZERO:
+                used = min(left, spare)
+                left -= used
+                unattributed[v["item_id"]] = spare - used
             if left <= ZERO:
                 continue
-            outstanding[item_id] = {**v, "qty": left}
+            outstanding[key] = {**v, "qty": left}
         if not outstanding:
             continue
         lines = outstanding
@@ -8214,9 +8261,9 @@ async def create_fulfilment_drafts_for_allocation(db: AsyncSession, alloc, user)
             (v["project_id"] for v in lines.values() if v["project_id"]), None
         )
         items: list[s.IssueItemWrite] = []
-        for item_id, v in lines.items():
+        for v in lines.values():
             items.extend(await _allocation_lines_by_batch(
-                db, alloc.indent_id, warehouse_id, item_id, v,
+                db, alloc.indent_id, warehouse_id, v["item_id"], v,
             ))
         if not items:
             continue

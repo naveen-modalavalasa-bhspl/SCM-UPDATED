@@ -187,6 +187,17 @@ const defaultPlan = (item: BatchDemandItem): ItemPlan => {
   };
 };
 
+/** One row per item AND combination: an item asked for as "Any brand" and as a
+ *  named brand is two rows, each with its own shelf figures. Falls back to the item
+ *  id for an API build that does not send `row_key`. */
+export const rowKey = (item: BatchDemandItem) => item.row_key ?? String(item.item_id);
+
+export const combinationLabel = (item: BatchDemandItem) => {
+  if (item.combination_any ?? !item.brand_id) return "Any brand";
+  return [item.brand_name ?? `Brand ${item.brand_id}`, item.variant_name, item.model_name]
+    .filter(Boolean).join(" / ");
+};
+
 const planTotal = (plan: ItemPlan) =>
   plan.splits.reduce((sum, s) => sum + (Number(s.qty) || 0), 0);
 
@@ -427,7 +438,10 @@ function ItemRow({ item, plan, onChange }: {
               : <ChevronRight className="h-4 w-4 shrink-0 text-muted" />}
         <div className="min-w-0 flex-1">
           <div className="truncate font-semibold text-ink">{item.item_name ?? "—"}</div>
-          <div className="truncate font-mono text-xs text-muted">{item.item_code ?? "—"}</div>
+          <div className="truncate font-mono text-xs text-muted">
+            {item.item_code ?? "—"}
+            <span className="ml-2 font-sans text-ink">· {combinationLabel(item)}</span>
+          </div>
         </div>
         <div className="hidden shrink-0 text-right sm:block">
           <div className="text-[11px] uppercase tracking-wide text-muted">Wanted</div>
@@ -679,7 +693,7 @@ function ItemRow({ item, plan, onChange }: {
 
 export function BatchDemandView({ cycle }: { cycle?: string }) {
   const qc = useQueryClient();
-  const [plans, setPlans] = useState<Record<number, ItemPlan>>({});
+  const [plans, setPlans] = useState<Record<string, ItemPlan>>({});
   const [result, setResult] = useState<
     { created: number; failed: { indent_no?: string | null; reason: string }[] } | null
   >(null);
@@ -690,7 +704,7 @@ export function BatchDemandView({ cycle }: { cycle?: string }) {
   });
   const items = useMemo(() => (batch.data?.items ?? []).map(withHeld), [batch.data]);
 
-  const planFor = (item: BatchDemandItem) => plans[item.item_id] ?? defaultPlan(item);
+  const planFor = (item: BatchDemandItem) => plans[rowKey(item)] ?? defaultPlan(item);
 
   /** Every item's decisions, regrouped into one allocation per INDENT — which is the
    *  document the backend actually writes. */
@@ -804,10 +818,10 @@ export function BatchDemandView({ cycle }: { cycle?: string }) {
 
       {items.map((item) => (
         <ItemRow
-          key={item.item_id}
+          key={rowKey(item)}
           item={item}
           plan={planFor(item)}
-          onChange={(next) => setPlans((cur) => ({ ...cur, [item.item_id]: next }))}
+          onChange={(next) => setPlans((cur) => ({ ...cur, [rowKey(item)]: next }))}
         />
       ))}
 

@@ -1225,7 +1225,13 @@ async def apply_to_stock(db: AsyncSession, alloc: Allocation, user,
     # the first row's fresh reservation as "already held" and reserved that much less.
     prior: dict[int, Decimal] = {}
 
-    for line in alloc.items:
+    # Lines naming a brand / variant / model reserve BEFORE "any" lines (2026-11-28).
+    # A named line can take only its own combination; an any line takes the earliest
+    # batch of whatever brand. Reserved in document order, an any line drew the named
+    # brand's stock first (FEFO does not look at brands) and the named line was then
+    # corrected down to nothing — "Absorbent Cotton, any 155 + G 10" reserved 10 of G
+    # for the any line and left the G line short, with G stock on the shelf.
+    for line in sorted(alloc.items, key=lambda row: combo_key(row) is None):
         requested_total += _d(line.requested_qty)
         given_total += _d(line.quantity)
 

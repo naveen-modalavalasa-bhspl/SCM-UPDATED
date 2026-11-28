@@ -105,6 +105,17 @@ async def reserve(db: AsyncSession, item_id: int, qty, ref_type: str, ref_id: in
                                               warehouse_types, strategy,
                                               warehouse_ids=warehouse_ids)
     rows = [row for row in rows if matches_combination(row, combination)]
+    if not combination or (not combination.get("no_brand")
+                           and not int(combination.get("brand_id") or 0)):
+        # An "any brand" line takes stock that carries NO brand first, then branded
+        # stock, each in pick-strategy order (2026-11-28). Branded stock is the only
+        # stock a line naming that brand can use; untagged stock serves only lines
+        # like this one. Walking every brand by expiry alone handed the earliest
+        # batch's brand-G units to an any line and left a later indent asking for G
+        # short with G on the shelf. The batch is still FEFO's call at issue: an
+        # allocation holds a quantity, never a batch.
+        rows = sorted(rows, key=lambda row: bool(
+            int(row.brand_id or 0) or int(row.variant_id or 0) or int(row.model_id or 0)))
 
     for stock in rows:
         if remaining <= ZERO:

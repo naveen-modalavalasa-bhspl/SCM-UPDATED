@@ -1280,6 +1280,17 @@ export interface BatchDemandLine {
 /** One ITEM across every indent still waiting for it. `shortfall` is what has to be
  *  bought: demand the shelf cannot cover. */
 export interface BatchDemandItem {
+  /** Unique per row — `item|any` or `item|brand-variant-model` (2026-11-28). */
+  row_key?: string;
+  /** The combination the row's lines ask for; `combination_any` = "Any brand". The
+   *  shelf figures are free stock OF THAT combination. */
+  combination_any?: boolean;
+  brand_id?: number;
+  variant_id?: number;
+  model_id?: number;
+  brand_name?: string | null;
+  variant_name?: string | null;
+  model_name?: string | null;
   item_id: number;
   item_code?: string | null;
   item_name?: string | null;

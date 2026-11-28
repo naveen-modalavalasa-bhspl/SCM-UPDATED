@@ -8561,7 +8561,15 @@ async def fulfilment_batch(db: AsyncSession, user,
     in_approval = await _indents_in_allocation_approval(
         db, [indent.id for indent in indents])
 
-    by_item: dict[int, list[dict]] = defaultdict(list)
+    # One row per item AND combination (2026-11-28). "Any brand" and "OXYDEEP" of one
+    # item are two asks with two different answers to "how much is free here": the
+    # row's shelf figure, its default shelf and its shortfall are all read for the
+    # combination the lines name — the same `allocations.free_for` rule the save
+    # applies. Grouping by item alone offered a shelf holding only another brand
+    # (Cholesterol ERBA defaulted to a warehouse with no ERBA) and every such Submit
+    # came back refused.
+    by_item: dict[tuple, list[dict]] = defaultdict(list)
+    combo_names: dict[tuple, dict] = {}
     for indent in indents:
         if indent.id in in_approval:
             continue
@@ -8570,7 +8578,16 @@ async def fulfilment_batch(db: AsyncSession, user,
             pending = _line_pending(line, committed, on_order, recorded)
             if pending <= 0:
                 continue
-            by_item[line.item_id].append({
+            combo = allocations.combo_key(line)
+            row_key = (int(line.item_id), combo)
+            if combo is not None and row_key not in combo_names:
+                combo_names[row_key] = {
+                    "brand_id": combo[0], "variant_id": combo[1], "model_id": combo[2],
+                    "brand_name": getattr(line, "brand_name", None),
+                    "variant_name": getattr(line, "variant_name", None),
+                    "model_name": getattr(line, "model_name", None),
+                }
+            by_item[row_key].append({
                 "indent_id": indent.id,
                 "indent_no": indent.indent_no,
                 "indent_item_id": line.id,
@@ -8585,8 +8602,9 @@ async def fulfilment_batch(db: AsyncSession, user,
     if not by_item:
         return {"items": [], "total": 0}
 
+    item_ids = {item_id for item_id, _combo in by_item}
     items = {row.id: row for row in (await db.execute(
-        select(Item).where(Item.id.in_(by_item))
+        select(Item).where(Item.id.in_(item_ids))
     )).scalars().all()}
 
     # On-hand per WAREHOUSE, scoped to the points this login may draw from — the same
@@ -8594,29 +8612,70 @@ async def fulfilment_batch(db: AsyncSession, user,
     # Broken down rather than totalled because "give 50" is only half the decision; the
     # other half is which shelf it leaves.
     warehouse_ids = await inventory_service.warehouse_ids_for_user(db, user)
-    stock_stmt = (select(Stock.item_id, Stock.warehouse_id,
+    stock_stmt = (select(Stock.item_id, Stock.warehouse_id, Stock.brand_id,
+                         Stock.variant_id, Stock.model_id,
                          func.sum(Stock.available_qty))
-                  .where(Stock.item_id.in_(by_item))
-                  .group_by(Stock.item_id, Stock.warehouse_id))
+                  .where(Stock.item_id.in_(item_ids))
+                  .group_by(Stock.item_id, Stock.warehouse_id, Stock.brand_id,
+                            Stock.variant_id, Stock.model_id))
     if warehouse_ids is not None:
         stock_stmt = stock_stmt.where(Stock.warehouse_id.in_(warehouse_ids or {0}))
     stock_rows = (await db.execute(stock_stmt)).all()
+    on_shelf: dict[tuple, Decimal] = defaultdict(Decimal)
+    for item_id, warehouse_id, b, v, mdl, qty in stock_rows:
+        on_shelf[(item_id, warehouse_id, int(b or 0), int(v or 0), int(mdl or 0))] += _d(qty)
+    points_by_item: dict[int, set[int]] = defaultdict(set)
+    for item_id, warehouse_id, *_rest in stock_rows:
+        points_by_item[item_id].add(warehouse_id)
 
     names = {row[0]: row[1] for row in (await db.execute(
         select(Warehouse.id, Warehouse.name)
         .where(Warehouse.id.in_({row[1] for row in stock_rows} or {0}))
     )).all()}
-    shelves: dict[int, list[dict]] = defaultdict(list)
-    on_hand: dict[int, Decimal] = defaultdict(Decimal)
-    for item_id, warehouse_id, qty in stock_rows:
-        quantity = _d(qty)
-        on_hand[item_id] += quantity
-        if quantity > 0:
-            shelves[item_id].append({
-                "warehouse_id": warehouse_id,
-                "warehouse_name": names.get(warehouse_id) or f"Warehouse {warehouse_id}",
-                "available_qty": float(quantity),
-            })
+    shelves: dict[tuple, list[dict]] = defaultdict(list)
+    on_hand: dict[tuple, Decimal] = defaultdict(Decimal)
+    for row_key in by_item:
+        item_id, combo = row_key
+        for warehouse_id in points_by_item.get(item_id, ()):
+            quantity = allocations.free_for(on_shelf, {}, item_id, warehouse_id, combo)
+            on_hand[row_key] += quantity
+            if quantity > 0:
+                shelves[row_key].append({
+                    "warehouse_id": warehouse_id,
+                    "warehouse_name": names.get(warehouse_id) or f"Warehouse {warehouse_id}",
+                    "available_qty": float(quantity),
+                })
+
+    # A named-combination row can draw ONLY its own brand; an "Any brand" row can draw
+    # any. So the named rows are spoken for first, and the Any row of the same item is
+    # offered what they leave at each point. Without this the Any row counted the
+    # named stock too, the defaults promised it twice, and the save refused the whole
+    # indent ("only 8 is free ... 7 already promised") — taking its material request
+    # for the genuinely short lines down with it.
+    earmarked: dict[tuple[int, int], Decimal] = defaultdict(Decimal)
+    for (item_id, combo), lines in by_item.items():
+        if combo is None:
+            continue
+        left = sum((_d(line["pending_qty"]) for line in lines), Decimal("0"))
+        for shelf in sorted(shelves.get((item_id, combo), []),
+                            key=lambda w: -w["available_qty"]):
+            if left <= 0:
+                break
+            take = min(left, _d(shelf["available_qty"]))
+            earmarked[(item_id, shelf["warehouse_id"])] += take
+            left -= take
+    if earmarked:
+        for (item_id, combo), points in shelves.items():
+            if combo is not None:
+                continue
+            kept = []
+            for shelf in points:
+                free = max(Decimal("0"), _d(shelf["available_qty"])
+                           - earmarked.get((item_id, shelf["warehouse_id"]), Decimal("0")))
+                on_hand[(item_id, combo)] -= _d(shelf["available_qty"]) - free
+                if free > 0:
+                    kept.append({**shelf, "available_qty": float(free)})
+            shelves[(item_id, combo)] = kept
 
     # Lots set aside for a project (Stock Segregation > Project Lots). Not in
     # `available_qty`, so not in the figures above: only that project's lines may
@@ -8627,7 +8686,7 @@ async def fulfilment_batch(db: AsyncSession, user,
         select(ProjectHold.item_id, ProjectHold.project_id, ProjectHold.project_name,
                ProjectHold.warehouse_id, func.sum(ProjectHold.quantity))
         .where(ProjectHold.status == ProjectHoldStatus.ACTIVE.value,
-               ProjectHold.item_id.in_(by_item))
+               ProjectHold.item_id.in_(item_ids))
         .group_by(ProjectHold.item_id, ProjectHold.project_id,
                   ProjectHold.project_name, ProjectHold.warehouse_id)
     )
@@ -8644,7 +8703,7 @@ async def fulfilment_batch(db: AsyncSession, user,
             "quantity": float(_d(qty)),
         })
         held_by_project[(item_id, project_id)] += _d(qty)
-    for item_id, lines in by_item.items():
+    for (item_id, _combo), lines in by_item.items():
         for line in lines:
             line["project_held_qty"] = float(
                 held_by_project.get((item_id, line["project_id"]), Decimal("0")))
@@ -8654,11 +8713,23 @@ async def fulfilment_batch(db: AsyncSession, user,
         db, {row.uom_code for row in items.values()})
 
     rows = []
-    for item_id, lines in by_item.items():
+    for row_key, lines in by_item.items():
+        item_id, combo = row_key
         item = items.get(item_id)
         demand = sum((_d(line["pending_qty"]) for line in lines), Decimal("0"))
-        available = on_hand.get(item_id, Decimal("0"))
+        available = on_hand.get(row_key, Decimal("0"))
+        named = combo_names.get(row_key) or {}
         rows.append({
+            # Unique per row: one item may appear once per combination.
+            "row_key": f"{item_id}|" + ("any" if combo is None
+                                        else "-".join(str(part) for part in combo)),
+            "combination_any": combo is None,
+            "brand_id": named.get("brand_id", 0),
+            "variant_id": named.get("variant_id", 0),
+            "model_id": named.get("model_id", 0),
+            "brand_name": named.get("brand_name"),
+            "variant_name": named.get("variant_name"),
+            "model_name": named.get("model_name"),
             "item_id": item_id,
             "item_code": item.code if item else None,
             "item_name": item.name if item else None,
@@ -8673,7 +8744,7 @@ async def fulfilment_batch(db: AsyncSession, user,
             "shortfall": float(max(Decimal("0"), demand - available)),
             # Fullest shelf first: the default answer to "where from" is usually the
             # one holding the most, and offering it first saves a click per item.
-            "warehouses": sorted(shelves.get(item_id, []),
+            "warehouses": sorted(shelves.get(row_key, []),
                                  key=lambda w: -w["available_qty"]),
             "project_holds": project_holds.get(item_id, []),
             "demand": sorted(lines, key=lambda line: (
